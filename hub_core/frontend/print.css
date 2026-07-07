@@ -1,0 +1,425 @@
+/* =============================================================================
+ * print.css — hub shared frontend kit
+ * -----------------------------------------------------------------------------
+ * Turns the interactive /hub into a clean, point-in-time, ink-frugal PRINTABLE
+ * AUDIT REPORT. Loaded LAST (after tokens.css + component CSS) so its @media
+ * print block wins the cascade; everything here is scoped to `@media print`
+ * EXCEPT the @page rules, so screen rendering is untouched.
+ *
+ * What it does (per the hub doctrine §10 Print):
+ *   - forces a light, ink-frugal theme (overrides light-dark() / data-theme)
+ *   - kills blur, shadow, gradient, glow, backdrop-filter, animation
+ *   - hides nav / command palette / SSE chrome / all interactive controls
+ *   - expands every <details> so nothing is hidden in the printout
+ *   - shows link target URLs after anchors (a reader of paper can't click)
+ *   - break-inside:avoid on cards, rows, sections, figures, summaries
+ *   - repeats <thead> on every page (display:table-header-group)
+ *   - status stays glyph+text (never color-alone) and prints legibly in mono
+ *   - a print-only run-date footer = the "point-in-time" stamp
+ *
+ * SHARED CONTRACT this file relies on (must match the rest of the kit):
+ *   layout : <nav class="hub-nav">  ·  <section id="sec-*">  ·  #main  ·  one <h1>
+ *   chrome : .hub-palette / [role="dialog"] (Cmd-K), .hub-skip (skip-link),
+ *            .hub-live / [data-sse] (SSE indicator), .hub-theme (theme toggle),
+ *            .hub-search / .hub-filter, .hub-density, .no-print (escape hatch)
+ *   content: .hub-card (cards), .hub-row (rows), .hub-status (status chip),
+ *            .hub-figure (inline-SVG viz wrapper), <table> with real <thead>
+ *   status : .hub-status carries data-status="pass|warn|fail|info|stale" and
+ *            renders glyph + text + aria-label (color is decorative only)
+ *
+ * No build step, no framework, no web fonts, no external deps.
+ * =========================================================================== */
+
+/* --- @page: physical sheet setup (valid outside @media print; UA applies
+ *     these only when printing anyway). Modest margins + a running page number. */
+@page {
+  size: A4 portrait;
+  margin: 14mm 14mm 16mm 14mm;
+}
+@page {
+  /* page number in the bottom-right margin box where the UA supports it */
+  @bottom-right {
+    content: "Page " counter(page) " of " counter(pages);
+    font: 9pt ui-monospace, "Cascadia Code", "Consolas", monospace;
+    color: #555;
+  }
+}
+
+@media print {
+
+  /* ===========================================================================
+   * 1. FORCE A LIGHT, INK-FRUGAL THEME
+   * Neutralise light-dark(), the [data-theme] override, and the OKLCH accent
+   * knob. Re-pin every shared token to print-safe black-on-white values so any
+   * component that consumes a token automatically renders in the print palette.
+   * ========================================================================= */
+  :root,
+  :root[data-theme="dark"],
+  :root[data-theme="light"],
+  :root[data-theme="system"] {
+    color-scheme: light !important;
+
+    /* surfaces collapse to white — no panel tints to burn ink */
+    --bg:        #ffffff !important;
+    --surface:   #ffffff !important;
+    --surface-2: #ffffff !important;
+
+    /* structure shows as hairline rules, text as near-black for crisp glyphs */
+    --border: #9a9a9a !important;
+    --text:   #111111 !important;
+    --muted:  #555555 !important;
+
+    /* accent + focus ring become ink; relative-color oklch(from --accent ..)
+       derivations therefore also resolve to neutral, contrast-safe values */
+    --accent:   #1a1a1a !important;
+    --accent-h: 0       !important;
+    --ring:     #000000 !important;
+
+    /* status role pairs → bg=white, fg=black. Status legibility is carried by
+       the glyph + text label (set in §4), NOT by these colors, per the
+       non-color-status rule. Keep them defined so token consumers don't break. */
+    --pass-bg: #ffffff !important; --pass-fg: #111111 !important;
+    --warn-bg: #ffffff !important; --warn-fg: #111111 !important;
+    --fail-bg: #ffffff !important; --fail-fg: #111111 !important;
+    --info-bg: #ffffff !important; --info-fg: #111111 !important;
+    --stale-bg:#ffffff !important; --stale-fg:#111111 !important;
+
+    --radius: 4px !important;
+  }
+
+  /* Tell the UA we genuinely want backgrounds/colors honored where we DO ask
+     for them (e.g. the thin status outline), without spraying panel fills. */
+  html, body {
+    background: #ffffff !important;
+    color: #111111 !important;
+    /* serif body reads better on paper; pt sizing is print-native */
+    font: 11pt/1.45 Georgia, "Times New Roman", "Liberation Serif", serif !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  /* Wrappers must not constrain width / float / stick on paper. */
+  body * {
+    /* opt-in: keep transforms off so nothing prints rotated/offset */
+    transform: none !important;
+    transition: none !important;
+    animation: none !important;
+    float: none !important;
+  }
+
+  a {
+    color: #111111 !important;
+    text-decoration: underline !important;
+  }
+
+  /* ===========================================================================
+   * 2. STRIP DECORATIVE EFFECTS (ink + legibility)
+   * ========================================================================= */
+  *, *::before, *::after {
+    box-shadow: none !important;
+    text-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    filter: none !important;
+    background-image: none !important;   /* kills gradients, glows, image bg */
+    border-radius: 0 !important;         /* square corners print cleaner */
+  }
+
+  /* Inline-SVG dataviz (sparkline/bars/donut/heatmap) is informative, so keep
+     its strokes/fills — only neutralise loud fills to grayscale-friendly ink.
+     Re-allow the SVG's own background-less rendering. */
+  .hub-figure svg,
+  svg[role="img"] {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  .hub-figure svg *,
+  svg[role="img"] * {
+    background-image: none !important;
+  }
+
+  /* ===========================================================================
+   * 3. HIDE INTERACTIVE / SCREEN-ONLY CHROME
+   * Nav, command palette, SSE live indicator, theme + density toggles, search /
+   * filter inputs, skip-link, and anything explicitly opted out via .no-print.
+   * Use [hidden] too so JS-toggled dialogs stay hidden.
+   * ========================================================================= */
+  .hub-nav,
+  nav.hub-nav,
+  .hub-palette,
+  [role="dialog"],
+  [role="combobox"],
+  .hub-search,
+  .hub-filter,
+  .hub-theme,
+  .hub-density,
+  .hub-live,
+  [data-sse],
+  .hub-skip,
+  a.hub-skip,
+  .no-print,
+  button,
+  input,
+  select,
+  [contenteditable],
+  [aria-hidden="true"]:not(.hub-status):not(.hub-status *) {
+    display: none !important;
+  }
+
+  /* Sticky nav reserves scroll-margin on sections; on paper there is no sticky
+     header, so drop the offset to avoid phantom whitespace before each section. */
+  [id^="sec-"],
+  section[id^="sec-"] {
+    scroll-margin-top: 0 !important;
+  }
+
+  /* The skip target and main landmark must flow normally. */
+  #main {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* ===========================================================================
+   * 4. STATUS — glyph + text + aria-label, NEVER color alone
+   * The 5-state vocabulary (pass ✓ / warn ▲ / fail ✕ / info • / stale ◌) is
+   * emitted as data; in print we strip any color pill and render the glyph in a
+   * monospace box so it stays unambiguous in grayscale. The visible text label
+   * is preserved by the component markup; we just make sure it isn't hidden.
+   * ========================================================================= */
+  .hub-status {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 0.35em !important;
+    background: #ffffff !important;
+    color: #111111 !important;
+    border: 1px solid #111111 !important;
+    border-radius: 0 !important;
+    padding: 0 0.35em !important;
+    font-weight: 700 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  /* Ensure the glyph (data-driven, often a ::before or a child .hub-status__glyph)
+     remains visible and in ink. */
+  .hub-status::before,
+  .hub-status__glyph {
+    color: #111111 !important;
+    font-family: ui-monospace, "Cascadia Code", "Consolas", monospace !important;
+  }
+  /* Never let the text label collapse to an icon-only chip in print. */
+  .hub-status__label,
+  .hub-status .label {
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    clip: auto !important;
+    clip-path: none !important;
+    overflow: visible !important;
+    white-space: normal !important;
+  }
+
+  /* ===========================================================================
+   * 5. EXPAND ALL <details> — nothing collapsed in the printout
+   * ========================================================================= */
+  details {
+    display: block !important;
+  }
+  details > summary {
+    display: block !important;
+    list-style: none !important;
+    cursor: default !important;
+    font-weight: 700 !important;
+  }
+  details > summary::-webkit-details-marker,
+  details > summary::marker {
+    display: none !important;
+    content: "" !important;
+  }
+  /* Force-reveal content regardless of the [open] state at print time. */
+  details:not([open]) > *,
+  details[open] > * {
+    display: revert !important;
+  }
+  details > summary ~ * {
+    display: block !important;
+  }
+
+  /* ===========================================================================
+   * 6. SHOW LINK URLS AFTER ANCHORS
+   * Only for "real" external/destination links: skip in-page (#…) anchors,
+   * javascript: handlers, the skip-link, and anchors whose visible text already
+   * IS the URL. Use the resolved href via attr() so it works without JS.
+   * ========================================================================= */
+  a[href^="http"]::after,
+  a[href^="/"]::after,
+  a[href^="mailto:"]::after {
+    content: " <" attr(href) ">";
+    font: 9pt ui-monospace, "Cascadia Code", "Consolas", monospace !important;
+    color: #555555 !important;
+    word-break: break-all;
+  }
+  /* Suppress the URL annotation where it would be noise or wrong. */
+  a[href^="#"]::after,
+  a[href^="javascript:"]::after,
+  a[href=""]::after,
+  a.hub-skip::after,
+  a[data-nourl]::after,
+  .hub-nav a::after {
+    content: "" !important;
+  }
+  /* Abbreviations / titled spans: expose the full meaning once on paper. */
+  abbr[title]::after {
+    content: " (" attr(title) ")";
+    font-size: 0.85em;
+    color: #555555 !important;
+  }
+
+  /* ===========================================================================
+   * 7. PAGINATION — keep meaningful units intact, repeat table headers
+   * ========================================================================= */
+  /* Don't split these blocks across a page boundary. */
+  .hub-card,
+  .hub-row,
+  .hub-figure,
+  figure,
+  tr,
+  li,
+  blockquote,
+  pre,
+  details,
+  details > summary {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Sections start tidily; never widow a section heading. */
+  section[id^="sec-"] {
+    break-inside: auto;            /* a long section MAY span pages */
+    page-break-before: auto;
+  }
+  h1, h2, h3, h4 {
+    break-after: avoid !important;
+    page-break-after: avoid !important;
+    break-inside: avoid !important;
+    color: #000000 !important;
+  }
+  /* Orphan/widow control for running prose. */
+  p, li {
+    orphans: 3;
+    widows: 3;
+  }
+
+  /* Tables: real <thead> repeats on every page; <tfoot> too. Add hairline
+     rules so the grayscale grid stays readable without fills. */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    background: #ffffff !important;
+  }
+  thead {
+    display: table-header-group !important;   /* repeat header each page */
+  }
+  tfoot {
+    display: table-footer-group !important;
+  }
+  th, td {
+    border: 1px solid #9a9a9a !important;
+    padding: 4pt 6pt !important;
+    color: #111111 !important;
+    background: #ffffff !important;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    font-weight: 700 !important;
+    border-bottom: 1.5pt solid #111111 !important;
+  }
+  /* Drop zebra striping (ink) but keep header rule. */
+  tr:nth-child(even) td,
+  tr:nth-child(odd) td {
+    background: #ffffff !important;
+  }
+
+  /* Cards become bordered, full-width blocks (no grid columns on paper). */
+  .hub-card {
+    display: block !important;
+    width: auto !important;
+    border: 1px solid #9a9a9a !important;
+    padding: 6pt 8pt !important;
+    margin: 0 0 6pt 0 !important;
+    background: #ffffff !important;
+  }
+
+  /* content-visibility:auto would skip off-screen content for the printer; force
+     full layout so the whole report is materialised. */
+  [style*="content-visibility"],
+  .hub-card, section, .hub-row {
+    content-visibility: visible !important;
+    contain-intrinsic-size: auto !important;
+  }
+
+  /* ===========================================================================
+   * 8. POINT-IN-TIME REPORT FRAMING
+   * A print-only banner under the <h1> identifying this as a snapshot, plus a
+   * generated-on stamp. The hub may populate [data-print-stamp] with served_sha
+   * / computed_at via JS before window.print(); a static fallback shows anyway.
+   * ========================================================================= */
+  h1 {
+    font-size: 20pt !important;
+    margin: 0 0 2pt 0 !important;
+    color: #000000 !important;
+    break-after: avoid !important;
+    page-break-after: avoid !important;
+  }
+  /* If the page provides <p class="hub-print-stamp" data-print-stamp="…">,
+     reveal it (it is .no-print-exempt) and render its data attr after any text. */
+  .hub-print-stamp {
+    display: block !important;
+    font: 9pt ui-monospace, "Cascadia Code", "Consolas", monospace !important;
+    color: #555555 !important;
+    margin: 0 0 8pt 0 !important;
+    padding-bottom: 4pt;
+    border-bottom: 1px solid #111111 !important;
+  }
+  .hub-print-stamp[data-print-stamp]::after {
+    content: " · " attr(data-print-stamp);
+  }
+  /* Synthesise a header line at the very top of the printed page even if the
+     page didn't add a stamp element. */
+  body::before {
+    content: "POINT-IN-TIME AUDIT SNAPSHOT — printed from /hub";
+    display: block;
+    font: 8pt ui-monospace, "Cascadia Code", "Consolas", monospace !important;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #666666 !important;
+    margin-bottom: 6pt;
+  }
+
+  /* ===========================================================================
+   * 9. REDUCED MOTION / SAFETY NETS
+   * ========================================================================= */
+  * {
+    scroll-behavior: auto !important;
+  }
+  /* Anything off-screen-positioned for sticky/overlay reasons returns to flow. */
+  .hub-card[style*="position: sticky"],
+  [style*="position: fixed"],
+  .hub-nav {
+    position: static !important;
+  }
+}
+
+/* prefers-reduced-motion is honored on screen too (defensive; the component
+ * CSS owns the primary rules, this is a kit-level guarantee). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

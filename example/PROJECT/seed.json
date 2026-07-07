@@ -1,0 +1,19 @@
+{
+  "adrs": [
+    {"ref":"0001","number":1,"status":"accepted",
+     "title":"All trackable work lives in the event-sourced hub",
+     "context_md":"Task state scattered across chat logs and READMEs goes stale, cannot be audited, and cannot gate a deploy.",
+     "decision_md":"Every trackable entity (task/adr/feat/gap/cap/deploy/note) lives in the hub event log under PROJECT/.hub; 'done' is granted only by the server-side complete endpoint (evidence + verification_command + recomputed audit).",
+     "consequences_md":"One source of truth; CI and deploys gate on the recomputed hubaudit, never on self-attested status."}
+  ],
+  "tasks": [
+    {"ref":"0001","phase":"0 Genesis","status":"todo","priority":"P1","decided_by":["0001"],
+     "title":"Wire the hub into the project and run the first audit",
+     "acceptance":"manage.py hubaudit exits 0 (PASS or amber-only) from a clean checkout.",
+     "verification_command":"python manage.py hubaudit"},
+    {"ref":"0002","phase":"0 Genesis","status":"todo","priority":"P2","deps":["0001"],
+     "title":"Record the first real feature task with acceptance criteria and a verification_command",
+     "acceptance":"A new task exists whose verification_command the hub can run server-side."}
+  ],
+  "notes": []
+}

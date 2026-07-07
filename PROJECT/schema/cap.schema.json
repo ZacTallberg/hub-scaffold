@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:cap",
+  "title": "Capability",
+  "description": "A reusable system/architecture node in the cross-project capability fabric. Project-prefixed ids share ONE id space so cap graphs cross projects.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "cap" },
+    "name": { "type": "string", "minLength": 1 },
+    "cap_version": { "type": "string", "description": "Published contract version." },
+    "iface": { "type": "string", "description": "REST/MCP/js-module/rust-crate/python-module/doc-playbook signature." },
+    "kind": { "enum": ["http_verb", "js_module", "rust_crate", "python_module", "doc_playbook", "service"] },
+    "maturity": { "enum": ["concept", "prototype", "proven", "reusable", "extracted"] },
+    "pivot_notes": { "type": "string", "description": "How to reference/pivot this into a future project." },
+    "needs": { "type": "string", "description": "What it still needs (doubles as cross-project backlog)." },
+    "realized_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/task that realize it." },
+    "depends_on": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
+    "consumed_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
+    "commercial_ok": { "type": "boolean" },
+    "health_endpoint": { "type": "string" },
+    "legacy_ref": { "type": "string" },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "name", "maturity", "version"]
+}

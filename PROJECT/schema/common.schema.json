@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:common",
+  "title": "Hub shared definitions",
+  "description": "HUB DOCTRINE shared $defs. Identical bytes across all project hubs. IDs are project-prefixed, type-segmented, allocated once, never reused/renumbered.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
+    },
+    "idref": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "description": "A machine-resolvable reference to another entity by id. The audit FAILS on any dangling idref."
+    },
+    "isoDate": { "type": "string", "format": "date-time" },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Who/when/which-commit produced or last changed this entity.",
+      "properties": {
+        "created_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "updated_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "commits": { "type": "array", "items": { "type": "string" }, "description": "Implementing commit SHA(s)." },
+        "author": { "type": "string" },
+        "agent": { "type": "string", "description": "Agent id that last mutated this entity." },
+        "model_version": { "type": "string" },
+        "session_id": { "type": "string" }
+      },
+      "required": ["created_at"]
+    },
+    "evidenceUri": {
+      "type": "string",
+      "description": "A pointer to recomputed proof: a test exit, a headless screenshot path, a /debug scorecard url, an audit violation id."
+    }
+  }
+}

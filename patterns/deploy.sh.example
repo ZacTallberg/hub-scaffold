@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# deploy.sh.example — runnable skeleton of the four-law deploy contract (see deploy-contract.md).
+#
+#   Law 1: build from a clean detached worktree of HEAD (uncommitted work can never ship)
+#   Law 2: bake the git short SHA into the artifact PRE-build; serve <meta name="build" content="build-<sha>">
+#   Law 3: done only when an independent front-door probe sees build-<sha> live (fail-closed)
+#   Law 4: register a blessed record so the standing canary re-asserts live vs intended forever
+#
+# Copy to your project as deploy.sh, fill the TODO hooks, and configure via environment:
+#   LIVE_URL     REQUIRED  public front-door URL to probe, e.g. https://{{PROJECT_KEY}}.example.com/
+#                          (init.sh may substitute {{LIVE_URL}} into the default below)
+#   BUILD_CMD    command run inside the clean worktree to produce the artifact
+#   SHIP_CMD     command that delivers the built artifact to the serving environment (org-specific)
+#   GATE_CMD     optional pre-build test/audit command; non-zero aborts the deploy
+#   ALERT_CMD    optional command run on canary failure, invoked as: $ALERT_CMD "<title>" "<message>"
+#                (same convention as standing-canary.sh — wire both through one org wrapper)
+#   BLESSED_DIR  where verified "<sha> <url>" records live (default: /var/lib/deploy-blessed);
+#                point standing-canary.sh at the same directory
+#   SHA_FILE     path (relative to repo root) where the SHA is stamped pre-build (default: build_sha.txt)
+#   CANARY_TRIES / CANARY_INTERVAL  probe patience (defaults: 60 tries x 6s)
+set -euo pipefail
+cd "$(dirname "$0")"
+PROJECT="$(basename "$(pwd)")"
+
+LIVE_URL="${LIVE_URL:-}"                 # or hardcode: LIVE_URL="{{LIVE_URL}}"
+BUILD_CMD="${BUILD_CMD:-}"
+SHIP_CMD="${SHIP_CMD:-}"
+GATE_CMD="${GATE_CMD:-}"
+ALERT_CMD="${ALERT_CMD:-}"
+BLESSED_DIR="${BLESSED_DIR:-/var/lib/deploy-blessed}"
+SHA_FILE="${SHA_FILE:-build_sha.txt}"
+CANARY_TRIES="${CANARY_TRIES:-60}"
+CANARY_INTERVAL="${CANARY_INTERVAL:-6}"
+
+[ -n "$LIVE_URL" ] || { echo "ERROR: LIVE_URL is required — the front-door canary is not optional." >&2; exit 2; }
+
+# --- Law 1: a project deploys its HEAD -------------------------------------------------------
+git rev-parse --git-dir >/dev/null 2>&1 \
+  || { echo "ERROR: not a git repo — a deploy ships a commit. git init && commit first." >&2; exit 2; }
+if [ -n "$(git status --porcelain)" ]; then
+  echo "WARN: dirty tree — deploy builds HEAD only; uncommitted changes will NOT ship." >&2
+fi
+SHA="$(git rev-parse --short HEAD)"
+
+WT="$(mktemp -d)/deploy-wt-$PROJECT"
+cleanup() { git worktree remove --force "$WT" 2>/dev/null || true; }
+trap cleanup EXIT
+git worktree add --detach "$WT" HEAD >/dev/null
+
+# --- Law 2: stamp the SHA into the worktree BEFORE building ----------------------------------
+# The build must bake this into the artifact, and the app must serve it on its entry page as
+#   <meta name="build" content="build-<sha>">
+printf '%s\n' "$SHA" > "$WT/$SHA_FILE"
+# TODO: if your app reads the stamp from a different location (settings module, asset manifest,
+#       env-file consumed by the container build), adjust SHA_FILE or add the extra stamp here.
+
+# --- Gate: org test/audit hook; non-zero means we never build ---------------------------------
+if [ -n "$GATE_CMD" ]; then
+  echo "==> gate: $GATE_CMD"
+  ( cd "$WT" && eval "$GATE_CMD" ) || { echo "GATE FAILED — not shipping." >&2; exit 1; }
+fi
+
+# --- Build inside the clean worktree ----------------------------------------------------------
+echo "==> build $PROJECT @ $SHA"
+if [ -n "$BUILD_CMD" ]; then
+  ( cd "$WT" && eval "$BUILD_CMD" )
+else
+  echo "TODO: set BUILD_CMD (e.g. 'docker build -t $PROJECT:$SHA .' or 'npm ci && npm run build')" >&2
+  exit 2
+fi
+
+# --- Ship: the ONLY org-specific step ---------------------------------------------------------
+# Whatever your platform is (container registry + orchestrator, rsync to a host, PaaS push, image
+# save/load over ssh), put it behind SHIP_CMD. Its exit code is treated as ADVISORY ONLY: a
+# dropped connection or platform timeout must not fail the deploy before the canary has ruled.
+echo "==> ship $PROJECT @ $SHA"
+SHIP_UNCONFIRMED=0
+if [ -n "$SHIP_CMD" ]; then
+  ( cd "$WT" && eval "$SHIP_CMD" ) \
+    || { SHIP_UNCONFIRMED=1; echo "(ship step errored or connection dropped — NOT trusted either way; the canary must now prove or fail the release)"; }
+else
+  echo "TODO: set SHIP_CMD for your platform (push image + trigger release, rsync + restart, ...)" >&2
+  exit 2
+fi
+
+# --- Law 3: front-door canary — fail closed ---------------------------------------------------
+TRIES="$CANARY_TRIES"
+[ "$SHIP_UNCONFIRMED" = 1 ] && TRIES=$((CANARY_TRIES * 2))
+echo "==> FRONT-DOOR CANARY: $LIVE_URL must serve build-$SHA (up to $TRIES tries)"
+expect="build-$SHA"
+ok=0
+for i in $(seq 1 "$TRIES"); do
+  body="$(curl -sL -A 'Mozilla/5.0 (deploy-canary)' --max-time 90 "$LIVE_URL" || true)"
+  # Pure-shell substring match — avoids grep/pipe edge cases on large bodies under pipefail.
+  case "$body" in *"$expect"*) ok=1; break;; esac
+  sleep "$CANARY_INTERVAL"
+done
+if [ "$ok" != 1 ]; then
+  msg="DEPLOY NOT VERIFIED: $LIVE_URL does not serve $expect — failing closed."
+  echo "==> $msg" >&2
+  [ -n "$ALERT_CMD" ] && "$ALERT_CMD" "Deploy canary FAIL: $PROJECT" "$msg" || true
+  exit 1
+fi
+echo "==> OK: live page serves $expect — release PROVEN."
+
+# --- Law 4: bless the deploy so the standing canary watches it from now on --------------------
+if mkdir -p "$BLESSED_DIR" 2>/dev/null && printf '%s %s\n' "$SHA" "$LIVE_URL" > "$BLESSED_DIR/$PROJECT" 2>/dev/null; then
+  echo "==> blessed record written: $BLESSED_DIR/$PROJECT — standing canary now watches $PROJECT"
+else
+  # TODO: if the canary runs on a different machine, replace this with your transport, e.g.:
+  #   printf '%s %s\n' "$SHA" "$LIVE_URL" | ssh "$MONITOR_HOST" "cat > $BLESSED_DIR/$PROJECT"
+  echo "WARN: could not write blessed record ($BLESSED_DIR/$PROJECT) — standing canary NOT updated." >&2
+fi
+
+# --- Deploy record: make served==deployed==HEAD checkable from the repo -----------------------
+printf '%s\n' "$SHA" > "$SHA_FILE"
+echo "==> done: $PROJECT @ $SHA is live at $LIVE_URL"
+echo "==> record law: the task/ticket for this work names $SHA as its live evidence."

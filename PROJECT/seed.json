@@ -1,0 +1,21 @@
+{
+  "adrs": [
+    {"ref":"template-1","number":1,"status":"accepted",
+     "title":"A new app is a clean scaffold instance whose ROOT serves the app",
+     "context_md":"Cloning-and-pivoting an existing project drags the donor's landing page, branding, and cruft onto the new root (this pattern has shipped apps with the wrong front door).",
+     "decision_md":"Start every app from the scaffold via init.sh: root serves the app, hub at /hub, born-safe, born-governed.",
+     "consequences_md":"The deployed root URL always presents the app; no donor cruft; every project starts governed."},
+    {"ref":"template-2","number":2,"status":"accepted",
+     "title":"PROJECT/ is the Project Plane: the canonical content-agnostic management framework",
+     "context_md":"Projects accumulated decisions, research, gaps, verification, and audit history in ad-hoc files; multi-agent campaigns improvised their own protocol, registers, and gates mid-flight, and governance lagged the work layer.",
+     "decision_md":"Every project is born with the Project Plane (PROJECT/README.md = the spec): hub ledger canonical for trackable entities; DOCTRINE/CHARTER/HANDOFF spine; ADR + research + registers + audit + verify + runs + worklogs + ops; pm/PROTOCOL.md as the leader/worker/verifier campaign law.",
+     "consequences_md":"One source of truth per fact class; channels crystallize into canon same-session; ships gate on re-derived green; any cold agent resumes from HANDOFF.md alone."}
+  ],
+  "tasks": [
+    {"ref":"T1","phase":"0 Genesis","status":"todo","priority":"P1","decided_by":["template-1"],
+     "title":"Build the app: mount the hub per adapters/django/MOUNTING.md, implement the first feature, then deploy via your deploy contract"},
+    {"ref":"T2","phase":"0 Genesis","status":"todo","priority":"P1","decided_by":["template-2"],
+     "title":"Adopt the Project Plane: fill CHARTER.md + HANDOFF.md, read DOCTRINE.md, seed TRUTH-MATRIX for your first surface"}
+  ],
+  "notes": []
+}

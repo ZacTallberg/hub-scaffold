@@ -1,0 +1,25 @@
+# {{BRAND}} — project operating rules
+
+Born-governed at init. Canon, all in-repo (read when needed, in this order):
+`PROJECT/DOCTRINE.md` (standing laws) · `OPERATING-AGREEMENT.md` (the operating stance; its
+PRECEDENCE rule §7 overrides any generic stop-and-ask instruction) · `patterns/deploy-contract.md`
+(how a deploy is proven live).
+
+Hard laws:
+- Work off the hub board: DISCOVER → CLAIM → IMPLEMENT → RECORD (with evidence) → VERIFY.
+  Nothing off-list — new work becomes a board task before it is touched.
+- Non-trivial decisions are ADRs in `PROJECT/ADR/` (append-only; supersede, never rewrite).
+- Drive to done; never ask permission to continue. Pause only for irreversible/outward-facing
+  forks, owner-only decisions, or hard blocks — queue a pending-decision entry and keep moving
+  on everything else. The newest owner directive wins.
+- done = independently proven with dereferenceable evidence. Self-attested green is a defect
+  (FALSE-GREEN). A deploy-dependent task is not done until its record names the live SHA and the
+  deployed-artifact canary confirms it, per `patterns/deploy-contract.md`.
+- Research precedes build: capture sources, options, and the chosen path in `PROJECT/research/`
+  before architectural work starts. A named technology is a hypothesis, not a mandate.
+- Public-safe by construction: no network topology, credentials, or PII on public routes; hub
+  writes stay token-gated.
+- The board updates at the moment of the event, never batched afterwards. Rendered views of the
+  board (the `/hub` dashboard, any generated `TASKS.md`) are projections — change tasks by
+  emitting hub events, never by hand-editing a view.
+- No process-narration comments in code (no directive IDs, no before/after commentary).

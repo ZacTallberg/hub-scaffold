@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:deploy",
+  "title": "Deploy record (append-only; written BY the act of deploying, never by hand)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "deploy" },
+    "build": { "type": "string" },
+    "sha": { "type": "string", "description": "The blessed git SHA the receiver wrote." },
+    "method": { "type": "string" },
+    "at": { "$ref": "hub:common#/$defs/isoDate" },
+    "audit_ok": { "type": "boolean", "description": "COMPUTED from the gate exit at deploy time, never hand-set." },
+    "served_sha": { "type": ["string", "null"], "description": "What the live artifact reported back (coherence proof); null until a canary confirms." },
+    "tasks_closed": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
+    "legacy_ref": { "type": "string" },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "sha", "at", "version"]
+}

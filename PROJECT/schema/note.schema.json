@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:note",
+  "title": "Finding / Note",
+  "description": "Context discovered along the way — facts, gotchas, data realities, method limits — so a later agent doesn't have to rediscover it. NOT a decision (that's an ADR).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "note" },
+    "title": { "type": "string", "minLength": 1 },
+    "category": { "enum": ["discovery", "gotcha", "data", "method", "source", "risk", "context"],
+                  "description": "discovery=fact learned · gotcha=trap · data=dataset reality · method=how-to + its limits · source=a source's shape · risk=a way this can mislead/fail · context=general." },
+    "body_md": { "type": "string", "description": "The finding in full, incl. limits/caveats." },
+    "status": { "enum": ["standing", "superseded"], "description": "standing = still true; superseded = replaced by a newer note." },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "relates_to": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "task/adr/feat this came from or informs." },
+    "found_at": { "type": "string", "description": "when/where it was learned." },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "title", "version"]
+}

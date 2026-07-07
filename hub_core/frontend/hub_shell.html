@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{brand}}</title>
+<meta name="robots" content="noindex">
+{{theme_init}}
+<style>{{tokens_css}}</style>
+<style>{{shell_css}}</style>
+<style>{{print_css}}</style>
+</head>
+<body class="hub-app">
+<a class="skip-link" href="#tabPanes">Skip to content</a>
+
+<nav class="navbar-main">
+  <div class="navbar-brand"><span class="brand-mark" id="brandMark" aria-hidden="true"></span> {{brand}}</div>
+  <div class="navbar-right">
+    <div class="status-pill" id="statusPill" role="status" aria-live="polite">
+      <span class="status-dot" aria-hidden="true"></span><span id="statusText">Ready</span><span class="clock" id="clock" aria-hidden="true"></span>
+    </div>
+    <button class="btn-white" id="refreshBtn" type="button"><span class="btn-ico" id="refreshIco" aria-hidden="true"></span><span class="btn-label">Refresh</span></button>
+    <button class="btn-white" id="paletteBtn" type="button" data-hub-palette-trigger title="Search — Ctrl/Cmd-K" aria-label="Open command palette">⌘K</button>
+    <label class="sr-only" for="hub-theme-select">Theme</label>
+    <select id="hub-theme-select" class="hub-theme-select btn-white" autocomplete="off" aria-label="Theme">
+      <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+    </select>
+  </div>
+</nav>
+
+<div class="page-wrapper">
+  <div class="tabs-bar" id="tabsBar" role="tablist" aria-label="Hub views"></div>
+  <div id="tabPanes" style="flex:1;min-height:0;display:flex;flex-direction:column"></div>
+</div>
+
+<div class="modal-overlay" id="universalModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal-content">
+    <div class="modal-header">
+      <div class="modal-icon t-info" id="modalIcon" aria-hidden="true"></div>
+      <div class="modal-htext"><div class="modal-title" id="modalTitle">Details</div><div class="modal-subtitle" id="modalSubtitle"></div></div>
+      <button class="modal-close" id="modalClose" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
+
+<script id="hub-data" type="application/json">{{snapshot_json}}</script>
+<script>{{hub_js}}</script>
+<script>{{palette_js}}</script>
+</body>
+</html>

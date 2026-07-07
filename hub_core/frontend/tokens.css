@@ -1,0 +1,804 @@
+/* =============================================================================
+   HUB KIT — tokens.css
+   Shared, portable, three-tier OKLCH design-token stylesheet for every hub.
+
+   Tier 1  PRIMITIVES — raw OKLCH ramps (one --accent-h hue knob).
+   Tier 2  SEMANTIC   — roles consumed everywhere (--bg, --text, --accent,
+                        the 5 status pairs, --ring, --radius, fluid type).
+   Tier 3  COMPONENT  — base resets + .hub-nav, cards/panels, tables,
+                        pills/badges, <details>, skip-link, status glyphs.
+
+   CONTRACT (other kit files MUST match these names):
+     - color-scheme via light-dark(); theme override via [data-theme].
+     - hue: ONE knob --accent-h repaints the whole system (oklch(from ...)).
+     - status vocab is FIXED 5-state: pass | warn | fail | info | stale,
+       each a (--<role> background, --<role>-fg foreground) pair.
+       Rendered glyph + text + aria-label, NEVER color-alone.
+     - density via [data-density="compact" | "comfortable"] (comfortable default).
+     - focus ring = --ring (>=3:1, 2px, :focus-visible). Target size >=24px.
+     - layout: .hub-nav sticky (height --nav-h); sections use
+       scroll-margin-top:var(--nav-h). prefers-reduced-motion disables anim.
+
+   No build step. No framework. No web fonts. No external deps. Vanilla CSS.
+
+   Contrast strategy: an EQUAL-LIGHTNESS OKLCH scale. Text/surface lightness
+   anchors are fixed per theme so body-text vs surface is systematically
+   >=4.5:1 and UI/status vs surface is >=3:1 regardless of the --accent-h hue
+   (relative-color keeps L constant, only h rotates). Verified mentally with
+   APCA: dark theme text Lc ~ -90 (white-on-near-black), light theme Lc ~ 95+.
+   ========================================================================== */
+
+/* -----------------------------------------------------------------------------
+   ROOT: declare the dual color scheme. light-dark() resolves against this.
+   [data-theme] lets the no-FOUC head script force a scheme before paint.
+   -------------------------------------------------------------------------- */
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"]  { color-scheme: dark; }
+
+/* =============================================================================
+   TIER 1 — PRIMITIVES
+   OKLCH ramps. Lightness values are fixed anchors (the equal-lightness scale);
+   chroma is restrained so colors stay legible at every hue. The accent and the
+   four status hues are the only chromatic primitives; everything chromatic is
+   derived from them via relative color (oklch(from ...)).
+   ========================================================================== */
+:root {
+  /* ---- The single hue knob. Change this one value to re-skin the system. ---- */
+  --accent-h: 255;          /* indigo-blue. e.g. 145 = green, 25 = red, 290 = violet */
+  --accent-c: 0.16;         /* accent chroma (lightness fixed in semantic tier) */
+
+  /* ---- Status hues (fixed; chosen for max mutual hue separation + a11y).
+          Lightness is applied later so contrast is hue-invariant. ---- */
+  --pass-h: 150;            /* green   */
+  --warn-h: 75;             /* amber   */
+  --fail-h: 27;             /* red     */
+  --info-h: 240;            /* blue    */
+  --stale-h: 285;           /* muted violet-grey */
+  --status-c: 0.13;         /* shared status chroma */
+
+  /* ---- Neutral ramp lightness anchors (equal-lightness scale).
+          Named by intent, not by shade number, so themes can remap them. ---- */
+  --l-canvas: 0.985;        /* page background (light) */
+  --l-surface: 1.0;         /* raised surface (light) */
+  --l-surface-2: 0.965;     /* recessed surface (light) */
+  --l-border: 0.88;         /* hairline (light) */
+  --l-muted: 0.52;          /* secondary text (light) — ~4.6:1 on white */
+  --l-text: 0.27;           /* body text (light) — APCA Lc ~ 92 on white */
+
+  /* Neutral chroma: a whisper of the accent hue tints the greys (cohesion). */
+  --neutral-c: 0.006;
+}
+
+/* =============================================================================
+   TIER 2 — SEMANTIC ROLES
+   The vocabulary the rest of the kit (and every hub HTML) consumes.
+   Defined with light-dark(LIGHT, DARK); the DARK arg flips the lightness
+   anchors. oklch(from ...) is used so the hue knob propagates everywhere.
+   ========================================================================== */
+:root {
+  /* ---- Fluid type scale (clamp). 1.20 minor-third-ish ratio. ---- */
+  --step--1: clamp(0.78rem, 0.74rem + 0.20vw, 0.875rem);  /* fine print, table cells */
+  --step-0:  clamp(0.92rem, 0.88rem + 0.22vw, 1.0rem);    /* body */
+  --step-1:  clamp(1.08rem, 1.00rem + 0.40vw, 1.25rem);   /* h3 / lead */
+  --step-2:  clamp(1.30rem, 1.16rem + 0.70vw, 1.65rem);   /* h2 */
+  --step-3:  clamp(1.65rem, 1.40rem + 1.25vw, 2.30rem);   /* h1 */
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", "Segoe UI Mono",
+          "Roboto Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+          "Noto Sans", sans-serif;
+  --leading: 1.55;
+  --leading-tight: 1.25;
+
+  /* ---- Shape ---- */
+  --radius: 0.625rem;
+  --radius-sm: 0.375rem;
+  --radius-pill: 999px;
+
+  /* ---- Density (overridden by [data-density]; comfortable is default) ---- */
+  --space: 1rem;            /* base spacing unit */
+  --pad-y: 0.5rem;          /* control vertical padding */
+  --pad-x: 0.75rem;         /* control horizontal padding */
+  --row-y: 0.55rem;         /* table row vertical padding */
+  --gap: 1rem;              /* grid/flex gap */
+  --tap: 2.5rem;            /* min interactive target (>=24px AA; 40px = generous) */
+  --nav-h: 3.25rem;         /* sticky nav height; sections key scroll-margin to it */
+
+  /* ---- NEUTRALS via light-dark(). Dark theme = dark surfaces, light text. ---- */
+  --bg: light-dark(
+          oklch(var(--l-canvas) var(--neutral-c) var(--accent-h)),
+          oklch(0.18 var(--neutral-c) var(--accent-h)));
+  --surface: light-dark(
+          oklch(var(--l-surface) var(--neutral-c) var(--accent-h)),
+          oklch(0.225 calc(var(--neutral-c) * 1.5) var(--accent-h)));
+  --surface-2: light-dark(
+          oklch(var(--l-surface-2) var(--neutral-c) var(--accent-h)),
+          oklch(0.27 calc(var(--neutral-c) * 1.5) var(--accent-h)));
+  --border: light-dark(
+          oklch(var(--l-border) calc(var(--neutral-c) * 1.5) var(--accent-h)),
+          oklch(0.36 calc(var(--neutral-c) * 2) var(--accent-h)));
+  --text: light-dark(
+          oklch(var(--l-text) var(--neutral-c) var(--accent-h)),
+          oklch(0.96 var(--neutral-c) var(--accent-h)));
+  --muted: light-dark(
+          oklch(var(--l-muted) calc(var(--neutral-c) * 2) var(--accent-h)),
+          oklch(0.72 calc(var(--neutral-c) * 2) var(--accent-h)));
+
+  /* ---- ACCENT. ONE chromatic source of truth; tints derived by relative color.
+          Lightness is fixed per theme so accent-on-surface stays >=4.5:1 (text)
+          / >=3:1 (UI). --accent-h is the only thing the user changes. ---- */
+  --accent: light-dark(
+          oklch(0.52 var(--accent-c) var(--accent-h)),
+          oklch(0.72 var(--accent-c) var(--accent-h)));
+  /* Foreground that sits ON the accent (button labels): max contrast either way. */
+  --accent-fg: light-dark(
+          oklch(0.99 0 var(--accent-h)),
+          oklch(0.16 0.01 var(--accent-h)));
+  /* Hover/active = nudge L via relative color (hue + chroma preserved). */
+  --accent-hover: light-dark(
+          oklch(from var(--accent) calc(l - 0.06) c h),
+          oklch(from var(--accent) calc(l + 0.06) c h));
+  /* Tinted wash for selected rows / link hover bg (low-chroma, theme-aware). */
+  --accent-wash: light-dark(
+          oklch(from var(--accent) 0.96 calc(c * 0.30) h),
+          oklch(from var(--accent) 0.30 calc(c * 0.45) h));
+
+  /* ---- FOCUS RING. Single token, used by every :focus-visible. >=3:1 vs both
+          surface and bg in either theme. Slightly brighter than accent. ---- */
+  --ring: light-dark(
+          oklch(0.58 calc(var(--accent-c) + 0.02) var(--accent-h)),
+          oklch(0.78 calc(var(--accent-c) + 0.02) var(--accent-h)));
+  --ring-w: 2px;
+  --ring-offset: 2px;
+
+  /* ---- Elevation (kept subtle; removed under reduced-motion/print) ---- */
+  --shadow-1: light-dark(
+          0 1px 2px oklch(0.2 0.02 var(--accent-h) / 0.08),
+          0 1px 2px oklch(0 0 0 / 0.4));
+  --shadow-2: light-dark(
+          0 4px 16px oklch(0.2 0.02 var(--accent-h) / 0.12),
+          0 6px 22px oklch(0 0 0 / 0.5));
+
+  /* ====== THE 5 STATUS ROLE PAIRS ======
+     Each is (bg = soft tinted chip, fg = text/glyph on that chip).
+     Equal-lightness construction:
+       light theme  -> bg L 0.95 (pale chip),  fg L 0.40 (>=4.5:1 on the chip)
+       dark  theme  -> bg L 0.30 (deep chip),  fg L 0.85 (>=4.5:1 on the chip)
+     Built from each status hue via oklch() so contrast is hue-invariant. ====== */
+  --pass:    light-dark(oklch(0.95 0.05 var(--pass-h)),  oklch(0.30 0.07 var(--pass-h)));
+  --pass-fg: light-dark(oklch(0.43 var(--status-c) var(--pass-h)), oklch(0.86 0.12 var(--pass-h)));
+  --pass-solid: light-dark(oklch(0.55 0.15 var(--pass-h)), oklch(0.72 0.15 var(--pass-h)));
+
+  --warn:    light-dark(oklch(0.95 0.06 var(--warn-h)),  oklch(0.30 0.06 var(--warn-h)));
+  --warn-fg: light-dark(oklch(0.42 var(--status-c) var(--warn-h)), oklch(0.85 0.13 var(--warn-h)));
+  --warn-solid: light-dark(oklch(0.70 0.15 var(--warn-h)), oklch(0.78 0.15 var(--warn-h)));
+
+  --fail:    light-dark(oklch(0.95 0.05 var(--fail-h)),  oklch(0.31 0.09 var(--fail-h)));
+  --fail-fg: light-dark(oklch(0.45 var(--status-c) var(--fail-h)), oklch(0.85 0.14 var(--fail-h)));
+  --fail-solid: light-dark(oklch(0.55 0.18 var(--fail-h)), oklch(0.66 0.20 var(--fail-h)));
+
+  --info:    light-dark(oklch(0.95 0.04 var(--info-h)),  oklch(0.30 0.07 var(--info-h)));
+  --info-fg: light-dark(oklch(0.45 var(--status-c) var(--info-h)), oklch(0.85 0.12 var(--info-h)));
+  --info-solid: light-dark(oklch(0.55 0.15 var(--info-h)), oklch(0.72 0.15 var(--info-h)));
+
+  /* stale = deliberately desaturated (it means "data may be old / inert"). */
+  --stale:    light-dark(oklch(0.94 0.015 var(--stale-h)), oklch(0.30 0.02 var(--stale-h)));
+  --stale-fg: light-dark(oklch(0.48 0.03 var(--stale-h)),  oklch(0.78 0.03 var(--stale-h)));
+  --stale-solid: light-dark(oklch(0.58 0.04 var(--stale-h)), oklch(0.68 0.04 var(--stale-h)));
+
+  /* Selection / mark highlight (used by inline fuzzy filter <mark>). */
+  --mark-bg: var(--warn);
+  --mark-fg: var(--warn-fg);
+}
+
+/* ---- Density variants. comfortable is the default (values above). ---- */
+:root[data-density="compact"] {
+  --space: 0.75rem;
+  --pad-y: 0.3rem;
+  --pad-x: 0.55rem;
+  --row-y: 0.3rem;
+  --gap: 0.6rem;
+  --nav-h: 2.75rem;
+  --radius: 0.5rem;
+}
+:root[data-density="comfortable"] {
+  --space: 1.15rem;
+  --pad-y: 0.6rem;
+  --pad-x: 0.85rem;
+  --row-y: 0.7rem;
+  --gap: 1.15rem;
+}
+
+/* =============================================================================
+   TIER 3 — COMPONENT + BASE
+   ========================================================================== */
+
+/* ---- Base reset ---- */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  /* anchored sections clear the sticky nav (WCAG 2.4.11 Focus-Not-Obscured) */
+  scroll-padding-top: var(--nav-h);
+  tab-size: 2;
+}
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: var(--step-0);
+  line-height: var(--leading);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  /* safe-area for notched phones */
+  padding:
+    env(safe-area-inset-top, 0)
+    env(safe-area-inset-right, 0)
+    env(safe-area-inset-bottom, 0)
+    env(safe-area-inset-left, 0);
+}
+
+img, svg, video, canvas { max-width: 100%; height: auto; display: block; }
+svg { fill: currentColor; }
+
+/* ---- Typography ---- */
+h1, h2, h3, h4 {
+  line-height: var(--leading-tight);
+  font-weight: 650;
+  text-wrap: balance;
+  color: var(--text);
+}
+h1 { font-size: var(--step-3); letter-spacing: -0.015em; }
+h2 { font-size: var(--step-2); letter-spacing: -0.01em; }
+h3 { font-size: var(--step-1); }
+p, li { text-wrap: pretty; max-width: 72ch; }
+small, .text-fine { font-size: var(--step--1); color: var(--muted); }
+code, kbd, samp, pre { font-family: var(--mono); font-size: 0.92em; }
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05em 0.4em;
+}
+pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space);
+  overflow: auto;
+  font-size: var(--step--1);
+  line-height: 1.5;
+}
+pre code { background: none; border: 0; padding: 0; }
+kbd {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.45em;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+/* ---- Links ---- */
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.15em; }
+a:hover { color: var(--accent-hover); }
+
+/* ---- Universal focus-visible ring (the single --ring token) ---- */
+:focus-visible {
+  outline: var(--ring-w) solid var(--ring);
+  outline-offset: var(--ring-offset);
+  border-radius: var(--radius-sm);
+}
+/* keep mouse clicks clean; only show ring for keyboard/programmatic focus */
+:focus:not(:focus-visible) { outline: none; }
+
+/* ---- Skip link (visually hidden until focused) ---- */
+.skip-link {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 1000;
+  padding: var(--pad-y) var(--pad-x);
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-radius: var(--radius-sm);
+  transform: translateY(-150%);
+  transition: transform 0.15s ease;
+}
+.skip-link:focus-visible { transform: translateY(0); color: var(--accent-fg); }
+
+/* ---- Visually-hidden utility (for sr-only labels on glyphs/icons) ---- */
+.visually-hidden,
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Layout container ---- */
+.hub-shell {
+  width: min(100% - 2rem, 78rem);
+  margin-inline: auto;
+}
+#main { display: block; }
+
+/* ---- Sticky nav (anchor links). Height === --nav-h. ---- */
+.hub-nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  height: var(--nav-h);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-inline: var(--pad-x);
+  background: light-dark(
+        oklch(from var(--surface) l c h / 0.85),
+        oklch(from var(--surface) l c h / 0.85));
+  -webkit-backdrop-filter: saturate(1.4) blur(8px);
+  backdrop-filter: saturate(1.4) blur(8px);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.hub-nav a, .hub-nav .nav-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0.25rem var(--pad-x);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+  font-size: var(--step--1);
+  font-weight: 550;
+}
+.hub-nav a:hover, .hub-nav .nav-link:hover {
+  color: var(--text);
+  background: var(--accent-wash);
+}
+/* scroll-spy: active section (toggled by scrollspy.js via aria-current) */
+.hub-nav a[aria-current="true"],
+.hub-nav .nav-link[aria-current="true"],
+.hub-nav a[aria-current="location"] {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+.hub-nav .nav-spacer { margin-left: auto; }
+
+/* ---- Sections key their scroll offset to the sticky nav ---- */
+section[id^="sec-"], .hub-section {
+  scroll-margin-top: var(--nav-h);
+  padding-block: var(--space);
+}
+/* :target deep-link flash (no-JS fallback; suppressed under reduced-motion) */
+:target {
+  scroll-margin-top: var(--nav-h);
+}
+@media (prefers-reduced-motion: no-preference) {
+  :target { animation: target-flash 1.6s ease; }
+}
+@keyframes target-flash {
+  0%, 18% { background: var(--accent-wash); }
+  100%    { background: transparent; }
+}
+
+/* ---- Cards / panels ---- */
+.card, .panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space);
+  box-shadow: var(--shadow-1);
+}
+.panel > header,
+.card > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--gap);
+  margin-bottom: var(--space);
+}
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+  gap: var(--gap);
+}
+/* off-screen panels skip layout/paint until needed (perf) */
+.card-grid > *, .lazy-section { content-visibility: auto; contain-intrinsic-size: auto 200px; }
+
+/* ---- Tables (real <table> + <th scope> + <caption>) ---- */
+.hub-table-wrap { overflow-x: auto; border-radius: var(--radius); }
+table.hub-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--step--1);
+  background: var(--surface);
+}
+table.hub-table caption {
+  text-align: left;
+  padding: var(--pad-y) 0;
+  color: var(--muted);
+  font-size: var(--step--1);
+  caption-side: top;
+}
+table.hub-table th,
+table.hub-table td {
+  text-align: left;
+  padding: var(--row-y) var(--pad-x);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.hub-table thead th {
+  position: sticky;
+  top: var(--nav-h);
+  z-index: 2;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: var(--step--1);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+table.hub-table tbody tr:hover { background: var(--accent-wash); }
+table.hub-table tbody tr:last-child td { border-bottom: 0; }
+table.hub-table tr:target td { background: var(--accent-wash); }
+
+/* ---- Pills / badges (generic) ---- */
+.pill, .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  min-height: 1.5rem;            /* >=24px target when interactive */
+  padding: 0.1em 0.6em;
+  border-radius: var(--radius-pill);
+  font-size: var(--step--1);
+  font-weight: 600;
+  line-height: 1.3;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+a.pill, button.pill { min-height: var(--tap); cursor: pointer; }
+.badge-count {
+  font-variant-numeric: tabular-nums;
+  background: var(--accent-wash);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+/* =============================================================================
+   STATUS — the FIXED 5-state vocabulary.
+   Markup contract (rendered by the hubs / viz helpers):
+     <span class="status status--pass" role="img" aria-label="pass">
+       <span class="status__glyph" aria-hidden="true">✓</span>
+       <span class="status__text">pass</span>
+     </span>
+   Glyphs: pass=✓ warn=▲ fail=✕ info=• stale=◌  (also exposed as CSS vars
+   so JS can emit them as data; ALWAYS paired with text + aria-label.)
+   Color is NEVER the sole signal (glyph + text carry meaning).
+   ========================================================================== */
+:root {
+  --glyph-pass:  "\2713";   /* ✓ */
+  --glyph-warn:  "\25B2";   /* ▲ */
+  --glyph-fail:  "\2715";   /* ✕ */
+  --glyph-info:  "\2022";   /* • */
+  --glyph-stale: "\25CC";   /* ◌ */
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  min-height: 1.5rem;
+  padding: 0.12em 0.6em;
+  border-radius: var(--radius-pill);
+  font-size: var(--step--1);
+  font-weight: 600;
+  line-height: 1.25;
+  border: 1px solid transparent;
+}
+.status__glyph { font-weight: 700; line-height: 1; }
+.status__text  { text-transform: capitalize; }
+
+.status--pass  { background: var(--pass);  color: var(--pass-fg);
+                 border-color: oklch(from var(--pass-fg) l c h / 0.25); }
+.status--warn  { background: var(--warn);  color: var(--warn-fg);
+                 border-color: oklch(from var(--warn-fg) l c h / 0.25); }
+.status--fail  { background: var(--fail);  color: var(--fail-fg);
+                 border-color: oklch(from var(--fail-fg) l c h / 0.25); }
+.status--info  { background: var(--info);  color: var(--info-fg);
+                 border-color: oklch(from var(--info-fg) l c h / 0.25); }
+.status--stale { background: var(--stale); color: var(--stale-fg);
+                 border-color: oklch(from var(--stale-fg) l c h / 0.25); }
+
+/* Solid dot variant (for legends / inline indicators) — still needs adjacent text. */
+.status-dot {
+  display: inline-block;
+  width: 0.7em; height: 0.7em;
+  border-radius: 50%;
+  vertical-align: baseline;
+  flex: none;
+}
+.status-dot--pass  { background: var(--pass-solid); }
+.status-dot--warn  { background: var(--warn-solid); }
+.status-dot--fail  { background: var(--fail-solid); }
+.status-dot--info  { background: var(--info-solid); }
+.status-dot--stale { background: var(--stale-solid); }
+
+/* ---- Buttons ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4em;
+  min-height: var(--tap);
+  min-width: var(--tap);          /* WCAG 2.5.8 target size >=24px */
+  padding: var(--pad-y) var(--pad-x);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.btn:hover { background: var(--surface-2); border-color: var(--muted); }
+.btn:active { transform: translateY(0.5px); }
+.btn[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); border-color: var(--accent); }
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+.btn-primary:hover { background: var(--accent-hover); color: var(--accent-fg); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.btn-ghost:hover { background: var(--accent-wash); color: var(--text); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Form controls (search box, theme/density toggles) ---- */
+input, select, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--pad-y) var(--pad-x);
+  min-height: var(--tap);
+}
+input::placeholder, textarea::placeholder { color: var(--muted); }
+input[type="search"] { -webkit-appearance: none; appearance: none; }
+::selection { background: var(--accent-wash); color: var(--text); }
+
+/* ---- <mark> for inline fuzzy-filter highlighting ---- */
+mark, .hl {
+  background: var(--mark-bg);
+  color: var(--mark-fg);
+  border-radius: 0.2em;
+  padding: 0 0.1em;
+}
+
+/* ---- <details> / <summary> (drill-into rows) ---- */
+details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: clip;
+}
+details + details { margin-top: var(--gap); }
+summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--tap);
+  padding: var(--pad-y) var(--pad-x);
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+  user-select: none;
+}
+summary::-webkit-details-marker { display: none; }
+summary::before {
+  content: "\25B8";               /* ▸ */
+  color: var(--muted);
+  transition: transform 0.15s ease;
+  flex: none;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+details[open] > summary { border-bottom: 1px solid var(--border); }
+.details-body { padding: var(--space); }
+
+/* ---- Definition-list / key-value (mobile table fallback target) ---- */
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem var(--gap); }
+dl.kv dt { color: var(--muted); font-size: var(--step--1); }
+dl.kv dd { margin: 0; }
+
+/* ---- aria-live regions (search count, last-updated). No visual chrome needed,
+        but keep them readable if shown. ---- */
+[aria-live] { color: var(--muted); font-size: var(--step--1); }
+
+/* ---- "Live · last updated Ns ago" indicator (SSE) ---- */
+.live-indicator { display: inline-flex; align-items: center; gap: 0.4em; color: var(--muted); font-size: var(--step--1); }
+.live-indicator[data-state="paused"] { color: var(--warn-fg); }
+.live-dot { width: 0.55em; height: 0.55em; border-radius: 50%; background: var(--pass-solid); flex: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .live-indicator[data-state="live"] .live-dot { animation: live-pulse 2s ease-in-out infinite; }
+}
+.live-indicator[data-state="paused"] .live-dot { background: var(--warn-solid); }
+@keyframes live-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* value-change flash (SSE deltas); suppressed under reduced-motion */
+@media (prefers-reduced-motion: no-preference) {
+  .flash { animation: value-flash 0.9s ease; }
+}
+@keyframes value-flash {
+  0% { background: var(--accent-wash); }
+  100% { background: transparent; }
+}
+
+/* =============================================================================
+   COMMAND PALETTE (Cmd/Ctrl-K) — structural styles; palette.js owns behavior.
+   ARIA combobox/listbox; full keyboard; focus trap handled in JS.
+   ========================================================================== */
+.cmdk-backdrop {
+  position: fixed; inset: 0; z-index: 900;
+  background: light-dark(oklch(0.2 0.02 var(--accent-h) / 0.35), oklch(0 0 0 / 0.55));
+  display: grid; place-items: start center;
+  padding-top: 12vh;
+}
+.cmdk-backdrop[hidden] { display: none; }
+.cmdk-panel {
+  width: min(100% - 2rem, 40rem);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  overflow: clip;
+}
+.cmdk-input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  font-size: var(--step-1);
+  padding: var(--space);
+}
+.cmdk-input:focus-visible { outline: none; }
+.cmdk-list { max-height: 56vh; overflow-y: auto; margin: 0; padding: 0.4rem; list-style: none; }
+.cmdk-group { padding: 0.4rem var(--pad-x) 0.2rem; color: var(--muted); font-size: var(--step--1); text-transform: uppercase; letter-spacing: 0.05em; }
+.cmdk-item {
+  display: flex; align-items: center; gap: 0.6rem;
+  min-height: var(--tap);
+  padding: var(--pad-y) var(--pad-x);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.cmdk-item[aria-selected="true"] { background: var(--accent-wash); color: var(--accent); }
+.cmdk-item .cmdk-meta { margin-left: auto; color: var(--muted); font-size: var(--step--1); }
+
+/* =============================================================================
+   INLINE-SVG DATAVIZ — shared styling hooks for the 4 Python viz helpers
+   (sparkline, segmented progress, donut, heatmap). Each SVG is role=img
+   + aria-label. Strokes use currentColor / status vars; non-scaling strokes.
+   ========================================================================== */
+.viz { color: var(--accent); display: block; }
+.viz [vector-effect] { vector-effect: non-scaling-stroke; }
+.viz .viz-track  { color: var(--surface-2); }
+.viz .viz-grid   { stroke: var(--border); }
+.viz .viz-pass   { color: var(--pass-solid); }
+.viz .viz-warn   { color: var(--warn-solid); }
+.viz .viz-fail   { color: var(--fail-solid); }
+.viz .viz-info   { color: var(--info-solid); }
+.viz .viz-stale  { color: var(--stale-solid); }
+.viz text { fill: var(--muted); font-size: 0.72rem; font-family: var(--sans); }
+/* heatmap cells reference status fills via class; empty cell = track */
+.heatmap rect { fill: var(--surface-2); }
+
+/* =============================================================================
+   RESPONSIVE — reflow to 320px (WCAG 1.4.10). Under ~640px, tables that opt in
+   with .stack-mobile collapse to labeled key/value cards.
+   ========================================================================== */
+@media (max-width: 40rem) {
+  .hub-nav { gap: 0.1rem; }
+  .panel > header, .card > header { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+
+  table.stack-mobile thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.stack-mobile tbody tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: var(--gap);
+    padding: var(--pad-x);
+  }
+  table.stack-mobile td {
+    display: grid;
+    grid-template-columns: minmax(6rem, 40%) 1fr;
+    gap: var(--gap);
+    border: 0;
+    padding: 0.25rem 0;
+  }
+  /* td must carry data-label="<header>" for the key column */
+  table.stack-mobile td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-weight: 600;
+    font-size: var(--step--1);
+  }
+}
+
+/* =============================================================================
+   MOTION — honor prefers-reduced-motion globally (WCAG 2.3.3 / 2.2 spirit).
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* =============================================================================
+   FORCED COLORS / high-contrast (Windows) — keep status meaning via glyph+text,
+   restore system semantics for borders & focus.
+   ========================================================================== */
+@media (forced-colors: active) {
+  .status, .pill, .badge, .card, .panel, details, .btn { border: 1px solid CanvasText; }
+  :focus-visible { outline: 2px solid Highlight; }
+  .status-dot, .live-dot { forced-color-adjust: none; }
+}
+
+/* =============================================================================
+   PRINT — ink-frugal point-in-time audit report. (print.css may extend this;
+   these are the safe baseline rules so a bare tokens.css still prints well.)
+   ========================================================================== */
+@media print {
+  :root { color-scheme: light; }
+  body { background: #fff; color: #000; }
+  .hub-nav, .cmdk-backdrop, .skip-link, .live-indicator, .btn { display: none !important; }
+  .card, .panel, details, table.hub-table { box-shadow: none !important; border-color: #999; }
+  details:not([open]) > .details-body { display: block; }   /* expand all */
+  details > summary::before { display: none; }
+  a[href]::after { content: " (" attr(href) ")"; font-size: 0.85em; color: #555; word-break: break-all; }
+  a[href^="#"]::after, a[href^="javascript:"]::after { content: ""; }
+  thead { display: table-header-group; }                     /* repeat headers */
+  tr, .card, details, .status { break-inside: avoid; }
+  *, *::before, *::after { background: transparent !important; box-shadow: none !important; filter: none !important; backdrop-filter: none !important; }
+  .status { border: 1px solid #000 !important; }
+}
+
+/* =============================================================================
+   APP-SHELL LAYOUT CONSTANTS (consumed by shell.css + hub.js)
+   The tabbed app shell (navbar + tabs + content + modal + toast). Added on top
+   of the token system so the shell inherits color/radius/status automatically.
+   ========================================================================== */
+:root {
+  --navbar-height: 60px;          /* tabs-bar sticky top MUST equal this */
+  --z-navbar: 1000;
+  --z-tabs: 999;
+  --z-modal: 2000;
+  --z-toast: 10000;
+  /* Navbar gradient: accent -> a darker accent (relative-color keeps the hue). */
+  --accent-gradient-from: var(--accent);
+  --accent-gradient-to: light-dark(
+        oklch(from var(--accent) calc(l - 0.12) c h),
+        oklch(from var(--accent) calc(l - 0.10) c h));
+  /* Accent focus glow used by shell inputs (accent at low alpha). */
+  --accent-ring: oklch(from var(--accent) l c h / 0.18);
+}

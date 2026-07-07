@@ -1,0 +1,8 @@
+# Runtime artifacts the selftest/example create — never ship or track these.
+__pycache__/
+*.pyc
+.hub/
+PROJECT/.hub/
+db.sqlite3
+*.sqlite3
+*.sqlite3-*

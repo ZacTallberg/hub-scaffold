@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:gap",
+  "title": "Gap / finding",
+  "description": "A reviewed finding from the analysis (REVIEW plans, RESEARCH-HISTORY, the CHARTER, CAPABILITY-LEDGER 'Needs'). Materializing these into the hub is Phase 2.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "gap" },
+    "title": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["open", "investigating", "mitigated", "closed", "wont-fix"] },
+    "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+    "evidence": { "type": "string", "description": "file:line / observed behavior backing the finding." },
+    "source": { "type": "string", "description": "REVIEW-G3 / CHARTER-security / RESEARCH-HISTORY-4.5 / LEDGER-Needs." },
+    "addressed_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Task(s) that close this gap." },
+    "legacy_ref": { "type": "string" },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "title", "status", "version"],
+  "allOf": [
+    { "if": { "properties": { "status": { "enum": ["mitigated", "closed"] } }, "required": ["status"] }, "then": { "properties": { "addressed_by": { "type": "array", "minItems": 1 } }, "required": ["addressed_by"] } }
+  ]
+}
