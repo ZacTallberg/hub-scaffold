@@ -62,6 +62,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 HUB_PROJECT_KEY = "example"        # entity-id prefix -> example:task:0001
 HUB_BRAND = "Example"              # navbar reads "Example · Hub"
 HUB_BUILD_STAMP = "build_sha.txt"  # BASE_DIR-relative build-identity stamp (written by the build)
+HUB_DONE_STRICTNESS = "strict"     # example runs strict so the selftest ladder proves the full
+                                   # machinery; the adapter DEFAULT is "tracked" (flow-first)
 
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes. Fail-closed when unset.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")

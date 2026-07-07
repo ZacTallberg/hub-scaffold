@@ -152,23 +152,32 @@ def complete(request, b):
     accept = b.get("accept_note")
     if not accept or not evidence:
         return JsonResponse({"errors": [{"code": "need_evidence", "msg": "accept_note + >=1 evidence_uri required"}]}, status=422)
-    # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.
-    bad = {}
-    for e in evidence:
-        problem = _evidence_problem(e)
-        if problem:
-            bad[str(e)[:200]] = problem
-    if bad:
-        return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-            "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing repo path)",
-            "bad": bad}]}, status=422)
+    # HUB_DONE_STRICTNESS is the flow-vs-proof dial (settings; default "tracked"):
+    #   "tracked" — done always carries WHO/WHAT/EVIDENCE (lease + accept_note + evidence), but
+    #               evidence may be anything non-empty (auth-walled ticket links are fine) and a
+    #               verification_command is optional (still RUNS when present).
+    #   "strict"  — evidence must dereference and a verification_command is required. For
+    #               environments where completions cannot be taken on trust (e.g. autonomous
+    #               agents — the mode this hub's origin system runs).
+    strict = str(hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")).lower() == "strict"
+    if strict:
+        # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.
+        bad = {}
+        for e in evidence:
+            problem = _evidence_problem(e)
+            if problem:
+                bad[str(e)[:200]] = problem
+        if bad:
+            return JsonResponse({"errors": [{"code": "evidence_unresolvable",
+                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing repo path)",
+                "bad": bad}]}, status=422)
     ent = hub_app.current_state().get("entities", {}).get(eid)
     if not ent:
         return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
-    # FALSE-GREEN GUARD: an unverifiable task cannot be completed — the server runs the task's own
-    # verification_command; absence is a 422, not a free pass (that skip was the audit's residual gap).
+    # FALSE-GREEN GUARD (strict): an unverifiable task cannot be completed — the server runs the
+    # task's own verification_command; absence is a 422, not a free pass.
     vc = ent.get("verification_command")
-    if not vc:
+    if strict and not vc:
         return JsonResponse({"errors": [{"code": "need_verification_command",
             "msg": "done requires a verification_command on the task; set it (POST /hub/api/task) before completing"}]},
             status=422)

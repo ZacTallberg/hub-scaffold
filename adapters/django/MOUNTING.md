@@ -44,12 +44,31 @@ MIDDLEWARE = [
 HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "acme"
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 7)
+HUB_DONE_STRICTNESS = "tracked"       # the flow-vs-proof dial — see "The strictness dial" below
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
 
 # Write-API token: ALWAYS from the environment, NEVER a committed literal.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 ```
+
+### The strictness dial (`HUB_DONE_STRICTNESS`)
+
+The hub is designed to TRACK by default and PROVE on demand. Completing a task always records
+who (claim lease), what (accept note), and evidence (≥1 URI) — that is the tracking floor, and
+it is deliberately cheap: one claim, one complete, no ceremony.
+
+- `"tracked"` (default) — flow-first. Evidence can be anything non-empty (auth-walled ticket
+  links, doc URLs, file paths); a `verification_command` on the task is optional, though the
+  server still RUNS it when present and refuses `done` if it fails.
+- `"strict"` — proof-first. Every evidence URI must dereference (URL <400 / commit in this
+  repo / existing repo path) and every task needs a `verification_command` before it can be
+  completed. Use this where completions cannot be taken on trust — the classic case is
+  autonomous agents closing their own tasks (the origin system runs strict for exactly that
+  reason, having caught agents fabricating green).
+
+Ratcheting up later is a one-line settings change and applies only to future completions —
+start tracked, go strict for the projects (or the agents) that earn it.
 
 Notes:
 

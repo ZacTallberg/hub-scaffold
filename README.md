@@ -9,9 +9,15 @@ Three ideas, one package:
 
 1. **The hub** (`hub_core/` + `adapters/`) — a small, framework-free event store and audit
    engine. Every task, decision, and ADR is an append-only event; state is a projection;
-   "done" requires evidence that dereferences to something real (a URL, a commit, a file).
-   Writes are token-gated over HTTP; reads are public-safe. The Django adapter mounts it at
-   `/hub` in an existing site.
+   "done" always carries who/what/evidence. Writes are token-gated over HTTP; reads are
+   public-safe. The Django adapter mounts it at `/hub` in an existing site.
+
+**Flow-first by design.** The tracking floor is deliberately cheap — create, claim, complete
+with a note and a link; nothing else is mandatory. Proof requirements are a **dial, not a
+default** (`HUB_DONE_STRICTNESS`, see `adapters/django/MOUNTING.md`): day-to-day work runs
+`tracked`; flip a project to `strict` (dereferenced evidence + server-run verification
+commands) only where completions can't be taken on trust, e.g. autonomous agents. Likewise
+everything in `patterns/` is opt-in — adopt a gate when a failure mode has earned it.
 2. **The plane** (`PROJECT/`) — a canonical on-disk tree (charter, doctrine, handoff, ADRs,
    registers, worklogs, verification specs) that any agent or human can pick up cold. It is
    the durable half; the hub is the operable half.
