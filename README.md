@@ -26,6 +26,9 @@ everything in `patterns/` is opt-in — adopt a gate when a failure mode has ear
    code that never shipped. Every pattern here is an *out-of-process* check: a deploy contract
    with a build-SHA canary, a pre-receive gate on the git host, a standing canary for the live
    site, and an agent guard.
+4. **The campaigns** (`campaigns/`) — the robust agent-prompt playbooks that operate all of the
+   above: how to maintain, improve, and augment a project through multi-agent (or single-agent)
+   work without losing state or shipping false-green. The *verbs* to the hub+plane's nouns.
 
 ## Layout
 
@@ -41,6 +44,12 @@ hub_core/                       pure-python engine: event store, projections, au
 adapters/django/hub/            Django app: /hub pages, read API, token-gated write API
 adapters/django/MOUNTING.md     how to wire the app into an existing Django site
 example/                        minimal runnable Django site wired to the adapter (selftest uses it)
+campaigns/                      the robust agent-prompt playbooks that RUN the system
+  00-orchestration-method.md    fan-out → verify → close → roll up; the adversarial-verify rule
+  maintain-audit-reconcile.md   MAINTAIN: reconcile code ↔ hub ↔ live ↔ docs; regenerate the anchor
+  improve-moe-review.md         IMPROVE: multi-expert review → adversarial verify → committed report
+  augment-hub.md                AUGMENT: add an entity type + tab, or backfill structure across repos
+  feature-buildout.md           BUILD: the DISCOVER→CLAIM→IMPLEMENT→RECORD→VERIFY loop + roles
 patterns/
   deploy-contract.md            what a trustworthy ship step must guarantee
   deploy.sh.example             reference deploy script implementing the contract
