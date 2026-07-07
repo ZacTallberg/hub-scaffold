@@ -148,9 +148,3 @@ Adoption is an event; staying honest is a loop:
 - **Doc integrity.** `tools/build_bootstrap.py --check` keeps `PROJECT-PLANE-BOOTSTRAP.md`
   byte-identical to the live templates, so the spec can never quietly diverge from what
   `init.sh` actually stamps.
-
-## License
-
-**All rights reserved.** This repository intentionally ships **no open-source license** — it is for
-internal/personal use, not public grant. The absence of a `LICENSE` file is a deliberate decision,
-not an oversight; no rights to use, copy, modify, or distribute are granted.

@@ -68,9 +68,8 @@ when usage is tight.
 - **Optional entity types (Findings, Lessons, Decisions-log)** — generic and reusable, but kept OUT of
   the minimal base. Add them via `campaigns/augment-hub.md` if you want them; they're an intended
   extension, not a gap.
-- **No LICENSE (operator decision, 2026-07-07)** — this repository ships WITHOUT an open-source
-  license: **all rights reserved, internal/personal use only.** That is deliberate (the design has
-  potential commercial value) — not an oversight. Do not add a license file or assume any grant of use.
+- **No LICENSE** — private/internal repo; the missing license file is intentional (default
+  all-rights-reserved). Don't add one.
 
 ## The three non-negotiables (the point of the whole thing)
 1. **Claimed-done ≠ done.** Prove results out-of-process — a gate re-run, a live probe, a re-read of the
