@@ -46,6 +46,7 @@ hub_core/                       pure-python engine: event store, projections, au
   tests/                        stdlib-unittest self-tests (no framework, run anywhere)
 adapters/django/hub/            Django app: /hub pages, read API, token-gated write API
 adapters/django/MOUNTING.md     how to wire the app into an existing Django site
+adapters/django/HUB-API.md      agent-facing API reference: the operate-as-a-loop contract + every endpoint
 example/                        minimal runnable Django site wired to the adapter (selftest uses it)
 campaigns/                      the robust agent-prompt playbooks that RUN the system
   00-orchestration-method.md    fan-out → verify → close → roll up; the adversarial-verify rule

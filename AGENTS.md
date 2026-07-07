@@ -26,7 +26,8 @@ from a working multi-project system. Nothing here names any specific person, hos
    write-API refusal ladder. All four steps must PASS. (Needs Python + Django — see `requirements.txt`.)
 2. **Read, in order:** this file → `README.md` → `campaigns/00-orchestration-method.md` (how to run
    work well) → `OPERATING-AGREEMENT.md` (the working laws) → `adapters/django/MOUNTING.md` (how the hub
-   mounts). Skim `PROJECT/DOCTRINE.md` for the in-repo law.
+   mounts) → `adapters/django/HUB-API.md` (the API you drive the hub with — read this before you POST
+   anything). Skim `PROJECT/DOCTRINE.md` for the in-repo law.
 3. **See it:** in `example/`, `DEBUG=1 python manage.py migrate && seedhub && runserver`, open `/hub`.
 
 ## How to USE it (stamp a new project)
