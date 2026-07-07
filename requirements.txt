@@ -1,0 +1,13 @@
+# hub-scaffold runtime dependencies.
+#
+# hub_core/ is PURE STDLIB — zero dependencies — and its tests run under any Python 3.10+.
+# Only the Django ADAPTER (adapters/django/) and the example/ site need Django.
+#
+# Django 5.2 is the current LTS (supported to 2028); 6.0.x also works (the example was proven on it).
+# Pin to your project's Django once you mount the adapter into it.
+Django>=5.2
+
+# The write API's evidence-dereference check (strict mode) uses only urllib from the stdlib — no
+# `requests`. The hub serves static frontend assets via Django's staticfiles; add whitenoise if you
+# serve it without a separate static host:
+# whitenoise>=6.0

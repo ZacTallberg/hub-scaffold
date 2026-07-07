@@ -1,0 +1,29 @@
+# Sample CI — the out-of-process gate this system preaches, as an actual required check.
+#
+# This is the missing enforcement primitive for adopters: a gate the building agent CANNOT
+# self-attest. It runs the full self-test (agnosticism scrub + hub_core unit tests + bootstrap
+# drift check + example-site boot + the write-API refusal ladder). Make it a REQUIRED status
+# check on your default branch (repo Settings → Branches) so a red run blocks merge.
+#
+# Adapt: if you host on GitLab/Forgejo/etc., port these steps to that CI — the steps are the point,
+# not the provider. Add your project's own `manage.py hubaudit` as a step once the hub is mounted.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Agnosticism scrub (no origin-specific residue)
+        run: bash tools/scrub_check.sh
+      - name: Full self-test (engine + bootstrap + example + refusal ladder)
+        run: bash tools/selftest.sh

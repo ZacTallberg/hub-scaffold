@@ -33,7 +33,10 @@ everything in `patterns/` is opt-in — adopt a gate when a failure mode has ear
 ## Layout
 
 ```
-README.md                       you are here
+README.md                       you are here (human orientation)
+AGENTS.md                       machine-first orientation — read first if you're an agent
+requirements.txt                runtime deps (hub_core is stdlib; the Django adapter needs Django)
+.github/workflows/ci.yml        sample CI: runs the scrub + selftest as a required, un-self-attestable gate
 .gitignore                      keeps selftest/runtime artifacts (event logs, sqlite, pycache) untracked
 init.sh                         stamp a new project from this scaffold (the only sanctioned way)
 OPERATING-AGREEMENT.md          the human/agent working agreement adopters take on
