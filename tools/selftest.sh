@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# selftest.sh — end-to-end proof the scaffold works on a fresh machine. Five steps:
+# selftest.sh — isolated end-to-end verification for releases and high-risk boundaries. It is NOT
+# the ordinary edit/commit gate; use tools/check.sh for fast development feedback. Five steps:
 #   1. agnosticism scrub          (tools/scrub_check.sh)
 #   2. engine unit tests          (python -m unittest over hub_core — framework-free)
 #   3. documentation integrity    (tools/docs_check.py)
@@ -31,7 +32,7 @@ run_step() {
 }
 
 step_scrub() {
-  bash "$ROOT/tools/scrub_check.sh"
+  bash "$ROOT/tools/scrub_check.sh" && bash "$ROOT/tools/scrub_check.sh" --selftest
 }
 
 step_unittests() {
@@ -80,16 +81,30 @@ step_example() {
     echo "example/manage.py not found — the example site is missing"
     return 1
   fi
+  local runtime_root
+  runtime_root="$(mktemp -d "$ROOT/.selftest-tmp.XXXXXX")" || return 1
+  case "$runtime_root" in
+    "$ROOT"/.selftest-tmp.*) ;;
+    *) echo "refusing unexpected self-test temp path: $runtime_root" >&2; return 1 ;;
+  esac
+  SELFTEST_RUNTIME_ROOT="$runtime_root"
+  cleanup_runtime() {
+    case "${SELFTEST_RUNTIME_ROOT:-}" in
+      "$ROOT"/.selftest-tmp.*) rm -rf -- "$SELFTEST_RUNTIME_ROOT" ;;
+      *) echo "refusing to clean unexpected self-test temp path: ${SELFTEST_RUNTIME_ROOT:-unset}" >&2 ;;
+    esac
+  }
+  trap cleanup_runtime EXIT
   cd "$ROOT/example"
   export DEBUG=1
   export HUB_WRITE_TOKEN="selftest-token"
+  export HUB_DIR="$runtime_root/hub"
+  export HUB_TEST_DB="$runtime_root/example.sqlite3"
   "$PY" manage.py migrate --no-input || return 1
   "$PY" manage.py seedhub || return 1
   "$PY" manage.py hubaudit || return 1
   "$PY" manage.py shell -c "$API_SNIPPET" || return 1
-  # The full server-granted-done hardening ladder: direct done -> 409, missing
-  # empty evidence -> 422, missing verification_command -> 422, unresolvable evidence -> 422, failing command -> 422,
-  # critical audit -> 422, real completion -> 200.
+  # The full isolated queue/completion ladder, including negative and race paths.
   "$PY" selftest.py || return 1
 }
 

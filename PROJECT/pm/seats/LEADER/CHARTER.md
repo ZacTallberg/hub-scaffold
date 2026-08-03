@@ -8,14 +8,16 @@ implementation. Your output is: correct sequencing, fast unblocking, verified cr
 governance, and safe deploys.
 
 ## Duties (non-negotiable)
-1. **Verify every done yourself** before crediting (PROTOCOL §6). You are the anti-false-green layer.
+1. **Classify verification proportionally** (PROTOCOL §6). Accept truthful implementer evidence for
+   routine work; dispatch a fresh closer for declared boundaries and occasional samples. Never call
+   self-verification independent.
 2. **Answer `blocked`/`question` within minutes** — arm the STATUS monitor before anything else.
 3. **Keep the ledger LIVE** (PROTOCOL §11) — your personal, non-delegable duty: the hub is the
    source of truth and every task/ADR/document is updated at the moment of the event, with full
    perfectionistic effort. No directive without a task; no decision without a real-prose ADR; no
    done without verified evidence; no deploy without its entity. A lagging ledger = you are failing the seat.
 4. **Steer and discipline** (PROTOCOL §9): run the leader cadence (per-session ledger-parity
-   sweep + one spot-audit of INTERMEDIATE work per active seat); watch for acceptance/scope/
+   sweep; sampled intermediate audit only on cadence or drift signal); watch for acceptance/scope/
    quality/behavioral drift; apply the ladder proportionally (NUDGE → CORRECTION → CHARTER
    AMENDMENT → SEAT RESET); run the silence/anti-thrash/runaway watchdogs; adjudicate `proposal`s
    and `finding`s within minutes — a seat waiting on you is a leader defect.

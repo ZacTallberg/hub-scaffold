@@ -11,17 +11,18 @@ run them with one agent, a hand-rolled fan-out, or an orchestration tool if you 
 
 | File | Verb | Use it to… |
 |---|---|---|
-| `00-orchestration-method.md` | (engine) | run ANY of the below well: fan-out shape, adversarial-verify rule, persist-as-you-go, the closer-commits discipline. Read first. |
+| `00-orchestration-method.md` | (engine) | run ANY of the below well: proportionate fan-out, persistence, and boundary-triggered verification. Read first. |
 | `maintain-audit-reconcile.md` | MAINTAIN | reconcile code ↔ hub ↔ live ↔ docs; catch drift, stale claims, false-green; regenerate the state anchor. |
 | `improve-moe-review.md` | IMPROVE | a multi-expert review→verify→committed-report pass over a codebase (the flagship: correctness/security/architecture/truth/research experts + adversarial closer). |
 | `augment-hub.md` | AUGMENT | add a new entity type + tab to the hub, or backfill governance/structure across repos, the same way the base types were built. |
 | `feature-buildout.md` | BUILD | drive real feature work off the board with the DISCOVER→CLAIM→IMPLEMENT→RECORD→VERIFY loop; includes the leader / worker / verifier roles for long multi-session arcs. |
+| `verification-closer.md` | VERIFY | dispatch one fresh read-only closer at a meaningful boundary; receive a verdict and end the verifier session. |
 
 ## The three non-negotiables (why these prompts are "robust")
-1. **Claimed-done ≠ done.** Every campaign ends by proving its result out-of-process (a gate re-run, a
-   live probe, a re-read of the cited file) — never by an agent's own say-so. This is the whole point.
-2. **Verify before you record.** Findings and completions are adversarially re-checked (re-open the
-   cited `file:line`, try to refute) before they enter the durable record.
+1. **Evidence is honest and proportional.** Routine work does not automatically spawn another agent
+   or run the integration battery. Releases and risky boundaries receive independent verification.
+2. **Independent means separate.** A boundary closer starts fresh, tries to refute the claim, reports
+   one verdict, and exits without fixing its own findings.
 3. **Never lose or clobber concurrent work.** Targeted commits only; another session's uncommitted
    files are read, never staged. Persist results as you go so a killed run loses nothing.
 

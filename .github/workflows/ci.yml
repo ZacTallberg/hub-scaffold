@@ -1,33 +1,20 @@
-# Sample CI — the out-of-process gate this system preaches, as an actual required check.
+# Fast CI — cheap, high-signal sanity checks for ordinary pushes and pull requests.
 #
-# This is the missing enforcement primitive for adopters: a gate the building agent CANNOT
-# self-attest. It runs the full self-test (agnosticism scrub + hub_core unit tests + documentation
-# checks + bootstrap drift check + example-site boot + the write-API refusal ladder). Make it a REQUIRED status
-# check on your default branch (repo Settings → Branches) so a red run blocks merge.
-#
-# Adapt: if you host on GitLab/Forgejo/etc., port these steps to that CI — the steps are the point,
-# not the provider. Add your project's own `manage.py hubaudit` as a step once the hub is mounted.
-name: ci
+# Full integration verification is intentionally separate in verify.yml and runs only when invoked.
+# Make this fast job required if desired; do not turn every small change into a release ceremony.
+name: ci-fast
 on:
   push:
     branches: [main]
   pull_request:
 
 jobs:
-  selftest:
+  check:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Agnosticism scrub (no origin-specific residue)
-        run: bash tools/scrub_check.sh
-      - name: Full self-test (engine + docs + bootstrap + example + refusal ladder)
-        run: bash tools/selftest.sh
+          python-version: "3.12"
+      - name: Fast impact-independent checks
+        run: bash tools/check.sh --all-fast

@@ -4,14 +4,15 @@ How to run any campaign in this directory well — whether you have a multi-agen
 a hand-rolled fan-out, or just one agent working sequentially. This is the engine; the other files
 are the payloads.
 
-## 1. Shape: fan-out → verify → close → roll up
+## 1. Shape: fan-out → consolidate → boundary-verify when warranted → roll up
 
 ```
 DISCOVER the work-list (inline: list the files/repos/entities in scope)
   → FAN OUT one worker per item / per expert        (parallel where independent)
     → each worker returns STRUCTURED findings      (never prose to be re-parsed)
-  → VERIFY: an adversarial pass re-checks each finding before it is trusted
-  → CLOSE: a per-item closer dedupes, writes the durable record, commits ONLY its file
+  → CONSOLIDATE: dedupe and ground findings in the raw artifacts
+  → VERIFY: at a meaningful boundary, one fresh disposable closer tests the risky claims
+  → RECORD: the authorized writer persists only the intended artifact
   → ROLL UP: one synthesizer produces the cross-cutting view
 ```
 
@@ -24,16 +25,14 @@ and **commit each item's record as you finish it** so a stopped run leaves durab
 Scale the fan-out to the budget — a huge parallel fleet is a cost decision the operator makes, not a
 default. When usage is constrained, prefer sequential-with-checkpoints over a large fan-out.
 
-## 2. The adversarial-verify rule (the thing that makes findings trustworthy)
+## 2. Proportional independent verification
 
-Never record a finding or a "done" on a single agent's assertion. For each candidate:
-- Spawn an independent checker **prompted to REFUTE it**, defaulting to "not real" when uncertain.
-- For high-stakes or destructive conclusions, use **N=3, accept only if ≥2 confirm**. For a finding
-  that can fail in more than one way, give each checker a *different angle* (does-it-reproduce /
-  security angle / correctness angle) rather than three identical refuters.
-- Mark **CONFIRMED** (the checker re-opened the exact `file:line` and the logic holds) vs **PLAUSIBLE**
-  (real-looking but not fully grounded). Discard anything actively refuted; count refutations.
-- Look for existing mitigations *before* confirming — half of plausible findings are already handled.
+Do not spawn a checker for every item. Ground routine findings by reopening the cited artifact and
+label uncertainty honestly. Invoke `verification-closer.md` once for a coherent batch when it reaches
+a release, security/auth, migration/destructive, public-contract, concurrency/process, regression,
+or sampled-audit boundary. Prompt that fresh closer to refute the claims and look for existing
+mitigations. Escalate to N=3 only for irreversible or genuinely high-stakes conclusions, giving each
+verifier a different failure angle. The closer returns one verdict and exits; it does not fix.
 
 ## 3. Structured output, not prose
 
@@ -47,9 +46,9 @@ Write each item's result to disk (or commit it) the moment it's done. A campaign
 the end loses everything if it's killed. If a run *is* stopped, the partial results are the salvage —
 read them before re-running, and resume only the unfinished items.
 
-## 5. The closer commits — and only its own file
+## 5. The record writer commits only its own file
 
-The agent that writes a durable record commits **only that file** with a targeted `git add <file>`.
+The authorized agent that writes a durable record commits **only that file** with a targeted `git add <file>`.
 NEVER `git add -A`, `stash`, or `checkout`: repos routinely hold another session's uncommitted work
 that must be read but never staged or disturbed. If a repo is a "separate world" (someone else's, or
 holding a live session), write the record *outside* it and don't touch it at all.
@@ -61,7 +60,7 @@ unverified, a source unread. What it finds is the next round, not an afterthough
 
 ## 7. Scale to the ask
 
-"Quick check" → a few workers, single-vote verify. "Thoroughly audit / be comprehensive" → a larger
-roster, 3-vote adversarial pass, a synthesis stage. When unsure, lean thorough for review/audit work
-and brief for spot-checks. Announce any coverage you drop (top-N, sampling, no-retry) — silent
-truncation reads as "covered everything" when it isn't.
+"Quick check" → one worker or a focused read. "Thoroughly audit / be comprehensive" → a larger
+roster, synthesis, and one boundary closer. Use three independent votes only when consequence
+justifies the coordination cost. Announce sampling or omitted coverage—silent truncation reads as
+"covered everything" when it was not.

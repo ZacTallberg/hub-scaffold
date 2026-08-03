@@ -50,8 +50,11 @@ WSGI_APPLICATION = "example_site.wsgi.application"
 
 # The hub itself has no relational models; this DB exists so `migrate` and any host apps work.
 DATABASES = {
-    "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": str(BASE_DIR / "db.sqlite3"),
-                "OPTIONS": {"timeout": 20}},
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": os.environ.get("HUB_TEST_DB", str(BASE_DIR / "db.sqlite3")),
+        "OPTIONS": {"timeout": 20},
+    },
 }
 
 LANGUAGE_CODE = "en-us"

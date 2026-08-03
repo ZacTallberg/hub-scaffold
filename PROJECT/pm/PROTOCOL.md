@@ -14,7 +14,7 @@ specifics. v2.1 adds §5's interrupt/preemption contract and §9 (steering & dis
 |---|---|---|
 | **SOLO** (default) | one principal agent | normal work. pm/ stays dormant; continuity = `../HANDOFF.md` + hub |
 | **PAIR** | LEADER + WORKER | a sustained queue where orchestration/verification and execution both saturate a session |
-| **TRIAD** | + VERIFIER | the product makes checkable claims at scale, or ships need an independent fail-closed gate |
+| **TRIAD** | + transient VERIFIER | a declared boundary or sampled batch needs an independent verdict; fold the seat after it reports |
 | **FLEET** | + WORKER-2..N / SPECIALIST(s) | independent workstreams that would serialize behind one worker |
 
 Escalate one step at a time; every added seat costs coordination overhead — add a seat only when
@@ -26,13 +26,14 @@ announced in DIRECTIVES + `../HANDOFF.md` §0.
 | Seat | Owns | May never |
 |---|---|---|
 | **OPERATOR** (human) | doctrine, product direction, operator-only decisions; may post anywhere as `who: operator` (`OP-n`) | — (absolute authority; misrouted operator posts get a HOLD + re-route by the leader, not silent compliance) |
-| **LEADER** (exactly 1) | orchestration · sequencing · issuing directives · **independent verification of every done** · stamps · CODE deploys · **the live ledger (§11)** · steering & discipline (§9) · answering blocked/question fast | delegate away verification-of-done; let the ledger/ADRs/docs lag the work layer even briefly |
+| **LEADER** (exactly 1) | orchestration · sequencing · issuing directives · risk classification and boundary-verifier dispatch · stamps · CODE deploys · **the live ledger (§11)** · steering & discipline (§9) · answering blocked/question fast | call implementer evidence independent; let the ledger/ADRs/docs lag the work layer even briefly |
 | **WORKER** (1..N) | implementation · tests · migrations · DATA deploys (as actor-tagged) · publishing producer contracts (manifest) | CODE deploys; editing another seat's files; unscoped kill patterns; editing directives channels; deviating from a directive without a `proposal` |
-| **VERIFIER** (0..1 standing) | independent verification per `../verify/README.md`: three-lane checks, verdicts, gate artifacts, `alert` escalations | deploys, ssh, app code, seeds/data patches, another seat's files; subagents if the operator has ordered watch-it-work |
+| **VERIFIER** (normally transient; 0..1 standing only for a sustained gate lane) | scoped independent verification per `../verify/README.md`: verdicts, gate artifacts, `alert` escalations, then exit | deploys, ssh, app code, seeds/data patches, another seat's files; outliving the declared verification boundary |
 | **SPECIALIST** (transient) | one scoped pass (design, security, migration) under a written charter with an explicit end condition | outliving its charter — it folds back (§12) |
 
-**The verifier-identity invariant:** whoever verifies must not be whoever built. The leader
-verifies the worker; the verifier checks the product; the gate re-derives the verifier. Nobody
+**The boundary-verifier identity invariant:** when work crosses a declared independent gate,
+whoever verifies must not be whoever built. The verifier checks the product and the gate re-derives
+the verifier. Routine work remains in SOLO unless risk or sampling justifies another seat. Nobody
 stamps their own work.
 
 **The authority chain:** OPERATOR > DOCTRINE/CHARTER > LEADER directives > backlog order. A seat
@@ -156,20 +157,21 @@ cure is structural, not disciplinary).
 - **Steering is cheap by design:** because every seat checkpoints into `STATE.md`, the leader
   (or operator) can redirect any seat at any time and lose at most one atomic unit of work.
 
-## §6 Verification & credit (the leader's core duty)
+## §6 Proportional verification & credit (the leader's core duty)
 
-1. A `done` is a **claim**. The leader independently: re-runs the stated verification extracting
-   the explicit verdict line (match `^(OK|FAILED)|Ran \d+ tests` — never trust the last stdout
-   line; test chatter fools tail-grabs), reads the implementing diff, and for user-facing work
-   checks the live surface itself.
+1. A `done` is a **claim**, but not every claim deserves the same apparatus. The leader records
+   routine low-risk work from truthful implementer evidence without spawning a verifier. For a
+   release, privileged boundary, migration, public contract, regression, or sample, dispatch a
+   fresh closer that reads the diff and runs the smallest decisive checks. If parsing test output,
+   extract an explicit verdict (match `^(OK|FAILED)|Ran \d+ tests`; never trust only the last line).
 2. **Evidence freshness:** the run must postdate the final edit, and must exercise the REAL chain
    (v1's deploy #2 looped prod 11 minutes because tests validated a middleware, not the proxy
    chain in front of it — test the chain, not the unit, before ships).
 3. **Parse actual shapes.** Instruments lie by key-drift (`entities` vs rows, `data` vs `payload`
    — three broken instruments shipped in v1). Prefer raw reads over assumed schemas when verifying.
-4. Credit = the `Leader-verified:` line. Mis-credits are retracted by a `correction` + channel note
-   — including the leader's own (self-verification errors get the same treatment).
-5. **Done ≠ live** (DOCTRINE §2.3): a verified done that needs a deploy stays open until its
+4. Independent credit uses a `Closer-verified:` or gate stamp naming the verifier and target.
+   Routine evidence is labeled as implementer evidence. Mis-credits are retracted by a `correction`.
+5. **Done ≠ live** (DOCTRINE §2.3): work that needs a deploy stays open until its
    `deploy_done` lands and is live-verified.
 
 ## §7 Deploy interlocks (code, not prose)
@@ -185,9 +187,11 @@ cure is structural, not disciplinary).
    release stage. A predeploy failure means the old artifact still serves — check before panicking.
 5. Every deploy appends a hub `deploy` entity (SHA+timestamp, unconditional) and a `deploy_done` event.
 
-## §8 The independent verification lane
+## §8 The independent verification lane (boundary-triggered)
 
-Wiring for the TRIAD+ modes (contract: `../verify/README.md`):
+Wiring for TRIAD+ modes at declared boundaries (contract: `../verify/README.md`). Do not activate
+this lane for every minor task; dispatch a transient closer or verifier only when §6 risk/sampling
+requires it, then de-escalate when the verdict lands:
 1. Worker publishes the manifest + contract; verifier sweeps; gate artifacts block data ships fail-closed.
 2. **Ship sequence (locked):** worker posts wave-green `done` → leader verifies + runs CODE deploy
    → worker regenerates manifest + publishes the ship's changed-record list → verifier runs the
@@ -204,12 +208,12 @@ Wiring for the TRIAD+ modes (contract: `../verify/README.md`):
 
 ### §9.1 Leader cadence
 - **Continuously:** monitor armed; `blocked`/`question`/`proposal` answered within minutes (an
-  unanswered blocker is a leader defect); dones verified as they land (§6); ledger live (§11).
+  unanswered blocker is a leader defect); evidence recorded as work lands (§6); ledger live (§11).
 - **Per ship:** gate + stamp + live verification (§7/§8).
 - **Per session (and at least daily):** a ledger-parity sweep (created-vs-transitioned, stale
-  `in_progress`); backlog re-prioritized against the CHARTER; `../HANDOFF.md` re-cut; **one
-  spot-audit of intermediate work per active seat** — sample the middle of the work, not just the
-  dones (v1's fabrication was caught by mechanical audit of in-flight output, not by completion review).
+  `in_progress`); backlog re-prioritized against the CHARTER; `../HANDOFF.md` re-cut. Dispatch a
+  spot-audit of intermediate work when sampling cadence or a drift signal warrants it—not as an
+  automatic tax on every active seat.
 
 ### §9.2 Drift detection (what the leader watches for)
 - **Acceptance drift** — output solves a neighboring problem, not the directive's.

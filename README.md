@@ -78,22 +78,27 @@ tools/                          bootstrap, scrub, documentation, and end-to-end 
 PROJECT-PLANE-BOOTSTRAP.md      standalone plane specification with embedded templates
 ```
 
-## Quickstart: prove the scaffold
+## Quickstart: get fast confidence
 
 Prerequisites are Git, Bash, and Python. `hub_core` supports Python 3.10+ with no third-party
 runtime dependencies. The example needs Django; install the repository requirements first.
 
 ```bash
-python -m pip install -r requirements.txt
-bash tools/selftest.sh
+bash tools/check.sh --all-fast
 ```
 
 Use `PYTHON=python3` when needed. Windows users should use Git Bash and a Windows Python
 interpreter; exact recipes are in [docs/TESTING.md](docs/TESTING.md).
 
-The self-test runs the agnosticism scrub, core tests, documentation/schema checks, generated
-bootstrap parity, a real Django boot, the write-API refusal ladder, strict completion, and the
-launch grant boundary.
+This fast check needs no Django install. It covers the scrub, core unit tests, documentation/schema
+links, generated bootstrap parity, and syntax. The isolated full verifier additionally needs
+`python -m pip install -r requirements.txt` and runs with `bash tools/selftest.sh`; reserve it for a
+release, risky cross-cutting boundary, regression, or occasional audit.
+
+For independent review, dispatch a fresh read-only agent with
+[the verification-closer prompt](campaigns/verification-closer.md) or the reusable
+[`$verification-closer` skill](skills/verification-closer/SKILL.md). It returns one evidence-backed
+verdict and exits; minor changes do not automatically receive another agent or the full battery.
 
 ## Stamp a new project
 
@@ -168,7 +173,9 @@ The repository intentionally does not ship a machine-wide/session-memory system.
 
 ## Maintenance
 
-- Run the full self-test before commits/releases that change core, adapters, schemas, docs, or tools.
+- Run `bash tools/check.sh` for ordinary pending changes. It selects cheap checks by impact.
+- Invoke a disposable closer and/or `bash tools/selftest.sh` only at a meaningful risk or release
+  boundary; do not put the integration battery on every minor edit.
 - If any `PROJECT/` template changes, run `python tools/build_bootstrap.py` and commit the regenerated
   `PROJECT-PLANE-BOOTSTRAP.md`.
 - Run `python tools/docs_check.py` to catch broken local links and schema-mirror drift.

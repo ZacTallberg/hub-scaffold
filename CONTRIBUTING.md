@@ -37,18 +37,20 @@ truthful documentation, and fail-closed behavior at privileged boundaries.
 - Prefer links to canonical docs over copying a rule into several places; when duplication is useful,
   update every copy and let `tools/docs_check.py` guard the file relationships.
 
-## Required verification
+## Proportional verification
 
 ```bash
-python tools/docs_check.py
-python tools/build_bootstrap.py --check
-bash tools/scrub_check.sh
-bash tools/selftest.sh
+bash tools/check.sh
 ```
 
-See `docs/TESTING.md` for Windows and interpreter-specific recipes. A new gate/refusal must include a
-negative test that proves it actually fires. Add broad or expensive tests only when they defend a
-real failure mode; keep the required path focused on high-signal boundaries.
+This impact-aware sanity pass is sufficient for ordinary work unless the changed boundary demands
+more. Use `bash tools/check.sh --all-fast` for the complete cheap set. A release, security/auth,
+migration/destructive, public API/schema, concurrency/process-launch, regression, or sampled audit
+should dispatch the disposable `verification-closer` and may justify `bash tools/selftest.sh`.
+
+See `docs/TESTING.md` for exact selection guidance. A new declared gate/refusal needs a negative
+fixture proving it fires, but that fixture may live in the isolated boundary battery. Broad or
+expensive tests stay off the ordinary path unless an observed failure earns their placement.
 
 ## Pull requests and publication
 

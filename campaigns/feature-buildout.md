@@ -21,8 +21,9 @@ Read `00-orchestration-method.md` first. Substitute `{{DEPLOY_CMD}}`, `{{LIVE_UR
 > 4. **RECORD** — mark it `done` WITH evidence (a commit SHA, a passing check, a live URL, a screenshot).
 >    In `strict` mode the server won't grant `done` without a `verification_command` it can run and
 >    evidence that dereferences — set those on the task, don't fight the gate.
-> 5. **VERIFY** — the hub re-runs the audit; if the project is now unsound, the transition is refused and
->    the task stays open. Fix the unsoundness, don't force the flag.
+> 5. **VERIFY proportionally** — the Hub re-runs its cheap audit. Run focused checks when the change
+>    has a plausible failure mode. Dispatch a fresh independent closer only for a release/risky
+>    boundary or an occasional sample; do not attach the full battery to every small task.
 > Nothing off-list: a bug, a missing step, a new idea all become tasks on the board FIRST, then get
 > claimed. Decisions are ADRs (append-only). Never delegate your one task to a lone sub-agent — do your
 > own work; fan out only for genuine parallelism.
@@ -46,11 +47,9 @@ same event-sourced board (state survives in the events, not in any agent's conte
 - **WORKER** — executes. Runs the loop above, lands gated commits, does data/content deploys, posts
   status events. Escalates a genuine block as a `blocked` event with the exact question rather than
   guessing or thrashing — and asks the leader for guidance instead of spinning.
-- **VERIFIER** — the independent last gate. Adversarially triages every "done" claim: re-derives the
-  result, re-reads the evidence, and refutes false-green (a `done` with hollow or unresolvable evidence
-  is demoted, not accepted). The verifier is NEVER the same agent as the builder — that identity
-  separation is the whole point; a builder verifying itself is the meta-failure this system exists to
-  prevent.
+- **VERIFIER** — a transient independent closer for a declared boundary or sampled batch. Re-derives
+  the result, re-reads the evidence, reports `PASS`/`FAIL`/`INCONCLUSIVE`, and exits. It is never the
+  builder and never fixes the findings it is judging. Routine low-risk tasks stay in the solo lane.
 
 Each seat reads the board + the channel tails on boot; every claim is an event; every `done` is
 server-granted. That's what lets the campaign pause and resume across days without losing or

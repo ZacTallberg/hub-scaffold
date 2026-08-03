@@ -22,9 +22,10 @@ Read when needed, in this order:
 - Drive to done; never ask permission to continue. Pause only for irreversible/outward-facing
   forks, owner-only decisions, or hard blocks — queue a pending-decision entry and keep moving
   on everything else. The newest owner directive wins.
-- done = independently proven with dereferenceable evidence. Self-attested green is a defect
-  (FALSE-GREEN). A deploy-dependent task is not done until its record names the live SHA and the
-  deployed-artifact canary confirms it, per `patterns/deploy-contract.md`.
+- done carries truthful, risk-proportional evidence. Minor low-risk work does not automatically need
+  a second agent or full battery. Releases, privileged/data/public-contract boundaries, regressions,
+  and occasional samples use a fresh independent closer that returns one verdict and exits. A
+  deploy-dependent task still needs the live SHA/canary per `patterns/deploy-contract.md`.
 - Research precedes build: capture sources, options, and the chosen path in `PROJECT/research/`
   before architectural work starts. A named technology is a hypothesis, not a mandate.
 - Hub reads are unauthenticated by default: publish no topology, credentials, PII, or confidential

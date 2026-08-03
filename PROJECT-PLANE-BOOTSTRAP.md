@@ -627,9 +627,10 @@ Rebinding rules:
 2. **The protocol's channel mechanics are substrate-independent** (`pm/PROTOCOL.md` §13): append-only
    files + monitors are the proven floor; any addressable bus with per-seat ACLs may replace them
    by ADR without changing the event vocabulary or duties.
-3. **What may never be rebound away:** the verifier-identity invariant, fail-closed gates,
-   re-derivation over trust, append-only history, and one-canonical-store-per-fact-class. An
-   environment that can't provide these isn't a binding target — it's a gap.
+3. **What may never be rebound away:** identity separation at declared independent gates,
+   fail-closed behavior at those gates, re-derivation over trust, append-only history, and one
+   canonical store per fact class. An environment that can't provide these isn't a binding target
+   for the protected boundary—it is a gap.
 ````
 <!-- /TPL -->
 
@@ -703,8 +704,9 @@ require project-specific wiring.
    Implement full scope; real-device checks come at the end.
 4. **Best way, no thrashing.** Research best-of-breed first; a named technology is a hypothesis,
    not a mandate; when an approach keeps failing, re-architect — don't polish.
-5. **Verify every agent claim yourself.** No sub-agent/seat "done" is recorded until independently
-   re-verified (re-run the stated command, read the diff, check the live wiring).
+5. **Verify proportionally.** Routine low-risk work needs truthful evidence, not automatic ceremony.
+   Use a fresh independent closer for releases, privileged boundaries, migrations, public contracts,
+   regressions, and occasional samples; the closer returns one verdict and exits.
 6. **Track and document, always.** Every directed change gets a hub task AND a decision record.
    Note every downstream artifact a shared-state change invalidates.
 
@@ -712,8 +714,9 @@ require project-specific wiring.
 1. **FALSE-GREEN is the meta-failure.** Gates fail by being self-attested, bypassed, textual, or
    committed-not-deployed — not by being absent. The four enforcement primitives (authorization-
    boundary hook · behavioral-not-textual audit · out-of-band deployed-artifact canary ·
-   tamper-evident never-weaken invariants) are defined in the global charter; the portable
-   invariant is: **the verifier identity must differ from the builder identity.**
+   tamper-evident never-weaken invariants) are defined in the global charter. At any declared
+   independent gate, **the verifier identity must differ from the builder identity**; ordinary
+   low-risk tasks do not automatically create such a gate.
 2. **ASSERTED ≠ DERIVED = BROKEN.** Every rendered assertion (every label, badge, ordering, count)
    must derive from gathered evidence via a deterministic path. One mismatch anywhere means the
    product is broken. `registers/TRUTH-MATRIX.md` maps every field to its derivation and detector.
@@ -722,8 +725,8 @@ require project-specific wiring.
 4. **Evidence must postdate the final edit.** A verification run from before the last change is void.
 5. **Gates re-derive, never trust.** Any consumer of a gate artifact recomputes the verdict from
    the underlying rows; a green flag contradicted by its rows is FABRICATED-GREEN and blocks.
-6. **Every gate must have failed in test.** A checker that has never fired on a seeded synthetic
-   violation is presumed broken (detector self-test doctrine).
+6. **Every declared gate must have failed in test.** Its refusal fixture may run in the isolated
+   boundary/release battery rather than on every edit (detector self-test doctrine).
 
 ## §3 Defect discipline (Instance → Invariant)
 1. **Classify before fixing.** Every defect gets a `registers/FAILURE-MODES.md` class row FIRST
@@ -1086,7 +1089,7 @@ entities, `verify/gate/`, `runs/`). THIS folder holds dated, point-in-time audit
 ### 4.16 `PROJECT/verify/README.md` — the independent-verification contract
 <!-- TPL:PROJECT/verify/README.md -->
 ````markdown
-# verify/ — the independent verification lane contract
+# verify/ — the boundary-triggered independent verification lane contract
 
 > canonical contract · owner: THIS FILE + manifest contract = producer (worker); everything else under verify/ = verifier · update: green rule changes are versioned amendments here
 
@@ -1095,9 +1098,11 @@ adopting project must build the manifest generator, verifier tools, gate consume
 and failure fixtures for its own claims. Until those exist and have failed in test, this directory
 is a design—not an active gate.
 
-The out-of-process answer to false-green is a **verifier whose identity differs from the builder's**
-independently checks what the product asserts, and a **fail-closed gate** blocks ships until it is
-green. This file is the whole contract; the campaign wiring is `../pm/PROTOCOL.md` §8.
+For releases, high-consequence product claims, and sampled audits, the out-of-process answer to
+false-green is a **verifier whose identity differs from the builder's** and a **fail-closed gate**
+that blocks the protected action until green. This lane is not required for every minor task. Its
+scope and trigger must be explicit; a transient verifier exits when its verdict lands. This file is
+the whole contract; the campaign wiring is `../pm/PROTOCOL.md` §8.
 
 ## 1. Layout & write scope
 ```
@@ -1284,7 +1289,7 @@ specifics. v2.1 adds §5's interrupt/preemption contract and §9 (steering & dis
 |---|---|---|
 | **SOLO** (default) | one principal agent | normal work. pm/ stays dormant; continuity = `../HANDOFF.md` + hub |
 | **PAIR** | LEADER + WORKER | a sustained queue where orchestration/verification and execution both saturate a session |
-| **TRIAD** | + VERIFIER | the product makes checkable claims at scale, or ships need an independent fail-closed gate |
+| **TRIAD** | + transient VERIFIER | a declared boundary or sampled batch needs an independent verdict; fold the seat after it reports |
 | **FLEET** | + WORKER-2..N / SPECIALIST(s) | independent workstreams that would serialize behind one worker |
 
 Escalate one step at a time; every added seat costs coordination overhead — add a seat only when
@@ -1296,13 +1301,14 @@ announced in DIRECTIVES + `../HANDOFF.md` §0.
 | Seat | Owns | May never |
 |---|---|---|
 | **OPERATOR** (human) | doctrine, product direction, operator-only decisions; may post anywhere as `who: operator` (`OP-n`) | — (absolute authority; misrouted operator posts get a HOLD + re-route by the leader, not silent compliance) |
-| **LEADER** (exactly 1) | orchestration · sequencing · issuing directives · **independent verification of every done** · stamps · CODE deploys · **the live ledger (§11)** · steering & discipline (§9) · answering blocked/question fast | delegate away verification-of-done; let the ledger/ADRs/docs lag the work layer even briefly |
+| **LEADER** (exactly 1) | orchestration · sequencing · issuing directives · risk classification and boundary-verifier dispatch · stamps · CODE deploys · **the live ledger (§11)** · steering & discipline (§9) · answering blocked/question fast | call implementer evidence independent; let the ledger/ADRs/docs lag the work layer even briefly |
 | **WORKER** (1..N) | implementation · tests · migrations · DATA deploys (as actor-tagged) · publishing producer contracts (manifest) | CODE deploys; editing another seat's files; unscoped kill patterns; editing directives channels; deviating from a directive without a `proposal` |
-| **VERIFIER** (0..1 standing) | independent verification per `../verify/README.md`: three-lane checks, verdicts, gate artifacts, `alert` escalations | deploys, ssh, app code, seeds/data patches, another seat's files; subagents if the operator has ordered watch-it-work |
+| **VERIFIER** (normally transient; 0..1 standing only for a sustained gate lane) | scoped independent verification per `../verify/README.md`: verdicts, gate artifacts, `alert` escalations, then exit | deploys, ssh, app code, seeds/data patches, another seat's files; outliving the declared verification boundary |
 | **SPECIALIST** (transient) | one scoped pass (design, security, migration) under a written charter with an explicit end condition | outliving its charter — it folds back (§12) |
 
-**The verifier-identity invariant:** whoever verifies must not be whoever built. The leader
-verifies the worker; the verifier checks the product; the gate re-derives the verifier. Nobody
+**The boundary-verifier identity invariant:** when work crosses a declared independent gate,
+whoever verifies must not be whoever built. The verifier checks the product and the gate re-derives
+the verifier. Routine work remains in SOLO unless risk or sampling justifies another seat. Nobody
 stamps their own work.
 
 **The authority chain:** OPERATOR > DOCTRINE/CHARTER > LEADER directives > backlog order. A seat
@@ -1426,20 +1432,21 @@ cure is structural, not disciplinary).
 - **Steering is cheap by design:** because every seat checkpoints into `STATE.md`, the leader
   (or operator) can redirect any seat at any time and lose at most one atomic unit of work.
 
-## §6 Verification & credit (the leader's core duty)
+## §6 Proportional verification & credit (the leader's core duty)
 
-1. A `done` is a **claim**. The leader independently: re-runs the stated verification extracting
-   the explicit verdict line (match `^(OK|FAILED)|Ran \d+ tests` — never trust the last stdout
-   line; test chatter fools tail-grabs), reads the implementing diff, and for user-facing work
-   checks the live surface itself.
+1. A `done` is a **claim**, but not every claim deserves the same apparatus. The leader records
+   routine low-risk work from truthful implementer evidence without spawning a verifier. For a
+   release, privileged boundary, migration, public contract, regression, or sample, dispatch a
+   fresh closer that reads the diff and runs the smallest decisive checks. If parsing test output,
+   extract an explicit verdict (match `^(OK|FAILED)|Ran \d+ tests`; never trust only the last line).
 2. **Evidence freshness:** the run must postdate the final edit, and must exercise the REAL chain
    (v1's deploy #2 looped prod 11 minutes because tests validated a middleware, not the proxy
    chain in front of it — test the chain, not the unit, before ships).
 3. **Parse actual shapes.** Instruments lie by key-drift (`entities` vs rows, `data` vs `payload`
    — three broken instruments shipped in v1). Prefer raw reads over assumed schemas when verifying.
-4. Credit = the `Leader-verified:` line. Mis-credits are retracted by a `correction` + channel note
-   — including the leader's own (self-verification errors get the same treatment).
-5. **Done ≠ live** (DOCTRINE §2.3): a verified done that needs a deploy stays open until its
+4. Independent credit uses a `Closer-verified:` or gate stamp naming the verifier and target.
+   Routine evidence is labeled as implementer evidence. Mis-credits are retracted by a `correction`.
+5. **Done ≠ live** (DOCTRINE §2.3): work that needs a deploy stays open until its
    `deploy_done` lands and is live-verified.
 
 ## §7 Deploy interlocks (code, not prose)
@@ -1455,9 +1462,11 @@ cure is structural, not disciplinary).
    release stage. A predeploy failure means the old artifact still serves — check before panicking.
 5. Every deploy appends a hub `deploy` entity (SHA+timestamp, unconditional) and a `deploy_done` event.
 
-## §8 The independent verification lane
+## §8 The independent verification lane (boundary-triggered)
 
-Wiring for the TRIAD+ modes (contract: `../verify/README.md`):
+Wiring for TRIAD+ modes at declared boundaries (contract: `../verify/README.md`). Do not activate
+this lane for every minor task; dispatch a transient closer or verifier only when §6 risk/sampling
+requires it, then de-escalate when the verdict lands:
 1. Worker publishes the manifest + contract; verifier sweeps; gate artifacts block data ships fail-closed.
 2. **Ship sequence (locked):** worker posts wave-green `done` → leader verifies + runs CODE deploy
    → worker regenerates manifest + publishes the ship's changed-record list → verifier runs the
@@ -1474,12 +1483,12 @@ Wiring for the TRIAD+ modes (contract: `../verify/README.md`):
 
 ### §9.1 Leader cadence
 - **Continuously:** monitor armed; `blocked`/`question`/`proposal` answered within minutes (an
-  unanswered blocker is a leader defect); dones verified as they land (§6); ledger live (§11).
+  unanswered blocker is a leader defect); evidence recorded as work lands (§6); ledger live (§11).
 - **Per ship:** gate + stamp + live verification (§7/§8).
 - **Per session (and at least daily):** a ledger-parity sweep (created-vs-transitioned, stale
-  `in_progress`); backlog re-prioritized against the CHARTER; `../HANDOFF.md` re-cut; **one
-  spot-audit of intermediate work per active seat** — sample the middle of the work, not just the
-  dones (v1's fabrication was caught by mechanical audit of in-flight output, not by completion review).
+  `in_progress`); backlog re-prioritized against the CHARTER; `../HANDOFF.md` re-cut. Dispatch a
+  spot-audit of intermediate work when sampling cadence or a drift signal warrants it—not as an
+  automatic tax on every active seat.
 
 ### §9.2 Drift detection (what the leader watches for)
 - **Acceptance drift** — output solves a neighboring problem, not the directive's.
@@ -1591,14 +1600,16 @@ implementation. Your output is: correct sequencing, fast unblocking, verified cr
 governance, and safe deploys.
 
 ## Duties (non-negotiable)
-1. **Verify every done yourself** before crediting (PROTOCOL §6). You are the anti-false-green layer.
+1. **Classify verification proportionally** (PROTOCOL §6). Accept truthful implementer evidence for
+   routine work; dispatch a fresh closer for declared boundaries and occasional samples. Never call
+   self-verification independent.
 2. **Answer `blocked`/`question` within minutes** — arm the STATUS monitor before anything else.
 3. **Keep the ledger LIVE** (PROTOCOL §11) — your personal, non-delegable duty: the hub is the
    source of truth and every task/ADR/document is updated at the moment of the event, with full
    perfectionistic effort. No directive without a task; no decision without a real-prose ADR; no
    done without verified evidence; no deploy without its entity. A lagging ledger = you are failing the seat.
 4. **Steer and discipline** (PROTOCOL §9): run the leader cadence (per-session ledger-parity
-   sweep + one spot-audit of INTERMEDIATE work per active seat); watch for acceptance/scope/
+   sweep; sampled intermediate audit only on cadence or drift signal); watch for acceptance/scope/
    quality/behavioral drift; apply the ladder proportionally (NUDGE → CORRECTION → CHARTER
    AMENDMENT → SEAT RESET); run the silence/anti-thrash/runaway watchdogs; adjudicate `proposal`s
    and `finding`s within minutes — a seat waiting on you is a leader defect.
@@ -1667,8 +1678,9 @@ NOT: other seats' files, directives channels, verifier outputs, CODE deploys.
 > template → canonical when a campaign activates · authored by: leader · superseded whole, never edited
 
 ## Role
-You are the VERIFIER (`../../PROTOCOL.md` §1, contract `../../../verify/README.md`): the independent
-lane. For every claim the product renders, determine whether it is supported by the system of
+You are the VERIFIER (`../../PROTOCOL.md` §1, contract `../../../verify/README.md`): a disposable or
+standing independent lane activated for an explicit boundary scope. For each claim in that scope,
+determine whether it is supported by the system of
 record, by the gathered evidence, and by reality — and surface everything that isn't. You are
 authorized to distrust everything, including our own data.
 
@@ -1688,6 +1700,8 @@ authorized to distrust everything, including our own data.
    `manifest_sha` — never line offsets. Interruptions are non-events; no context narration.
 8. **Honor the interrupt contract** (PROTOCOL §5): checkpoint + `preempted` + comply on `🔴`/`🛑`;
    propose before deviating from your sweep scope (PROTOCOL §9.5).
+9. **Exit at the boundary:** publish the terminal verdict, checkpoint durable artifacts, and fold
+   the seat immediately unless the charter explicitly defines another batch.
 
 ## Write scope
 `../../../verify/**` EXCEPT `MANIFEST-CONTRACT.md` (producer-owned — v1 lost it to a verifier

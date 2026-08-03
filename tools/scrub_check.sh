@@ -39,22 +39,34 @@ PATTERNS=(
   '\bplots?\b'
 )
 
-hits=0
-for p in "${PATTERNS[@]}"; do
-  out="$(grep -rInEi \
-          --binary-files=without-match \
-          --exclude-dir=.git --exclude-dir=__pycache__ --exclude-dir=node_modules \
-          --exclude-dir=.hub --exclude-dir=staticfiles \
-          --exclude=scrub_check.sh --exclude='*.sqlite3' \
-          -e "$p" . 2>/dev/null || true)"
-  if [ -n "$out" ]; then
-    hits=1
-    echo "FORBIDDEN pattern '$p':"
-    printf '%s\n' "$out" | sed 's/^/  /'
-  fi
-done
+combined="$(IFS='|'; echo "${PATTERNS[*]}")"
 
-if [ "$hits" -ne 0 ]; then
+if [ "${1:-}" = "--selftest" ]; then
+  printf '%s\n' 'loom' '192.168.10.20' | grep -Eiq -e "$combined" || {
+    echo "SCRUB SELFTEST: FAIL — seeded forbidden text was not detected" >&2
+    exit 1
+  }
+  if printf '%s\n' 'bloom' 'ordinary portable text' | grep -Eiq -e "$combined"; then
+    echo "SCRUB SELFTEST: FAIL — boundary-safe text was rejected" >&2
+    exit 1
+  fi
+  echo "SCRUB SELFTEST: PASS — seeded violation detected; boundary-safe text accepted"
+  exit 0
+fi
+
+if [ -n "${1:-}" ]; then
+  echo "usage: bash tools/scrub_check.sh [--selftest]" >&2
+  exit 2
+fi
+
+out="$(git grep --untracked --exclude-standard -nIEi \
+        -e "$combined" -- . \
+        ':(exclude)tools/scrub_check.sh' \
+        ':(exclude)**/node_modules/**' \
+        ':(exclude)**/staticfiles/**' 2>/dev/null || true)"
+
+if [ -n "$out" ]; then
+  printf '%s\n' "$out" | sed 's/^/  /'
   echo "SCRUB: FAIL — origin-specific residue found (see above). Rewrite generically; keep the lesson, lose the specifics."
   exit 2
 fi

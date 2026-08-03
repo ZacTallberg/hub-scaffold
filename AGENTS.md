@@ -23,10 +23,9 @@ from a working multi-project system. Nothing here names any specific person, hos
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook
-1. **Prove it works before trusting it:** `bash tools/selftest.sh` — runs the agnosticism scrub, the
-   `hub_core` unit tests, documentation/schema checks, the bootstrap-doc drift check, boots the
-   example site, and drives the full write-API refusal ladder. All five steps must PASS. (Needs
-   Python + Django — see `requirements.txt` and `docs/TESTING.md`.)
+1. **Get fast signal first:** `bash tools/check.sh --all-fast` runs the cheap scaffold checks. The
+   isolated `bash tools/selftest.sh` is a boundary/release verifier, not an ordinary per-task ritual.
+   Use `docs/TESTING.md` and `skills/verification-closer/` to choose proportionally.
 2. **Read, in order:** this file → `README.md` → `campaigns/00-orchestration-method.md` (how to run
    work well) → `OPERATING-AGREEMENT.md` (the working laws) → `SECURITY.md` (the actual trust boundary)
    → `adapters/django/MOUNTING.md` (how the hub
@@ -47,9 +46,9 @@ Everything runs through `campaigns/`. Match the campaign to the verb:
 - review/harden a codebase → `improve-moe-review.md` (the multi-expert audit + adversarial closer)
 - add an entity type/tab, or backfill structure across repos → `augment-hub.md`
 - drive feature work off the board → `feature-buildout.md` (DISCOVER→CLAIM→IMPLEMENT→RECORD→VERIFY)
-The engine behind all of them — fan-out, adversarial verify, persist-as-you-go, closer-commits-only —
-is `campaigns/00-orchestration-method.md`. Scale the fan-out to the budget; sequential-with-checkpoints
-when usage is tight.
+The engine behind all of them—proportionate fan-out, persist-as-you-go, and boundary-triggered
+verification—is `campaigns/00-orchestration-method.md`. Scale coordination to the work, and use the
+disposable `verification-closer` only when consequence or sampling warrants it.
 
 ## The two dials you should know
 - **`HUB_DONE_STRICTNESS`** (`tracked` default | `strict`) — flow-first vs proof-first completion. A
@@ -92,10 +91,10 @@ when usage is tight.
   license only if a teammate needs to legally reuse it).
 
 ## The three non-negotiables (the point of the whole thing)
-1. **Claimed-done ≠ done.** Prove results out-of-process — a gate re-run, a live probe, a re-read of the
-   cited file — never an agent's own say-so.
-2. **Verify before you record.** Findings and completions are adversarially re-checked before they enter
-   the durable record.
+1. **Evidence is truthful and proportional.** Do not call implementer evidence independent, but do
+   not burden minor work with a release battery or second agent.
+2. **Independent verification is boundary-triggered.** A fresh closer handles releases, privileged
+   boundaries, migrations, public contracts, regressions, and occasional samples, then exits.
 3. **Never lose or clobber concurrent work.** Targeted commits only; another session's uncommitted files
    are read, never staged; persist as you go so a killed run loses nothing.
 
@@ -104,5 +103,5 @@ Extracted 2026-07-07 from a working multi-project estate and updated 2026-08-03 
 worker-launch trust boundary and repository-wide documentation contract; every file is scrub-verified
 agnostic. If you change `PROJECT/`
 templates, re-run `python tools/build_bootstrap.py`
-so the bootstrap doc stays byte-exact, then run `python tools/docs_check.py` and
-`bash tools/scrub_check.sh` before every commit/push.
+so the bootstrap doc stays byte-exact. Use `bash tools/check.sh` for pending changes and reserve the
+full isolated self-test for a justified verification boundary.

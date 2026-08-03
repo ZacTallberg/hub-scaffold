@@ -141,6 +141,7 @@ Rebinding rules:
 2. **The protocol's channel mechanics are substrate-independent** (`pm/PROTOCOL.md` §13): append-only
    files + monitors are the proven floor; any addressable bus with per-seat ACLs may replace them
    by ADR without changing the event vocabulary or duties.
-3. **What may never be rebound away:** the verifier-identity invariant, fail-closed gates,
-   re-derivation over trust, append-only history, and one-canonical-store-per-fact-class. An
-   environment that can't provide these isn't a binding target — it's a gap.
+3. **What may never be rebound away:** identity separation at declared independent gates,
+   fail-closed behavior at those gates, re-derivation over trust, append-only history, and one
+   canonical store per fact class. An environment that can't provide these isn't a binding target
+   for the protected boundary—it is a gap.

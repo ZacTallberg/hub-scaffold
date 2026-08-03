@@ -6,3 +6,4 @@ PROJECT/.hub/
 db.sqlite3
 *.sqlite3
 *.sqlite3-*
+.selftest-tmp.*

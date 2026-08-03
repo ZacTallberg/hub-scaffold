@@ -121,6 +121,10 @@ scheduling, a continuously running conformance scanner, or the project-specific 
 harness described by `PROJECT/verify/`. The patterns and templates specify those roles but do not
 make them active merely by existing in a repository.
 
+Independent verification is also not a standing requirement for every task. The operating model
+uses truthful implementer evidence for routine low-risk work and dispatches a fresh disposable
+closer at releases, privileged/data/public-contract boundaries, regressions, and occasional samples.
+
 The Hub also does not redact entity fields on read. If `/hub` is reachable, its complete board is
 readable without authentication. Put only publishable data in the ledger or add authentication at
 the reverse proxy/application boundary.

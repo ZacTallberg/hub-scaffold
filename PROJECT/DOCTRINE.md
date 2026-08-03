@@ -17,8 +17,9 @@ require project-specific wiring.
    Implement full scope; real-device checks come at the end.
 4. **Best way, no thrashing.** Research best-of-breed first; a named technology is a hypothesis,
    not a mandate; when an approach keeps failing, re-architect — don't polish.
-5. **Verify every agent claim yourself.** No sub-agent/seat "done" is recorded until independently
-   re-verified (re-run the stated command, read the diff, check the live wiring).
+5. **Verify proportionally.** Routine low-risk work needs truthful evidence, not automatic ceremony.
+   Use a fresh independent closer for releases, privileged boundaries, migrations, public contracts,
+   regressions, and occasional samples; the closer returns one verdict and exits.
 6. **Track and document, always.** Every directed change gets a hub task AND a decision record.
    Note every downstream artifact a shared-state change invalidates.
 
@@ -26,8 +27,9 @@ require project-specific wiring.
 1. **FALSE-GREEN is the meta-failure.** Gates fail by being self-attested, bypassed, textual, or
    committed-not-deployed — not by being absent. The four enforcement primitives (authorization-
    boundary hook · behavioral-not-textual audit · out-of-band deployed-artifact canary ·
-   tamper-evident never-weaken invariants) are defined in the global charter; the portable
-   invariant is: **the verifier identity must differ from the builder identity.**
+   tamper-evident never-weaken invariants) are defined in the global charter. At any declared
+   independent gate, **the verifier identity must differ from the builder identity**; ordinary
+   low-risk tasks do not automatically create such a gate.
 2. **ASSERTED ≠ DERIVED = BROKEN.** Every rendered assertion (every label, badge, ordering, count)
    must derive from gathered evidence via a deterministic path. One mismatch anywhere means the
    product is broken. `registers/TRUTH-MATRIX.md` maps every field to its derivation and detector.
@@ -36,8 +38,8 @@ require project-specific wiring.
 4. **Evidence must postdate the final edit.** A verification run from before the last change is void.
 5. **Gates re-derive, never trust.** Any consumer of a gate artifact recomputes the verdict from
    the underlying rows; a green flag contradicted by its rows is FABRICATED-GREEN and blocks.
-6. **Every gate must have failed in test.** A checker that has never fired on a seeded synthetic
-   violation is presumed broken (detector self-test doctrine).
+6. **Every declared gate must have failed in test.** Its refusal fixture may run in the isolated
+   boundary/release battery rather than on every edit (detector self-test doctrine).
 
 ## §3 Defect discipline (Instance → Invariant)
 1. **Classify before fixing.** Every defect gets a `registers/FAILURE-MODES.md` class row FIRST

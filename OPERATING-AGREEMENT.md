@@ -45,9 +45,11 @@ Strict completion strengthens proof of a claim; it does not reduce the authority
    follow it and re-check. Evidence must postdate the final edit; a run from before the last
    change is void. Run the Hub in `strict` mode when the server itself must enforce
    dereferenceability and a passing verification command.
-5. **VERIFY** — an identity **other than the implementer** (a gate, an audit, a reviewer, a
-   canary) confirms the claim. If the project is in an unsound state, the transition is refused
-   and the task stays open.
+5. **VERIFY proportionally** — use the smallest check that can catch the plausible failure. Routine
+   low-risk work may need only a diff/evidence review or no executable test. Invoke a fresh,
+   independent closer for releases, security/auth, migrations/destructive work, public contracts,
+   concurrency/process launch, regressions, or occasional sampling. If a declared gate is red, the
+   transition is refused and the task stays open.
 
 The board is updated **at the moment of the event** — claim when claiming, done when proven —
 never batched or reconstructed afterwards. A board that lags the work is itself a defect.
@@ -68,18 +70,21 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
 - A decision that was made but not recorded is treated as not made: it can be silently unmade by
   the next worker, which is exactly the failure ADRs exist to prevent.
 
-## §5 — Definition of done: independently proven (FALSE-GREEN discipline)
+## §5 — Definition of done: evidence proportional to consequence
 
 - **FALSE-GREEN is the meta-failure** this agreement exists to kill: work that *reports* green
   without *being* green. Gates fail not by being absent but by being self-attested, bypassed,
   textual-only, or committed-but-not-deployed.
-- Therefore, by policy: `done` = **independently proven with dereferenceable evidence**. No evidence
-  → not done. Self-attested green is a defect even when the work happens to be correct. In
-  `tracked` mode this standard is reviewer-enforced; in `strict` mode the Hub also dereferences
-  evidence and runs the task's command.
-- **The verifier identity must differ from the builder identity.** An agent may not grant its own
-  gate. Acceptable verifiers: an out-of-process audit, a CI gate, a live canary that inspects the
-  deployed artifact, or a human reviewer.
+- Therefore, `done` always carries a truthful evidence pointer, but the evidence burden is
+  **risk-proportional**. A small copy or formatting change does not require the integration battery
+  or a second agent. The implementer may provide routine evidence; never call that independent.
+- **Identity separation is mandatory at declared independent gates, not on every task.** A release,
+  deploy, privileged boundary, migration, public compatibility change, regression, or sampled audit
+  uses a fresh verifier that did not build the work. The verifier reports once and exits; it does not
+  linger as another worker or repair its own findings.
+- Tests earn critical-path placement by defending a concrete failure mode. Broad batteries live off
+  the ordinary edit loop and run at meaningful boundaries. Cheap impact-aware checks may remain on
+  the default path.
 - **Done ≠ merged, and done ≠ committed.** If a task's value requires a deploy, it is not done
   until the deployed artifact is verified live and the record names the live version (SHA).
 - Any consumer of a gate artifact re-derives the verdict from the underlying data. A green flag
@@ -108,10 +113,10 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
 - **The newest directive wins.** When instructions conflict, the most recent owner directive
   supersedes older ones; note the supersession on the board rather than stalling to reconcile.
 
-## §8 — Enforcement is out-of-process, or it is advisory
+## §8 — Declared gates are out-of-process; ordinary work stays light
 
-- A rule that the worker can self-attest is a suggestion, not a gate. Every gate in this agreement
-  is backed by a mechanism **outside the worker's control**:
+- A rule that the worker can self-attest is a suggestion, not an independent gate. Whenever this
+  agreement declares a gate, it is backed by a mechanism **outside the worker's control**:
   - a **server-side push gate** (pre-receive) that rejects pushes violating repository law
     (e.g. credential-shaped files) where no client can skip it;
   - a **server-granted `done` transition** that requires a lease, acceptance note, and attached
@@ -122,13 +127,15 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
     when red;
   - a **deployed-artifact canary** that proves the running system is built from the claimed
     version, out-of-band from the process that deployed it.
-- **Every gate must have failed in test.** A checker that has never fired on a seeded synthetic
-  violation is presumed broken. Gates are never weakened to make a task pass; weakening a gate is
-  an ADR-level decision.
+- **Every declared gate must have failed in test.** This does not require running every gate for
+  every edit. Its refusal fixture belongs in the isolated verifier/release battery, and the gate is
+  invoked when its protected boundary is crossed. Gates are never weakened to make a task pass;
+  weakening one is an ADR-level decision.
 
 ---
 
 **In short:** the board is always true; every unit of work runs DISCOVER → CLAIM → IMPLEMENT →
-RECORD → VERIFY; decisions are append-only ADRs; research precedes build; done means independently
-proven with evidence anyone can dereference; workers decide-and-go except at genuinely
-irreversible forks; and every rule above is enforced by something the worker cannot self-attest.
+RECORD → VERIFY; decisions are append-only ADRs; research precedes build; evidence and verification
+are proportional to consequence; independent disposable closers protect meaningful boundaries;
+workers decide-and-go except at genuinely irreversible forks; and declared gates are enforced by
+something the worker cannot self-attest.

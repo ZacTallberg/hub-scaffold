@@ -5,6 +5,12 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+- Replaced the per-change full-test expectation with impact-aware fast checks and a manually invoked,
+  isolated full verifier.
+- Added a reusable disposable `verification-closer` skill and campaign prompt with risk-based trigger,
+  evidence, read-only, terminal-verdict, and exit contracts.
+- Isolated the Django refusal ladder in a unique temporary ledger/database so repeated or concurrent
+  verification cannot grow or contend on shared example runtime state.
 - Completed a repository-wide documentation truth pass.
 - Added canonical architecture, security, operations, testing, and contribution guides.
 - Documented the command-execution and server-side-fetch authority of the general write token.
