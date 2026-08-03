@@ -30,6 +30,7 @@ from django.test import Client
 
 TOKEN = os.environ["HUB_WRITE_TOKEN"]
 client = Client()
+csrf_client = Client(enforce_csrf_checks=True)
 failures = []
 
 
@@ -46,13 +47,38 @@ def rung(tag, resp, want):
     print("%s [%s] want %s got %s  %s" % ("PASS" if ok else "FAIL", tag, want, resp.status_code, body[:220]))
     if not ok:
         failures.append(tag)
-    return json.loads(body) if body else {}
+    try:
+        return json.loads(body) if body else {}
+    except ValueError:
+        return {}
 
 
 print("== hub write-API refusal ladder ==")
 
 # rung 0: writes are fail-closed without the token
 rung("no-token-403", post("/hub/api/task", {"title": "x", "agent": "ladder"}, token=None), 403)
+
+# The browser gets exactly one narrow, CSRF-gated capability. It never needs the general write
+# token; the separate authoritative consume endpoint still does.
+page = csrf_client.get("/hub/")
+rung("hub-page-csrf-200", page, 200)
+page_text = page.content.decode("utf-8").lower()
+if "x-write-token" in page_text or "unlock" in page_text:
+    failures.append("browser-write-token-ui-present")
+csrf = csrf_client.cookies["csrftoken"].value
+rung("launch-mint-no-csrf-403", csrf_client.post(
+    "/hub/api/launch-grant", data=json.dumps({"action": "start", "count": 1}),
+    content_type="application/json"), 403)
+minted = rung("launch-mint-csrf-no-write-token-200", csrf_client.post(
+    "/hub/api/launch-grant", data=json.dumps({"action": "start", "count": 1}),
+    content_type="application/json", HTTP_X_CSRFTOKEN=csrf), 200)
+grant = minted["data"]["grant"]
+rung("launch-consume-no-write-token-403", post(
+    "/hub/api/launch-grant/consume", {"consume": grant, "action": "start", "count": 1}, token=None), 403)
+rung("launch-consume-write-token-200", post(
+    "/hub/api/launch-grant/consume", {"consume": grant, "action": "start", "count": 1}), 200)
+rung("launch-replay-refused-403", post(
+    "/hub/api/launch-grant/consume", {"consume": grant, "action": "start", "count": 1}), 403)
 
 # rung 1: the generic upsert can never mint a 'done'
 rung("direct-done-409", post("/hub/api/task", {"title": "sneaky done", "status": "done", "agent": "ladder"}), 409)

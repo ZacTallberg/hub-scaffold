@@ -13,7 +13,8 @@ from a working multi-project system. Nothing here names any specific person, hos
 
 ## The mental model (four layers)
 - **hub** (`hub_core/` + `adapters/`) — nouns you operate: events → projected tasks/ADRs/features/etc.,
-  token-gated writes, server-granted "done". Mounts at `/hub` in a Django site.
+  token-gated writes, server-granted "done", and an optional single-use-grant worker bridge. Mounts
+  at `/hub` in a Django site; the workstation bridge is disabled by default.
 - **plane** (`PROJECT/`) — the durable on-disk tree: charter, doctrine, ADRs, registers, research,
   verification contracts, the leader/worker/verifier protocol. What a cold session reads to pick up.
 - **patterns** (`patterns/`) — opt-in enforcement: deploy contract, standing canary, pre-receive gate,
@@ -53,6 +54,9 @@ when usage is tight.
   completers (e.g. autonomous agents).
 - **Entity extensibility** — a new hub type is a schema + write path + tab. `campaigns/augment-hub.md`
   is the exact recipe; the base types were built this same way, so an added type is first-class.
+- **`HUB_WORKER_LAUNCH_ENABLED`** (`False` default) — opt-in local process launch. Read
+  `adapters/windows/README.md` before enabling it. The browser receives only a CSRF-minted,
+  action/task/count-bound grant; authoritative consume remains write-token-gated.
 
 ## What is deliberately NOT here (design, not omission)
 - **The memory layer** — session-recall/persistence tooling is home-environment-specific and excluded
@@ -81,6 +85,7 @@ when usage is tight.
    are read, never staged; persist as you go so a killed run loses nothing.
 
 ## Provenance
-Extracted 2026-07-07 from a working multi-project estate; hardened by an adversarial review pass; every
-file scrub-verified agnostic. If you change `PROJECT/` templates, re-run `python tools/build_bootstrap.py`
+Extracted 2026-07-07 from a working multi-project estate and updated 2026-08-03 with the portable
+worker-launch trust boundary; every file is scrub-verified agnostic. If you change `PROJECT/`
+templates, re-run `python tools/build_bootstrap.py`
 so the bootstrap doc stays byte-exact, and `bash tools/scrub_check.sh` before every commit/push.

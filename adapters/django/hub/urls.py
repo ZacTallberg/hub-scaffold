@@ -20,5 +20,7 @@ urlpatterns = [
     path("api/capability", hub_write.capability),
     path("api/decision", hub_write.decision),
     path("api/claim", hub_write.claim),
+    path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
+    path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),
 ]

@@ -439,6 +439,96 @@
   }
   function tickClock() { var c = doc.getElementById("clock"); if (c) { var d = new Date(); c.textContent = d.toTimeString().slice(0, 8); } }
 
+  /* ============================ LOCAL WORKER LAUNCH ============================ */
+  // External protocols must be followed during the original user gesture. A fetch inside the
+  // click handler loses that activation in some browsers, so controls are armed ahead of time
+  // with short-lived, single-use grants. A ready click remains an ordinary anchor navigation:
+  // no popup, no write token in browser storage, and no asynchronous hop.
+  var LAUNCH = D.worker_launch || {};
+  function launchBase(anchor) {
+    var protocol = String(LAUNCH.protocol || "hub-worker").replace(/[^a-z0-9+.-]/g, "");
+    if (protocol.indexOf("hub-") !== 0) protocol = "hub-worker";
+    var task = anchor.getAttribute("data-task") || "";
+    return protocol + "://start" + (task ? "/" + encodeURIComponent(task) : "");
+  }
+  function launchReady(anchor) {
+    return anchor.getAttribute("data-launch-ready") === "1" &&
+      parseInt(anchor.getAttribute("data-launch-expires") || "0", 10) * 1000 > Date.now() + 5000;
+  }
+  function prepareLaunch(anchor) {
+    if (!LAUNCH.enabled) return Promise.resolve({ ok: false, message: "Worker launch is disabled" });
+    if (launchReady(anchor)) return Promise.resolve({ ok: true });
+    if (anchor._launchGrantRequest) return anchor._launchGrantRequest;
+    var count = parseInt(anchor.getAttribute("data-count") || "1", 10) || 1;
+    var task = anchor.getAttribute("data-task") || "";
+    var csrf = (doc.querySelector('meta[name="csrf-token"]') || {}).content || "";
+    var endpoint = LAUNCH.grant_endpoint || "/hub/api/launch-grant";
+    anchor.setAttribute("aria-busy", "true");
+    var request = fetch(endpoint, {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+      body: JSON.stringify({ action: "start", task: task, count: count })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (payload) {
+        return { response: response, payload: payload };
+      });
+    });
+    anchor._launchGrantRequest = request.then(function (result) {
+      var data = (result.payload || {}).data || {};
+      if (!result.response.ok || !data.grant) {
+        var error = (((result.payload || {}).errors || [])[0] || {}).msg;
+        return { ok: false, message: "Launch authorization refused — " +
+          (error || ("HTTP " + result.response.status)) };
+      }
+      var base = launchBase(anchor);
+      anchor.setAttribute("data-launch-base", base);
+      anchor.href = base + "?count=" + count + "&grant=" + encodeURIComponent(data.grant);
+      anchor.setAttribute("data-launch-ready", "1");
+      anchor.setAttribute("data-launch-expires", String(data.expires || 0));
+      return { ok: true };
+    }, function () {
+      return { ok: false, message: "Launch authorization failed — could not reach the Hub" };
+    }).then(function (result) {
+      anchor.removeAttribute("aria-busy");
+      anchor._launchGrantRequest = null;
+      return result;
+    });
+    return anchor._launchGrantRequest;
+  }
+  function launchClick(anchor, event) {
+    if (launchReady(anchor)) {
+      // Preserve the user activation: do not preventDefault and do not await anything here.
+      var base = anchor.getAttribute("data-launch-base") || launchBase(anchor);
+      anchor.removeAttribute("data-launch-ready");
+      anchor.removeAttribute("data-launch-expires");
+      setTimeout(function () {
+        anchor.href = base;
+        prepareLaunch(anchor);
+      }, 0);
+      return;
+    }
+    event.preventDefault();
+    prepareLaunch(anchor).then(function (result) {
+      toast(result.ok ? "Launch is authorized — click once more to open the local worker" : result.message,
+            result.ok ? "info" : "error");
+    });
+  }
+  function initLaunchControls() {
+    if (!LAUNCH.enabled) return;
+    [].forEach.call(doc.querySelectorAll("[data-launch]"), function (anchor) {
+      anchor.hidden = false;
+      anchor.href = launchBase(anchor);
+      ["pointerenter", "focusin", "touchstart"].forEach(function (name) {
+        anchor.addEventListener(name, function () { prepareLaunch(anchor); }, { passive: true });
+      });
+      prepareLaunch(anchor);
+    });
+    doc.addEventListener("click", function (event) {
+      var anchor = event.target && event.target.closest ? event.target.closest("[data-launch]") : null;
+      if (anchor) launchClick(anchor, event);
+    });
+  }
+
   /* ============================ TABS ============================ */
   var _panes = {};
   function activate(key) {
@@ -468,6 +558,7 @@
     // refresh
     var refresh = doc.getElementById("refreshBtn");
     if (refresh) refresh.addEventListener("click", function () { setStatus("scanning", "Reloading…"); location.reload(); });
+    initLaunchControls();
     // modal close wiring
     var mo = doc.getElementById("universalModal");
     if (mo) mo.addEventListener("click", function (e) { if (e.target === mo) closeModal(); });

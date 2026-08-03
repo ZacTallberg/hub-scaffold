@@ -10,7 +10,7 @@ import subprocess
 from functools import wraps
 
 from django.http import HttpResponseNotAllowed, JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import ids, validate
 from hub_core.store import ConflictError
@@ -274,3 +274,67 @@ def claim(request, b):
 def heartbeat(request, b):
     res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=int(b.get("ttl_s", 900)))
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+@csrf_protect
+def launch_grant(request):
+    """Mint one narrow browser capability without exposing the general Hub write token.
+
+    Same-origin CSRF protection prevents a foreign page from reading or minting a usable grant.
+    The grant is short-lived, signed, and bound to action/task/count; the workstation must still
+    consume it at the token-gated issuing Hub before any process starts.
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if not hub_app.worker_launch_enabled():
+        return JsonResponse({"errors": [{"code": "launch_disabled",
+                                         "msg": "worker launch is not enabled on this Hub"}]}, status=404)
+    b = _body(request)
+    if b is None:
+        return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+    from django.urls import reverse
+    from hub_core import launch_grant as grants
+
+    action = b.get("action") or "start"
+    task_id = b.get("task") or ""
+    if not isinstance(task_id, str) or len(task_id) > 256:
+        return JsonResponse({"errors": [{"code": "bad_grant_request",
+                                         "msg": "task must be a string of at most 256 characters"}]}, status=422)
+    try:
+        count = int(b.get("count") or 1)
+        ttl = int(hub_app._dj_setting("HUB_WORKER_GRANT_TTL_S", grants.DEFAULT_TTL_S))
+        configured = str(hub_app._dj_setting("HUB_WORKER_LAUNCH_ISSUER_URL", "") or "").strip()
+        issuer = configured or request.build_absolute_uri(reverse("hub:consume-launch-grant"))
+        with grants.using_hub_dir(hub_app.HUB_DIR):
+            grant = grants.mint(action=action, task=task_id, count=count, ttl_s=ttl, issuer=issuer)
+    except (TypeError, ValueError) as exc:
+        return JsonResponse({"errors": [{"code": "bad_grant_request", "msg": str(exc)}]}, status=422)
+    except OSError:
+        return JsonResponse({"errors": [{"code": "launch_unavailable",
+                                         "msg": "grant store unavailable"}]}, status=503)
+    return JsonResponse({"data": {"grant": grants.encode(grant), "expires": grant["expires"],
+                                  "count": grant["count"], "task": grant["task"]}})
+
+
+# Marker consumed by the computed route audit.  This is the sole non-writer /hub/api capability.
+launch_grant._hub_origin_gated = True
+
+
+@writer
+def consume_launch_grant(request, b):
+    """Validate and atomically burn a grant at the Hub that issued it."""
+    if b.get("consume") is None:
+        return JsonResponse({"errors": [{"code": "missing_grant", "msg": "consume is required"}]},
+                            status=400)
+    from hub_core import launch_grant as grants
+
+    try:
+        count = int(b.get("count") or 1)
+    except (TypeError, ValueError) as exc:
+        return JsonResponse({"errors": [{"code": "bad_grant_request", "msg": str(exc)}]}, status=422)
+    with grants.using_hub_dir(hub_app.HUB_DIR):
+        ok, detail = grants.consume(b.get("consume"), action=b.get("action") or "start",
+                                    task=b.get("task") or "", count=count)
+    if not ok:
+        return JsonResponse({"errors": [{"code": "launch_refused", "msg": str(detail)}]}, status=403)
+    return JsonResponse({"data": {"authorized": True, "count": int(detail)}})

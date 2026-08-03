@@ -3,8 +3,8 @@
 #   1. agnosticism scrub          (tools/scrub_check.sh)
 #   2. engine unit tests          (python -m unittest over hub_core — framework-free)
 #   3. bootstrap doc integrity    (tools/build_bootstrap.py --check)
-#   4. example site boots + the write API refuses correctly (405/403/400 ladder), then the full
-#      server-granted-done hardening ladder (example/selftest.py: 403/409/422/422/200)
+#   4. example site boots + the write API refuses correctly, proves the CSRF-mint/token-consume
+#      launch boundary, then runs the full server-granted-done hardening ladder
 # Prints PASS/FAIL per step and exits nonzero if any step failed. Requires: bash, git, a
 # python3 on PATH (override with PYTHON=/path/to/python); step 4 additionally needs Django
 # importable by that python.

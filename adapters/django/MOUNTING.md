@@ -50,6 +50,12 @@ HUB_DONE_STRICTNESS = "tracked"       # the flow-vs-proof dial — see "The stri
 
 # Write-API token: ALWAYS from the environment, NEVER a committed literal.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
+
+# Optional workstation worker bridge (disabled unless explicitly enabled):
+HUB_WORKER_LAUNCH_ENABLED = False
+HUB_WORKER_PROTOCOL = "hub-worker"
+# HUB_WORKER_LAUNCH_ISSUER_URL = "{{LIVE_URL}}/hub/api/launch-grant/consume"
+# HUB_WORKER_GRANT_TTL_S = 120
 ```
 
 ### The strictness dial (`HUB_DONE_STRICTNESS`)
@@ -146,7 +152,8 @@ Wire it so a red audit BLOCKS the ship, out of process from the agent doing the 
 The audit is computed-not-attested: schema validity of every entity, referential integrity
 (no dangling idrefs), ADR numbering, event-log hash-chain tamper check, build coherence
 (git HEAD vs deploy record vs served sha), settings AST safety, and route-guard introspection
-(every `/hub/api/` route must carry the `@writer` token gate). It never trusts a stored boolean.
+(every `/hub/api/` route must carry either the general `@writer` token gate or the explicitly narrow
+origin-gated launch mint marker). It never trusts a stored boolean.
 
 ## 7. Build coherence (the false-green killer)
 
@@ -164,14 +171,22 @@ is amber so it cannot block the very deploy that creates it.
 
 ## 8. Write-API token contract
 
-- Transport: `POST` with header `X-Write-Token: <token>` (never `?token=` — query strings leak
-  into access logs and referers). Compared constant-time.
+- Transport: general writes use `POST` with header `X-Write-Token: <token>` (never `?token=` —
+  query strings leak into access logs and referers). Compared constant-time.
 - Configuration: set the `HUB_WRITE_TOKEN` environment variable on the server; keep the local
   copy in an untracked file (e.g. `.hub_write_token.local`, gitignored). The adapter reads
   `settings.HUB_WRITE_TOKEN` first, then the environment.
-- Fail-closed: when no token is configured, EVERY write returns 403. Reads stay public.
+- Fail-closed: when no token is configured, every general write and launch consume returns 403.
+  Reads stay public; the optional CSRF-gated mint capability is described below.
 - Endpoints (all POST, JSON body): `/hub/api/task`, `/hub/api/complete`, `/hub/api/adr`,
   `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`.
+
+The sole exception is the optional `POST /hub/api/launch-grant`: it is a same-origin,
+`@csrf_protect` browser capability that can mint only a short-lived grant bound to
+`action + task + count + issuer + nonce`. It cannot mutate board entities. The workstation then
+calls the separate `/hub/api/launch-grant/consume` endpoint with the write token over HTTPS before
+starting a process. The computed route audit recognizes exactly these two explicit gate classes:
+general `@writer` routes and the narrow origin-gated mint route.
 
 ### The server-granted `done` (hardening contract — do not weaken)
 
@@ -199,7 +214,20 @@ curl -s $U/complete -H "$H" -d '{"id":"acme:task:0001","token":"<lease>","agent"
   "accept_note":"pytest green","evidence_uri":["<commit-sha>"]}'
 ```
 
-## 9. Optional ingests
+## 9. Optional local-worker launch
+
+This feature is off by default. When enabled, the page shows **Launch Worker** and pre-arms it before
+the click so the final `hub-worker://` navigation remains synchronous and retains browser user
+activation. No popup or token-unlock console is used. The grant signing secret stays under
+`PROJECT/.hub`; first-use creation is serialized across processes, and every nonce is single-use.
+
+On Windows, configure the server settings above and follow `adapters/windows/README.md`. Registration
+is per-user (HKCU, no admin) and requires both a local token-file path and an operator-supplied agent
+wrapper. The handler validates the configured issuer exactly, refuses non-HTTPS remote issuers, and
+starts no process until the issuing Hub authorizes and burns the grant. Worker windows are tied to
+the wrapper lifecycle and close when it exits.
+
+## 10. Optional ingests
 
 - `python manage.py hubimport` — `CAPABILITY-LEDGER.md` table rows -> `cap` entities.
 - `python manage.py hubmaterialize` — `PROJECT/REVIEW-AND-REIMPL-PLAN.md` gap ledger -> `gap`

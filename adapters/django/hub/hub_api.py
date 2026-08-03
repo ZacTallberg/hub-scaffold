@@ -16,7 +16,18 @@ def _snapshot(served=None):
     state = hub_app.current_state(s)
     audit = hub_app.run_audit(s, served=served)
     build = hub_app.build_meta(served)
-    return state, projections.hub_snapshot(state, build=build, audit=audit)
+    snap = projections.hub_snapshot(state, build=build, audit=audit)
+    if hub_app.worker_launch_enabled():
+        from django.urls import reverse
+
+        snap["worker_launch"] = {
+            "enabled": True,
+            "protocol": hub_app.worker_protocol(),
+            "grant_endpoint": reverse("hub:launch-grant"),
+        }
+    else:
+        snap["worker_launch"] = {"enabled": False}
+    return state, snap
 
 
 def hub_json(request):

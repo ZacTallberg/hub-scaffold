@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{brand}}</title>
 <meta name="robots" content="noindex">
+<meta name="csrf-token" content="{{csrf_token}}">
 {{theme_init}}
 <style>{{tokens_css}}</style>
 <style>{{shell_css}}</style>
@@ -19,6 +20,8 @@
     <div class="status-pill" id="statusPill" role="status" aria-live="polite">
       <span class="status-dot" aria-hidden="true"></span><span id="statusText">Ready</span><span class="clock" id="clock" aria-hidden="true"></span>
     </div>
+    <a class="btn-white" id="launchWorkerBtn" href="#" data-launch="1" data-count="1" hidden
+       title="Launch one local worker. Requires the optional workstation adapter to be registered once.">Launch Worker</a>
     <button class="btn-white" id="refreshBtn" type="button"><span class="btn-ico" id="refreshIco" aria-hidden="true"></span><span class="btn-label">Refresh</span></button>
     <button class="btn-white" id="paletteBtn" type="button" data-hub-palette-trigger title="Search — Ctrl/Cmd-K" aria-label="Open command palette">⌘K</button>
     <label class="sr-only" for="hub-theme-select">Theme</label>

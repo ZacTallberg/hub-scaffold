@@ -21,13 +21,14 @@ def _asset(name):
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def render(snap, brand):
+def render(snap, brand, csrf_token=""):
     """Return the full single-file HTML for the hub. `snap` = the /hub.json snapshot dict; `brand`
     = the navbar title (e.g. 'Acme · Hub'). Escapes the JSON island (< -> \\u003c so a stray
     </script in any field can't close it) and inlined JS (</script -> <\\/script)."""
     snap_json = json.dumps(snap, separators=(",", ":")).replace("<", "\\u003c")
     repl = {
         "brand": brand,
+        "csrf_token": str(csrf_token or ""),
         "theme_init": _THEME_INIT,
         "tokens_css": _asset("tokens.css"),
         "shell_css": _asset("shell.css"),

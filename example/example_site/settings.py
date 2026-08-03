@@ -65,5 +65,12 @@ HUB_BUILD_STAMP = "build_sha.txt"  # BASE_DIR-relative build-identity stamp (wri
 HUB_DONE_STRICTNESS = "strict"     # example runs strict so the selftest ladder proves the full
                                    # machinery; the adapter DEFAULT is "tracked" (flow-first)
 
+# Optional local-worker bridge. The example enables it only so selftest can prove the narrow
+# CSRF-grant boundary; no process is launched by the test suite.
+HUB_WORKER_LAUNCH_ENABLED = True
+HUB_WORKER_PROTOCOL = "hub-worker"
+HUB_WORKER_LAUNCH_ISSUER_URL = "https://example.invalid/hub/api/launch-grant/consume"
+HUB_WORKER_GRANT_TTL_S = 120
+
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes. Fail-closed when unset.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")

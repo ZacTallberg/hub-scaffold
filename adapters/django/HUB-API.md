@@ -4,8 +4,10 @@ Everything an agent needs to read and drive the hub over HTTP. Reads are public 
 token-gated. You do not need to read the source — this is the contract.
 
 - **Base path:** wherever the app is mounted, e.g. `{{LIVE_URL}}/hub` (locally `http://127.0.0.1:8000/hub`).
-- **Write auth:** every `POST /hub/api/*` requires the header `X-Write-Token: <HUB_WRITE_TOKEN>`. Writes
-  are **fail-closed**: if the server has no token configured, every write is `403`. Reads need nothing.
+- **Write auth:** general `POST /hub/api/*` operations require the header
+  `X-Write-Token: <HUB_WRITE_TOKEN>` and fail closed when it is absent. Reads need nothing. The
+  optional browser launch-mint endpoint is the one narrow exception: it is same-origin CSRF-gated,
+  cannot mutate board entities, and its separate authoritative consume remains write-token-gated.
 - **Ids** are `{{PROJECT_KEY}}:<type>:<local>`, e.g. `{{PROJECT_KEY}}:task:0001`. Allocated once, never renumbered.
 - **Content type:** send `Content-Type: application/json`; bodies are JSON objects.
 
@@ -49,6 +51,15 @@ VERIFY    (the server re-runs the audit inside complete; a red audit refuses the
 | `/hub/api/adr` | `agent`, `title`, `status`(proposed/accepted/…); `number`+`id` are auto-assigned. `status:"accepted"` ALSO requires `context_md`+`decision_md`+`consequences_md`; `superseded` requires `superseded_by[]`. Update: `id` | `200 {data}` | `422 schema` (missing a required field), `409 adr_immutable` (editing an accepted ADR's context/decision) |
 | `/hub/api/capability` | `agent`, `name`, optional `local` | `200 {data}` | `400 need_name` |
 | `/hub/api/decision` | `agent`, `topic`, `choice`, optional `rationale`,`invalidates`,`refs` | `200 {data:{event}}` (idempotent on topic+choice) | `400 need_topic_choice` |
+| `/hub/api/launch-grant/consume` | `consume`, `action:"start"`, `task`, `count` | `200 {data:{authorized:true,count}}` | `403 launch_refused` (bad/expired/replayed/re-aimed grant) |
+
+### Optional browser launch mint (CSRF, not write-token auth)
+
+`POST /hub/api/launch-grant` accepts `{action:"start", task:"", count:1}` only when
+`HUB_WORKER_LAUNCH_ENABLED=True`. It requires the CSRF cookie/header pair emitted by the Hub page and
+returns a signed, short-lived single-use grant. This endpoint is for the in-page control, not agents;
+agents should never copy the general write token into browser storage. See `adapters/windows/README.md`
+for the workstation half of the issuer-bound consume protocol.
 
 ### The completion gate (`/hub/api/complete`) — what it checks, in order
 1. Lease — you must hold a valid claim (`409 must_claim` if unclaimed, `409 lease` if the token is stale/another agent's).
@@ -68,7 +79,9 @@ See `MOUNTING.md → The strictness dial` for `tracked` (flow-first, the default
 `forbidden`(403 missing/invalid token) · `bad_json`(400) · method not POST (405) · `use_complete`(409) ·
 `precondition_required`(428 OCC) · `conflict`(409 OCC version race) · `must_claim`/`lease`(409) ·
 `need_evidence`/`evidence_unresolvable`/`need_verification_command`/`verify_failed`/`audit_unsound`(422) ·
-`adr_immutable`(409) · `not_found`(404). A refusal is guidance — read `msg`, fix the cause, don't hammer.
+`adr_immutable`(409) · `launch_disabled`(404) · `launch_refused`(403) · `launch_unavailable`(503) ·
+`not_found`(404). A refusal is
+guidance — read `msg`, fix the cause, don't hammer.
 
 ## Worked example (the full loop, curl)
 

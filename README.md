@@ -12,6 +12,11 @@ Three ideas, one package:
    "done" always carries who/what/evidence. Writes are token-gated over HTTP; reads are
    public-safe. The Django adapter mounts it at `/hub` in an existing site.
 
+   **Optional local-worker launch.** A Windows adapter can expose a one-click worker control without
+   putting the Hub write token in the browser. The page pre-arms a short-lived, signed, single-use
+   grant; the workstation validates and burns it at the issuing Hub before starting an
+   operator-supplied agent wrapper. The adapter is vendor-neutral and disabled by default.
+
 **Flow-first by design.** The tracking floor is deliberately cheap — create, claim, complete
 with a note and a link; nothing else is mandatory. Proof requirements are a **dial, not a
 default** (`HUB_DONE_STRICTNESS`, see `adapters/django/MOUNTING.md`): day-to-day work runs
@@ -47,6 +52,7 @@ hub_core/                       pure-python engine: event store, projections, au
 adapters/django/hub/            Django app: /hub pages, read API, token-gated write API
 adapters/django/MOUNTING.md     how to wire the app into an existing Django site
 adapters/django/HUB-API.md      agent-facing API reference: the operate-as-a-loop contract + every endpoint
+adapters/windows/               optional fail-closed hub-worker:// workstation bridge
 example/                        minimal runnable Django site wired to the adapter (selftest uses it)
 campaigns/                      the robust agent-prompt playbooks that RUN the system
   00-orchestration-method.md    fan-out → verify → close → roll up; the adversarial-verify rule
@@ -113,6 +119,10 @@ Prereqs: bash, git, python3, and (for the web hub) a Django project to mount int
    deploy, the live site must serve back the exact SHA you shipped, checked by a process other
    than the one that claimed success.
 
+6. **Optional worker button** — if this project intentionally launches local workers, follow
+   `adapters/windows/README.md`: enable the narrow server capability, provide a vendor-specific
+   wrapper, and register the per-user protocol handler. This is not required to operate the Hub.
+
 Verify the whole scaffold itself at any time with `bash tools/selftest.sh`.
 
 ## What requires org-specific wiring
@@ -131,6 +141,9 @@ The scaffold is deliberately incomplete in exactly these places — they cannot 
   use.
 - **Secrets.** `HUB_WRITE_TOKEN` must be generated per project and injected via your secret
   mechanism. It is never committed; writes are disabled (fail-closed) until it exists.
+- **Worker command.** The optional launcher provides authorization and process lifecycle, not an
+  opinionated agent CLI. Its wrapper is yours; the adapter passes stable context through environment
+  variables and closes the child window when that wrapper exits.
 
 ## Maintenance loop
 

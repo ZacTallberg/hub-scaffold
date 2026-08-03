@@ -13,6 +13,10 @@ substitutes at scaffold time):
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
     HUB_WRITE_TOKEN   write-API bearer token (see hub_write._token_ok; fail-closed when empty).
+    HUB_WORKER_LAUNCH_ENABLED   expose the optional grant-backed local launcher. Default False.
+    HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
+    HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
+    HUB_WORKER_GRANT_TTL_S      short grant lifetime, clamped by hub_core. Default 120 seconds.
 The PROJECT/ plane dir is resolved relative to the Django BASE_DIR; HUB_DIR (env) overrides the
 event-log location (default PROJECT/.hub).
 """
@@ -43,6 +47,22 @@ HUB_DIR = Path(os.environ.get("HUB_DIR") or (PROJECT / ".hub"))
 SCHEMA_DIR = PROJECT / "schema"
 PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", "{{PROJECT_KEY}}")
 BRAND = _dj_setting("HUB_BRAND", "{{BRAND}}")
+
+
+def worker_launch_enabled() -> bool:
+    """Whether this deployment intentionally exposes its optional local-worker launch bridge."""
+    value = _dj_setting("HUB_WORKER_LAUNCH_ENABLED", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def worker_protocol() -> str:
+    """Return a syntactically safe custom URL scheme (the Windows adapter must use the same one)."""
+    import re
+
+    value = str(_dj_setting("HUB_WORKER_PROTOCOL", "hub-worker") or "hub-worker").lower()
+    return value if re.fullmatch(r"hub-[a-z0-9][a-z0-9+.-]{0,26}", value) else "hub-worker"
 
 
 @functools.lru_cache(maxsize=1)
@@ -173,8 +193,12 @@ def settings_ast_adapter(state):
 
 
 def route_guard_adapter(state):
-    """Auth-boundary primitive: assert EVERY mutating /hub/api/ route is token-gated (carries the
-    @writer marker). Fail-closed. Skips cleanly in CLI context (runs in the served-context audit)."""
+    """Auth-boundary primitive: assert every mutating route has an explicit gate.
+
+    General writes carry ``@writer`` (the private header token).  The one deliberately narrow
+    browser capability may instead carry ``@csrf_protect`` plus ``_hub_origin_gated``; it can only
+    mint a short-lived launch grant and never receives general write authority.
+    """
     try:
         from django.urls import get_resolver
         resolver = get_resolver()
@@ -190,10 +214,13 @@ def route_guard_adapter(state):
                 walk(sub, pat)
             elif "hub/api/" in pat:
                 cb = getattr(p, "callback", None)
-                if not getattr(cb, "_hub_token_gated", False):
-                    viols.append(_sv("routes:unguarded", "every /hub/api/ route is token-gated",
-                                     "%s -> %s NOT token-gated" % (pat, getattr(cb, "__name__", "?")),
-                                     "token-gated (@writer)", remediation="wrap the view with @writer"))
+                guarded = getattr(cb, "_hub_token_gated", False) or getattr(cb, "_hub_origin_gated", False)
+                if not guarded:
+                    viols.append(_sv("routes:unguarded", "every /hub/api/ route has an explicit gate",
+                                     "%s -> %s is not token- or origin-gated" %
+                                     (pat, getattr(cb, "__name__", "?")),
+                                     "@writer or narrow @csrf_protect capability",
+                                     remediation="wrap general writes with @writer"))
     try:
         walk(resolver.url_patterns)
     except Exception as e:
