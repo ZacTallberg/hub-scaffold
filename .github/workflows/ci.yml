@@ -1,8 +1,8 @@
 # Sample CI — the out-of-process gate this system preaches, as an actual required check.
 #
 # This is the missing enforcement primitive for adopters: a gate the building agent CANNOT
-# self-attest. It runs the full self-test (agnosticism scrub + hub_core unit tests + bootstrap
-# drift check + example-site boot + the write-API refusal ladder). Make it a REQUIRED status
+# self-attest. It runs the full self-test (agnosticism scrub + hub_core unit tests + documentation
+# checks + bootstrap drift check + example-site boot + the write-API refusal ladder). Make it a REQUIRED status
 # check on your default branch (repo Settings → Branches) so a red run blocks merge.
 #
 # Adapt: if you host on GitLab/Forgejo/etc., port these steps to that CI — the steps are the point,
@@ -16,14 +16,18 @@ on:
 jobs:
   selftest:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Agnosticism scrub (no origin-specific residue)
         run: bash tools/scrub_check.sh
-      - name: Full self-test (engine + bootstrap + example + refusal ladder)
+      - name: Full self-test (engine + docs + bootstrap + example + refusal ladder)
         run: bash tools/selftest.sh

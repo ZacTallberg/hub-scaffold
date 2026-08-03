@@ -49,7 +49,7 @@ implementer could argue about belongs in a review, not a scanner.
 | `agent_rules` | agent governance file present (e.g. `CLAUDE.md` / `AGENTS.md`) | see governance/ templates |
 | `settings` | harness settings committed (e.g. `.claude/settings.json`) | hooks/permissions travel with the repo |
 | `plane` | project-plane tree present (`PROJECT/` or at minimum a decision log dir) | decisions are append-only records |
-| `memory_store` | per-project agent memory store exists | only if your org runs one; else NA |
+| `memory_binding` | the project can reach the machine/org-level agent memory service, when one is part of the environment | memory is a general environment service, not a per-project store; NA when the org runs none |
 
 ### B. Truthful — what the project claims matches what is observable
 
@@ -61,7 +61,7 @@ implementer could argue about belongs in a review, not a scanner.
 | `coherence` | live SHA == local HEAD short SHA | WARN on mismatch (undeployed commits or unstamped deploy), not FAIL |
 | `blessed` | a blessed record exists for the project on the canary host | i.e. the standing canary is watching it; probe gracefully — an unreachable canary host makes this NA, not FAIL |
 | `registered` | project appears in the org's project registry | NA for projects with no public surface, if your registry only tracks deployed ones |
-| `done_verified` | done-claims are server-verified, not self-attested | if the org runs a task hub: the hub's write path demands verification evidence (e.g. a required verification-command field). NA otherwise |
+| `done_verified` | the configured completion mode matches the project's trust claim | for this Hub, PASS for mechanically proof-gated completions only when `strict` is configured and tested; `tracked` is valid flow tracking but must not be scored as server-proven |
 
 ### C. Clean — the repo contains only what it should
 

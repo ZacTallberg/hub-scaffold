@@ -3,7 +3,7 @@
 > canonical · owner: any seat producing research · update: one file per campaign/memo; chronicle updated same session
 
 ## The contract
-1. **Research precedes build** (`DOCTRINE.md` §4.1). No architectural task starts until its
+1. **Research precedes build** (`../DOCTRINE.md` §4.1). No architectural task starts until its
    dependent research is captured here — findings living only in chat are lost work; mine prior
    chat/session history for findings and file them here before they evaporate.
 2. **One file per effort**, named `YYYY-MM-DD-<slug>.md`. Genres this folder holds:

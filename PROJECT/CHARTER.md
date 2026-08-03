@@ -19,10 +19,12 @@ The capabilities this project promises. Each maps to hub `feat` entities once bu
 Explicitly out of scope, with the reason. A non-goal may only move into scope via ADR.
 
 ## 5. Quality bar
-- **Born-safe:** prod settings hardened at birth (no DEBUG default, no committed secrets, token-gated writes).
+- **Born-safe:** prod settings hardened at birth (no DEBUG default, no committed secrets,
+  unauthenticated reads only when contents are publishable, general writes token-gated).
 - **Truth-first:** every rendered assertion derives from gathered evidence (`DOCTRINE.md` §2) —
   the truth matrix (`registers/TRUTH-MATRIX.md`) is the acceptance checklist for any new surface.
-- **Gate-green:** `hubaudit` PASS + project invariant gates green are ship preconditions, fail-closed.
+- **Gate-green:** `hubaudit` PASS + every project invariant gate that has actually been implemented
+  and wired is a ship precondition, fail-closed. A contract file without a runner is not green.
 - **Best-of-breed:** research before build (`research/README.md`); re-architect rather than polish a failing approach.
 
 ## 6. Definition of done (project-level)

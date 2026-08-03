@@ -2,7 +2,8 @@
 
 Security posture is fail-closed: SECRET_KEY is REQUIRED in prod (no committed literal — the hub
 audit's AST gate enforces this), ephemeral only under DEBUG; ALLOWED_HOSTS never defaults to '*';
-hub writes are token-gated via the HUB_WRITE_TOKEN environment variable. This file is also what
+general Hub mutations are token-gated via the HUB_WRITE_TOKEN environment variable. Reads remain
+unauthenticated in this example, and the optional launch mint uses its narrow CSRF gate. This file is also what
 `manage.py hubaudit` AST-scans, so it doubles as the reference shape for a mounted project.
 """
 import os
@@ -72,5 +73,6 @@ HUB_WORKER_PROTOCOL = "hub-worker"
 HUB_WORKER_LAUNCH_ISSUER_URL = "https://example.invalid/hub/api/launch-grant/consume"
 HUB_WORKER_GRANT_TTL_S = 120
 
-# Token for hub writes (X-Write-Token). Public reads, token-gated writes. Fail-closed when unset.
+# Token for general Hub writes (X-Write-Token). Reads are unauthenticated; the narrow launch mint is
+# CSRF-gated. General writes and launch consume fail closed when the token is unset.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")

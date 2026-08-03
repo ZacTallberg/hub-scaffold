@@ -14,7 +14,8 @@ from a working multi-project system. Nothing here names any specific person, hos
 ## The mental model (four layers)
 - **hub** (`hub_core/` + `adapters/`) — nouns you operate: events → projected tasks/ADRs/features/etc.,
   token-gated writes, server-granted "done", and an optional single-use-grant worker bridge. Mounts
-  at `/hub` in a Django site; the workstation bridge is disabled by default.
+  at `/hub` in a Django site; reads are unauthenticated, and the workstation bridge is disabled by
+  default.
 - **plane** (`PROJECT/`) — the durable on-disk tree: charter, doctrine, ADRs, registers, research,
   verification contracts, the leader/worker/verifier protocol. What a cold session reads to pick up.
 - **patterns** (`patterns/`) — opt-in enforcement: deploy contract, standing canary, pre-receive gate,
@@ -23,10 +24,12 @@ from a working multi-project system. Nothing here names any specific person, hos
 
 ## First-pull runbook
 1. **Prove it works before trusting it:** `bash tools/selftest.sh` — runs the agnosticism scrub, the
-   `hub_core` unit tests, the bootstrap-doc drift check, boots the example site, and drives the full
-   write-API refusal ladder. All four steps must PASS. (Needs Python + Django — see `requirements.txt`.)
+   `hub_core` unit tests, documentation/schema checks, the bootstrap-doc drift check, boots the
+   example site, and drives the full write-API refusal ladder. All five steps must PASS. (Needs
+   Python + Django — see `requirements.txt` and `docs/TESTING.md`.)
 2. **Read, in order:** this file → `README.md` → `campaigns/00-orchestration-method.md` (how to run
-   work well) → `OPERATING-AGREEMENT.md` (the working laws) → `adapters/django/MOUNTING.md` (how the hub
+   work well) → `OPERATING-AGREEMENT.md` (the working laws) → `SECURITY.md` (the actual trust boundary)
+   → `adapters/django/MOUNTING.md` (how the hub
    mounts) → `adapters/django/HUB-API.md` (the API you drive the hub with — read this before you POST
    anything). Skim `PROJECT/DOCTRINE.md` for the in-repo law.
 3. **See it:** in `example/`, `DEBUG=1 python manage.py migrate && seedhub && runserver`, open `/hub`.
@@ -49,14 +52,26 @@ is `campaigns/00-orchestration-method.md`. Scale the fan-out to the budget; sequ
 when usage is tight.
 
 ## The two dials you should know
-- **`HUB_DONE_STRICTNESS`** (`tracked` default | `strict`) — flow-first vs proof-first completion. See
-  `adapters/django/MOUNTING.md` → "The strictness dial". Start `tracked`; go `strict` for untrusted
-  completers (e.g. autonomous agents).
+- **`HUB_DONE_STRICTNESS`** (`tracked` default | `strict`) — flow-first vs proof-first completion. A
+  command is optional in tracked but still executes when present; strict requires one. See
+  `adapters/django/MOUNTING.md` → "The strictness dial". Start `tracked`; go `strict` when completion
+  claims need mechanical proof. Strict does not make an untrusted token holder safe.
 - **Entity extensibility** — a new hub type is a schema + write path + tab. `campaigns/augment-hub.md`
   is the exact recipe; the base types were built this same way, so an added type is first-class.
 - **`HUB_WORKER_LAUNCH_ENABLED`** (`False` default) — opt-in local process launch. Read
   `adapters/windows/README.md` before enabling it. The browser receives only a CSRF-minted,
   action/task/count-bound grant; authoritative consume remains write-token-gated.
+
+## Security boundary you must not infer away
+- **Unauthenticated does not mean sanitized.** `/hub` reads expose the complete projected board.
+  Keep sensitive data out or add a real authentication boundary.
+- **The write token is command-execution-grade.** A writer can set `verification_command`, which the
+  server runs with `shell=True` on completion; strict URL evidence is fetched by the server too.
+  Treat every token holder as trusted at the Hub service-account/network boundary. `SECURITY.md` is
+  authoritative for this threat model.
+- **Normative docs are not automatic controls.** `PROJECT/verify/`, campaigns, and patterns describe
+  roles and contracts. A canary, alert, backup, verifier, or conformance scan exists only after it is
+  wired and tested in the adopting environment. `docs/ARCHITECTURE.md` lists shipped guarantees.
 
 ## What is deliberately NOT here (design, not omission)
 - **The memory layer** — session-recall/persistence tooling is home-environment-specific and excluded
@@ -86,6 +101,8 @@ when usage is tight.
 
 ## Provenance
 Extracted 2026-07-07 from a working multi-project estate and updated 2026-08-03 with the portable
-worker-launch trust boundary; every file is scrub-verified agnostic. If you change `PROJECT/`
+worker-launch trust boundary and repository-wide documentation contract; every file is scrub-verified
+agnostic. If you change `PROJECT/`
 templates, re-run `python tools/build_bootstrap.py`
-so the bootstrap doc stays byte-exact, and `bash tools/scrub_check.sh` before every commit/push.
+so the bootstrap doc stays byte-exact, then run `python tools/docs_check.py` and
+`bash tools/scrub_check.sh` before every commit/push.

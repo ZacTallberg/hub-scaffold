@@ -10,7 +10,7 @@ against source is a rumor. Secrets stay in your organization's credential store 
 How the app runs (server, workers, migrate-on-boot), and the exact boot order.
 
 ## Deploy paths
-- **Code:** command, owner (campaigns: seat per `pm/PROTOCOL.md` §7), gates it must pass, expected
+- **Code:** command, owner (campaigns: seat per `../pm/PROTOCOL.md` §7), gates it must pass, expected
   duration + the patience notes (what a "hung" deploy actually is).
 - **Data:** command, owner, pre-ship gates, the stop/swap/start window behavior.
 - **Sequencing law:** code-first when a change spans both (new code tolerates old data; old code

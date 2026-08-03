@@ -24,7 +24,7 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     entities = state["entities"]
 
     # 1. every entity validates against its schema (the if/then rules make false claims fail here:
-    #    done->verified_by, blocked->deps, shipped-feat->tasks, superseded-adr->successor)
+    #    done->verified_by+evidence, blocked->deps, shipped-feat->tasks, superseded-adr->successor)
     from .validate import validate as _validate
     for eid, ent in entities.items():
         et = ent.get("type")

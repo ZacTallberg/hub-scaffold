@@ -13,6 +13,7 @@ from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import ids, validate
+from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
 from . import hub_app
@@ -46,14 +47,16 @@ def writer(fn):
         if b is None:
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
         return fn(request, b, *a, **k)
-    w._hub_token_gated = True   # marker the route-guard audit adapter asserts on every /hub/api/ route
+    # Marker asserted on every general mutation route; the launch mint has its own narrow marker.
+    w._hub_token_gated = True
     return w
 
 
 def _evidence_problem(ev):
     """Return None if the evidence string dereferences to something real, else the reason it
     doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
-    repo-relative file path. 'done' evidence that nothing can resolve is decoration, not evidence."""
+    file path resolved from BASE_DIR. This proves existence, not confinement: the general write
+    token is already command-execution-grade. 'done' evidence that cannot resolve is decoration."""
     import re
     import urllib.request
 
@@ -83,7 +86,7 @@ def _evidence_problem(ev):
             return None
     except OSError:
         pass
-    return "not a resolvable URL, commit sha, or existing repo path"
+    return "not a resolvable URL, commit sha, or existing path from BASE_DIR"
 
 
 def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
@@ -137,7 +140,7 @@ def task(request, b):
 @writer
 def complete(request, b):
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
-    if not eid:
+    if not isinstance(eid, str) or not eid.strip():
         return JsonResponse({"errors": [{"code": "missing_id"}]}, status=400)
     # Doctrine: exactly one agent OWNS a task before completing it. Require a held, valid lease
     # (claim first) — not just "not held by someone else".
@@ -146,12 +149,14 @@ def complete(request, b):
         return JsonResponse({"errors": [{"code": "must_claim", "msg": "claim the task first (POST /hub/api/claim)"}]}, status=409)
     if not hub_app.lease_valid(eid, token):
         return JsonResponse({"errors": [{"code": "lease", "msg": "claimed by another agent / stale token"}]}, status=409)
-    evidence = b.get("evidence_uri") or []
+    evidence = b.get("evidence_uri")
     if isinstance(evidence, str):
         evidence = [evidence]
     accept = b.get("accept_note")
-    if not accept or not evidence:
-        return JsonResponse({"errors": [{"code": "need_evidence", "msg": "accept_note + >=1 evidence_uri required"}]}, status=422)
+    if (not isinstance(accept, str) or not accept.strip() or not isinstance(evidence, list) or
+            not evidence or any(not isinstance(item, str) or not item.strip() for item in evidence)):
+        return JsonResponse({"errors": [{"code": "need_evidence",
+            "msg": "non-empty accept_note + >=1 non-empty string evidence_uri required"}]}, status=422)
     # HUB_DONE_STRICTNESS is the flow-vs-proof dial (settings; default "tracked"):
     #   "tracked" — done always carries WHO/WHAT/EVIDENCE (lease + accept_note + evidence), but
     #               evidence may be anything non-empty (auth-walled ticket links are fine) and a
@@ -169,11 +174,14 @@ def complete(request, b):
                 bad[str(e)[:200]] = problem
         if bad:
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing repo path)",
+                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from BASE_DIR)",
                 "bad": bad}]}, status=422)
     ent = hub_app.current_state().get("entities", {}).get(eid)
     if not ent:
         return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+    verified_version = ent.get("version")
+    if b.get("expected_version") is not None and b.get("expected_version") != verified_version:
+        return JsonResponse({"errors": [{"code": "conflict", "current_version": verified_version}]}, status=409)
     # FALSE-GREEN GUARD (strict): an unverifiable task cannot be completed — the server runs the
     # task's own verification_command; absence is a 422, not a free pass.
     vc = ent.get("verification_command")
@@ -197,11 +205,16 @@ def complete(request, b):
         return JsonResponse({"errors": [{"code": "audit_unsound", "msg": "hub audit has CRITICAL violations; resolve before completing",
             "violations": [{"id": v.get("id"), "observed": v.get("observed")} for v in blocking[:5]]}]}, status=422)
     payload = {"type": "task", "status": "done", "verified_by": b.get("verified_by") or [accept], "evidence_uri": evidence}
-    # OCC: the held lease already guarantees sole ownership, so default expected_version to the
-    # version we just read (still catches a concurrent write between read and append).
-    exp = b.get("expected_version") if b.get("expected_version") is not None else ent.get("version")
-    resp, status = _append("task", eid, payload, expected_version=exp, agent=agent,
-                           idem=b.get("idem_key"), etype="task.transitioned")
+    # Fence the final append against an expiry/reclaim race. Verification can take minutes, so the
+    # global lease lock is deliberately acquired only for this short commit section. The original
+    # entity version binds the result to exactly the task definition that was verified.
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        if not hub_app.lease_valid(eid, token):
+            return JsonResponse({"errors": [{"code": "lease", "msg": "lease expired or was reclaimed during verification"}]}, status=409)
+        resp, status = _append("task", eid, payload, expected_version=verified_version, agent=agent,
+                               idem=b.get("idem_key"), etype="task.transitioned")
+        if status == 200:
+            hub_app.release_lease(eid, token)
     return JsonResponse(resp, status=status)
 
 
@@ -264,15 +277,61 @@ def decision(request, b):
 @writer
 def claim(request, b):
     eid, agent = b.get("id"), b.get("agent")
-    if not eid or not agent:
+    if (not isinstance(eid, str) or not eid.strip() or
+            not isinstance(agent, str) or not agent.strip() or len(agent) > 256):
         return JsonResponse({"errors": [{"code": "need_id_agent"}]}, status=400)
-    res = hub_app.claim(eid, agent, ttl_s=int(b.get("ttl_s", 900)))
+    try:
+        ttl = int(b.get("ttl_s", 900))
+    except (TypeError, ValueError):
+        ttl = 0
+    if ttl < 1 or ttl > 86400:
+        return JsonResponse({"errors": [{"code": "bad_ttl", "msg": "ttl_s must be 1..86400"}]}, status=422)
+    # Serialize lease acquisition and the projected status transition as one claim flow. The
+    # underlying helpers use this same re-entrant process/file lock, so another server process
+    # cannot observe a newly granted lease and still race a second todo->in_progress transition.
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        state = hub_app.current_state()
+        ent = state.get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]}, status=404)
+        status = ent.get("status")
+        flags = state.get("flags", {}).get(eid, {})
+        if flags.get("deps_unmet"):
+            return JsonResponse({"errors": [{"code": "deps_blocked", "msg": "task dependencies are not done",
+                                             "deps_unmet": flags.get("deps_unmet")}]}, status=409)
+        if status not in ("todo", "in_progress"):
+            return JsonResponse({"errors": [{"code": "not_claimable",
+                                             "msg": "only todo or in_progress tasks can be claimed"}]}, status=409)
+        res = hub_app.claim(eid, agent, ttl_s=ttl)
+        if not res["ok"]:
+            return JsonResponse(res, status=409)
+        if status != "in_progress":
+            transition, transition_status = _append(
+                "task", eid, {"type": "task", "status": "in_progress"},
+                expected_version=ent.get("version"), agent=agent,
+                idem=b.get("idem_key"), etype="task.transitioned",
+            )
+            if transition_status != 200:
+                hub_app.release_lease(eid, res["token"])
+                return JsonResponse(transition, status=transition_status)
+            res["version"] = transition["data"]["version"]
+        else:
+            res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
 @writer
 def heartbeat(request, b):
-    res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=int(b.get("ttl_s", 900)))
+    if (not isinstance(b.get("id"), str) or not b.get("id").strip() or
+            not isinstance(b.get("token"), str) or not b.get("token").strip()):
+        return JsonResponse({"errors": [{"code": "need_id_token"}]}, status=400)
+    try:
+        ttl = int(b.get("ttl_s", 900))
+    except (TypeError, ValueError):
+        ttl = 0
+    if ttl < 1 or ttl > 86400:
+        return JsonResponse({"errors": [{"code": "bad_ttl", "msg": "ttl_s must be 1..86400"}]}, status=422)
+    res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=ttl)
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 

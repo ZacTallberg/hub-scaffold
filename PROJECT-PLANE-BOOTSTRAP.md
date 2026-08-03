@@ -1,10 +1,11 @@
-# THE PROJECT PLANE — BOOTSTRAP SPECIFICATION (v1, 2026-07-02)
+# THE PROJECT PLANE — BOOTSTRAP SPECIFICATION (v1.1, 2026-08-03)
 
-**This document is fully self-contained.** Hand it to a fresh agent in any environment — no other
-files, repos, or credentials from the origin ecosystem are needed — and it can stand up the
-complete Project Plane: a verifiable, agent-operated project-management system with a
-tamper-evident source of truth, live governance, independent verification, and a crystallized
-multi-agent protocol.
+**This document is a self-contained specification and template set.** Hand it to a fresh agent in
+any environment and it can create the Project Plane without origin-specific files or credentials.
+The templates include contracts for independent verification, runs, deploys, and multi-agent
+coordination; those controls become active only when the adopting project implements and wires their
+runners. The `hub-scaffold` repository supplies a working filesystem Hub/Django reference binding;
+this standalone document embeds the plane templates, not that implementation's source code.
 
 Provenance: crystallized from a live-fire multi-agent campaign (2026-07) and a five-project
 quality-doctrine corpus. Template blocks below are machine-inserted from the
@@ -26,7 +27,8 @@ byte-exact.
 4. Prove the setup with §7 (the setup self-test). **The Plane is not "set up" until the seeded
    violations FAIL the gate and the clean state PASSES it.** A gate that has never failed in test
    is presumed broken.
-5. Everything in this spec is law unless your environment truly cannot provide it — in which case
+5. Everything in this spec is project policy unless your environment truly cannot provide it—in
+   which case
    record the deviation as your project's ADR-0002 (ADR-0001 is the adoption itself), with the
    compensating control.
 
@@ -81,12 +83,13 @@ provides — the roles, not the tools, are the requirement:
 history · one-canonical-store-per-fact-class. An environment that cannot provide these is not a
 binding target; it's a gap.
 
-### 2.3 Reference substrate (pure files — works anywhere)
+### 2.3 Reference substrate (the shipped filesystem Hub)
 
-If the environment provides nothing, implement this; it needs only a filesystem and any scripting
-runtime.
+The `hub-scaffold` repository implements this binding in `hub_core/` with the Django HTTP adapter in
+`adapters/django/hub/`. A standalone adopter can reproduce the same roles with any runtime, but must
+not claim the controls are active until its implementation passes §7.
 
-**Ledger** — `PROJECT/.plane/ledger.jsonl`, one event per line, append-only:
+**Ledger** — `PROJECT/.hub/events.jsonl`, one canonical-JSON event per line, append-only:
 
 ```json
 {"seq": 12, "ts": "2026-07-02T18:00:00Z", "aggregate": "myproj:task:0007",
@@ -94,24 +97,28 @@ runtime.
  "prev_hash": "<hash of event 11>", "hash": "<see below>"}
 ```
 
-- `hash` = SHA-256 hex of the canonical JSON (sorted keys, no whitespace, UTF-8) of the event
-  **without** the `hash` field. Genesis event's `prev_hash` = 64 zeros.
+- `hash` = SHA-256 hex of `prev_hash + canonical(selected event fields)`, where canonical JSON uses
+  sorted keys, no insignificant whitespace, and UTF-8. The selected field order is defined by
+  `hub_core.store._HASH_FIELDS`; genesis `prev_hash` is the empty string.
 - `verify_chain`: replay the file recomputing every hash and linking every `prev_hash`; any
   mismatch = tampering = CRITICAL.
-- Event `type` vocabulary: `<entity>.created`, `<entity>.updated`, `<entity>.amended`,
-  `task.claimed`, `task.completed`, `event.reverted` (a compensating event — the only way to undo).
+- Entity events use typed names such as `task.created`, `task.updated`, `task.transitioned`, and
+  `adr.upserted`; log-only events such as `decision.logged` remain in the stream without projecting
+  an entity. Evolve state with later events, never by editing prior lines.
 - Writes are validated BEFORE append (R2): fold the aggregate's current state, merge the payload,
   validate against the schema — reject on any violation, including the conditional rules.
+- `PROJECT/.hub/events.db` is a rebuildable SQLite index and transactional gatekeeper for aggregate
+  versions/idempotency. JSONL remains canonical.
 
 **Entities** — projections, never a store: fold events per aggregate in `seq` order,
 last-write-wins per field. Any materialized view (JSON snapshot, dashboard, markdown table)
 carries a "generated — canonical: ledger" header and is regenerated, never edited.
 
-**Claims (multi-agent)** — `PROJECT/.plane/claims/<entity-id>.json` =
+**Claims (multi-agent)** — `PROJECT/.hub/claims/<entity-id>.json` =
 `{"task": id, "agent": seat, "token": nonce, "claimed": epoch, "expires": epoch}`; a completion
 without a live claim is rejected; expired claims auto-release.
 
-### 2.4 The gate runner (`plane_audit`)
+### 2.4 The gate runner (`manage.py hubaudit` in the reference binding)
 
 One command; runs everywhere (CI required check + pre-ship + on demand); **fail-closed** (an
 internal error is a RED, never a skip). Invariants, in order:
@@ -120,17 +127,24 @@ internal error is a RED, never a skip). Invariants, in order:
 2. **Referential integrity** — every idref resolves; no dangling references. HIGH.
 3. **ADR contiguity** — ADR numbers gap-free from 1; every `superseded` has a successor. WARN.
 4. **Chain verification** — `verify_chain` intact. CRITICAL.
-5. **Live-ledger parity** — created-vs-transitioned ratio and stale `in_progress` beyond a
-   threshold flag a lagging ledger (the governance-fiction failure). WARN→HIGH.
-6. **Build coherence** (once deploys exist) — last deploy's `sha` == intended == what the live
-   artifact reports; unknown ⇒ AMBER, mismatch ⇒ HIGH.
-7. **Behavioral adapters** (environment-specific, added over time) — e.g. settings safety,
-   route-guard checks. An adapter that raises ⇒ CRITICAL.
+5. **Build coherence** (once deploys exist) — last deploy's `sha` matches the checkout/build stamp;
+   when a caller supplies an independently observed `served` SHA, compare that too. Unknown ⇒
+   AMBER, mismatch ⇒ HIGH. The base audit does not actively probe the live URL.
+6. **Behavioral adapters** (environment-specific, added over time) — the Django binding checks a
+   focused set of settings defaults and explicit guards on mutation routes.
+7. **Project-specific controls** — live-ledger parity, stale leases, live probes, verifier gates,
+   backups, and alert delivery are valuable but are not generic `hubaudit` checks; wire and test them
+   when the project's threat/failure model requires them.
 
-Exit codes: `0` PASS · `2` blocking (critical/high) · `3` warn-only amber · `1` internal error
-(treat as RED). The write path adds its own guards: `done` cannot be minted directly — only a
-completion operation that requires a live claim, ≥1 evidence entry, and a passing verification
-command may grant it.
+An audit adapter that raises becomes a CRITICAL violation rather than a silent skip.
+
+The structured audit uses `exit_code`: `0` PASS · `2` blocking (critical/high) · `3` warn-only
+amber. The Django management command returns process exit `0` for PASS or amber, `2` for blocking,
+and `1` for an internal error (treat as RED). The write path adds its own guards: `done` cannot be minted directly. Completion
+always requires a live claim, acceptance note, evidence, and a sound critical audit. In the default
+`tracked` mode a verification command is optional but runs when present; `strict` additionally
+requires a passing command and dereferenceable evidence. Because writers can set commands, the
+general write token is command-execution-grade.
 
 ## §3 The entity model
 
@@ -139,11 +153,11 @@ unsatisfiable at write time.** Field lists are authoritative in the embedded sch
 
 | Type | Required | Status enum | Unsatisfiability rules |
 |---|---|---|---|
-| `task` | id, type, title, status, version | `todo · in_progress · blocked · done · dropped · shadow` (shadow = wired-but-inert, NOT done) | `done` ⇒ `verified_by` ≥1 · `blocked` ⇒ `deps` ≥1 |
+| `task` | id, type, title, status, version | `todo · in_progress · blocked · done · dropped · shadow` (shadow = wired-but-inert, NOT done) | `done` ⇒ substantive `verified_by` ≥1 + `evidence_uri` ≥1 · `blocked` ⇒ `deps` ≥1 |
 | `adr` | id, type, number, title, status, version | `proposed · accepted · superseded · deprecated · rejected` | accepted/superseded/deprecated ⇒ full `context_md`+`decision_md`+`consequences_md` · `superseded` ⇒ `superseded_by` ≥1 |
 | `gap` | id, type, title, status, version | `open · investigating · mitigated · closed · wont-fix` | mitigated/closed ⇒ `addressed_by` ≥1 |
 | `feat` | id, type, name, status, version | `shipped · partial · planned · experimental · removed` | shipped/partial ⇒ `tasks` ≥1 (no orphan feature claims) |
-| `deploy` | id, type, sha, at, version | — (append-only record, written BY the act of deploying) | `audit_ok` computed from the gate exit, never hand-set; `served_sha` null until a canary confirms |
+| `deploy` | id, type, sha, at, version | — (append-only record, written BY the act of deploying) | schema has no conditional proof rule; the project-specific deploy writer must derive `audit_ok` and `served_sha`, never accept them as self-attested input |
 | `cap` | id, type, name, maturity, version | maturity: `concept · prototype · proven · reusable · extracted` | — (reuse fabric node) |
 | `note` | id, type, title, version | `standing · superseded` | categories: discovery/gotcha/data/method/source/risk/context — a note is NOT a decision |
 
@@ -159,7 +173,7 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:common",
   "title": "Hub shared definitions",
-  "description": "HUB DOCTRINE shared $defs. Identical bytes across all project hubs. IDs are project-prefixed, type-segmented, allocated once, never reused/renumbered.",
+  "description": "Hub shared definitions. IDs are project-prefixed, type-segmented, allocated once, and never reused or renumbered.",
   "$defs": {
     "id": {
       "type": "string",
@@ -189,6 +203,8 @@ project key are renameable bindings; the rules are not.
     },
     "evidenceUri": {
       "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*",
       "description": "A pointer to recomputed proof: a test exit, a headless screenshot path, a /debug scorecard url, an audit violation id."
     }
   }
@@ -212,7 +228,7 @@ project key are renameable bindings; the rules are not.
     "priority": { "enum": ["P0", "P1", "P2", "P3"] },
     "phase": { "type": "string" },
     "acceptance": { "type": "string", "description": "Definition of done for this task." },
-    "verification_command": { "type": "string", "description": "The command the HUB runs server-side to grant done; exit 0 + evidence required." },
+    "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Trusted server-side shell command run on completion whenever present; required only in strict mode. Possession of write authority can set this command." },
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
@@ -222,7 +238,7 @@ project key are renameable bindings; the rules are not.
     "deps": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Blocked iff any dep is not done." },
     "implements": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/cap this realizes." },
     "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },
-    "verified_by": { "type": "array", "items": { "type": "string" }, "description": "Verification evidence summaries; >=1 required for done." },
+    "verified_by": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" }, "description": "Substantive verification evidence summaries; >=1 required for done." },
     "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
     "surfaced_by": { "$ref": "hub:common#/$defs/idref", "description": "The task/work during which this was scouted." },
     "source": { "type": "string", "description": "Where it came from, e.g. REVIEW-G3, CHARTER, RESEARCH-HISTORY." },
@@ -232,7 +248,7 @@ project key are renameable bindings; the rules are not.
   },
   "required": ["id", "type", "title", "status", "version"],
   "allOf": [
-    { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 } }, "required": ["verified_by"] } },
+    { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 }, "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["verified_by", "evidence_uri"] } },
     { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } }
   ]
 }
@@ -253,9 +269,9 @@ project key are renameable bindings; the rules are not.
     "number": { "type": "integer", "minimum": 1, "description": "Gap-free sequential ADR number." },
     "title": { "type": "string", "minLength": 1 },
     "status": { "enum": ["proposed", "accepted", "superseded", "deprecated", "rejected"] },
-    "context_md": { "type": "string", "description": "Immutable post-accept." },
-    "decision_md": { "type": "string", "description": "Immutable post-accept." },
-    "consequences_md": { "type": "string" },
+    "context_md": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Substantive context; immutable post-accept." },
+    "decision_md": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Substantive decision; immutable post-accept." },
+    "consequences_md": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
     "amendments_md": { "type": "string", "description": "Dated, append-only amendments (the legal way to evolve an Accepted ADR short of supersession)." },
     "supersedes": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
     "superseded_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
@@ -278,7 +294,7 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:gap",
   "title": "Gap / finding",
-  "description": "A reviewed finding from the analysis (REVIEW plans, RESEARCH-HISTORY, the CHARTER, CAPABILITY-LEDGER 'Needs'). Materializing these into the hub is Phase 2.",
+  "description": "A reviewed, evidence-backed finding that represents a real project gap.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -344,10 +360,10 @@ project key are renameable bindings; the rules are not.
     "id": { "$ref": "hub:common#/$defs/id" },
     "type": { "const": "deploy" },
     "build": { "type": "string" },
-    "sha": { "type": "string", "description": "The blessed git SHA the receiver wrote." },
+    "sha": { "type": "string", "description": "The git SHA this deploy record claims was shipped." },
     "method": { "type": "string" },
     "at": { "$ref": "hub:common#/$defs/isoDate" },
-    "audit_ok": { "type": "boolean", "description": "COMPUTED from the gate exit at deploy time, never hand-set." },
+    "audit_ok": { "type": "boolean", "description": "Must be derived by the trusted deploy writer from the gate exit; the schema alone cannot prove it." },
     "served_sha": { "type": ["string", "null"], "description": "What the live artifact reported back (coherence proof); null until a canary confirms." },
     "tasks_closed": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
     "legacy_ref": { "type": "string" },
@@ -365,7 +381,7 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:cap",
   "title": "Capability",
-  "description": "A reusable system/architecture node in the cross-project capability fabric. Project-prefixed ids share ONE id space so cap graphs cross projects.",
+  "description": "A reusable system or architecture node in this project's capability graph. Cross-project discovery requires an external registry or federation binding.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -468,7 +484,7 @@ PROJECT/
 ### 4.1 `PROJECT/README.md` — the framework spec & map
 <!-- TPL:PROJECT/README.md -->
 ````markdown
-# THE PROJECT PLANE — canonical PROJECT/ framework (v1, 2026-07-02)
+# THE PROJECT PLANE — canonical PROJECT/ framework (v1.1, 2026-08-03)
 
 > canonical · owner: whoever leads the project · update: only by ADR (this file is the framework spec)
 
@@ -480,6 +496,16 @@ doctrine documents (lifecycle framework · method playbook · quality charter) a
 bindings, replaceable per §7. Where any older doc lists legacy PROJECT/ file sets
 (TASKS/FEATURES/CHANGELOG/DEPLOYS markdown), **this manifest supersedes them**: those facts live in
 the hub ledger now.
+
+## Contract status: normative versus active
+
+This tree is a portable framework and set of templates. The reference Hub makes the entity ledger,
+schemas, projections, and `hubaudit` active after it is mounted. Empty directories/contracts such
+as `verify/`, `runs/`, `worklogs/`, `audit/`, and the multi-seat `pm/` topology describe what an
+adopting project must implement and operate; the scaffold does not silently create verifier tools,
+run artifacts, monitors, alerts, backups, or deploys. A document may state a project law without
+proving that its enforcement has been wired. Record that status honestly in `HANDOFF.md` and the
+Hub.
 
 ## 0. Read-order for a cold agent
 
@@ -498,13 +524,13 @@ the hub ledger now.
 | `CHARTER.md` | mission · scope · quality bar · definition of done | canonical |
 | `DOCTRINE.md` | standing laws (operator contract + crystallized project laws) | canonical |
 | `HANDOFF.md` | living continuity file — the single resume entry point | canonical, always current |
-| `seed.json` · `schema/` · `.hub/` | hub genesis · entity schemas · hash-chained event ledger | `.hub/events.jsonl` = THE ledger |
+| `seed.json` · `schema/` · `.hub/` | reference-Hub genesis · entity schemas · runtime hash-chained event ledger | `.hub/events.jsonl` = the entity ledger after the reference Hub is activated |
 | `ADR/` | numbered decision records (full prose of record) | canonical prose; hub `adr` entity canonical for status/links |
 | `research/` | deep research: dossiers, MoE panels, improvement-surface memos + `RESEARCH-HISTORY.md` chronicle | canonical |
 | `registers/` | what hub schemas don't model: failure-mode taxonomy, incidents, truth matrix, blind spots, pending operator decisions, glossary | canonical |
 | `audit/` | filed point-in-time audit artifacts (MoE registers, audit runs, security reviews) | canonical artifacts |
-| `verify/` | independent-verification harness: manifest ↔ verdicts ↔ fail-closed gate | canonical (contract in its README) |
-| `runs/` | machine-readable run ledger + current gate-status rollup | canonical |
+| `verify/` | independent-verification contract and target layout | canonical contract; harness is adopter-implemented |
+| `runs/` | target shape for project-specific machine-readable run artifacts | canonical once a runner is wired |
 | `worklogs/` | per-workstream execution logs with measured before/after | canonical |
 | `ops/` | infra inventory / deploy runbook | canonical, date-stamped |
 | `pm/` | multi-agent campaign kit: protocol, seats, channels | channels = operational log, NOT a governance store |
@@ -515,14 +541,19 @@ say so (see §3).
 
 ## 2. Where the audit history lives (the user-visible answer to "what happened?")
 
-- **`.hub/events.jsonl`** — the tamper-evident spine: every task/ADR/gap/deploy transition,
+- **`.hub/events.jsonl`** — the tamper-evident spine for transitions actually recorded through the
+  reference Hub: every task/ADR/gap/deploy transition,
   SHA-256 hash-chained, append-only. `hubaudit` verifies the chain + schema + referential integrity
-  + build coherence, fail-closed.
-- **Hub `deploy` entities** — one per deploy, keyed SHA+timestamp, appended unconditionally,
-  `audit_ok` computed never hand-set.
+  + build coherence; critical/high states block, while explicitly unknowable pre-first-deploy
+  coherence is reported amber.
+- **Hub `deploy` entities** — the required record for each deploy once the project's deploy writer
+  is wired. The base HTTP API has no deploy endpoint; the deploy integration must validate and
+  append it, and must derive `audit_ok` rather than accept a human assertion.
 - **`audit/`** — dated point-in-time audit artifacts (MoE finding registers, review verdicts).
-- **`verify/gate/`** — fail-closed ship-gate artifacts with versioned green rules.
-- **`runs/`** — one JSON per operational run; `runs/status.json` = the current green/red rollup.
+- **`verify/gate/`** — fail-closed ship-gate artifacts after the project implements the verifier
+  contract.
+- **`runs/`** — one JSON per operational run after project tooling is wired;
+  `runs/status.json` is the contract's current green/red rollup, not a base-Hub output.
 - **`registers/INCIDENTS.md`** — every defect instance: class, detection, resolution, detector born.
 
 ## 3. Source-of-truth law
@@ -531,7 +562,7 @@ say so (see §3).
    deploys, capabilities, notes. One canonical store per fact class: hub = entities; markdown =
    prose + the registers above; channels (`pm/`) = coordination traffic only. Anything that
    contradicts the hub is wrong until the hub is amended.
-2. **Every file opens with a role header**: `> canonical | view (source: X) | channel | template`
+2. **Every prose artifact opens with a role header**: `> canonical | view (source: X) | channel | template`
    plus owner and update trigger. A view that could be mistaken for canon is a defect.
 3. **Views declare and never lead.** A rendered table of hub data carries
    `RENDERED VIEW — canonical: hub` and is regenerated, never hand-drifted.
@@ -585,7 +616,7 @@ roles; everything else in this folder is plain files:
 | Role the Plane requires | Home-ecosystem binding | Rebind to (examples) |
 |---|---|---|
 | **Tamper-evident append-only ledger** (entity transitions, hash-chained) | `hub_core` store → `.hub/events.jsonl` | any event store, signed git log, ledgered DB |
-| **Schema-validated entity store with false-claim-unsatisfiable rules** (done⇒verified_by, etc.) | hub entities + `schema/*.json` + `seedhub` | Jira/Linear + required-field rules, GitHub Issues + CI schema check |
+| **Schema-validated entity store with false-claim-unsatisfiable rules** (done⇒verified_by+evidence, etc.) | hub entities + `schema/*.json` + `seedhub` | Jira/Linear + required-field rules, GitHub Issues + CI schema check |
 | **Fail-closed gate runner** (audit + invariant checks, exit≠0 blocks ship) | `manage.py hubaudit` + deploy gates | CI required checks, pre-receive hooks, pipeline gates |
 
 Rebinding rules:
@@ -626,10 +657,12 @@ The capabilities this project promises. Each maps to hub `feat` entities once bu
 Explicitly out of scope, with the reason. A non-goal may only move into scope via ADR.
 
 ## 5. Quality bar
-- **Born-safe:** prod settings hardened at birth (no DEBUG default, no committed secrets, token-gated writes).
+- **Born-safe:** prod settings hardened at birth (no DEBUG default, no committed secrets,
+  unauthenticated reads only when contents are publishable, general writes token-gated).
 - **Truth-first:** every rendered assertion derives from gathered evidence (`DOCTRINE.md` §2) —
   the truth matrix (`registers/TRUTH-MATRIX.md`) is the acceptance checklist for any new surface.
-- **Gate-green:** `hubaudit` PASS + project invariant gates green are ship preconditions, fail-closed.
+- **Gate-green:** `hubaudit` PASS + every project invariant gate that has actually been implemented
+  and wired is a ship precondition, fail-closed. A contract file without a runner is not green.
 - **Best-of-breed:** research before build (`research/README.md`); re-architect rather than polish a failing approach.
 
 ## 6. Definition of done (project-level)
@@ -657,6 +690,8 @@ Where data comes from, what may be stored/published, rate-limit/courtesy rules, 
 
 These are the laws every agent on this project operates under, regardless of content. They are the
 distillation of every hard lesson to date. Violating one is a defect even when the output "works".
+They are normative policy; `README.md` identifies which reference-Hub controls are shipped and which
+require project-specific wiring.
 
 ## §1 Operator contract
 1. **Zero decisions pushed to the operator.** Best-guess every fork, record it (ADR if architectural,
@@ -712,6 +747,8 @@ distillation of every hard lesson to date. Violating one is a defect even when t
    layer is itself a defect (a real campaign once created 221 tasks and transitioned 14 — the
    board was fiction). In campaigns the LEADER carries this duty personally (PROTOCOL §11).
 5. **Shared-kit changes** (anything vendored across projects) get a CHANGELOG entry in the kit.
+6. **Contracts never impersonate controls.** A documented gate, verifier, backup, canary, scanner,
+   or alert is reported as active only after its runner, schedule, failure test, and owner are wired.
 
 ## §5 Autonomy discipline
 1. **Two attempts, then escalate** with what you tried. Timebox unfamiliar rabbit holes (~20 min).
@@ -749,7 +786,8 @@ with their ADR numbers.
 
 ## 2. What's live right now (all verified, with evidence)
 - Deployed code SHA + how it was verified.
-- Deployed data state + gate status (`runs/status.json`).
+- Deployed data state + gate status (`runs/status.json` when the project has implemented that
+  contract; otherwise name the real gate artifact and the missing wiring).
 - Domains/surfaces and their states.
 
 ## 3. In-flight
@@ -837,7 +875,7 @@ If this decision is a stepping stone, name the full solution it defers and what 
 > canonical · owner: any seat producing research · update: one file per campaign/memo; chronicle updated same session
 
 ## The contract
-1. **Research precedes build** (`DOCTRINE.md` §4.1). No architectural task starts until its
+1. **Research precedes build** (`../DOCTRINE.md` §4.1). No architectural task starts until its
    dependent research is captured here — findings living only in chat are lost work; mine prior
    chat/session history for findings and file them here before they evaporate.
 2. **One file per effort**, named `YYYY-MM-DD-<slug>.md`. Genres this folder holds:
@@ -1048,11 +1086,16 @@ entities, `verify/gate/`, `runs/`). THIS folder holds dated, point-in-time audit
 ### 4.16 `PROJECT/verify/README.md` — the independent-verification contract
 <!-- TPL:PROJECT/verify/README.md -->
 ````markdown
-# verify/ — the independent verification lane
+# verify/ — the independent verification lane contract
 
 > canonical contract · owner: THIS FILE + manifest contract = producer (worker); everything else under verify/ = verifier · update: green rule changes are versioned amendments here
 
-The out-of-process answer to false-green: a **verifier whose identity differs from the builder's**
+This scaffold supplies the contract and target layout, not a generic verifier implementation. An
+adopting project must build the manifest generator, verifier tools, gate consumer, deployment hook,
+and failure fixtures for its own claims. Until those exist and have failed in test, this directory
+is a design—not an active gate.
+
+The out-of-process answer to false-green is a **verifier whose identity differs from the builder's**
 independently checks what the product asserts, and a **fail-closed gate** blocks ships until it is
 green. This file is the whole contract; the campaign wiring is `../pm/PROTOCOL.md` §8.
 
@@ -1139,7 +1182,7 @@ bus so in-flight sweeps re-key.
   manufactures false "insufficient" verdicts systematically.
 
 ## Field inventory
-| field | What it asserts | Derivation (must match `registers/TRUTH-MATRIX.md`) | Evidence doc types included |
+| field | What it asserts | Derivation (must match `../registers/TRUTH-MATRIX.md`) | Evidence doc types included |
 |---|---|---|---|
 
 <!-- Amendments append below with dates; the newest block is authoritative. -->
@@ -1151,13 +1194,16 @@ bus so in-flight sweeps re-key.
 ````markdown
 # runs/ — machine-readable run ledger
 
-> canonical · owner: whatever runs (pipelines, gates, batch jobs write here) · update: one artifact per run, written by the run itself · append-only
+> contract → canonical once a runner is wired · owner: whatever runs (pipelines, gates, batch jobs write here) · update: one artifact per run, written by the run itself · append-only
+
+The base scaffold defines this artifact shape but does not ship a generic run recorder. A project
+must wire its own pipeline/gate/batch tools before anything in this directory is operational.
 
 - **One JSON per run:** `<UTC-stamp>.json` =
   `{run_id, kind, actor, started, finished, dry_run, stages:[{name, seconds, delta, error}],
     final_counts, errors, notes}`. Written by the tooling, never by hand. Long logs may sit
   alongside as `<run_id>-<stage>.log`.
-- **`status.json`** = the current health rollup the deploy gates and the hub read:
+- **`status.json`** = the current health rollup project-specific deploy gates may read:
   `{ok, violations, classes:{…}, at, run_id}` — regenerated by the invariant/gate check, never edited.
 - Rows are never deduplicated or rewritten; a bad run stays on the ledger (that's the point).
   Voiding follows `../README.md` §5.
@@ -1197,7 +1243,7 @@ against source is a rumor. Secrets stay in your organization's credential store 
 How the app runs (server, workers, migrate-on-boot), and the exact boot order.
 
 ## Deploy paths
-- **Code:** command, owner (campaigns: seat per `pm/PROTOCOL.md` §7), gates it must pass, expected
+- **Code:** command, owner (campaigns: seat per `../pm/PROTOCOL.md` §7), gates it must pass, expected
   duration + the patience notes (what a "hung" deploy actually is).
 - **Data:** command, owner, pre-ship gates, the stop/swap/start window behavior.
 - **Sequencing law:** code-first when a change spans both (new code tolerates old data; old code
@@ -1540,7 +1586,7 @@ per-seat ACLs becomes available, adopt it by ADR — the event vocabulary (§4) 
 > template → canonical when a campaign activates · authored by: operator or outgoing leader · superseded whole, never edited
 
 ## Role
-You are the LEADER (`pm/PROTOCOL.md` §1). You orchestrate; you do not race your seats to
+You are the LEADER (`../../PROTOCOL.md` §1). You orchestrate; you do not race your seats to
 implementation. Your output is: correct sequencing, fast unblocking, verified credit, crystallized
 governance, and safe deploys.
 
@@ -1558,11 +1604,11 @@ governance, and safe deploys.
    and `finding`s within minutes — a seat waiting on you is a leader defect.
 5. **Own CODE deploys** (unless re-chartered): gate-green precondition, mutex, patient canary, live verification.
 6. **Stamp gates** — verifier artifacts are provisional until your `Leader-verified:` line.
-7. **Keep `../../HANDOFF.md` current** — you own project continuity.
+7. **Keep `../../../HANDOFF.md` current** — you own project continuity.
 8. **Route operator posts** — misrouted `OP-` orders get a HOLD + re-route, never silent drift.
 
 ## Write scope
-`../../HANDOFF.md`, all `seats/*/CHARTER.md` + `seats/*/DIRECTIVES.md` (append-only), STATUS
+`../../../HANDOFF.md`, all `seats/*/CHARTER.md` + `seats/*/DIRECTIVES.md` (append-only), STATUS
 appends, hub writes, registers, ADRs. NOT: app code while seats own it, seat STATE files, verify/ internals.
 
 ## Current assignment
@@ -1578,7 +1624,7 @@ appends, hub writes, registers, ADRs. NOT: app code while seats own it, seat STA
 > template → canonical when a campaign activates · authored by: leader · superseded whole, never edited
 
 ## Role
-You are WORKER-1 (`pm/PROTOCOL.md` §1): you implement — code, tests, migrations, detectors, data
+You are WORKER-1 (`../../PROTOCOL.md` §1): you implement — code, tests, migrations, detectors, data
 work — driving the directive queue and backlog to done, autonomously.
 
 ## Duties (non-negotiable)
@@ -1592,7 +1638,7 @@ work — driving the directive queue and backlog to done, autonomously.
    stock + flow, bank the probe.
 5. **Own DATA deploys** (unless re-chartered): code-first sequencing, mutex, pre-ship gates
    fail-closed, scoped kills only.
-6. **Publish producer contracts:** the verify manifest + `MANIFEST-CONTRACT.md` are yours; the
+6. **Publish producer contracts:** the verify manifest + `../../../verify/MANIFEST-CONTRACT.md` are yours; the
    ship's changed-record list is published every ship.
 7. **Update `STATE.md`** after every batch — any interruption must be free.
 8. **Consume auto-routed verifier `alert`s** for established classes directly (PROTOCOL §8.4).
@@ -1604,7 +1650,7 @@ work — driving the directive queue and backlog to done, autonomously.
     they're grounded; a directive that violates DOCTRINE/CHARTER gets challenged before execution.
 
 ## Write scope
-App code/tests/data tooling, `../../verify/MANIFEST-CONTRACT.md` + manifest generation, hub
+App code/tests/data tooling, `../../../verify/MANIFEST-CONTRACT.md` + manifest generation, hub
 writes for your tasks, registers rows you originate, your `STATE.md`, STATUS appends.
 NOT: other seats' files, directives channels, verifier outputs, CODE deploys.
 
@@ -1621,7 +1667,7 @@ NOT: other seats' files, directives channels, verifier outputs, CODE deploys.
 > template → canonical when a campaign activates · authored by: leader · superseded whole, never edited
 
 ## Role
-You are the VERIFIER (`pm/PROTOCOL.md` §1, contract `../../verify/README.md`): the independent
+You are the VERIFIER (`../../PROTOCOL.md` §1, contract `../../../verify/README.md`): the independent
 lane. For every claim the product renders, determine whether it is supported by the system of
 record, by the gathered evidence, and by reality — and surface everything that isn't. You are
 authorized to distrust everything, including our own data.
@@ -1631,7 +1677,7 @@ authorized to distrust everything, including our own data.
 2. **Grounding law:** every `supported` verdict quotes verbatim-contained text; run the mechanical
    selfcheck before writing any gate artifact.
 3. **Write-before-report:** verdict rows land in `verdicts.jsonl` before you post about them.
-4. **Gate artifacts** follow the versioned GREEN-RULE in `verify/README.md` §4 — you never
+4. **Gate artifacts** follow the versioned GREEN-RULE in `../../../verify/README.md` §4 — you never
    redefine green; zero means zero.
 5. **Escalate, never fix:** findings are `alert` events with grounded evidence; you never patch
    code or data.
@@ -1644,7 +1690,7 @@ authorized to distrust everything, including our own data.
    propose before deviating from your sweep scope (PROTOCOL §9.5).
 
 ## Write scope
-`../../verify/**` EXCEPT `MANIFEST-CONTRACT.md` (producer-owned — v1 lost it to a verifier
+`../../../verify/**` EXCEPT `MANIFEST-CONTRACT.md` (producer-owned — v1 lost it to a verifier
 overwrite once; never again), your `STATE.md`, STATUS appends. NOT: app code, seeds, data, other
 seats' files, deploys, ssh. Read the DB only from your own copy under `verify/tmp/`.
 
@@ -1665,12 +1711,13 @@ bus with per-seat ACLs, adopt it by ADR — the event vocabulary and duties tran
 
 1. **Create the project repo/folder**; version-control it from the first commit.
 2. **Instantiate `PROJECT/`** from §4, byte-exact, plus the `schema/` files from §3.1.
-3. **Bind the substrate** (§2.2): if the environment has a suitable tracker/event system, map the
-   entity model onto it and record the mapping as ADR-0002; otherwise implement the reference
-   substrate (§2.3) — ledger, fold+validate writer, claims — in the environment's scripting
-   runtime (~200 lines; no dependencies beyond SHA-256 and a JSON-Schema validator).
-4. **Implement `plane_audit`** (§2.4) and wire it as a REQUIRED check (CI required status /
-   pre-receive / pipeline gate). Advisory wiring is a bootstrap failure.
+3. **Bind the substrate** (§2.2): when adopting from `hub-scaffold`, copy/mount the shipped
+   `hub_core` and Django adapter. In another environment, map the entity model onto a suitable
+   tracker/event system or implement the roles in §2.3. Record the mapping and all deviations as
+   ADR-0002; do not represent a planned binding as operational.
+4. **Activate the gate** (§2.4): run the reference `hubaudit` or implement an equivalent and wire it
+   as a REQUIRED check (CI required status / pre-receive / pipeline gate). Advisory wiring is a
+   bootstrap failure.
 5. **Genesis, live-ledger style:** record ADR-0001 "This project adopts the Project Plane"
    (accepted, full prose) + the first real tasks — through the write path, never by editing
    projections.
@@ -1694,13 +1741,14 @@ require PASS. Record the whole run as the project's first `runs/` artifact.
 | 2 | an entity with a dangling `idref` | audit HIGH |
 | 3 | an ADR numbered with a gap (e.g. 1 then 3) | audit WARN |
 | 4 | one byte modified in a mid-file ledger event | audit CRITICAL (chain) |
-| 5 | a gate artifact hand-edited to `green: true` over refuted rows | consumer re-derivation flags FABRICATED-GREEN and blocks |
+| 5 | a gate artifact hand-edited to `green: true` over refuted rows | when the independent verification lane is implemented, its consumer re-derivation flags FABRICATED-GREEN and blocks |
 | 6 | a completion attempted without a live claim (multi-agent binding) | write REJECTED |
 | 7 | clean state (all seeds removed) | audit exit 0 |
 
-Behavioral spot-checks: projections regenerate identically from the ledger after deletion; an
-append to a channel file via an editor-style rewrite is detectable (monitor flags it); the audit
-run itself appears in `runs/`.
+Behavioral spot-checks: projections regenerate identically from the ledger after deletion. If the
+file-channel protocol is activated, an editor-style rewrite is detectable by its monitor. If the
+project run recorder is implemented, the audit run appears in `runs/`. Mark unimplemented optional
+lanes as such; absence may be an accepted bootstrap scope, fabricated green may not.
 
 ## §8 Rebinding quick-reference (work environments)
 

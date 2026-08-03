@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# selftest.sh — end-to-end proof the scaffold works on a fresh machine. Four steps:
+# selftest.sh — end-to-end proof the scaffold works on a fresh machine. Five steps:
 #   1. agnosticism scrub          (tools/scrub_check.sh)
 #   2. engine unit tests          (python -m unittest over hub_core — framework-free)
-#   3. bootstrap doc integrity    (tools/build_bootstrap.py --check)
-#   4. example site boots + the write API refuses correctly, proves the CSRF-mint/token-consume
+#   3. documentation integrity    (tools/docs_check.py)
+#   4. bootstrap doc integrity    (tools/build_bootstrap.py --check)
+#   5. example site boots + the write API refuses correctly, proves the CSRF-mint/token-consume
 #      launch boundary, then runs the full server-granted-done hardening ladder
 # Prints PASS/FAIL per step and exits nonzero if any step failed. Requires: bash, git, a
-# python3 on PATH (override with PYTHON=/path/to/python); step 4 additionally needs Django
+# Python executable available as `python` (override with PYTHON=/path/to/python); step 5 additionally needs Django
 # importable by that python.
 set -uo pipefail
 
@@ -36,6 +37,11 @@ step_scrub() {
 step_unittests() {
   cd "$ROOT"
   "$PY" -m unittest discover -s hub_core -t "$ROOT" -v
+}
+
+step_docs_check() {
+  cd "$ROOT"
+  "$PY" tools/docs_check.py
 }
 
 step_bootstrap_check() {
@@ -82,12 +88,14 @@ step_example() {
   "$PY" manage.py hubaudit || return 1
   "$PY" manage.py shell -c "$API_SNIPPET" || return 1
   # The full server-granted-done hardening ladder: direct done -> 409, missing
-  # verification_command -> 422, unresolvable evidence -> 422, real completion -> 200.
+  # empty evidence -> 422, missing verification_command -> 422, unresolvable evidence -> 422, failing command -> 422,
+  # critical audit -> 422, real completion -> 200.
   "$PY" selftest.py || return 1
 }
 
 run_step "scrub (agnosticism gate)"        step_scrub
 run_step "hub_core unit tests"             step_unittests
+run_step "documentation integrity"         step_docs_check
 run_step "bootstrap doc --check"           step_bootstrap_check
 run_step "example site + write-API ladder" step_example
 

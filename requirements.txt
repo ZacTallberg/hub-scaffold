@@ -3,11 +3,11 @@
 # hub_core/ is PURE STDLIB — zero dependencies — and its tests run under any Python 3.10+.
 # Only the Django ADAPTER (adapters/django/) and the example/ site need Django.
 #
-# Django 5.2 is the current LTS (supported to 2028); 6.0.x also works (the example was proven on it).
-# Pin to your project's Django once you mount the adapter into it.
-Django>=5.2
+# Django 5.2 is the supported LTS floor (Python 3.10+); Django 6.0 is supported on Python 3.12+.
+# The upper bound prevents an untested future feature series from silently redefining the scaffold
+# gate. Pin and promptly patch your chosen series once you mount the adapter into an application.
+Django>=5.2,<6.1
 
 # The write API's evidence-dereference check (strict mode) uses only urllib from the stdlib — no
-# `requests`. The hub serves static frontend assets via Django's staticfiles; add whitenoise if you
-# serve it without a separate static host:
-# whitenoise>=6.0
+# `requests`. The Hub page inlines its small frontend kit, so the adapter adds no static-file
+# serving dependency.

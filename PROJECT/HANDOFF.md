@@ -18,7 +18,8 @@ with their ADR numbers.
 
 ## 2. What's live right now (all verified, with evidence)
 - Deployed code SHA + how it was verified.
-- Deployed data state + gate status (`runs/status.json`).
+- Deployed data state + gate status (`runs/status.json` when the project has implemented that
+  contract; otherwise name the real gate artifact and the missing wiring).
 - Domains/surfaces and their states.
 
 ## 3. In-flight

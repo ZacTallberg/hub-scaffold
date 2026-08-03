@@ -1,8 +1,13 @@
-# verify/ — the independent verification lane
+# verify/ — the independent verification lane contract
 
 > canonical contract · owner: THIS FILE + manifest contract = producer (worker); everything else under verify/ = verifier · update: green rule changes are versioned amendments here
 
-The out-of-process answer to false-green: a **verifier whose identity differs from the builder's**
+This scaffold supplies the contract and target layout, not a generic verifier implementation. An
+adopting project must build the manifest generator, verifier tools, gate consumer, deployment hook,
+and failure fixtures for its own claims. Until those exist and have failed in test, this directory
+is a design—not an active gate.
+
+The out-of-process answer to false-green is a **verifier whose identity differs from the builder's**
 independently checks what the product asserts, and a **fail-closed gate** blocks ships until it is
 green. This file is the whole contract; the campaign wiring is `../pm/PROTOCOL.md` §8.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hub-scaffold init — stamp a new project with the event-sourced hub, the PROJECT/ management
-# plane, governance files, and the enforcement patterns. The only sanctioned way to adopt the
+# plane, governance/security files, architecture contract, and enforcement patterns. The only sanctioned way to adopt the
 # scaffold — never copy pieces by hand and pivot them.
 #
 #   bash init.sh <target-dir> <project-key> "<Brand Name>" [live-url]
@@ -10,7 +10,8 @@
 #   Brand Name    human-facing name; becomes {{BRAND}} everywhere
 #   live-url      optional; becomes {{LIVE_URL}} (default: https://<project-key>.example.com)
 #
-# What it does: copies PROJECT/, hub_core/, adapters/, patterns/, OPERATING-AGREEMENT.md into
+# What it does: copies PROJECT/, hub_core/, adapters/, patterns/, OPERATING-AGREEMENT.md,
+# SECURITY.md, and docs/ARCHITECTURE.md into
 # the target, renames governance templates into place (CLAUDE.md, AGENTS.md), substitutes the
 # three placeholders across all text files (fail-closed if any survive), then git init -b main
 # with a genesis commit. Safe to run from any cwd.
@@ -49,7 +50,7 @@ missing=0
 for t in PROJECT hub_core adapters patterns; do
   [ -d "$ROOT/$t" ] || { echo "ERROR: scaffold is incomplete, missing $t/" >&2; missing=1; }
 done
-for f in OPERATING-AGREEMENT.md governance/CLAUDE.md.template governance/AGENTS.md.template; do
+for f in OPERATING-AGREEMENT.md SECURITY.md docs/ARCHITECTURE.md governance/CLAUDE.md.template governance/AGENTS.md.template; do
   [ -f "$ROOT/$f" ] || { echo "ERROR: scaffold is incomplete, missing $f" >&2; missing=1; }
 done
 [ "$missing" -eq 0 ] || exit 1
@@ -60,6 +61,9 @@ done
   -cf - PROJECT hub_core adapters patterns) | (cd "$TARGET" && tar -xf -)
 
 cp "$ROOT/OPERATING-AGREEMENT.md" "$TARGET/OPERATING-AGREEMENT.md"
+cp "$ROOT/SECURITY.md" "$TARGET/SECURITY.md"
+mkdir -p "$TARGET/docs"
+cp "$ROOT/docs/ARCHITECTURE.md" "$TARGET/docs/ARCHITECTURE.md"
 # Governance templates land renamed into place at the project root.
 cp "$ROOT/governance/CLAUDE.md.template" "$TARGET/CLAUDE.md"
 cp "$ROOT/governance/AGENTS.md.template" "$TARGET/AGENTS.md"
@@ -102,12 +106,13 @@ cat <<EOF
 
 Initialized '$KEY' ($BRAND) at $TARGET — placeholders substituted, git genesis committed.
 
-Next steps (the 10-minute runbook lives in the scaffold README):
+Next steps (the adoption runbook lives in the scaffold README):
   1. Mount the hub in your web project per adapters/django/MOUNTING.md
      (copy adapters/django/hub/ in as an app, add its urls under /hub, NEVER at the front door).
   2. Set a write token and seed the board:
        export HUB_WRITE_TOKEN=<random-secret>
        python manage.py migrate && python manage.py seedhub
+     Treat the token as command-execution-grade; read SECURITY.md before distributing it.
   3. Prove the gate works, then wire it into CI/pre-deploy:
        python manage.py hubaudit
   4. Adopt the deploy contract: read patterns/deploy-contract.md, start from

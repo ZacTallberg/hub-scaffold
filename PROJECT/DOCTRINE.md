@@ -4,6 +4,8 @@
 
 These are the laws every agent on this project operates under, regardless of content. They are the
 distillation of every hard lesson to date. Violating one is a defect even when the output "works".
+They are normative policy; `README.md` identifies which reference-Hub controls are shipped and which
+require project-specific wiring.
 
 ## §1 Operator contract
 1. **Zero decisions pushed to the operator.** Best-guess every fork, record it (ADR if architectural,
@@ -59,6 +61,8 @@ distillation of every hard lesson to date. Violating one is a defect even when t
    layer is itself a defect (a real campaign once created 221 tasks and transitioned 14 — the
    board was fiction). In campaigns the LEADER carries this duty personally (PROTOCOL §11).
 5. **Shared-kit changes** (anything vendored across projects) get a CHANGELOG entry in the kit.
+6. **Contracts never impersonate controls.** A documented gate, verifier, backup, canary, scanner,
+   or alert is reported as active only after its runner, schedule, failure test, and owner are wired.
 
 ## §5 Autonomy discipline
 1. **Two attempts, then escalate** with what you tried. Timebox unfamiliar rabbit holes (~20 min).

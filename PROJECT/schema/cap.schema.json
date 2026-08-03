@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:cap",
   "title": "Capability",
-  "description": "A reusable system/architecture node in the cross-project capability fabric. Project-prefixed ids share ONE id space so cap graphs cross projects.",
+  "description": "A reusable system or architecture node in this project's capability graph. Cross-project discovery requires an external registry or federation binding.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

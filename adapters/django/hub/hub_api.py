@@ -1,6 +1,8 @@
 """Hub machine READ API. Every surface renders FROM the event-log snapshot (single source
 of truth); the HTML embeds the same payload. Doctrine sections 1-2 + the hub API contract.
 """
+import time
+
 from django.http import Http404, HttpResponse, JsonResponse
 
 from hub_core import projections
@@ -73,7 +75,7 @@ def schema_json(request, type):
 
 
 def next_json(request):
-    """DISCOVER: ranked unblocked + unclaimed tasks (TaskWarrior-style urgency). The agent's entrypoint."""
+    """DISCOVER: ranked unblocked tasks without a live lease, including stale reclaims."""
     state, _ = _snapshot()
     flags = state.get("flags", {})
     blockers = {}
@@ -85,11 +87,24 @@ def next_json(request):
         pri = {"P0": 40, "P1": 20, "P2": 10, "P3": 5}.get(t.get("priority"), 8)
         return pri + blockers.get(t["id"], 0) * 8
 
-    cand = [t for t in state["by_type"].get("task", [])
-            if t.get("status") == "todo" and flags.get(t["id"], {}).get("unblocked")]
+    now = time.time()
+
+    def available(t):
+        task_flags = flags.get(t["id"], {})
+        lease = hub_app._read_lease(t["id"])
+        held = bool(lease and lease.get("expires", 0) > now)
+        # A crashed worker can leave projected status=in_progress after its lease expires. Offer
+        # that task again once its dependencies are satisfied; a live lease always removes it.
+        return (t.get("status") in ("todo", "in_progress") and
+                not task_flags.get("deps_unmet") and not held)
+
+    cand = [t for t in state["by_type"].get("task", []) if available(t)]
     cand.sort(key=urgency, reverse=True)
     try:
         n = max(1, min(int(request.GET.get("n", "1")), 50))
     except ValueError:
         n = 1
-    return JsonResponse({"data": cand[:n], "metadata": {"unblocked": len(cand)}})
+    rows = [dict(t, available=True, stale_reclaim=t.get("status") == "in_progress")
+            for t in cand[:n]]
+    # Keep the historical `unblocked` count as a compatibility alias for existing consumers.
+    return JsonResponse({"data": rows, "metadata": {"available": len(cand), "unblocked": len(cand)}})

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:common",
   "title": "Hub shared definitions",
-  "description": "HUB DOCTRINE shared $defs. Identical bytes across all project hubs. IDs are project-prefixed, type-segmented, allocated once, never reused/renumbered.",
+  "description": "Hub shared definitions. IDs are project-prefixed, type-segmented, allocated once, and never reused or renumbered.",
   "$defs": {
     "id": {
       "type": "string",
@@ -32,6 +32,8 @@
     },
     "evidenceUri": {
       "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*",
       "description": "A pointer to recomputed proof: a test exit, a headless screenshot path, a /debug scorecard url, an audit violation id."
     }
   }

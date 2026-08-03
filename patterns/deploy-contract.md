@@ -16,6 +16,12 @@ The companion files implement the contract:
 | `standing-canary.sh` | Law 4: the out-of-band re-checker |
 | `pre-receive-gate.sh` | Adjacent: server-side push gate (secrets can never enter the repo) |
 
+For a mounted Hub, add one project-specific post-canary integration: append a validated `deploy`
+entity and update the running deployment's `PROJECT/state.json` with `last_deploy_sha` and
+`live_url`. The generic shell skeleton cannot know how to reach a container/host's durable runtime
+mount, so it does not pretend to perform that integration. Until it is wired, Hub build coherence
+will remain unknown or stale.
+
 ---
 
 ## Law 1 — Build from a clean detached worktree of HEAD
@@ -114,8 +120,8 @@ gate            optional org test/audit command; non-zero aborts
 build           $BUILD_CMD inside the worktree
 ship            $SHIP_CMD  (the only org-specific part)
 canary          poll $LIVE_URL for "build-$SHA"; fail closed         (Law 3)
-bless           write "<sha> <url>" to the blessed-records dir       (Law 4)
-record          stamp the repo's deploy record with sha + url
+bless           write "<sha> <url>" to the blessed-records dir       (Law 4; failure blocks)
+record          invoke the project's deploy-entity/runtime-state writer
 ```
 
 Anti-patterns this contract explicitly bans:

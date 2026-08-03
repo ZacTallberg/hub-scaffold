@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:gap",
   "title": "Gap / finding",
-  "description": "A reviewed finding from the analysis (REVIEW plans, RESEARCH-HISTORY, the CHARTER, CAPABILITY-LEDGER 'Needs'). Materializing these into the hub is Phase 2.",
+  "description": "A reviewed, evidence-backed finding that represents a real project gap.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

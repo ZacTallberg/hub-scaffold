@@ -9,6 +9,15 @@ solely off it.
 > reality at every moment.** If it's not on the board, it doesn't get built; the second reality
 > changes, the board changes.
 
+**Policy versus enforcement.** This agreement states the operating standard. The shipped Hub's
+default `tracked` mode mechanically requires a claim, acceptance note, and evidence value, but it
+does not dereference that evidence or require a verification command. Set
+`HUB_DONE_STRICTNESS=strict` to make those two proof checks mechanical. Independent reviewer/canary
+identity, deploy verification, alerting, and research discipline remain process or adopter-wired
+controls unless the project supplies the named external gate. See `docs/ARCHITECTURE.md` for the
+enforcement matrix and `SECURITY.md` before issuing a write token.
+Strict completion strengthens proof of a claim; it does not reduce the authority of a token holder.
+
 ---
 
 ## §1 — The hub is the single source of truth
@@ -34,7 +43,8 @@ solely off it.
 4. **RECORD** — mark it `done` **with evidence**: a commit SHA, a passing-test transcript, a live
    URL, a screenshot. Evidence must be *dereferenceable* — a reviewer who was not present can
    follow it and re-check. Evidence must postdate the final edit; a run from before the last
-   change is void.
+   change is void. Run the Hub in `strict` mode when the server itself must enforce
+   dereferenceability and a passing verification command.
 5. **VERIFY** — an identity **other than the implementer** (a gate, an audit, a reviewer, a
    canary) confirms the claim. If the project is in an unsound state, the transition is refused
    and the task stays open.
@@ -63,8 +73,10 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
 - **FALSE-GREEN is the meta-failure** this agreement exists to kill: work that *reports* green
   without *being* green. Gates fail not by being absent but by being self-attested, bypassed,
   textual-only, or committed-but-not-deployed.
-- Therefore: `done` = **independently proven with dereferenceable evidence**. No evidence → not
-  done. Self-attested green is a defect even when the work happens to be correct.
+- Therefore, by policy: `done` = **independently proven with dereferenceable evidence**. No evidence
+  → not done. Self-attested green is a defect even when the work happens to be correct. In
+  `tracked` mode this standard is reviewer-enforced; in `strict` mode the Hub also dereferences
+  evidence and runs the task's command.
 - **The verifier identity must differ from the builder identity.** An agent may not grant its own
   gate. Acceptable verifiers: an out-of-process audit, a CI gate, a live canary that inspects the
   deployed artifact, or a human reviewer.
@@ -102,7 +114,9 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
   is backed by a mechanism **outside the worker's control**:
   - a **server-side push gate** (pre-receive) that rejects pushes violating repository law
     (e.g. credential-shaped files) where no client can skip it;
-  - a **server-granted `done` transition** that requires attached evidence;
+  - a **server-granted `done` transition** that requires a lease, acceptance note, and attached
+    evidence; in strict mode it additionally requires dereferenceable evidence and a passing
+    server-run verification command;
   - an **audit** that recomputes invariants per request (served version matches HEAD, no
     mutations on read routes, no private data on public surfaces) and blocks `done` and deploy
     when red;

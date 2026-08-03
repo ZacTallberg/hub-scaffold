@@ -9,7 +9,9 @@ The hub is two pieces:
   commands. Must be importable as `hub`.
 
 Everything below assumes your repo root is the Django `BASE_DIR` (the directory holding
-`manage.py`). Total mount time is about ten minutes.
+`manage.py`). The Hub's GET surfaces are unauthenticated and return the complete board unless you
+add an authentication boundary. Read [SECURITY.md](../../SECURITY.md) before exposing `/hub` or
+issuing a token.
 
 ## 1. Put the code on the import path
 
@@ -68,13 +70,19 @@ it is deliberately cheap: one claim, one complete, no ceremony.
   links, doc URLs, file paths); a `verification_command` on the task is optional, though the
   server still RUNS it when present and refuses `done` if it fails.
 - `"strict"` — proof-first. Every evidence URI must dereference (URL <400 / commit in this
-  repo / existing repo path) and every task needs a `verification_command` before it can be
-  completed. Use this where completions cannot be taken on trust — the classic case is
-  autonomous agents closing their own tasks (the origin system runs strict for exactly that
-  reason, having caught agents fabricating green).
+  repo / existing path resolved from `BASE_DIR`) and every task needs a `verification_command` before it can be
+  completed. Use this where completion claims cannot be taken on trust—for example an autonomous
+  agent whose operating principal is trusted with Hub-server authority but whose “done” assertion
+  still needs mechanical proof. Strict mode does not sandbox an untrusted token holder.
 
 Ratcheting up later is a one-line settings change and applies only to future completions —
 start tracked, go strict for the projects (or the agents) that earn it.
+
+Security consequence: any configured `verification_command` is executed with `shell=True` as the
+Hub service account, even in tracked mode. Strict URL evidence is fetched from the server's network.
+`HUB_WRITE_TOKEN` is therefore command-execution-grade, not a low-privilege board-edit token. Only
+trusted operators/agents may hold it; isolate or replace the command runner before admitting
+untrusted writers.
 
 Notes:
 
@@ -100,7 +108,7 @@ PROJECT/
 ```
 
 Copy `PROJECT/schema/` from this scaffold's plane tree (or from `example/PROJECT/schema/`).
-The event log (`PROJECT/.hub/`) is created on first write; add `PROJECT/.hub/` to `.gitignore`
+The runtime store (`PROJECT/.hub/`) is created on first store access; add `PROJECT/.hub/` to `.gitignore`
 if you do not want runtime events in version control. The `HUB_DIR` environment variable
 overrides the event-log location (useful for tests).
 
@@ -116,7 +124,7 @@ urlpatterns = [
 ]
 ```
 
-Read surface (public-safe, no auth):
+Read surface (unauthenticated; safe to expose only when all board data is publishable):
 
 - `GET /hub/` — the human view (single-file tabbed app; `?format=json` returns the snapshot)
 - `GET /hub/?served=<sha>` / `hub.json` — snapshot incl. build coherence
@@ -179,7 +187,11 @@ is amber so it cannot block the very deploy that creates it.
 - Fail-closed: when no token is configured, every general write and launch consume returns 403.
   Reads stay public; the optional CSRF-gated mint capability is described below.
 - Endpoints (all POST, JSON body): `/hub/api/task`, `/hub/api/complete`, `/hub/api/adr`,
-  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`.
+  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, and
+  `/hub/api/launch-grant/consume`.
+
+The write token authorizes all of those endpoints and, through task verification commands,
+operating-system shell execution. It is never suitable for browser storage or an untrusted client.
 
 The sole exception is the optional `POST /hub/api/launch-grant`: it is a same-origin,
 `@csrf_protect` browser capability that can mint only a short-lived grant bound to
@@ -188,23 +200,29 @@ calls the separate `/hub/api/launch-grant/consume` endpoint with the write token
 starting a process. The computed route audit recognizes exactly these two explicit gate classes:
 general `@writer` routes and the narrow origin-gated mint route.
 
-### The server-granted `done` (hardening contract — do not weaken)
+### The server-granted `done`
 
 `status: "done"` cannot be written directly:
 
 1. `POST /hub/api/task` with `"status": "done"` -> **409 use_complete**. Only
    `/hub/api/complete` can grant done.
 2. `complete` requires a held claim lease (`/hub/api/claim` first) with a valid fencing token.
-3. `complete` requires `accept_note` + at least one `evidence_uri`, and every evidence string
-   must DEREFERENCE (URL answering <400, a commit sha present in the repo, or an existing
-   repo-relative path) -> otherwise **422 evidence_unresolvable**.
-4. The task must carry a `verification_command`; absence is **422 need_verification_command**,
-   not a free pass. The SERVER runs that command (cwd = `BASE_DIR`, 300s timeout) and a nonzero
-   exit is **422 verify_failed**.
-5. The audit is recomputed server-side at completion time; CRITICAL violations (tampered chain,
+3. In both modes, `complete` requires `accept_note` + at least one non-empty `evidence_uri`.
+4. In `strict` mode, every evidence string must dereference (URL answering <400, a commit sha
+   present in the repo, or an existing path resolved from `BASE_DIR`) or completion returns
+   **422 evidence_unresolvable**. This is a resolvability check, not a path/network sandbox.
+5. In `strict` mode, the task must carry a `verification_command`; absence is
+   **422 need_verification_command**. In either mode, if the task carries a command, the server
+   runs it through the shell (`cwd=BASE_DIR`, 300s timeout). A nonzero exit is
+   **422 verify_failed** and an invocation/timeout error is **422 verify_error**.
+6. The audit is recomputed server-side at completion time; CRITICAL violations (tampered chain,
    schema corruption) block with **422 audit_unsound**.
+7. Immediately before append, the fencing token is rechecked and the transition is bound to the
+   exact task version whose command was verified. Lease expiry/reclaim or a concurrent task edit
+   returns **409**. Success releases the lease; abandoned `in_progress` work is reoffered after
+   lease expiry.
 
-Example loop:
+Strict-mode example loop:
 
 ```bash
 T="$HUB_WRITE_TOKEN"; H="X-Write-Token: $T"; U=http://localhost:8000/hub/api

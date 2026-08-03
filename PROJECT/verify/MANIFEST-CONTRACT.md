@@ -18,7 +18,7 @@ bus so in-flight sweeps re-key.
   manufactures false "insufficient" verdicts systematically.
 
 ## Field inventory
-| field | What it asserts | Derivation (must match `registers/TRUTH-MATRIX.md`) | Evidence doc types included |
+| field | What it asserts | Derivation (must match `../registers/TRUTH-MATRIX.md`) | Evidence doc types included |
 |---|---|---|---|
 
 <!-- Amendments append below with dates; the newest block is authoritative. -->

@@ -1,4 +1,4 @@
-# THE PROJECT PLANE — canonical PROJECT/ framework (v1, 2026-07-02)
+# THE PROJECT PLANE — canonical PROJECT/ framework (v1.1, 2026-08-03)
 
 > canonical · owner: whoever leads the project · update: only by ADR (this file is the framework spec)
 
@@ -10,6 +10,16 @@ doctrine documents (lifecycle framework · method playbook · quality charter) a
 bindings, replaceable per §7. Where any older doc lists legacy PROJECT/ file sets
 (TASKS/FEATURES/CHANGELOG/DEPLOYS markdown), **this manifest supersedes them**: those facts live in
 the hub ledger now.
+
+## Contract status: normative versus active
+
+This tree is a portable framework and set of templates. The reference Hub makes the entity ledger,
+schemas, projections, and `hubaudit` active after it is mounted. Empty directories/contracts such
+as `verify/`, `runs/`, `worklogs/`, `audit/`, and the multi-seat `pm/` topology describe what an
+adopting project must implement and operate; the scaffold does not silently create verifier tools,
+run artifacts, monitors, alerts, backups, or deploys. A document may state a project law without
+proving that its enforcement has been wired. Record that status honestly in `HANDOFF.md` and the
+Hub.
 
 ## 0. Read-order for a cold agent
 
@@ -28,13 +38,13 @@ the hub ledger now.
 | `CHARTER.md` | mission · scope · quality bar · definition of done | canonical |
 | `DOCTRINE.md` | standing laws (operator contract + crystallized project laws) | canonical |
 | `HANDOFF.md` | living continuity file — the single resume entry point | canonical, always current |
-| `seed.json` · `schema/` · `.hub/` | hub genesis · entity schemas · hash-chained event ledger | `.hub/events.jsonl` = THE ledger |
+| `seed.json` · `schema/` · `.hub/` | reference-Hub genesis · entity schemas · runtime hash-chained event ledger | `.hub/events.jsonl` = the entity ledger after the reference Hub is activated |
 | `ADR/` | numbered decision records (full prose of record) | canonical prose; hub `adr` entity canonical for status/links |
 | `research/` | deep research: dossiers, MoE panels, improvement-surface memos + `RESEARCH-HISTORY.md` chronicle | canonical |
 | `registers/` | what hub schemas don't model: failure-mode taxonomy, incidents, truth matrix, blind spots, pending operator decisions, glossary | canonical |
 | `audit/` | filed point-in-time audit artifacts (MoE registers, audit runs, security reviews) | canonical artifacts |
-| `verify/` | independent-verification harness: manifest ↔ verdicts ↔ fail-closed gate | canonical (contract in its README) |
-| `runs/` | machine-readable run ledger + current gate-status rollup | canonical |
+| `verify/` | independent-verification contract and target layout | canonical contract; harness is adopter-implemented |
+| `runs/` | target shape for project-specific machine-readable run artifacts | canonical once a runner is wired |
 | `worklogs/` | per-workstream execution logs with measured before/after | canonical |
 | `ops/` | infra inventory / deploy runbook | canonical, date-stamped |
 | `pm/` | multi-agent campaign kit: protocol, seats, channels | channels = operational log, NOT a governance store |
@@ -45,14 +55,19 @@ say so (see §3).
 
 ## 2. Where the audit history lives (the user-visible answer to "what happened?")
 
-- **`.hub/events.jsonl`** — the tamper-evident spine: every task/ADR/gap/deploy transition,
+- **`.hub/events.jsonl`** — the tamper-evident spine for transitions actually recorded through the
+  reference Hub: every task/ADR/gap/deploy transition,
   SHA-256 hash-chained, append-only. `hubaudit` verifies the chain + schema + referential integrity
-  + build coherence, fail-closed.
-- **Hub `deploy` entities** — one per deploy, keyed SHA+timestamp, appended unconditionally,
-  `audit_ok` computed never hand-set.
+  + build coherence; critical/high states block, while explicitly unknowable pre-first-deploy
+  coherence is reported amber.
+- **Hub `deploy` entities** — the required record for each deploy once the project's deploy writer
+  is wired. The base HTTP API has no deploy endpoint; the deploy integration must validate and
+  append it, and must derive `audit_ok` rather than accept a human assertion.
 - **`audit/`** — dated point-in-time audit artifacts (MoE finding registers, review verdicts).
-- **`verify/gate/`** — fail-closed ship-gate artifacts with versioned green rules.
-- **`runs/`** — one JSON per operational run; `runs/status.json` = the current green/red rollup.
+- **`verify/gate/`** — fail-closed ship-gate artifacts after the project implements the verifier
+  contract.
+- **`runs/`** — one JSON per operational run after project tooling is wired;
+  `runs/status.json` is the contract's current green/red rollup, not a base-Hub output.
 - **`registers/INCIDENTS.md`** — every defect instance: class, detection, resolution, detector born.
 
 ## 3. Source-of-truth law
@@ -61,7 +76,7 @@ say so (see §3).
    deploys, capabilities, notes. One canonical store per fact class: hub = entities; markdown =
    prose + the registers above; channels (`pm/`) = coordination traffic only. Anything that
    contradicts the hub is wrong until the hub is amended.
-2. **Every file opens with a role header**: `> canonical | view (source: X) | channel | template`
+2. **Every prose artifact opens with a role header**: `> canonical | view (source: X) | channel | template`
    plus owner and update trigger. A view that could be mistaken for canon is a defect.
 3. **Views declare and never lead.** A rendered table of hub data carries
    `RENDERED VIEW — canonical: hub` and is regenerated, never hand-drifted.
@@ -115,7 +130,7 @@ roles; everything else in this folder is plain files:
 | Role the Plane requires | Home-ecosystem binding | Rebind to (examples) |
 |---|---|---|
 | **Tamper-evident append-only ledger** (entity transitions, hash-chained) | `hub_core` store → `.hub/events.jsonl` | any event store, signed git log, ledgered DB |
-| **Schema-validated entity store with false-claim-unsatisfiable rules** (done⇒verified_by, etc.) | hub entities + `schema/*.json` + `seedhub` | Jira/Linear + required-field rules, GitHub Issues + CI schema check |
+| **Schema-validated entity store with false-claim-unsatisfiable rules** (done⇒verified_by+evidence, etc.) | hub entities + `schema/*.json` + `seedhub` | Jira/Linear + required-field rules, GitHub Issues + CI schema check |
 | **Fail-closed gate runner** (audit + invariant checks, exit≠0 blocks ship) | `manage.py hubaudit` + deploy gates | CI required checks, pre-receive hooks, pipeline gates |
 
 Rebinding rules:

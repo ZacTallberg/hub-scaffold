@@ -1,164 +1,182 @@
 # hub-scaffold
 
-An **event-sourced, verification-gated project hub** plus a **content-agnostic PROJECT/
-management plane** plus the **enforcement patterns** that keep both honest — extracted from a
-working multi-project system and scrubbed of every origin-specific detail so it can be adopted
-by any team, on any machine.
+`hub-scaffold` is a portable project operating system built around an append-only task/decision
+ledger. It combines:
 
-Three ideas, one package:
+1. an event-sourced Hub (`hub_core/` plus a Django adapter);
+2. a durable, content-agnostic management plane (`PROJECT/`);
+3. opt-in enforcement patterns for deployment, canaries, repository hygiene, and agent safety;
+4. campaign playbooks for maintaining, reviewing, extending, and building from the board.
 
-1. **The hub** (`hub_core/` + `adapters/`) — a small, framework-free event store and audit
-   engine. Every task, decision, and ADR is an append-only event; state is a projection;
-   "done" always carries who/what/evidence. Writes are token-gated over HTTP; reads are
-   public-safe. The Django adapter mounts it at `/hub` in an existing site.
+The design goal is not more ceremony. The default tracking loop is deliberately small—discover,
+claim, implement, complete with a note and evidence—while proof-heavy checks can be enabled where a
+failure mode justifies them.
 
-   **Optional local-worker launch.** A Windows adapter can expose a one-click worker control without
-   putting the Hub write token in the browser. The page pre-arms a short-lived, signed, single-use
-   grant; the workstation validates and burns it at the issuing Hub before starting an
-   operator-supplied agent wrapper. The adapter is vendor-neutral and disabled by default.
+## What is implemented
 
-**Flow-first by design.** The tracking floor is deliberately cheap — create, claim, complete
-with a note and a link; nothing else is mandatory. Proof requirements are a **dial, not a
-default** (`HUB_DONE_STRICTNESS`, see `adapters/django/MOUNTING.md`): day-to-day work runs
-`tracked`; flip a project to `strict` (dereferenced evidence + server-run verification
-commands) only where completions can't be taken on trust, e.g. autonomous agents. Likewise
-everything in `patterns/` is opt-in — adopt a gate when a failure mode has earned it.
-2. **The plane** (`PROJECT/`) — a canonical on-disk tree (charter, doctrine, handoff, ADRs,
-   registers, worklogs, verification specs) that any agent or human can pick up cold. It is
-   the durable half; the hub is the operable half.
-3. **The enforcement patterns** (`patterns/`) — the anti-false-green kit. The core failure
-   mode this system exists to kill: gates that are self-attested, bypassed, or "passed" on
-   code that never shipped. Every pattern here is an *out-of-process* check: a deploy contract
-   with a build-SHA canary, a pre-receive gate on the git host, a standing canary for the live
-   site, and an agent guard.
-4. **The campaigns** (`campaigns/`) — the robust agent-prompt playbooks that operate all of the
-   above: how to maintain, improve, and augment a project through multi-agent (or single-agent)
-   work without losing state or shipping false-green. The *verbs* to the hub+plane's nouns.
+- Canonical events in `PROJECT/.hub/events.jsonl`, hash-chained and append-only.
+- A rebuildable SQLite index with optimistic concurrency and aggregate-scoped idempotency.
+- JSON-Schema-validated tasks, ADRs, features, gaps, capabilities, deploys, and notes.
+- Derived dependency/urgency state, graph, collections, audit, and a browser dashboard.
+- A typed write API with one shared header token, expiring task leases, and a guarded completion
+  transition.
+- A focused computed audit for schemas, references, ADR numbering, event integrity, build
+  coherence, selected Django safety settings, and mutation-route guards.
+- A minimal mounted Django example and end-to-end refusal tests.
+- An optional Windows one-click worker launcher that keeps the general write token out of the
+  browser and closes its host window when the configured wrapper finishes.
 
-## Layout
+The plane, patterns, and campaigns also specify controls that require adopter wiring. Merely copying
+a deploy pattern, verification contract, or conformance-scanner specification does not activate it.
+The exact shipped-versus-normative boundary is documented in
+[Architecture and guarantees](docs/ARCHITECTURE.md).
 
+## Security boundary—read before deploying
+
+Hub reads are unauthenticated by default and expose the complete projected board. “Public read” does
+not mean automatically redacted: keep sensitive material out of entities or add an authentication
+boundary.
+
+The general `HUB_WRITE_TOKEN` is more powerful than an ordinary tracker token. A write-token holder
+can create a task with a `verification_command`; completion executes that command on the Hub server.
+Strict evidence URLs are fetched by that server as well. Treat the token as command-execution-grade,
+give it only to trusted operators/agents, and isolate the service accordingly. The optional browser
+launcher never receives it. Read [SECURITY.md](SECURITY.md) before enabling writes or worker launch.
+
+## Documentation map
+
+| Need | Start here |
+|---|---|
+| Understand components, storage, flows, and guarantees | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Threat model, trust boundaries, deployment checklist | [SECURITY.md](SECURITY.md) |
+| Mount the Hub into Django | [adapters/django/MOUNTING.md](adapters/django/MOUNTING.md) |
+| Operate the HTTP API | [adapters/django/HUB-API.md](adapters/django/HUB-API.md) |
+| Run, back up, restore, rotate, or troubleshoot | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Test locally or in CI | [docs/TESTING.md](docs/TESTING.md) |
+| Install the optional Windows worker adapter | [adapters/windows/README.md](adapters/windows/README.md) |
+| Understand the human/agent laws | [OPERATING-AGREEMENT.md](OPERATING-AGREEMENT.md) |
+| Run a maintenance/build/review campaign | [campaigns/README.md](campaigns/README.md) |
+| Bootstrap or rebind the management plane | [PROJECT-PLANE-BOOTSTRAP.md](PROJECT-PLANE-BOOTSTRAP.md) |
+| See scaffold release history | [CHANGELOG.md](CHANGELOG.md) |
+| Contribute safely | [CONTRIBUTING.md](CONTRIBUTING.md) |
+
+Agents should read [AGENTS.md](AGENTS.md) first.
+
+## Repository layout
+
+```text
+hub_core/                       framework-free event store, fold, audit, rendering, grants
+adapters/django/hub/            mounted Django app and management commands
+adapters/windows/               optional per-user local worker bridge
+PROJECT/                        canonical management-plane templates and entity schemas
+example/                        runnable strict-mode Django integration fixture
+patterns/                       opt-in deploy/canary/repository/agent enforcement patterns
+campaigns/                      operating playbooks
+governance/                     agent-rule templates installed by init.sh
+docs/                           architecture, operations, and testing manuals
+tools/                          bootstrap, scrub, documentation, and end-to-end checks
+PROJECT-PLANE-BOOTSTRAP.md      standalone plane specification with embedded templates
 ```
-README.md                       you are here (human orientation)
-AGENTS.md                       machine-first orientation — read first if you're an agent
-requirements.txt                runtime deps (hub_core is stdlib; the Django adapter needs Django)
-.github/workflows/ci.yml        sample CI: runs the scrub + selftest as a required, un-self-attestable gate
-.gitignore                      keeps selftest/runtime artifacts (event logs, sqlite, pycache) untracked
-init.sh                         stamp a new project from this scaffold (the only sanctioned way)
-OPERATING-AGREEMENT.md          the human/agent working agreement adopters take on
-PROJECT-PLANE-BOOTSTRAP.md      full spec of the plane, with every template embedded verbatim
-PROJECT/                        the canonical plane tree (copied into your project by init.sh)
-hub_core/                       pure-python engine: event store, projections, audit, validation
-  tests/                        stdlib-unittest self-tests (no framework, run anywhere)
-adapters/django/hub/            Django app: /hub pages, read API, token-gated write API
-adapters/django/MOUNTING.md     how to wire the app into an existing Django site
-adapters/django/HUB-API.md      agent-facing API reference: the operate-as-a-loop contract + every endpoint
-adapters/windows/               optional fail-closed hub-worker:// workstation bridge
-example/                        minimal runnable Django site wired to the adapter (selftest uses it)
-campaigns/                      the robust agent-prompt playbooks that RUN the system
-  00-orchestration-method.md    fan-out → verify → close → roll up; the adversarial-verify rule
-  maintain-audit-reconcile.md   MAINTAIN: reconcile code ↔ hub ↔ live ↔ docs; regenerate the anchor
-  improve-moe-review.md         IMPROVE: multi-expert review → adversarial verify → committed report
-  augment-hub.md                AUGMENT: add an entity type + tab, or backfill structure across repos
-  feature-buildout.md           BUILD: the DISCOVER→CLAIM→IMPLEMENT→RECORD→VERIFY loop + roles
-patterns/
-  deploy-contract.md            what a trustworthy ship step must guarantee
-  deploy.sh.example             reference deploy script implementing the contract
-  standing-canary.sh            recurring liveness/freshness probe for the deployed site
-  pre-receive-gate.sh           git-host hook: rejects credential-shaped pushes server-side
-  agent-guard.py                guardrail for autonomous agents operating the hub
-  conformance-scan.md           periodic drift scan across adopted projects
-governance/
-  CLAUDE.md.template            agent governance file (init.sh renames to CLAUDE.md)
-  AGENTS.md.template            same, for other agent runtimes (renamed to AGENTS.md)
-tools/
-  build_bootstrap.py            (re)embeds PROJECT/ templates into the bootstrap doc; --check gates drift
-  scrub_check.sh                agnosticism gate: fails on any origin-specific residue
-  selftest.sh                   end-to-end proof: scrub + unit tests + doc check + example boot + API refusal ladder
+
+## Quickstart: prove the scaffold
+
+Prerequisites are Git, Bash, and Python. `hub_core` supports Python 3.10+ with no third-party
+runtime dependencies. The example needs Django; install the repository requirements first.
+
+```bash
+python -m pip install -r requirements.txt
+bash tools/selftest.sh
 ```
 
-## 10-minute adoption runbook
+Use `PYTHON=python3` when needed. Windows users should use Git Bash and a Windows Python
+interpreter; exact recipes are in [docs/TESTING.md](docs/TESTING.md).
 
-Prereqs: bash, git, python3, and (for the web hub) a Django project to mount into.
+The self-test runs the agnosticism scrub, core tests, documentation/schema checks, generated
+bootstrap parity, a real Django boot, the write-API refusal ladder, strict completion, and the
+launch grant boundary.
 
-1. **Init** — stamp your project:
+## Stamp a new project
 
-   ```bash
-   bash init.sh ../my-project my-project "My Project" https://my-project.example.com
-   ```
+`init.sh` requires a new or empty target directory and creates a Git repository with a genesis
+commit:
 
-   This copies `PROJECT/`, `hub_core/`, `adapters/`, `patterns/`, the operating agreement, and
-   the governance files (renamed into place), substitutes `{{PROJECT_KEY}}` / `{{BRAND}}` /
-   `{{LIVE_URL}}` across all text files (fail-closed if any placeholder survives), and makes a
-   genesis commit on `main`.
+```bash
+bash init.sh ../my-project my-project "My Project" https://my-project.example.com
+```
 
-2. **Mount** — wire the hub into your Django site per `adapters/django/MOUNTING.md`: add the
-   `hub` app, include its urls under `/hub/`. Never mount it at the front door of a public
-   site; `/hub` is an operations surface.
+It copies `PROJECT/`, `hub_core/`, adapters, patterns, the operating/security agreements, and the
+architecture contract; installs the governance templates as `CLAUDE.md` and `AGENTS.md`; substitutes `{{PROJECT_KEY}}`, `{{BRAND}}`, and
+`{{LIVE_URL}}`; and fails if a placeholder survives. It does not merge into an existing project or
+mount the Django app automatically.
 
-3. **Seed** — set a write token and load the board genesis:
+Then, inside the new project:
 
-   ```bash
-   export HUB_WRITE_TOKEN=<random-secret>   # writes are fail-closed until this exists
-   python manage.py migrate
-   python manage.py seedhub                 # imports PROJECT/seed.json into the event store
-   ```
+1. Mount `adapters/django/hub` under `/hub/` using
+   [MOUNTING.md](adapters/django/MOUNTING.md). Never mount it at the site root.
+2. Decide whether Hub reads may be unauthenticated; add a protection boundary if not.
+3. Generate and inject a write token through the deployment secret mechanism.
+4. Validate and seed genesis state.
+5. Put `hubaudit` and the project's own high-value tests in CI/pre-deploy.
+6. Adapt the deploy/canary patterns to the actual platform and alert channel.
 
-4. **Gate** — run the computed audit and make it block:
+```bash
+export HUB_WRITE_TOKEN='<generated secret>'
+python manage.py migrate
+python manage.py seedhub --dry-run
+python manage.py seedhub
+python manage.py hubaudit
+```
 
-   ```bash
-   python manage.py hubaudit    # exit 0 pass / 2 violation / 1 internal error (fail-closed)
-   ```
+## The completion dial
 
-   Wire `hubaudit` into CI and into your deploy script *before* the ship step. An audit that
-   can be skipped is decoration.
+`HUB_DONE_STRICTNESS` separates cheap tracking from stronger proof:
 
-5. **Deploy contract** — read `patterns/deploy-contract.md`, adapt
-   `patterns/deploy.sh.example` to your infrastructure, install
-   `patterns/pre-receive-gate.sh` on your git host, and schedule
-   `patterns/standing-canary.sh`. The contract's heart is the build-SHA canary: after every
-   deploy, the live site must serve back the exact SHA you shipped, checked by a process other
-   than the one that claimed success.
+- `tracked` (default): completion requires a live claim, acceptance note, and at least one non-empty
+  evidence value. A `verification_command` is optional, but the server executes it when present.
+- `strict`: every evidence item must resolve as a URL, repository commit, or existing path resolved
+  from `BASE_DIR` (absolute paths are accepted too), and the task must carry a passing server-run
+  verification command.
 
-6. **Optional worker button** — if this project intentionally launches local workers, follow
-   `adapters/windows/README.md`: enable the narrow server capability, provide a vendor-specific
-   wrapper, and register the per-user protocol handler. This is not required to operate the Hub.
+Both modes refuse direct `status: done` writes and block completion on critical Hub audit failures.
+Strict mode provides stronger mechanical evidence, but it also makes the write-token command
+execution boundary unavoidable. See [the API completion gate](adapters/django/HUB-API.md#the-completion-gate-hubapicomplete--what-it-checks-in-order).
 
-Verify the whole scaffold itself at any time with `bash tools/selftest.sh`.
+## Optional worker launch
 
-## What requires org-specific wiring
+Worker launch is off by default. When intentionally enabled, the Hub page pre-mints a short-lived
+grant using same-origin CSRF protection, then opens the registered `hub-worker://` handler on the
+real click. The workstation validates the exact issuer and consumes the single-use grant with its
+local token before starting an operator-supplied wrapper. There is no browser token prompt, unlock
+overlay, popup worker window, or vendor-specific agent command in the scaffold.
 
-The scaffold is deliberately incomplete in exactly these places — they cannot be generic:
+Follow [the Windows adapter guide](adapters/windows/README.md); do not enable the server setting
+without installing and testing the workstation half.
 
-- **The ship step.** `patterns/deploy.sh.example` shows the contract (gate → build → ship →
-  SHA canary → record), but the "ship" line is your platform's: container push, rsync,
-  platform CLI, whatever. Keep the surrounding contract intact when you fill it in.
-- **Alerting.** `patterns/standing-canary.sh` detects a dead or stale live site; where the
-  alarm goes (pager, chat webhook, email) is yours to wire. A canary nobody hears is not a
-  canary.
-- **CI.** The audit gate (`manage.py hubaudit`), the bootstrap doc check
-  (`tools/build_bootstrap.py --check`), and the hub_core unit tests are all plain commands —
-  add them to whatever CI you run, and install the pre-receive hook on whatever git host you
-  use.
-- **Secrets.** `HUB_WRITE_TOKEN` must be generated per project and injected via your secret
-  mechanism. It is never committed; writes are disabled (fail-closed) until it exists.
-- **Worker command.** The optional launcher provides authorization and process lifecycle, not an
-  opinionated agent CLI. Its wrapper is yours; the adapter passes stable context through environment
-  variables and closes the child window when that wrapper exits.
+## What adopters must supply
 
-## Maintenance loop
+- The actual build and ship commands.
+- A production process server, TLS/reverse-proxy configuration, and any read authentication.
+- Durable storage and tested backup/restore for `HUB_DIR`.
+- A secret manager and write-token rotation process.
+- The build stamp and live front-door canary.
+- Alert delivery and scheduling for standing monitors.
+- Project-specific verification commands, tests, schemas, and business invariants.
+- The vendor-specific local worker wrapper, if worker launch is used.
 
-Adoption is an event; staying honest is a loop:
+The repository intentionally does not ship a machine-wide/session-memory system. The Hub and
+`PROJECT/` are durable project records; general agent memory is an environment-level concern.
 
-- **Audit gate in CI, always blocking.** `hubaudit` runs on every push and before every
-  deploy. When it fails, fix the violation or record an ADR that changes the rule — never
-  bypass it. Bypasses are how false-green systems are born.
-- **Conformance scan.** On a schedule (weekly is a good start), run the checklist in
-  `patterns/conformance-scan.md` across every adopted project: gate still wired? canary still
-  scheduled and heard? write token still fail-closed? deploy script still SHA-stamped?
-  Drift is silent; the scan makes it loud.
-- **ADR discipline.** Every decision that changes architecture, rules, or scope gets an ADR
-  through the hub's write API (which validates and versions it) — including decisions to relax
-  a gate. The board is only trustworthy if the decisions that shaped it are on it.
-- **Doc integrity.** `tools/build_bootstrap.py --check` keeps `PROJECT-PLANE-BOOTSTRAP.md`
-  byte-identical to the live templates, so the spec can never quietly diverge from what
-  `init.sh` actually stamps.
+## Maintenance
+
+- Run the full self-test before commits/releases that change core, adapters, schemas, docs, or tools.
+- If any `PROJECT/` template changes, run `python tools/build_bootstrap.py` and commit the regenerated
+  `PROJECT-PLANE-BOOTSTRAP.md`.
+- Run `python tools/docs_check.py` to catch broken local links and schema-mirror drift.
+- Run `bash tools/scrub_check.sh` before publishing to keep the scaffold environment-agnostic.
+- Schedule the conformance scan described in `patterns/` only after implementing its registry and
+  alert bindings.
+
+## License status
+
+No license is currently granted. Public visibility does not itself grant permission to copy,
+modify, or redistribute the repository. Add an explicit license before offering it for reuse.

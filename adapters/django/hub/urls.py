@@ -1,5 +1,8 @@
-"""The agent-operable hub at /hub — public-safe reads, token-gated writes (X-Write-Token).
-Rendered entirely by hub_core (shell.render); no Django templates. NEVER mount at the front door."""
+"""The agent-operable Hub at /hub — unauthenticated reads and explicitly gated mutations.
+
+Rendered entirely by hub_core (shell.render); no Django templates. The host must add read
+authentication when entity data is not public. NEVER mount at the front door.
+"""
 from django.urls import path
 
 from . import hub_api, hub_write, hubsite

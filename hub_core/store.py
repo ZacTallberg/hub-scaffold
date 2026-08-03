@@ -2,8 +2,8 @@
 
 Canonical truth = PROJECT/.hub/events.jsonl (one canonical-JSON event per line, append-only).
 PROJECT/.hub/events.db (SQLite) is a DERIVED index used as the transactional gatekeeper for
-optimistic-concurrency head versions + idempotency, and for fast queries. The index is rebuilt
-from the JSONL on init, so a crash between the JSONL append and the index commit self-heals
+optimistic-concurrency head versions + idempotency, and for fast queries. The index is reconciled
+from JSONL on init and rebuilt when its count/head metadata differs, so a crash between the JSONL append and the index commit self-heals
 (the JSONL is the durable source). Stdlib only (works in Django and in single-file WSGI).
 """
 import os
@@ -105,8 +105,9 @@ class EventStore:
         return out
 
     def _reconcile(self):
-        """Heal the index from the canonical JSONL. CONTENT-AWARE: rebuilds whenever the chain-head
-        hash differs (catches a stale OR forged-but-same-row-count DB), not only on a row-count gap.
+        """Heal the index from the canonical JSONL. Rebuild whenever the indexed chain-head
+        metadata differs, not only on a row-count gap. Ordinary in-place DB edits are separately
+        blocked by triggers; JSONL chain verification remains the integrity authority.
         TORN-LINE TOLERANT: a power-loss-mid-fsync leaves a partial FINAL line — quarantine it
         (truncate the log to the last good line); a non-final parse failure is real corruption -> raise."""
         import json

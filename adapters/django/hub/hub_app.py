@@ -10,9 +10,11 @@ substitutes at scaffold time):
     HUB_BRAND         human brand for titles, e.g. "Acme".             Default "{{BRAND}}".
     HUB_BUILD_STAMP   BASE_DIR-relative path of the build-sha stamp the deploy pipeline bakes
                       into the artifact.                               Default "build_sha.txt".
+    HUB_DONE_STRICTNESS completion proof dial: tracked or strict.       Default "tracked".
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
-    HUB_WRITE_TOKEN   write-API bearer token (see hub_write._token_ok; fail-closed when empty).
+    HUB_WRITE_TOKEN   general write bearer token; verification commands make it
+                      command-execution-grade (see SECURITY.md). Fail-closed when empty.
     HUB_WORKER_LAUNCH_ENABLED   expose the optional grant-backed local launcher. Default False.
     HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
@@ -255,6 +257,7 @@ def run_audit(st=None, served=None) -> dict:
 import os as _os
 import time as _time
 import uuid as _uuid
+from hub_core.process_lock import ProcessFileLock
 
 CLAIMS = HUB_DIR / "claims"
 
@@ -282,14 +285,21 @@ def _write_lease(task_id, lease):
 
 
 def claim(task_id, agent, ttl_s=900):
-    now = _time.time()
-    cur = _read_lease(task_id)
-    if cur and cur.get("expires", 0) > now and cur.get("agent") != agent:
-        return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
-    lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
-             "claimed": now, "expires": now + ttl_s}
-    _write_lease(task_id, lease)
-    return {"ok": True, **lease}
+    with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
+        now = _time.time()
+        cur = _read_lease(task_id)
+        if cur and cur.get("expires", 0) > now:
+            if cur.get("agent") != agent:
+                return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
+            # Retrying the same claim must not silently invalidate the fencing token already held
+            # by this worker. Renew the lease in place and return that same token.
+            cur["expires"] = now + ttl_s
+            _write_lease(task_id, cur)
+            return {"ok": True, **cur}
+        lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
+                 "claimed": now, "expires": now + ttl_s}
+        _write_lease(task_id, lease)
+        return {"ok": True, **lease}
 
 
 def lease_valid(task_id, token):
@@ -298,9 +308,31 @@ def lease_valid(task_id, token):
 
 
 def heartbeat(task_id, token, ttl_s=900):
-    cur = _read_lease(task_id)
-    if not cur or cur.get("token") != token:
-        return {"ok": False, "reason": "no/stale lease"}
-    cur["expires"] = _time.time() + ttl_s
-    _write_lease(task_id, cur)
-    return {"ok": True, "expires": cur["expires"]}
+    with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
+        cur = _read_lease(task_id)
+        if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
+            return {"ok": False, "reason": "no/stale lease"}
+        cur["expires"] = _time.time() + ttl_s
+        _write_lease(task_id, cur)
+        return {"ok": True, "expires": cur["expires"]}
+
+
+def release_lease(task_id, token) -> bool:
+    """Remove exactly the lease named by its fencing token; never release a successor's claim."""
+    with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
+        cur = _read_lease(task_id)
+        if not cur or cur.get("token") != token:
+            return False
+        try:
+            _claim_path(task_id).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Completion is already durable at this point. If Windows temporarily holds the
+            # sidecar open, expire it in place so it cannot fence a successor or surface as live.
+            cur["expires"] = 0
+            try:
+                _write_lease(task_id, cur)
+            except OSError:
+                return False
+        return True

@@ -109,10 +109,13 @@ if mkdir -p "$BLESSED_DIR" 2>/dev/null && printf '%s %s\n' "$SHA" "$LIVE_URL" > 
 else
   # TODO: if the canary runs on a different machine, replace this with your transport, e.g.:
   #   printf '%s %s\n' "$SHA" "$LIVE_URL" | ssh "$MONITOR_HOST" "cat > $BLESSED_DIR/$PROJECT"
-  echo "WARN: could not write blessed record ($BLESSED_DIR/$PROJECT) — standing canary NOT updated." >&2
+  echo "ERROR: could not write blessed record ($BLESSED_DIR/$PROJECT) — Law 4 is not satisfied." >&2
+  exit 1
 fi
 
-# --- Deploy record: make served==deployed==HEAD checkable from the repo -----------------------
+# --- Local operator stamp --------------------------------------------------------------------
+# This is NOT the mounted Hub's deploy entity or running PROJECT/state.json. A Hub adopter must
+# add its platform-specific post-canary writer as described in deploy-contract.md.
 printf '%s\n' "$SHA" > "$SHA_FILE"
 echo "==> done: $PROJECT @ $SHA is live at $LIVE_URL"
 echo "==> record law: the task/ticket for this work names $SHA as its live evidence."
