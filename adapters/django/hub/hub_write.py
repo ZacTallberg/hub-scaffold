@@ -89,9 +89,8 @@ def _evidence_problem(ev):
     return "not a resolvable URL, commit sha, or existing path from BASE_DIR"
 
 
-def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
+def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype):
     """Validate the MERGED entity, then append. Returns (response_dict, http_status)."""
-    s = hub_app.store()
     state = hub_app.current_state(s)
     existing = state["entities"].get(eid, {})
     # OCC: updating an existing entity REQUIRES expected_version (else concurrent writes lose).
@@ -111,6 +110,16 @@ def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
     return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)
+
+
+def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
+    """Append using a request-owned store and always release its database handle."""
+    s = hub_app.store()
+    try:
+        return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
+                                  agent=agent, idem=idem, etype=etype)
+    finally:
+        s.close()
 
 
 @writer
@@ -266,11 +275,15 @@ def decision(request, b):
     if not topic or not choice:
         return JsonResponse({"errors": [{"code": "need_topic_choice"}]}, status=400)
     idem = "decision:" + hashlib.sha256((topic + choice).encode("utf-8")).hexdigest()[:16]
-    ev = hub_app.store().append(
-        aggregate=f"{hub_app.PROJECT_KEY}:decision:{idem[-12:]}", type="decision.logged",
-        payload={"topic": topic, "choice": choice, "rationale": b.get("rationale"),
-                 "invalidates": b.get("invalidates", []), "refs": b.get("refs", [])},
-        expected_version=None, agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
+    s = hub_app.store()
+    try:
+        ev = s.append(
+            aggregate=f"{hub_app.PROJECT_KEY}:decision:{idem[-12:]}", type="decision.logged",
+            payload={"topic": topic, "choice": choice, "rationale": b.get("rationale"),
+                     "invalidates": b.get("invalidates", []), "refs": b.get("refs", [])},
+            expected_version=None, agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
+    finally:
+        s.close()
     return JsonResponse({"data": {"event": ev["event_id"]}})
 
 

@@ -78,7 +78,14 @@ def store():
 
 
 def current_state(st=None):
-    return _project.state((st or store()).events())
+    """Fold the board, closing only a store opened by this helper."""
+    if st is not None:
+        return _project.state(st.events())
+    owned = store()
+    try:
+        return _project.state(owned.events())
+    finally:
+        owned.close()
 
 
 def _git_head():
@@ -230,8 +237,7 @@ def route_guard_adapter(state):
     return viols
 
 
-def run_audit(st=None, served=None) -> dict:
-    s = st or store()
+def _run_audit_with_store(s, served=None) -> dict:
     state = current_state(s)
     bm = build_meta(served)
     coh = {"head": bm["head"], "sha": bm["sha"], "served": served}
@@ -251,6 +257,17 @@ def run_audit(st=None, served=None) -> dict:
         coh["unknown_severity"] = "warn"
     return _audit.audit(state, registry(), store=s, coherence=coh,
                         adapters=[settings_ast_adapter, route_guard_adapter])
+
+
+def run_audit(st=None, served=None) -> dict:
+    """Audit the board while preserving ownership of a caller-provided store."""
+    if st is not None:
+        return _run_audit_with_store(st, served=served)
+    owned = store()
+    try:
+        return _run_audit_with_store(owned, served=served)
+    finally:
+        owned.close()
 
 
 # ---- agent claims: a lease + fencing token so exactly one agent owns a task ----

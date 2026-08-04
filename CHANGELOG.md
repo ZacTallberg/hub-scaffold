@@ -5,6 +5,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+- Closed request-scoped EventStore handles across state, audit, read-snapshot, append, and decision
+  paths while preserving caller ownership of explicitly supplied stores; added focused regression
+  coverage for normal and exceptional exits.
 - Replaced the per-change full-test expectation with impact-aware fast checks and a manually invoked,
   isolated full verifier.
 - Added a reusable disposable `verification-closer` skill and campaign prompt with risk-based trigger,

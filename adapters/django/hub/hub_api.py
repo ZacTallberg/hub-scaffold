@@ -15,10 +15,13 @@ _COLLECTION = {"task": "tasks", "adr": "adrs", "feat": "feats", "gap": "gaps", "
 
 def _snapshot(served=None):
     s = hub_app.store()
-    state = hub_app.current_state(s)
-    audit = hub_app.run_audit(s, served=served)
-    build = hub_app.build_meta(served)
-    snap = projections.hub_snapshot(state, build=build, audit=audit)
+    try:
+        state = hub_app.current_state(s)
+        audit = hub_app.run_audit(s, served=served)
+        build = hub_app.build_meta(served)
+        snap = projections.hub_snapshot(state, build=build, audit=audit)
+    finally:
+        s.close()
     if hub_app.worker_launch_enabled():
         from django.urls import reverse
 
