@@ -1,5 +1,13 @@
 # AGENTS.md — orientation for an agent that just pulled this repo
 
+**This repo is a GENERATED EXPORT — do not commit improvements here.** It is a scrubbed export of
+an upstream canonical hub template, regenerated whenever that template changes. Anything you fix
+here is lost on the next export and forks the engine in the meantime. If you find a defect or an
+improvement: fix it upstream in the canonical template and re-export. What legitimately lives in
+this layer is the export machinery itself — the agnosticism gate (`tools/scrub_check.sh`, whose
+`--selftest` proves it catches a seeded violation AND stays quiet on boundary-safe text), the
+five-step `tools/selftest.sh`, `init.sh`, `example/`, and the bootstrap embedding.
+
 Read this first. It is the machine-first map of the whole system: what's here, how to prove it works,
 how to use it, how to operate it, and — importantly — **what is deliberately NOT here** so you don't
 mistake a design choice for a missing piece. (`README.md` is the human-oriented version; this is yours.)

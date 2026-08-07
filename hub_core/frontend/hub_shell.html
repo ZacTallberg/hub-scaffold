@@ -14,15 +14,20 @@
 <body class="hub-app">
 <a class="skip-link" href="#tabPanes">Skip to content</a>
 
+<!-- Everything the dialog must shut out lives inside #appShell: openModal sets inert on it, which
+     removes the background from BOTH the tab order and the accessibility tree. aria-modal alone
+     only asks assistive tech to do that; inert makes it true for keyboard users too. The modal and
+     the toast/announcer live outside this wrapper so they stay reachable while it is inert. -->
+<div id="appShell">
 <nav class="navbar-main">
   <div class="navbar-brand"><span class="brand-mark" id="brandMark" aria-hidden="true"></span> {{brand}}</div>
   <div class="navbar-right">
-    <div class="status-pill" id="statusPill" role="status" aria-live="polite">
-      <span class="status-dot" aria-hidden="true"></span><span id="statusText">Ready</span><span class="clock" id="clock" aria-hidden="true"></span>
+    <div class="status-pill connecting" id="statusPill" role="status" aria-live="polite" data-state="connecting">
+      <span class="status-dot" aria-hidden="true"></span><span id="statusText">Connecting</span><span class="status-meta" id="statusMeta"></span><span class="clock" id="clock" aria-hidden="true"></span>
     </div>
-    <a class="btn-white" id="launchWorkerBtn" href="#" data-launch="1" data-count="1" hidden
-       title="Launch one local worker. Requires the optional workstation adapter to be registered once.">Launch Worker</a>
-    <button class="btn-white" id="refreshBtn" type="button"><span class="btn-ico" id="refreshIco" aria-hidden="true"></span><span class="btn-label">Refresh</span></button>
+    <a class="btn-white" id="launchWorkerBtn" href="#" data-launch="1" data-count="1" title="Launch ONE local worker that pulls the next ready task and completes it with a receipt. Requires tools/register-worker-protocol.ps1 to have been run once.">▶ Launch Worker</a>
+    <a class="btn-white" id="launch4Btn" href="#" data-launch="1" data-count="4" title="Launch FOUR independent workers at once — splitscreened to the four corners, each in its own git worktree, all self-sequencing off the shared board via leases + the readiness rail.">▶▶ Launch 4</a>
+    <button class="btn-white" id="refreshBtn" type="button"><span class="btn-ico" id="refreshIco" aria-hidden="true"></span><span class="btn-label">Sync now</span></button>
     <button class="btn-white" id="paletteBtn" type="button" data-hub-palette-trigger title="Search — Ctrl/Cmd-K" aria-label="Open command palette">⌘K</button>
     <label class="sr-only" for="hub-theme-select">Theme</label>
     <select id="hub-theme-select" class="hub-theme-select btn-white" autocomplete="off" aria-label="Theme">
@@ -35,6 +40,7 @@
   <div class="tabs-bar" id="tabsBar" role="tablist" aria-label="Hub views"></div>
   <div id="tabPanes" style="flex:1;min-height:0;display:flex;flex-direction:column"></div>
 </div>
+</div><!-- /#appShell -->
 
 <div class="modal-overlay" id="universalModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
   <div class="modal-content">
@@ -48,6 +54,7 @@
 </div>
 
 <div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
+<div class="sr-only" id="liveAnnouncer" aria-live="polite" aria-atomic="true"></div>
 
 <script id="hub-data" type="application/json">{{snapshot_json}}</script>
 <script>{{hub_js}}</script>

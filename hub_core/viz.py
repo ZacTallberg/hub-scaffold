@@ -1,10 +1,10 @@
-"""viz.py — dependency-free inline-SVG dataviz helpers for the project hubs.
+"""viz.py — dependency-free inline-SVG dataviz helpers for the PINNACLE HUBs.
 
 Stack-neutral, stdlib only. Each function returns a complete ``<svg>`` STRING that can be
-dropped straight into a Django template (``{{ svg|safe }}``) OR a single-file WSGI f-string page.
+dropped straight into a Django template (``{{ svg|safe }}``) OR a single-file app's f-string ``_PAGE``.
 No matplotlib, no chart lib, no numpy, no deps. Identical bytes across every project hub.
 
-The four helpers (hub doctrine §8 / §11 "frontend kit"):
+The four helpers (PINNACLE HUB DOCTRINE §8 / §11 "frontend kit"):
   - ``sparkline(values, ...)``  — fps / drift / store-size trend off the /debug ring.
   - ``progress(done, total, ...)`` — segmented phase / coverage bar.
   - ``donut(pct, label, ...)``  — the headline audit % ring.

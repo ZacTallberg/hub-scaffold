@@ -23,7 +23,7 @@ def _asset(name):
 
 def render(snap, brand, csrf_token=""):
     """Return the full single-file HTML for the hub. `snap` = the /hub.json snapshot dict; `brand`
-    = the navbar title (e.g. 'Acme · Hub'). Escapes the JSON island (< -> \\u003c so a stray
+    = the navbar title (e.g. 'Project · Hub'). Escapes the JSON island (< -> \\u003c so a stray
     </script in any field can't close it) and inlined JS (</script -> <\\/script)."""
     snap_json = json.dumps(snap, separators=(",", ":")).replace("<", "\\u003c")
     repl = {

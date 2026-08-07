@@ -120,7 +120,7 @@ def _check(schema, value, path, root_doc, registry, errors):
         if "pattern" in schema:
             pat = schema["pattern"]
             # JSON-Schema/ECMA-262: $ is end-of-INPUT (no trailing-\n exception that Python's re.search
-            # allows). For anchored ^...$ patterns use fullmatch so e.g. "demo:task:0001\n" is rejected.
+            # allows). For anchored ^...$ patterns use fullmatch so e.g. "proj:task:0001\n" is rejected.
             ok = (re.fullmatch(pat, value) is not None) if pat.startswith("^") else (re.search(pat, value) is not None)
             if not ok:
                 errors.append(f"{path}: does not match pattern {pat}")
