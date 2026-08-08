@@ -13,6 +13,21 @@
     "phase": { "type": "string" },
     "acceptance": { "type": "string", "description": "Definition of done for this task." },
     "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Trusted server-side shell command run on completion whenever present; required only in strict mode. Possession of write authority can set this command." },
+    "verification_run": {
+      "type": "array",
+      "description": "Typed receipts of the verification_command being run OUT-OF-BAND by the worker. The exit-0 receipt is what grants done; the hub validates it and never executes the command itself (that was an RCE path).",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "command": { "type": "string", "minLength": 1 },
+          "exit_code": { "type": "integer" },
+          "output_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "ran_by": { "type": "string", "minLength": 1 },
+          "ran_at": { "type": "string" }
+        },
+        "required": ["command", "exit_code"]
+      }
+    },
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",

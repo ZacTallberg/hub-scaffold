@@ -13,22 +13,20 @@ to the public.
 | `POST /hub/api/launch-grant` | Same-origin CSRF, only when enabled | Mint a short-lived, action/task/count/issuer-bound launch capability; cannot mutate board entities |
 | Windows protocol handler | Local user context + configured issuer + local token file | Consume a valid grant and start the configured wrapper |
 
-### The write token is command-execution-grade
+### The write token is production-grade, but it is NOT code execution
 
-A task may contain `verification_command`. On completion, the Django server executes that value
-with `shell=True`, a working directory of `BASE_DIR`, and a five-minute timeout. This happens in
-`tracked` mode whenever a command is present and is mandatory in `strict` mode. Strict evidence
-URLs are also fetched by the server and can reach networks available to that process.
+The hub NEVER executes a task's `verification_command`. It used to — `subprocess.run(vc,
+shell=True)` inside `complete()` — which made the write token equivalent to arbitrary shell on
+the machine serving the hub, reachable by anyone who could write a task. That is removed.
 
-Consequently, possession of `HUB_WRITE_TOKEN` must be treated as equivalent to the ability to run
-commands as the Hub service account and make server-side HTTP requests. Do not give it to an
-untrusted browser, user, model, repository, or external integration. A reverse proxy, ordinary TLS,
-or the token header does not turn mutually untrusted writers into safe tenants.
+The RECEIPT GATE replaces it and is stronger evidence: the WORKER runs the command out-of-band
+and submits a typed receipt — `{command, exit_code, output_sha256, ran_by}` — bound so it cannot
+be borrowed into place (`command` must equal the task's own frozen `verification_command`,
+`exit_code` must be 0, `ran_by` must be the completing agent). The hub validates what it is
+handed; it never becomes the thing that runs untrusted strings.
 
-For an untrusted-agent deployment, isolate the Hub service account/container, restrict its network
-and filesystem access, and replace arbitrary verification commands with an allowlisted job runner
-before issuing credentials. That replacement is an adopter-specific security control; it is not
-implemented by this scaffold.
+Treat the write token as production credentials all the same: it grants `done`, deploy records
+and ruling ADRs. It just no longer grants a shell.
 
 ## Unauthenticated reads
 
