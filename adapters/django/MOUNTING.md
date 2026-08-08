@@ -80,7 +80,9 @@ start tracked, go strict for the projects (or the agents) that earn it.
 
 Security consequence: any configured `verification_command` is executed with `shell=True` as the
 Hub service account, even in tracked mode. Strict URL evidence is fetched from the server's network.
-`HUB_WRITE_TOKEN` is therefore command-execution-grade, not a low-privilege board-edit token. Only
+`HUB_WRITE_TOKEN` therefore grants terminal board authority (done, deploys, ADRs), though NOT code
+execution — the hub never runs a task's verification_command; the worker does, and submits a
+receipt. Only
 trusted operators/agents may hold it; isolate or replace the command runner before admitting
 untrusted writers.
 

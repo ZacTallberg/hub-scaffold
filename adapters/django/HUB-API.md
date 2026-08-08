@@ -12,7 +12,7 @@ the contract.
   cannot mutate board entities, and its separate authoritative consume remains write-token-gated.
 - **Write-token power:** a writer can set `verification_command`, which the server executes with
   `shell=True` during completion; strict evidence URLs are also fetched by the server. Treat the
-  token as command-execution-grade and read [SECURITY.md](../../SECURITY.md) before distributing it.
+  token as production credentials and read [SECURITY.md](../../SECURITY.md) before distributing it.
 - **Ids** are `{{PROJECT_KEY}}:<type>:<local>`, e.g. `{{PROJECT_KEY}}:task:0001`. Allocated once, never renumbered.
 - **Content type:** send `Content-Type: application/json`; bodies are JSON objects.
 

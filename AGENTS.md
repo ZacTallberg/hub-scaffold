@@ -72,7 +72,8 @@ disposable `verification-closer` only when consequence or sampling warrants it.
 ## Security boundary you must not infer away
 - **Unauthenticated does not mean sanitized.** `/hub` reads expose the complete projected board.
   Keep sensitive data out or add a real authentication boundary.
-- **The write token is command-execution-grade.** A writer can set `verification_command`, which the
+- **The write token grants terminal board authority, not code execution.** A writer sets
+  `verification_command`, which the
   worker runs OUT-OF-BAND, submitting a typed exit-0 receipt the hub validates — the hub never
   executes it (that was an RCE path and is gone); strict URL evidence IS still fetched by the server.
   Treat every token holder as trusted at the Hub service-account/network boundary. `SECURITY.md` is

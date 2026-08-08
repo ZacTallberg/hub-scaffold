@@ -12,7 +12,7 @@ This guide covers the shipped filesystem/Django deployment. For first-time integ
 | `HUB_BRAND` | `{{BRAND}}` | Human-facing Hub title |
 | `HUB_BUILD_STAMP` | `build_sha.txt` | `BASE_DIR`-relative running-build identity |
 | `HUB_SETTINGS_FILE` | resolved Django settings module | File scanned by the focused AST safety audit |
-| `HUB_WRITE_TOKEN` | empty | General writes disabled when empty; command-execution-grade when configured |
+| `HUB_WRITE_TOKEN` | empty | General writes disabled when empty; grants terminal board authority (done/deploy/ADR) when configured |
 | `HUB_DONE_STRICTNESS` | `tracked` | `tracked` or `strict`; unknown values behave as `tracked` |
 | `HUB_DIR` environment variable | `BASE_DIR/PROJECT/.hub` | Canonical runtime ledger, index, leases, and grant sidecars |
 | `HUB_ATTEST_SECRET` environment variable | generated `HUB_DIR/.attest-secret` | Optional stable launch-grant HMAC secret override; protect like a credential |

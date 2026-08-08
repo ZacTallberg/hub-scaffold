@@ -38,8 +38,9 @@ not mean automatically redacted: keep sensitive material out of entities or add 
 boundary.
 
 The general `HUB_WRITE_TOKEN` is more powerful than an ordinary tracker token. A write-token holder
-can create a task with a `verification_command`; completion executes that command on the Hub server.
-Strict evidence URLs are fetched by that server as well. Treat the token as command-execution-grade,
+can grant `done`, record deploys, and rule ADRs. It is NOT code execution: the Hub never runs a
+task's `verification_command` — the worker runs it out-of-band and submits a typed exit-0 receipt
+the Hub validates. Strict evidence URLs ARE still fetched by the server. Treat the token as production credentials,
 give it only to trusted operators/agents, and isolate the service accordingly. The optional browser
 launcher never receives it. Read [SECURITY.md](SECURITY.md) before enabling writes or worker launch.
 

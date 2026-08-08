@@ -144,7 +144,7 @@ and `1` for an internal error (treat as RED). The write path adds its own guards
 always requires a live claim, acceptance note, evidence, and a sound critical audit. In the default
 `tracked` mode a verification command is optional but runs when present; `strict` additionally
 requires a passing command and dereferenceable evidence. Because writers can set commands, the
-general write token is command-execution-grade.
+general write token grants terminal board authority.
 
 ## §3 The entity model
 

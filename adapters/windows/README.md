@@ -16,7 +16,7 @@ The trust chain is intentionally narrow:
 
 This is a privileged local capability. Any page can attempt to navigate to a custom protocol, so
 the signed grant, exact issuer match, and authoritative consume are all mandatory. The Hub's general
-write token is command-execution-grade; keep its workstation file private to the current user.
+write token grants terminal board authority; keep its workstation file private to the current user.
 
 ## Prerequisites
 

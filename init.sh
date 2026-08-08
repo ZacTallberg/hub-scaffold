@@ -112,12 +112,16 @@ Next steps (the adoption runbook lives in the scaffold README):
   2. Set a write token and seed the board:
        export HUB_WRITE_TOKEN=<random-secret>
        python manage.py migrate && python manage.py seedhub
-     Treat the token as command-execution-grade; read SECURITY.md before distributing it.
+     Treat the token as production credentials; read SECURITY.md before distributing it.
   3. Prove the gate works, then wire it into CI/pre-deploy:
        python manage.py hubaudit
-  4. Adopt the deploy contract: read patterns/deploy-contract.md, start from
-     patterns/deploy.sh.example, and install patterns/pre-receive-gate.sh on your git host.
-     patterns/standing-canary.sh needs your org's alerting hooked in before it is real.
+  4. Adopt the deploy contract: read patterns/deploy-contract.md for the four laws, then
+     patterns/deploy-runbook.md for how to satisfy them WITHOUT a deploy script (an agent
+     executes it and reads real output at each step; fill in the binding table once).
+     patterns/deploy.sh.example remains only if you specifically want a scripted path.
+     Install patterns/pre-receive-gate.sh on your git host, and patterns/standing-canary.sh
+     needs your org's alerting hooked in before it is real — both observe or refuse rather
+     than performing the deploy, which is why they stay as code.
   5. Read OPERATING-AGREEMENT.md with your team; it is the human half of the system.
 
 Live URL recorded as: $LIVE_URL
