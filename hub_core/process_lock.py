@@ -74,15 +74,22 @@ class ProcessFileLock:
         return int(raw) if raw.isdigit() else None
 
     def _breakable(self):
-        pid = self._holder_pid()
-        if pid is not None:
-            return not _pid_alive(pid)
+        try:
+            raw = self.path.read_text(encoding="ascii").strip()
+        except OSError:
+            return False
+        if raw.isdigit():
+            return not _pid_alive(int(raw))
+        if raw == "released":
+            return True                     # deliberate Windows-fallback release marker
         try:
             stat = self.path.stat()
         except OSError:
             return False
-        if stat.st_size == 0:
-            return True
+        # EMPTY is not "released": O_EXCL-create and the pid write are two syscalls, so an
+        # empty file can be a LIVE holder mid-create — instant reclamation of it let two
+        # processes win the same claim (caught by test_claim_linearizability, round ~210).
+        # Only age can break an empty/unrecognized lock.
         return time.time() - stat.st_mtime > self.LEGACY_STALE_S
 
     def __enter__(self):
@@ -127,9 +134,11 @@ class ProcessFileLock:
             try:
                 self.path.unlink()
             except OSError:
-                # Mark released if an indexer/scanner has the file open on Windows.
+                # Mark released if an indexer/scanner has the file open on Windows. The marker
+                # is a non-empty sentinel: EMPTY must stay ambiguous (a holder mid-create), so
+                # only this explicit word grants instant reclamation.
                 try:
-                    self.path.write_text("", encoding="ascii")
+                    self.path.write_text("released", encoding="ascii")
                 except OSError:
                     pass
         self._thread_lock.release()

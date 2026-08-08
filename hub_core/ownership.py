@@ -1,5 +1,15 @@
 """Resolve an executable task to its owner, from the generated ownership register.
 
+INSTANCE CONTENT, not template infrastructure: the register
+(`PROJECT/design/ownership-register.json`) is compiled from an instance's GDD requirement
+families by its own `tools/build_owner_register.py`. The canonical template ships NEITHER,
+so `load()` returns None here and `decorate()` passes tasks through untouched - the one real
+consumer (hub_core/projections.py) is written for exactly that. An instance that wants task
+ownership supplies the register and the builder, and takes the guard with them (ember has
+all three). The 08-07 backport folded this module and its guard into the template without
+the data either needs, which left a permanently red test against content that was never
+here.
+
 The register (`PROJECT/design/ownership-register.json`, compiled by `tools/build_owner_register.py`)
 says who builds, verifies, supports and rolls back each GDD requirement family. This module answers
 the inverse for a task: which family owns it, and therefore which role is responsible, who

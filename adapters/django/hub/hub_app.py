@@ -237,10 +237,39 @@ def route_guard_adapter(state):
     return viols
 
 
+# (base, head) -> paths changed between two commits, memoized: both ends are immutable, so the
+# answer cannot change, and a warm audit must not pay a subprocess. None means the range could not
+# be read (a shallow clone, an unfetched sha) — UNKNOWN, never "empty".
+_RANGE_TOUCH_CACHE = {}
+
+
+def _range_touched_paths(base, head):
+    key = (base, head)
+    if key in _RANGE_TOUCH_CACHE:
+        return _RANGE_TOUCH_CACHE[key]
+    try:
+        r = subprocess.run(["git", "-C", str(BASE_DIR), "diff", "--name-only", f"{base}..{head}"],
+                           capture_output=True, text=True, timeout=15)
+        val = None if r.returncode != 0 else tuple(sorted(
+            p.strip().replace("\\", "/") for p in (r.stdout or "").splitlines() if p.strip()))
+    except Exception:
+        val = None
+    _RANGE_TOUCH_CACHE[key] = val
+    return val
+
+
 def _run_audit_with_store(s, served=None) -> dict:
     state = current_state(s)
     bm = build_meta(served)
     coh = {"head": bm["head"], "sha": bm["sha"], "served": served}
+    # DEPLOY BOOKKEEPING IS NOT DRIFT. A deploy records its own sha in the state file AFTER the
+    # canary passes, so HEAD sits one commit past the shipped sha from then until the next deploy.
+    # coherence:repo demanded exact equality, which made it permanently high — reachable-green only
+    # in the instant between shipping and recording, and a red nobody can clear is how a board
+    # teaches its readers to ignore reds. The audit quiets it ONLY when the whole delta is that
+    # bookkeeping file; supply the delta so it can tell. A None answer is UNKNOWN and still fires.
+    if bm["head"] and bm["sha"] and bm["head"] != bm["sha"]:
+        coh["delta_paths"] = _range_touched_paths(bm["sha"], bm["head"])
     # Unknowable coherence must SAY SO — a None head/sha silently skipping the checks is the
     # vacuous-green failure mode (audit green while the running identity is unmeasured).
     if not bm["head"]:

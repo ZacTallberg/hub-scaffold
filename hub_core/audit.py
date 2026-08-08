@@ -100,6 +100,11 @@ def _v(vid, severity, invariant, observed, expected, *, kind="logic", remediatio
     }
 
 
+# The one file a deploy writes AFTER shipping: the deploy record itself. It is never part of
+# the served artifact, so a commit touching only this is bookkeeping, not unshipped work.
+DEPLOY_BOOKKEEPING_PATHS = frozenset({"PROJECT/state.json"})
+
+
 def audit(state, registry, *, store: EventStore = None, coherence: dict = None, adapters=None,
           suppress=None) -> dict:
     """Compute the audit. `state` from project.state(); `coherence` is {repo,deploy,sha,head,served,...}
@@ -145,9 +150,25 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     if coherence is not None:
         head, sha, served = coherence.get("head"), coherence.get("sha"), coherence.get("served")
         if head and sha and head != sha:
-            violations.append(_v("coherence:repo", "high", "state.last_deploy_sha == git HEAD",
-                                 f"sha={sha} head={head}", "equal", kind="probe",
-                                 remediation="redeploy or reconcile the deploy record"))
+            # A deploy is RECORDED after it ships (state.last_deploy_sha is written once the canary
+            # passes), so HEAD sits one commit past the shipped sha from then until the next deploy.
+            # Demanding exact equality made this permanently high — green only in the instant
+            # between shipping and recording. Quiet when the WHOLE delta is that bookkeeping file
+            # (it is never served, so nothing about the live artifact is stale); anything else in
+            # the range and the finding stands. A None delta means the range could not be read,
+            # which is unknown, not empty — report it rather than assuming either way.
+            delta = coherence.get("delta_paths")
+            bookkeeping_only = delta is not None and bool(delta) and set(delta).issubset(
+                DEPLOY_BOOKKEEPING_PATHS)
+            if not bookkeeping_only:
+                extra = ""
+                if delta is None:
+                    extra = " (could not read the commit range — treating as unshipped work)"
+                elif delta:
+                    extra = " (unshipped: %s)" % ", ".join(list(delta)[:4])
+                violations.append(_v("coherence:repo", "high", "state.last_deploy_sha == git HEAD",
+                                     f"sha={sha} head={head}{extra}", "equal", kind="probe",
+                                     remediation="redeploy or reconcile the deploy record"))
         if served and head and served != head:
             violations.append(_v("coherence:served", "high", "live served_sha == git HEAD",
                                  f"served={served} head={head}", "equal", kind="probe",
@@ -644,18 +665,29 @@ def _oracle_fingerprint():
     if _ORACLE_FINGERPRINT is None:
         import hashlib
         import inspect
+        # EVERY function that can change an answer — not just the entry point. analyze_oracle_diff
+        # is now a thin wrapper over oracle_diff_counts/oracle_reasons, so fingerprinting the
+        # wrapper alone let the whole decision body change without invalidating a cached verdict:
+        # a tamper audit switched off by having already run. Same class as a guard holding a copy
+        # of the code's filename — the list of what decides must not be a stale second copy.
         parts = []
-        for obj in (analyze_oracle_diff, asserting_helpers, _oracle_vc_files, _code_hit):
+        for obj in (analyze_oracle_diff, oracle_diff_counts, oracle_reasons, asserting_helpers,
+                    _oracle_vc_files, _code_hit, _oracle_pre_image, _string_spans):
             try:
                 parts.append(inspect.getsource(obj))
             except (OSError, TypeError):
                 parts.append(repr(obj))          # fingerprint degrades, never silently succeeds
-        parts += [repr(_ORACLE_SKIP), repr(_ORACLE_PATCH), repr(_ORACLE_EXIT0)]
+        parts += [repr(_ORACLE_SIGNALS), repr(_ORACLE_TEST_SURFACE), repr(_ORACLE_VC_PATH)]
         _ORACLE_FINGERPRINT = hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
     return _ORACLE_FINGERPRINT
 
 
 _GIT_DIR_MEMO = {}   # str(repo_dir) -> absolute .git dir (or None); a repo's .git never moves
+# The persistent cache file names, NAMED HERE so a test that must run cold deletes the file this
+# code actually writes. A second copy of a filename in a test is how a "cold" run silently became
+# a warm one and blinded every seeded regression that depended on it.
+ORACLE_VERDICT_CACHE_NAME = "hub-oracle-verdicts.sqlite3"
+COMMIT_TREE_CACHE_NAME = "hub-commit-trees.sqlite3"
 
 
 class _OracleVerdictCache:
@@ -682,7 +714,7 @@ class _OracleVerdictCache:
                 _GIT_DIR_MEMO[rkey] = r.stdout.strip() if r.returncode == 0 else None
             if not _GIT_DIR_MEMO[rkey]:
                 return
-            path = _os.path.join(_GIT_DIR_MEMO[rkey], "hub-oracle-verdicts.sqlite3")
+            path = _os.path.join(_GIT_DIR_MEMO[rkey], ORACLE_VERDICT_CACHE_NAME)
             db = sqlite3.connect(path, timeout=10)
             db.execute("CREATE TABLE IF NOT EXISTS verdicts "
                        "(k TEXT PRIMARY KEY, reasons TEXT NOT NULL)")
@@ -773,12 +805,18 @@ class _CommitTreeCache:
         try:
             import sqlite3
             import subprocess
-            r = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--absolute-git-dir"],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=20)
-            if r.returncode != 0:
+            # Same memo as the verdict cache: this constructor runs on every audit pass, and an
+            # unmemoized rev-parse here is a git spawn on every WARM audit — the exact cost the
+            # hot-memoize guard bounds at zero.
+            rkey = str(repo_dir)
+            if rkey not in _GIT_DIR_MEMO:
+                r = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--absolute-git-dir"],
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=20)
+                _GIT_DIR_MEMO[rkey] = r.stdout.strip() if r.returncode == 0 else None
+            if not _GIT_DIR_MEMO[rkey]:
                 return
-            path = _os.path.join(r.stdout.strip(), "ember-commit-trees.sqlite3")
+            path = _os.path.join(_GIT_DIR_MEMO[rkey], COMMIT_TREE_CACHE_NAME)
             db = sqlite3.connect(path, timeout=10)
             db.execute("CREATE TABLE IF NOT EXISTS trees (sha TEXT PRIMARY KEY, tree TEXT NOT NULL)")
             db.commit()
@@ -1012,6 +1050,10 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
     import json
     import os
 
+    # RESET PER RUN. _BATCH_STATS is module-global, so without this the failure list is a
+    # cumulative smear across every audit in the process and its count means nothing.
+    _BATCH_STATS["batch_failures"] = []
+
     cache_root = Path(cache_dir) if cache_dir else None
 
     def _cache_path(kind, key, suffix):
@@ -1219,6 +1261,22 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
                             % ", ".join(sorted(vc_files))))
     if cache is not None:
         cache.close()
+    # A GIT LOOKUP THAT FAILED IS A COMMIT THIS GUARD DID NOT ACTUALLY ANALYSE. _note_batch_failure
+    # recorded those into a list that NOTHING read — a swallow with a filing cabinet, and the most
+    # dangerous shape a guard can take: it reports clean while its coverage silently shrank. Warn,
+    # not blocking: degraded coverage is a reason to look, not a reason to refuse a completion.
+    failures = _BATCH_STATS.get("batch_failures") or []
+    if failures:
+        viols.append(_v(
+            "oracle:degraded", "warn",
+            "every commit behind a receipt is actually analysed (a git lookup that failed is a "
+            "commit this guard skipped, not a commit it cleared)",
+            "%d git lookup(s) failed during tamper analysis; first: %s"
+            % (len(failures), "; ".join(str(f)[:120] for f in failures[:3])),
+            "zero failed lookups", kind="probe",
+            remediation="re-run the audit against a reachable repo; a persistent failure means the "
+                        "tamper guard is running blind over those commits and its silence is not "
+                        "evidence they are clean"))
     return viols
 
 

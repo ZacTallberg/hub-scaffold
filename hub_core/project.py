@@ -270,9 +270,9 @@ def derive(entities: dict, now=None) -> dict:
     # impact establish urgency; the slice signal breaks what urgency leaves tied, and numbered
     # phase and stable id resolve the rest deterministically.
     #
-    # The slice term sits AFTER urgency, so it never overrides priority: ADR-0008 puts game work
+    # The slice term sits AFTER urgency, so it never overrides priority: ADR-0008 puts slice work
     # ahead of an equal-or-lower-priority instrument repair, which means a P0 repair still outranks
-    # a P2 game task. What it changes is the case the old key decided by phase number and then by
+    # a P2 slice task. What it changes is the case the old key decided by phase number and then by
     # id — arbitrary from the ruling's point of view — where two equally urgent tasks sit side by
     # side and exactly one of them advances a playable slice.
     #
