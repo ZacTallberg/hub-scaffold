@@ -27,7 +27,9 @@ from a working multi-project system. Nothing here names any specific person, hos
 - **plane** (`PROJECT/`) — the durable on-disk tree: charter, doctrine, ADRs, registers, research,
   verification contracts, the leader/worker/verifier protocol. What a cold session reads to pick up.
 - **patterns** (`patterns/`) — opt-in enforcement: deploy contract, standing canary, pre-receive gate,
-  agent guard, conformance-scan spec. None runs unless you install it.
+  agent guard, conformance-scan spec, and **worker longevity** (`worker-longevity.md`: a worker's
+  green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
+  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook

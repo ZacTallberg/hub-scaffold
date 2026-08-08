@@ -71,7 +71,7 @@ adapters/django/hub/            mounted Django app and management commands
 adapters/windows/               optional per-user local worker bridge
 PROJECT/                        canonical management-plane templates and entity schemas
 example/                        runnable strict-mode Django integration fixture
-patterns/                       opt-in deploy/canary/repository/agent enforcement patterns
+patterns/                       opt-in deploy/canary/repository/agent patterns + worker longevity
 campaigns/                      operating playbooks
 governance/                     agent-rule templates installed by init.sh
 docs/                           architecture, operations, and testing manuals

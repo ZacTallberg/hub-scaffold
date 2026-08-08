@@ -92,7 +92,16 @@ for ($index = 1; $index -le $Count; $index++) {
 You are an independent worker on the Hub, agent id '$agent'. Read AGENTS.md and
 OPERATING-AGREEMENT.md in full, then use the Hub's DISCOVER -> CLAIM -> IMPLEMENT -> RECORD ->
 VERIFY loop. Work only from claimed tasks. If the launcher targeted '$Task', prefer it when ready.
-Continue until no ready task remains. Keep the board synchronized with reality.
+Keep the board synchronized with reality.
+
+You are measured by COMPLETIONS, not by being busy: a seat that holds a claim and finishes nothing
+is failing however active it looks. An empty rail is a signal to REFILL it from real evidence -
+open findings, audit violations, unlanded work - not a reason to stop; "everything is done" is a
+fleet judgement one seat cannot make. If you finish a cycle having completed nothing, CHANGE what
+you are doing rather than repeating it: report a real step, then release the claim so a worker
+with fresh context can take it (a held claim starves every other seat), then record a finding
+naming the evidence and take work from a different source. Releasing is progress and an honest
+finding is a completion.
 "@
     Set-Content -LiteralPath $promptFile -Value $prompt -Encoding UTF8
     $child = @"
@@ -104,16 +113,62 @@ Set-Location '$(Quote-Single $Repo)'
 `$env:HUB_DIR = '$(Quote-Single (Join-Path $Repo "PROJECT\.hub"))'
 `$env:HUB_WORKER_PROMPT_FILE = '$(Quote-Single $promptFile)'
 `$Host.UI.RawUI.WindowTitle = '$(Quote-Single $agent)'
-try {
-    & '$(Quote-Single $WorkerCommand)'
-    `$workerExit = if (`$null -eq `$LASTEXITCODE) { 0 } else { `$LASTEXITCODE }
-} catch {
-    Write-Error `$_
-    `$workerExit = 1
-} finally {
-    Remove-Item -LiteralPath '$(Quote-Single $promptFile)' -Force -ErrorAction SilentlyContinue
+# THE SEAT DOES NOT END. Invoking the worker command once and exiting makes a seat's entire
+# existence a single run: the agent stops generating, the shell exits, the seat is gone - and no
+# amount of queue can save it. This loop is the seat's lifetime and has no terminal condition.
+# Your WorkerCommand should start a FRESH agent session each time it is called: the context is
+# meant to be disposable and the BOARD is the memory, which is what keeps a long-lived seat from
+# degrading as its window fills, and why it never needs to be told the overall goal.
+`$__heartbeat = Join-Path `$env:HUB_DIR ('seat-' + `$env:HUB_AGENT_ID + '.heartbeat')
+`$__cycle = 0
+`$__fails = 0
+`$__barren = 0
+while (`$true) {
+    `$__cycle++
+    # Liveness stamp BEFORE the run, so a seat killed mid-cycle still leaves evidence it existed.
+    # Whoever reads this must judge by the PID, never by the timestamp: a seat inside a long cycle
+    # is alive however old its stamp, and reaping on age kills seats for thinking hard.
+    Set-Content -LiteralPath `$__heartbeat -Value ((Get-Date).ToUniversalTime().ToString('o') + ' cycle ' + `$__cycle + ' pid ' + `$PID) -Encoding ASCII -ErrorAction SilentlyContinue
+
+    # COMPLETIONS ARE THE GREEN CONDITION, read from the ledger either side of the run. A seat
+    # cannot forge this: a `done` costs a receipt through the write gate. `is-active` is not
+    # `is-working`, and every other signal - a pid, a window, a heartbeat - calls a permanently
+    # stuck seat healthy.
+    `$__before = 0
+    try { `$__before = [int](& python (Join-Path `$env:HUB_REPO 'tools/seat_productivity.py') --agent `$env:HUB_AGENT_ID --done-count 2>`$null) } catch { }
+
+    # The seat's context is fresh each cycle, so it cannot remember being stuck; the ledger
+    # remembers for it and this variable is how that measurement reaches the worker.
+    `$env:HUB_BARREN_CYCLES = `$__barren
+    try {
+        & '$(Quote-Single $WorkerCommand)'
+        `$workerExit = if (`$null -eq `$LASTEXITCODE) { 0 } else { `$LASTEXITCODE }
+    } catch {
+        Write-Error `$_
+        `$workerExit = 1
+    }
+
+    `$__after = `$__before
+    try { `$__after = [int](& python (Join-Path `$env:HUB_REPO 'tools/seat_productivity.py') --agent `$env:HUB_AGENT_ID --done-count 2>`$null) } catch { }
+    if (`$__after -gt `$__before) {
+        `$__barren = 0
+        Write-Host ('completed ' + (`$__after - `$__before) + ' task(s) this cycle (total ' + `$__after + ')') -ForegroundColor Green
+    } else {
+        `$__barren++
+        Write-Host ('no completion this cycle (' + `$__barren + ' barren) - change what you do, do not repeat it') -ForegroundColor Yellow
+    }
+
+    # Backoff is DURABILITY, not a brake: the loop never exits on either branch. A transient
+    # outage - quota, network, a locked board - is survived rather than spun through at full speed
+    # until whatever would have recovered on its own is exhausted.
+    if (`$workerExit -eq 0) { `$__fails = 0; `$__wait = 3 }
+    else {
+        `$__fails++
+        `$__wait = [Math]::Min(300, 10 * [Math]::Pow(2, [Math]::Min(`$__fails, 5)))
+        Write-Host ('cycle exited ' + `$workerExit + ' (consecutive ' + `$__fails + ') - back in ' + `$__wait + 's; the seat does not stop') -ForegroundColor Yellow
+    }
+    Start-Sleep -Seconds `$__wait
 }
-exit `$workerExit
 "@
     Set-Content -LiteralPath $childFile -Value $child -Encoding UTF8
     if ($DryRun) {
@@ -121,8 +176,10 @@ exit `$workerExit
         Remove-Item -LiteralPath $promptFile, $childFile -Force -ErrorAction SilentlyContinue
         continue
     }
-    # The child owns exactly the worker's lifetime. No -NoExit: when the worker ends, its window
-    # ends too instead of accumulating a permanently stale terminal.
+    # The child IS the seat's lifetime and does not end on its own - it loops until the operator
+    # stops it. No -NoExit: if it ever does end, its window ends with it rather than accumulating
+    # a permanently stale terminal. The prompt file is deliberately NOT deleted after one run: the
+    # worker command reads it every cycle.
     Start-Process powershell.exe -ArgumentList @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"' + $childFile + '"')
     ) | Out-Null
