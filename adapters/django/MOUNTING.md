@@ -215,7 +215,8 @@ general `@writer` routes and the narrow origin-gated mint route.
    **422 evidence_unresolvable**. This is a resolvability check, not a path/network sandbox.
 5. In `strict` mode, the task must carry a `verification_command`; absence is
    **422 need_verification_command**. In either mode, if the task carries a command, the server
-   runs it through the shell (`cwd=BASE_DIR`, 300s timeout). A nonzero exit is
+   requires a typed exit-0 `verification_run` receipt the WORKER produced (the hub never runs the
+   command — that was an RCE path). A receipt for another command, or a nonzero exit, is
    **422 verify_failed** and an invocation/timeout error is **422 verify_error**.
 6. The audit is recomputed server-side at completion time; CRITICAL violations (tampered chain,
    schema corruption) block with **422 audit_unsound**.

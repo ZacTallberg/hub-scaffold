@@ -140,7 +140,7 @@ python manage.py hubaudit
 - `tracked` (default): completion requires a live claim, acceptance note, and at least one non-empty
   evidence value. A `verification_command` is optional, but the server executes it when present.
 - `strict`: every evidence item must resolve as a URL, repository commit, or existing path resolved
-  from `BASE_DIR` (absolute paths are accepted too), and the task must carry a passing server-run
+  from `BASE_DIR` (absolute paths are accepted too), and the completion must carry a typed exit-0 receipt for the task's own
   verification command.
 
 Both modes refuse direct `status: done` writes and block completion on critical Hub audit failures.

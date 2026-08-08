@@ -53,7 +53,7 @@ VERIFY    (the server re-runs the audit inside complete; a red audit refuses the
 | `/hub/api/task` | Create: `title`, optional `agent`; update: `id` + `expected_version` plus changed fields. Optional `priority` (P0–P3), `status` (not `done`), `verification_command`, `deps`, `acceptance`, `phase`, `touches`, `plan`, `implements`, `decided_by`, `surfaced_by`, `source` | `200 {data:{id,version,event}}` | `409 use_complete` (status=done), `428 precondition_required` (update without expected_version), `409 conflict`, `422 schema` |
 | `/hub/api/claim` | Existing task `id`, non-empty string `agent`, optional `ttl_s` (default 900; 1–86400) | Atomically acquires/renews the lease and transitions `todo` to `in_progress`; `200 {ok:true,token,expires,version,…}`. A same-agent retry renews without rotating the token. **Keep `token`.** | `404 not_found`; `409 deps_blocked`, `not_claimable`, or `{ok:false,reason:"held"}`; `422 bad_ttl` |
 | `/hub/api/heartbeat` | `id`, `token`, optional `ttl_s` (default 900; 1–86400) | `200 {ok:true,expires}` | `400 need_id_token`; `409 {ok:false,reason:"no/stale lease"}`; `422 bad_ttl` |
-| `/hub/api/complete` | `id`, `token` (from claim), `accept_note`, `evidence_uri` (string or array); optional `agent`, `verified_by` (array), `expected_version`, `idem_key` | `200 {data:{id,version,event}}` | See the completion gate below |
+| `/hub/api/complete` | `id`, `token` (from claim), `accept_note`, `evidence_uri` (string or array), `verification_run` (required when the task carries a `verification_command`); optional `agent`, `verified_by` (array), `expected_version`, `idem_key` | `200 {data:{id,version,event}}` | See the completion gate below |
 | `/hub/api/adr` | Create: `title`, `status`, optional `agent`; `number` and `id` auto-assign. Accepted/superseded/deprecated rows require `context_md`, `decision_md`, and `consequences_md`; superseded also requires `superseded_by[]`. Update: `id` + `expected_version`. | `200 {data}` | `422 schema`, `428 precondition_required`, `409 adr_immutable` for frozen context/decision |
 | `/hub/api/capability` | `agent`, `name`, optional `local` | `200 {data}` | `400 need_name` |
 | `/hub/api/decision` | `agent`, `topic`, `choice`, optional `rationale`,`invalidates`,`refs` | `200 {data:{event}}` (idempotent on topic+choice) | `400 need_topic_choice` |
@@ -75,10 +75,21 @@ for the workstation half of the issuer-bound consume protocol.
    also accepted) — else
    `422 evidence_unresolvable` (checked BEFORE the verification_command check); and the task must carry a
    `verification_command` (set it via `/hub/api/task` first) — else `422 need_verification_command`.
-4. If the task has a `verification_command`, the server runs it through the operating-system shell
-   from `BASE_DIR`, with captured output and a 300-second timeout. A non-zero exit is
-   `422 verify_failed`; invocation/timeout errors are `422 verify_error`. This happens in `tracked`
-   mode too whenever a command is present. Only trusted writers may set commands.
+4. If the task has a `verification_command`, you must supply a typed `verification_run` receipt —
+   else `422 need_verification_run`. **The server does NOT run the command.** It used to
+   (`shell=True`, from `BASE_DIR`), which made the write token equivalent to arbitrary shell on
+   the hub's host; that path is removed. You run it yourself, out-of-band, and report what
+   happened:
+
+   ```json
+   "verification_run": {"command": "<the task's own verification_command, verbatim>",
+                        "exit_code": 0,
+                        "output_sha256": "<sha256 of the captured stdout+stderr>",
+                        "ran_by": "<your agent id>"}
+   ```
+   Refused as `422 bad_verification_run` if the command is not the task's own (a receipt cannot be
+   borrowed from another task), if `exit_code` is non-zero, or if `ran_by` is not the completing
+   agent. The receipt is stored on the entity, so the completion stays falsifiable afterwards.
 5. The server re-runs the audit; a `critical` violation is `422 audit_unsound` — fix the unsoundness, don't retry.
 6. Immediately before append, the server rechecks the fencing token under the lease lock and binds
    completion to the exact entity version whose command was verified. A concurrent edit or expired/
@@ -115,8 +126,11 @@ curl -s $H -d '{"title":"Wire the export endpoint","agent":"me","priority":"P1"}
 # CLAIM — capture token
 curl -s $H -d '{"id":"{{PROJECT_KEY}}:task:0001","agent":"me"}' "$BASE/api/claim"
 # COMPLETE — with the lease token + evidence
+# You run the verification_command YOURSELF first, then report it — the hub never runs it.
 curl -s $H -d '{"id":"{{PROJECT_KEY}}:task:0001","token":"<lease-token>","agent":"me",
-                "accept_note":"shipped + verified","evidence_uri":["<commit-sha-or-url-or-path>"]}' "$BASE/api/complete"
+                "accept_note":"shipped + verified","evidence_uri":["<commit-sha-or-url-or-path>"],
+                "verification_run":{"command":"<the task'"'"'s verification_command>","exit_code":0,
+                                    "output_sha256":"<sha256 of its output>","ran_by":"me"}}' "$BASE/api/complete"
 ```
 
 Reads are a plain `curl "$BASE/hub.json"`. That's the whole API — reach for the loop, not the endpoints.

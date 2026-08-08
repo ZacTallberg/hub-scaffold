@@ -121,7 +121,7 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
     (e.g. credential-shaped files) where no client can skip it;
   - a **server-granted `done` transition** that requires a lease, acceptance note, and attached
     evidence; in strict mode it additionally requires dereferenceable evidence and a passing
-    server-run verification command;
+    typed exit-0 verification receipt the worker produced;
   - an **audit** that recomputes invariants per request (served version matches HEAD, no
     mutations on read routes, no private data on public surfaces) and blocks `done` and deploy
     when red;
