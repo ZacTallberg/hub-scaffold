@@ -14,6 +14,17 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### 2026-08-09 (later) — licensed, and the last battery-era doctrine out
+
+- **MIT LICENSE added** (Copyright (c) 2026 Zac Oberg); README's "no license granted" section
+  replaced accordingly.
+- **The gate doctrine is now proven-at-write everywhere it is stated**: OPERATING-AGREEMENT and
+  PROJECT/DOCTRINE (+ regenerated bootstrap) no longer send a gate's refusal fixture to a
+  "release battery" that no longer exists — seed a positive, watch it fire, quiet on a negative,
+  receipt both runs, leave no fixture file.
+- SECURITY.md's adopter checklist no longer implies the hub can execute commands; it now warns
+  against re-adding server-side `verification_command` execution (the removed RCE).
+
 ### 2026-08-09 — re-export: the no-battery regime, the operator off-switch, and the last ops scripts out
 
 - **The unit battery is gone, with the machinery that would regrow it** (upstream ruling

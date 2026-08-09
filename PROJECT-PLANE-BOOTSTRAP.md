@@ -740,8 +740,9 @@ require project-specific wiring.
 4. **Evidence must postdate the final edit.** A verification run from before the last change is void.
 5. **Gates re-derive, never trust.** Any consumer of a gate artifact recomputes the verdict from
    the underlying rows; a green flag contradicted by its rows is FABRICATED-GREEN and blocks.
-6. **Every declared gate must have failed in test.** Its refusal fixture may run in the isolated
-   boundary/release battery rather than on every edit (detector self-test doctrine).
+6. **Every declared gate must have been SEEN to fire.** Seed a real positive at write time, watch
+   it refuse, confirm quiet on a true negative, record both runs as the receipt — and leave no
+   fixture file behind (proven-at-write doctrine; there is no battery for a fixture to live in).
 
 ## §3 Defect discipline (Instance → Invariant)
 1. **Classify before fixing.** Every defect gets a `registers/FAILURE-MODES.md` class row FIRST

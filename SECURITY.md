@@ -72,7 +72,9 @@ process merely because a `hub-worker://` URL was opened.
 - Decide explicitly whether Hub reads are public; otherwise add and test authentication.
 - Run the Hub under a least-privilege account with a dedicated durable `HUB_DIR`.
 - Restrict outbound network access if strict URL evidence is enabled.
-- Restrict command execution or trust every write-token holder at the service-account boundary.
+- The hub executes no caller-supplied commands — keep it that way. A fork that re-adds
+  server-side `verification_command` execution silently turns the write token into arbitrary
+  shell at the service account (the exact RCE removed above).
 - Leave `HUB_WORKER_LAUNCH_ENABLED=False` unless the workstation workflow is intentionally deployed.
 - Put `hubaudit` in CI/pre-deploy, but do not mistake its focused checks for a complete security
   scanner or penetration test.

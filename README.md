@@ -186,7 +186,6 @@ The repository intentionally does not ship a machine-wide/session-memory system.
 - Schedule the conformance scan described in `patterns/` only after implementing its registry and
   alert bindings.
 
-## License status
+## License
 
-No license is currently granted. Public visibility does not itself grant permission to copy,
-modify, or redistribute the repository. Add an explicit license before offering it for reuse.
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Zac Oberg.

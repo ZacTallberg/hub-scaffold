@@ -76,8 +76,8 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
   without *being* green. Gates fail not by being absent but by being self-attested, bypassed,
   textual-only, or committed-but-not-deployed.
 - Therefore, `done` always carries a truthful evidence pointer, but the evidence burden is
-  **risk-proportional**. A small copy or formatting change does not require the integration battery
-  or a second agent. The implementer may provide routine evidence; never call that independent.
+  **risk-proportional**. A small copy or formatting change does not require the full selftest
+  ladder or a second agent. The implementer may provide routine evidence; never call that independent.
 - **Identity separation is mandatory at declared independent gates, not on every task.** A release,
   deploy, privileged boundary, migration, public compatibility change, regression, or sampled audit
   uses a fresh verifier that did not build the work. The verifier reports once and exits; it does not
@@ -127,10 +127,11 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
     when red;
   - a **deployed-artifact canary** that proves the running system is built from the claimed
     version, out-of-band from the process that deployed it.
-- **Every declared gate must have failed in test.** This does not require running every gate for
-  every edit. Its refusal fixture belongs in the isolated verifier/release battery, and the gate is
-  invoked when its protected boundary is crossed. Gates are never weakened to make a task pass;
-  weakening one is an ADR-level decision.
+- **Every declared gate must have been SEEN to fire.** At the time the gate is written: seed a
+  real positive, watch it refuse, confirm it stays quiet on a true negative, and record both runs
+  as the receipt — leave no fixture file behind (this repo ships no battery for one to live in).
+  The gate is invoked when its protected boundary is crossed. Gates are never weakened to make a
+  task pass; weakening one is an ADR-level decision.
 
 ---
 
