@@ -12,9 +12,9 @@ The companion files implement the contract:
 
 | File | Role |
 |---|---|
-| `deploy.sh.example` | Runnable skeleton of laws 1–4 with pluggable org hooks |
-| `standing-canary.sh` | Law 4: the out-of-band re-checker |
-| `pre-receive-gate.sh` | Adjacent: server-side push gate (secrets can never enter the repo) |
+| `deploy-runbook.md` | How an agent satisfies laws 1–4 by hand, reading real output at each step |
+| `standing-canary.md` | Law 4: the out-of-band re-check, executed at natural moments — not a cron |
+| `pre-receive-gate.sh` | Adjacent: server-side push gate (secrets can never enter the repo) — code, because it refuses |
 
 For a mounted Hub, add one project-specific post-canary integration: append a validated `deploy`
 entity and update the running deployment's `PROJECT/state.json` with `last_deploy_sha` and
@@ -90,9 +90,12 @@ Corollaries:
 
 **Rule.** When Law 3 passes, the deploy writes a **blessed record** — one file per project
 containing `<sha> <url>` — into a records directory on a machine that is *not* part of any
-deploying agent's process. A cron job (`standing-canary.sh`) periodically re-fetches every blessed
-URL, compares the served `build-<sha>` meta against the record, and fires `$ALERT_CMD` on mismatch
-or unreachability (with a per-project cooldown so a real outage doesn't become an alert storm).
+deploying agent's process. The record is re-checked out of band (`standing-canary.md`): an agent
+re-fetches every blessed URL at natural moments — after each deploy, at session start, before
+trusting any "it is live" claim — compares the served `build-<sha>` meta against the record, and
+raises a mismatch as a live incident with a receipt. A schedule is deliberately not the mechanism:
+a cron canary's own death reads identical to "all green", which is the exact failure this law exists
+to catch.
 
 **Rationale.** Laws 1–3 prove the deploy was true *at the moment it finished*. Nothing about that
 moment protects the next hour: someone deploys over you without the wrapper, the platform restarts

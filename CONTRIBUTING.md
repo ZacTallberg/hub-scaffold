@@ -18,7 +18,8 @@ truthful documentation, and fail-closed behavior at privileged boundaries.
 - Validate merged entity state before append; preserve optimistic concurrency and idempotency.
 - Never add a second way to mint terminal task state. `done` remains a completion transition.
 - Keep general write routes behind `@writer`; a narrower capability needs an explicit threat model,
-  marker, route-audit coverage, and refusal tests.
+  marker, route-audit coverage, and a refusal PROVEN to fire (seeded positive red, true negative
+  quiet, both runs recorded).
 - Do not put the general write token in URLs, pages, browser storage, registry values, or process
   arguments.
 - A new entity type requires a schema, projection/fold registration, write path where needed, read
@@ -48,9 +49,11 @@ more. Use `bash tools/check.sh --all-fast` for the complete cheap set. A release
 migration/destructive, public API/schema, concurrency/process-launch, regression, or sampled audit
 should dispatch the disposable `verification-closer` and may justify `bash tools/selftest.sh`.
 
-See `docs/TESTING.md` for exact selection guidance. A new declared gate/refusal needs a negative
-fixture proving it fires, but that fixture may live in the isolated boundary battery. Broad or
-expensive tests stay off the ordinary path unless an observed failure earns their placement.
+See `docs/TESTING.md` for exact selection guidance. A new declared gate/refusal must be PROVEN to
+fire before it counts: seed a real positive, watch it go red, confirm it stays quiet on a true
+negative — in the session, at the time you write it, with both runs recorded as the receipt.
+Leave no test file behind; this repo ships no battery, and the write API refuses a bare suite
+runner as a task's proof for the same reason the battery is gone.
 
 ## Pull requests and publication
 

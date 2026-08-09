@@ -1,113 +1,77 @@
-# Testing and verification
+# Verification
 
-Testing is a tool for resolving risk, not a ritual attached to every edit. Minor copy, formatting,
-or obviously local changes do not automatically need executable tests, the integration battery, or
-a second agent. A check belongs on the critical path only when it cheaply protects a concrete
-failure mode.
+Verification means exercising the real artifact your change touched and recording what actually
+happened. This repo deliberately ships **no unit battery**: a suite is green whenever the repo is
+healthy, whether or not your change works, so a battery proves the repo, never the change — and
+once a battery exists, every completion learns to pay its price and to trust its green. The engine
+that once lived in `hub_core/tests/` was removed on those grounds (upstream ruling, 2026-08-08),
+and the write API refuses a bare suite runner as a task's `verification_command` for the same
+reason.
 
-## Four levels
+What replaces it is not "no verification" — it is verification with the right subject:
+
+## Three obligations
+
+**1. A guard is proven by watching it fire.** When you write or change a guard, seed a real
+positive and watch it go red, then confirm it stays quiet on a true negative — at the time you
+write it, in the session. A one-directional proof does not count, and a guard nobody ever saw fire
+is a vacuous guard. Leave no test file behind; record the two runs (command + output) as the
+task's receipt. `tools/scrub_check.sh --selftest` is the standing example of the form: it seeds a
+violation, proves the gate catches it, and proves boundary-safe text passes.
+
+**2. A feature is proven against the real thing.** Boot the actual example app and drive the
+actual surface — `tools/selftest.sh` step 5 does exactly this for the write path (real Django
+process, real refusal ladder, real CSRF-mint/token-consume boundary). For your own change, the
+receipt is a command whose subject is the artifact you touched: a probe against the running
+mount, a CLI invocation of the tool you changed, a diff of generated output. Not a suite.
+
+**3. The floor is compile-and-import.** `bash tools/check.sh` keeps the cheap floor on every
+edit: the agnosticism scrub plus `compileall` over every python surface. It costs seconds and
+catches the class a battery only ever caught incidentally.
+
+## Levels
 
 | Level | Use when | Mechanism |
 |---|---|---|
 | Judgment | Tiny, low-risk, directly inspectable change | Read the diff; record truthful evidence. No command is mandatory. |
-| Fast sanity | Ordinary pending work | `bash tools/check.sh`; it selects cheap checks from changed paths. |
-| Focused proof | A specific behavior or regression changed | Run the smallest relevant test/probe, including the prior failure when possible. |
-| Independent boundary verification | Release/deploy, security/auth, migration/destructive work, public API/schema compatibility, concurrency/process launch, regression, broad batch, or occasional sample | Launch one fresh read-only `verification-closer`; run `bash tools/selftest.sh` only if the boundary justifies the full integration battery. |
+| Fast sanity | Ordinary pending work | `bash tools/check.sh` — scrub + compile floor, selected from changed paths. |
+| Focused proof | A behavior changed | The smallest command that exercises the changed artifact itself, run by you, receipt recorded. |
+| Independent boundary verification | Release, security/auth, migration/destructive work, public API/schema compatibility, concurrency/process launch | One fresh read-only `verification-closer` against the real mount; `bash tools/selftest.sh` when the boundary justifies the full ladder. |
 
 Independent closers are disposable. They receive the raw target and claim, return one
 `PASS`/`FAIL`/`INCONCLUSIVE` verdict with evidence and gaps, and exit. They do not fix their own
 findings or wait for more work. See [the prompt](../campaigns/verification-closer.md) and reusable
 [$verification-closer skill](../skills/verification-closer/SKILL.md).
 
-## Fast ordinary check
+## The selftest ladder
 
 ```bash
-bash tools/check.sh
-```
-
-The default invocation always runs the agnosticism scrub, then selects only relevant cheap checks:
-
-- Python syntax for changed Python;
-- documentation links and schema-mirror parity for docs/templates/schemas;
-- generated bootstrap parity for `PROJECT/` template changes;
-- shell syntax for changed shell scripts.
-
-It deliberately leaves behavior-test selection to the implementer. `--all-fast` additionally runs
-the framework-free unit suite and the complete cheap set; it is the ordinary push/PR CI command:
-
-```bash
-bash tools/check.sh --all-fast
-```
-
-## Isolated full verifier
-
-```bash
-python -m pip install -r requirements.txt
 bash tools/selftest.sh
 ```
 
-Use this deliberately, not per minor task. It runs five layers:
+Four cheap steps and one real one: agnosticism scrub (both directions), compile floor, doc
+integrity, bootstrap integrity — then the step that matters, booting the example site and running
+the write API's full refusal ladder in-process. Use it for releases and risky boundaries, not as
+an every-edit ritual.
 
-1. agnosticism scrub;
-2. framework-free `hub_core` unit tests;
-3. documentation links and mirrored schemas;
-4. generated bootstrap/template byte parity;
-5. a real Django seed/audit plus queue, completion, launch-grant, negative-path, and race ladder.
-
-The Django layer creates a unique temporary ledger and SQLite database under a guarded
-`.selftest-tmp.*` directory and removes them when its process ends. Repeated or concurrent runs do
-not append to `example/PROJECT/.hub`, inherit old leases, or contend on a shared example database.
-Every layer still runs after an earlier failure so a boundary verifier receives a complete report.
-
-## Selection examples
-
-- README typo: inspect it; optionally run the selected fast doc check. No fresh verifier.
-- Local refactor with unchanged behavior: syntax plus the nearest unit test, if one exists.
-- Bug fix: reproduce the bug, apply the fix, rerun the same probe. Add a regression only if it
-  protects the failure class economically.
-- Authentication refusal or task-lease race: focused negative/success paths and a fresh closer.
-- Release candidate: fresh closer; full isolated battery when its coverage is relevant.
-- Periodic confidence audit: sample a coherent batch, not every completed task.
-
-## Prerequisites and compatibility
-
-- Fast checks: Git, Bash, and Python 3.10+; no Django installation is required.
-- Full verification: dependencies from `requirements.txt`.
-- Django 5.2 runs on Python 3.10+; Django 6.0 requires Python 3.12+.
-
-The dependency range is `Django>=5.2,<6.1`: an untested future feature series must be admitted
-explicitly. Check Django's [supported-version table](https://www.djangoproject.com/download/) and
-pin a current patch release in an adopting application.
-
-Windows PowerShell with Git for Windows:
+On Windows, run it under Git Bash:
 
 ```powershell
-$env:PYTHON = ((py -c "import sys; print(sys.executable)") -replace '\\', '/')
-& "$env:ProgramFiles\Git\bin\bash.exe" tools/check.sh
-
-# Only for an explicitly chosen full verification boundary:
-py -m pip install -r requirements.txt
 & "$env:ProgramFiles\Git\bin\bash.exe" tools/selftest.sh
 ```
 
 If `py` is a launcher rather than a directly executable interpreter in Bash, set `PYTHON` to the
 full forward-slash path of `python.exe`. Do not mix WSL Bash with a Windows interpreter accidentally.
 
-## Full-battery coverage
+## What is deliberately not proven here
 
-The isolated battery covers event serialization/integrity/OCC/idempotency, schema contracts,
-Django route/auth refusals, queue lease/transition/reclaim truth, completion evidence/command/audit
-and race fencing, launch grant/replay/issuer bounds, Windows handler safety, documentation links,
-schema mirrors, and generated templates.
-
-It deliberately does not prove a production reverse proxy/TLS/read-auth boundary, real deployment
-provider or canary, alert delivery, backup restoration, browser-specific external-protocol prompts,
-the operator's worker wrapper, project business behavior, or safety from an untrusted write-token
-holder. A closer must name these as coverage gaps when they matter.
+A production reverse proxy/TLS/read-auth boundary, a real deployment provider or canary, alert
+delivery, backup restoration, browser-specific external-protocol prompts, the operator's worker
+wrapper, project business behavior, or safety from an untrusted write-token holder. A closer must
+name these as coverage gaps when they matter.
 
 ## CI
 
-`.github/workflows/ci.yml` runs only `tools/check.sh --all-fast` on ordinary pushes and pull requests.
-`.github/workflows/verify.yml` is a manually dispatched, disposable full verifier across Python
-3.10/Django 5.2 and Python 3.12/Django 6.0. Invoke it for a justified boundary; it is intentionally
-not a required per-change ceremony.
+`.github/workflows/ci.yml` runs only `tools/check.sh --all-fast` on ordinary pushes and pull
+requests. `.github/workflows/verify.yml` is manual-dispatch only and runs the selftest ladder —
+verification stays a decision someone makes for a boundary, never a schedule.

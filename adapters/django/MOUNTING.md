@@ -229,11 +229,15 @@ Strict-mode example loop:
 
 ```bash
 T="$HUB_WRITE_TOKEN"; H="X-Write-Token: $T"; U=http://localhost:8000/hub/api
-curl -s $U/task -H "$H" -d '{"title":"Ship X","verification_command":"python -m pytest -q","agent":"a1"}'
+curl -s $U/task -H "$H" -d '{"title":"Ship X","verification_command":"python tools/ship_x.py --dry-run","agent":"a1"}'
 curl -s $U/claim -H "$H" -d '{"id":"acme:task:0001","agent":"a1"}'            # -> lease token
 curl -s $U/complete -H "$H" -d '{"id":"acme:task:0001","token":"<lease>","agent":"a1",
-  "accept_note":"pytest green","evidence_uri":["<commit-sha>"]}'
+  "accept_note":"dry-run exercised the changed artifact; output receipt attached","evidence_uri":["<commit-sha>"]}'
 ```
+
+The `verification_command` must exercise the task's own artifact — the write API refuses a bare
+suite runner (`python -m pytest`, `python -m unittest`) because a suite is green whenever the repo
+is healthy, whether or not this task's work happened.
 
 ## 9. Optional local-worker launch
 

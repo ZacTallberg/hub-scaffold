@@ -16,7 +16,7 @@ changes normally do not need an independent closer.
 > do not inherit the implementer's conclusions. Work read-only unless explicitly authorized.
 >
 > Identify the concrete failure modes introduced by this change, then run the smallest decisive set
-> of checks. Do not run the full battery automatically. Use it only if the scope is release-level or
+> of checks against the real artifact. Do not run the full selftest ladder automatically. Use it only if the scope is release-level or
 > cross-cutting enough to justify it. For privileged boundaries, exercise both refusal and success
 > paths. Compare public documentation with observed behavior when the contract changed.
 >

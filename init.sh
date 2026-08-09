@@ -118,10 +118,10 @@ Next steps (the adoption runbook lives in the scaffold README):
   4. Adopt the deploy contract: read patterns/deploy-contract.md for the four laws, then
      patterns/deploy-runbook.md for how to satisfy them WITHOUT a deploy script (an agent
      executes it and reads real output at each step; fill in the binding table once).
-     patterns/deploy.sh.example remains only if you specifically want a scripted path.
-     Install patterns/pre-receive-gate.sh on your git host, and patterns/standing-canary.sh
-     needs your org's alerting hooked in before it is real — both observe or refuse rather
-     than performing the deploy, which is why they stay as code.
+     There is deliberately no deploy script and no cron canary here: the runbook IS the deploy
+     path, and patterns/standing-canary.md is the by-hand re-check that keeps a blessed record
+     honest. Install patterns/pre-receive-gate.sh on your git host — it REFUSES rather than
+     performs, which is why it alone stays as code.
   5. Read OPERATING-AGREEMENT.md with your team; it is the human half of the system.
 
 Live URL recorded as: $LIVE_URL

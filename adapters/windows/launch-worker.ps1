@@ -125,6 +125,18 @@ Set-Location '$(Quote-Single $Repo)'
 `$__barren = 0
 while (`$true) {
     `$__cycle++
+    # THE OPERATOR'S OFF SWITCH, checked every cycle before any work. A fleet that never stops
+    # must still be stoppable by a human, and killing windows is not stopping it if anything ever
+    # relaunches seats. Writing 0 (or less) into PROJECT/.hub/fleet-target disarms every seat at
+    # its next cycle boundary; delete the file or raise the number to re-arm.
+    `$__target = Join-Path `$env:HUB_DIR 'fleet-target'
+    if (Test-Path -LiteralPath `$__target) {
+        `$__t = 0
+        if ([int]::TryParse(((Get-Content -LiteralPath `$__target -First 1 -ErrorAction SilentlyContinue) -replace '[^0-9-]', ''), [ref]`$__t) -and `$__t -le 0) {
+            Write-Host ('fleet-target is ' + `$__t + ' - DISARMED. This seat stops here, deliberately.') -ForegroundColor Yellow
+            break
+        }
+    }
     # Liveness stamp BEFORE the run, so a seat killed mid-cycle still leaves evidence it existed.
     # Whoever reads this must judge by the PID, never by the timestamp: a seat inside a long cycle
     # is alive however old its stamp, and reaping on age kills seats for thinking hard.

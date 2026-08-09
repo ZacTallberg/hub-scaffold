@@ -6,7 +6,8 @@ here is lost on the next export and forks the engine in the meantime. If you fin
 improvement: fix it upstream in the canonical template and re-export. What legitimately lives in
 this layer is the export machinery itself — the agnosticism gate (`tools/scrub_check.sh`, whose
 `--selftest` proves it catches a seeded violation AND stays quiet on boundary-safe text), the
-five-step `tools/selftest.sh`, `init.sh`, `example/`, and the bootstrap embedding.
+five-step `tools/selftest.sh` (scrub · compile floor · docs · bootstrap · the real example app),
+`init.sh`, `example/`, and the bootstrap embedding.
 
 Read this first. It is the machine-first map of the whole system: what's here, how to prove it works,
 how to use it, how to operate it, and — importantly — **what is deliberately NOT here** so you don't
@@ -92,10 +93,11 @@ disposable `verification-closer` only when consequence or sampling warrants it.
   (`patterns/conformance-scan.md`, `campaigns/maintain-audit-reconcile.md` Prompt B), not scripts,
   because both are inherently org-specific (your live-URL shape, your project list, your alert hook).
   Implement them per environment from the spec.
-- **The org-specific ship step** — `patterns/deploy.sh.example` has explicit `TODO` hooks
-  (`BUILD_CMD`/`SHIP_CMD`/`ALERT_CMD`); the actual deploy target (a PaaS, Kubernetes, a VM, a container
-  host, …) is yours to
-  wire. The contract it must satisfy is fixed; the mechanism is not.
+- **The org-specific ship step** — `patterns/deploy-runbook.md` is the shape: an agent executes
+  the four laws by hand against your actual deploy target (a PaaS, Kubernetes, a VM, a container
+  host, …), reading real output at each step. There is deliberately no deploy script to fill in —
+  a script encodes one environment's assumptions and then rots silently against the platform it
+  drives. The contract it must satisfy is fixed; the mechanism is yours.
 - **Optional entity types (Findings, Lessons, Decisions-log)** — generic and reusable, but kept OUT of
   the minimal base. Add them via `campaigns/augment-hub.md` if you want them; they're an intended
   extension, not a gap.
@@ -104,7 +106,8 @@ disposable `verification-closer` only when consequence or sampling warrants it.
 
 ## The three non-negotiables (the point of the whole thing)
 1. **Evidence is truthful and proportional.** Do not call implementer evidence independent, but do
-   not burden minor work with a release battery or second agent.
+   not burden minor work with the full ladder or a second agent. There is no unit battery here at
+   all: a guard is proven by watching it fire, a feature against the real example app.
 2. **Independent verification is boundary-triggered.** A fresh closer handles releases, privileged
    boundaries, migrations, public contracts, regressions, and occasional samples, then exits.
 3. **Never lose or clobber concurrent work.** Targeted commits only; another session's uncommitted files

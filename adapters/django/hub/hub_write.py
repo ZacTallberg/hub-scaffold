@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 from functools import wraps
 
@@ -210,6 +211,14 @@ def complete(request, b):
         return JsonResponse({"errors": [{"code": "need_verification_command",
             "msg": "done requires a verification_command on the task; set it (POST /hub/api/task) before completing"}]},
             status=422)
+    # A bare suite runner is not a proof of THIS task: a suite is green whenever the repo is
+    # healthy, whether or not the work happened, and accepting one teaches every completion to
+    # pay the whole battery's price. The command must name the artifact this task changed.
+    if vc and re.match(r"^(?:\S*python[\w.]*\s+)?(?:-m\s+)?(?:pytest|unittest(?:\s+discover)?)\b[^&|;]*$"
+                       r"|^(?:bash\s+)?tools/(?:selftest|check)\.sh\b[^&|;]*$", vc.strip(), re.I):
+        return JsonResponse({"errors": [{"code": "verification_command_is_a_suite",
+            "msg": "a bare suite runner proves the repo, not this task — name a command whose "
+                   "subject is the artifact this task changed"}]}, status=422)
     if vc:
         run = b.get("verification_run") or {}
         if not isinstance(run, dict) or not run:

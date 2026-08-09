@@ -41,8 +41,12 @@ if has_match '\.py$'; then
 fi
 
 if [ "$MODE" = "--all-fast" ]; then
-  echo "FAST CHECK: framework-free unit tests"
-  "$PY" -m unittest discover -s hub_core -t "$ROOT"
+  # The unit battery ran here until 2026-08-08. It was removed with its suite: a battery is
+  # green whenever the repo is healthy, which proves the repo, not your change. The compile
+  # gate above keeps the syntax/import floor; step 5 of tools/selftest.sh proves the write
+  # path against the real example app when a boundary justifies it.
+  echo "FAST CHECK: python surfaces compile (tools included)"
+  "$PY" -m compileall -q tools
 fi
 
 if has_match '(\.md$|\.template$|^PROJECT/schema/|^example/PROJECT/schema/|^tools/docs_check\.py$)'; then

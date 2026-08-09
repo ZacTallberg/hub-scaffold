@@ -13,6 +13,23 @@ A process check called all three healthy.
 The only evidence that counts is a `done` transition on the ledger, which costs a receipt through
 the write gate and therefore cannot be self-reported into existence.
 
+## ⏹ How the operator stops it (read this first)
+
+A fleet designed never to stop must still be stoppable by a human, deliberately, without a chase.
+Killing windows is not stopping it — anything that resurrects seats will undo you. The off switch
+is a file the seats themselves poll:
+
+```
+echo 0 > PROJECT/.hub/fleet-target
+```
+
+Every seat launched by `adapters/windows/launch-worker.ps1` checks `fleet-target` at each cycle
+boundary and, on `0` (or any value ≤ 0), prints `DISARMED` and ends itself — mid-cycle work
+finishes first, so nothing is killed while holding a claim. Confirm the seats have drained, then
+close whatever windows remain; they stay dead. Delete the file (or write a positive number) to
+re-arm. If you add any resurrection machinery of your own, it MUST honour the same file, or your
+off switch is a rumor.
+
 ## The nine ways a worker stops completing
 
 Most designs defend only the first two, which is why most fleets quietly stop.

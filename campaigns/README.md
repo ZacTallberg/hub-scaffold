@@ -20,7 +20,8 @@ run them with one agent, a hand-rolled fan-out, or an orchestration tool if you 
 
 ## The three non-negotiables (why these prompts are "robust")
 1. **Evidence is honest and proportional.** Routine work does not automatically spawn another agent
-   or run the integration battery. Releases and risky boundaries receive independent verification.
+   or run the full selftest ladder. Releases and risky boundaries receive independent verification
+   against the real mount — there is no unit battery to hide behind.
 2. **Independent means separate.** A boundary closer starts fresh, tries to refute the claim, reports
    one verdict, and exits without fixing its own findings.
 3. **Never lose or clobber concurrent work.** Targeted commits only; another session's uncommitted

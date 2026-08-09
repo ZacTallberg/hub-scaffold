@@ -16,10 +16,11 @@ An agent working from a runbook reads the real output of each step and adapts. T
 is to make each step's EXPECTED OBSERVATION explicit, so "it worked" is a thing you saw rather
 than a thing you assumed.
 
-**This is not an argument against code.** Keep as code anything that must hold when nobody is
-watching — an out-of-band canary (`standing-canary.sh`), a server-side push refusal
-(`pre-receive-gate.sh`), an agent guard. Those observe or refuse; they do not perform the work.
-What leaves is the thing that *does the work silently*.
+**This is not an argument against code.** Keep as code anything that must REFUSE when nobody is
+watching — a server-side push refusal (`pre-receive-gate.sh`), an agent guard. A refusal that is
+prose does not refuse. What leaves is the thing that *does the work silently* — and the watcher
+whose own death reads as green: the standing re-check is a by-hand procedure with a receipt
+(`standing-canary.md`), not a cron.
 
 ## The binding table — fill this in once, at adoption
 

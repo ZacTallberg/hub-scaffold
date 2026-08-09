@@ -12,6 +12,26 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### 2026-08-09 — re-export: the no-battery regime, the operator off-switch, and the last ops scripts out
+
+- **The unit battery is gone, with the machinery that would regrow it** (upstream ruling
+  2026-08-08). `hub_core/tests/` deleted; `selftest.sh` step 2 and `check.sh --all-fast` re-subjected
+  to a compile/import floor; `docs/TESTING.md` rewritten as the verification doctrine (a guard is
+  proven by watching it fire; a feature against the real example app — step 5 is unchanged and is
+  the model); CONTRIBUTING/campaign prompts no longer assign test-writing obligations.
+- **The write API refuses a bare suite runner as a task's proof** (`verification_command_is_a_suite`,
+  422): a suite is green whenever the repo is healthy, whether or not the task's work happened.
+  Proven both directions against the running example app before export.
+- **`hub_core/audit.py` regenerated from canonical** (same transform: copy, LF, scrub vocabulary);
+  the in-module oracle-tamper selftest left with the battery.
+- **Every seat now has an operator off-switch**: `adapters/windows/launch-worker.ps1` polls
+  `PROJECT/.hub/fleet-target` each cycle and disarms on ≤0; `patterns/worker-longevity.md` opens
+  with the stop procedure — a fleet designed never to stop must still be stoppable, deliberately.
+- **`deploy.sh.example` and `standing-canary.sh` are out; `standing-canary.md` replaces the cron.**
+  The runbook is the deploy path; the standing re-check is a by-hand procedure with a receipt — a
+  scheduled watcher's own death reads identical to "all green". `pre-receive-gate.sh` alone stays
+  code, because a refusal that is prose does not refuse.
+
 - **Engine forward-ported from the consolidated canonical (2026-08-07).** The July engine was a
   fossil relative to upstream: `store.py` gained the whole cross-process serialization layer it
   never had (`LedgerLock`, durable replace + fsync, jsonl tail hashing, fork linearization, and

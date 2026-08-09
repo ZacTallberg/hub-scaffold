@@ -91,15 +91,17 @@ bash tools/check.sh --all-fast
 Use `PYTHON=python3` when needed. Windows users should use Git Bash and a Windows Python
 interpreter; exact recipes are in [docs/TESTING.md](docs/TESTING.md).
 
-This fast check needs no Django install. It covers the scrub, core unit tests, documentation/schema
-links, generated bootstrap parity, and syntax. The isolated full verifier additionally needs
+This fast check needs no Django install. It covers the scrub, the compile/import floor,
+documentation/schema links, generated bootstrap parity, and syntax. There is deliberately no unit
+battery — a guard is proven by watching it fire, a feature against the real example app
+([docs/TESTING.md](docs/TESTING.md)). The isolated full verifier additionally needs
 `python -m pip install -r requirements.txt` and runs with `bash tools/selftest.sh`; reserve it for a
 release, risky cross-cutting boundary, regression, or occasional audit.
 
 For independent review, dispatch a fresh read-only agent with
 [the verification-closer prompt](campaigns/verification-closer.md) or the reusable
 [`$verification-closer` skill](skills/verification-closer/SKILL.md). It returns one evidence-backed
-verdict and exits; minor changes do not automatically receive another agent or the full battery.
+verdict and exits; minor changes do not automatically receive another agent or the full ladder.
 
 ## Stamp a new project
 
@@ -176,7 +178,7 @@ The repository intentionally does not ship a machine-wide/session-memory system.
 
 - Run `bash tools/check.sh` for ordinary pending changes. It selects cheap checks by impact.
 - Invoke a disposable closer and/or `bash tools/selftest.sh` only at a meaningful risk or release
-  boundary; do not put the integration battery on every minor edit.
+  boundary; do not put the full ladder on every minor edit.
 - If any `PROJECT/` template changes, run `python tools/build_bootstrap.py` and commit the regenerated
   `PROJECT-PLANE-BOOTSTRAP.md`.
 - Run `python tools/docs_check.py` to catch broken local links and schema-mirror drift.

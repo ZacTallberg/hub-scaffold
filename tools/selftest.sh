@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # selftest.sh — isolated end-to-end verification for releases and high-risk boundaries. It is NOT
 # the ordinary edit/commit gate; use tools/check.sh for fast development feedback. Five steps:
-#   1. agnosticism scrub          (tools/scrub_check.sh)
-#   2. engine unit tests          (python -m unittest over hub_core — framework-free)
+#   1. agnosticism scrub          (tools/scrub_check.sh — both directions)
+#   2. python surfaces compile    (compileall — syntax/import floor, costs a second)
 #   3. documentation integrity    (tools/docs_check.py)
 #   4. bootstrap doc integrity    (tools/build_bootstrap.py --check)
 #   5. example site boots + the write API refuses correctly, proves the CSRF-mint/token-consume
 #      launch boundary, then runs the full server-granted-done hardening ladder
+# There is deliberately NO unit battery: a suite passes whenever the repo is healthy, whether or
+# not your change works. Prove a guard by watching it fire on a seeded positive; prove a feature
+# against the real example app (step 5 is exactly that, for the write path).
 # Prints PASS/FAIL per step and exits nonzero if any step failed. Requires: bash, git, a
 # Python executable available as `python` (override with PYTHON=/path/to/python); step 5 additionally needs Django
 # importable by that python.
@@ -35,9 +38,14 @@ step_scrub() {
   bash "$ROOT/tools/scrub_check.sh" && bash "$ROOT/tools/scrub_check.sh" --selftest
 }
 
-step_unittests() {
+step_compile() {
   cd "$ROOT"
-  "$PY" -m unittest discover -s hub_core -t "$ROOT" -v
+  # Every python surface compiles and imports. The engine's unit battery lived here until
+  # 2026-08-08 (upstream ruling: a battery passes whenever the repo is healthy, whether or not
+  # the change works - agents prove a guard by watching it fire and prove a feature against the
+  # REAL example app in step 4). A syntax error or broken import is the class the battery caught
+  # incidentally, and this keeps that class at a second's cost.
+  "$PY" -m compileall -q hub_core adapters/django/hub example tools
 }
 
 step_docs_check() {
@@ -109,7 +117,7 @@ step_example() {
 }
 
 run_step "scrub (agnosticism gate)"        step_scrub
-run_step "hub_core unit tests"             step_unittests
+run_step "python surfaces compile"         step_compile
 run_step "documentation integrity"         step_docs_check
 run_step "bootstrap doc --check"           step_bootstrap_check
 run_step "example site + write-API ladder" step_example

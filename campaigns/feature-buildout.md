@@ -23,7 +23,8 @@ Read `00-orchestration-method.md` first. Substitute `{{DEPLOY_CMD}}`, `{{LIVE_UR
 >    evidence that dereferences — set those on the task, don't fight the gate.
 > 5. **VERIFY proportionally** — the Hub re-runs its cheap audit. Run focused checks when the change
 >    has a plausible failure mode. Dispatch a fresh independent closer only for a release/risky
->    boundary or an occasional sample; do not attach the full battery to every small task.
+>    boundary or an occasional sample; do not attach the full selftest ladder to every small task,
+>    and never offer a suite runner as a task's proof — the write API refuses it.
 > Nothing off-list: a bug, a missing step, a new idea all become tasks on the board FIRST, then get
 > claimed. Decisions are ADRs (append-only). Never delegate your one task to a lone sub-agent — do your
 > own work; fan out only for genuine parallelism.
