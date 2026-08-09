@@ -1,13 +1,16 @@
 # AGENTS.md — orientation for an agent that just pulled this repo
 
-**This repo is a GENERATED EXPORT — do not commit improvements here.** It is a scrubbed export of
-an upstream canonical hub template, regenerated whenever that template changes. Anything you fix
-here is lost on the next export and forks the engine in the meantime. If you find a defect or an
-improvement: fix it upstream in the canonical template and re-export. What legitimately lives in
-this layer is the export machinery itself — the agnosticism gate (`tools/scrub_check.sh`, whose
-`--selftest` proves it catches a seeded violation AND stays quiet on boundary-safe text), the
-five-step `tools/selftest.sh` (scrub · compile floor · docs · bootstrap · the real example app),
-`init.sh`, `example/`, and the bootstrap embedding.
+**This repo IS the canonical hub template — the single source every new project spins up from.**
+(Until 2026-08-09 it was a generated export of a private upstream; that upstream is retired and
+this repo now stands alone.) Improvements are committed HERE, under two laws. First, the
+agnosticism gate is non-negotiable: nothing project-, host-, or person-specific may land —
+`tools/scrub_check.sh` enforces it, and its `--selftest` proves it catches a seeded violation AND
+stays quiet on boundary-safe text. Second, improvements discovered inside a working instance
+arrive as **curated upserts**: the instance proves the change in production first, then the
+generic form of it is carried here through the scrub gate — never a bulk merge, never a clone.
+The proving grounds are the instances; the template is where the lesson is kept. The rest of the
+layer: the five-step `tools/selftest.sh` (scrub · compile floor · docs · bootstrap · the real
+example app), `init.sh`, `example/`, and the bootstrap embedding.
 
 Read this first. It is the machine-first map of the whole system: what's here, how to prove it works,
 how to use it, how to operate it, and — importantly — **what is deliberately NOT here** so you don't
