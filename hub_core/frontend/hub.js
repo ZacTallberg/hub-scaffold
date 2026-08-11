@@ -668,35 +668,83 @@
      "critical path 11" is a claim the operator has to take on faith; the chain shows WHICH
      eleven, so the one queue worth unblocking first is visible. */
   function dagChart(dg) {
+    // The frontier, DRAWN: one column per dependency layer, the critical path threaded through
+    // them as a flowing spine, and every layer labelled with how wide it actually is. The point
+    // is that "critical path 11" becomes a shape you can read — where the board narrows to a
+    // single file, and where it opens wide enough to absorb more workers.
     if (!dg || !dg.nodes) return null;
     var layers = dg.layers || [];
     if (!layers.length) return null;
-    var W = Math.max(240, layers.length * 46), H = Math.max(70, Math.min(9, Math.max.apply(null, layers)) * 17 + 30);
-    // The CSS gives this a bounded height; `meet` letterboxes the drawing inside it rather than
-    // scaling the height off the card's width.
+    var CAP = 7;                                     // rows drawn per column before "+N"
+    var n = layers.length;
+    var tall = Math.min(CAP, Math.max.apply(null, layers));
+    // Width tracks the number of layers and height the widest one, so the viewBox matches the
+    // drawing rather than a fixed frame the drawing floats inside.
+    var W = Math.max(210, Math.min(1200, n * 104));
+    var H = Math.max(150, (tall - 1) * 19 + 96), MID = H / 2 - 14;
     var g = svgEl("svg", { viewBox: "0 0 " + W + " " + H, class: "dag-svg", role: "img",
       preserveAspectRatio: "xMidYMid meet",
-      "aria-label": "Dependency frontier: " + layers.length + " layers, widest " + dg.max_frontier_width });
-    var stepX = W / (layers.length + 1);
+      "aria-label": "Dependency frontier: " + n + " layers, widest " + dg.max_frontier_width
+                    + ", critical path " + dg.critical_path_length });
+
+    // gradient + glow so the spine reads as energy moving through the graph
+    var defs = svgEl("defs");
+    var lg = svgEl("linearGradient", { id: "dagSpine", x1: "0", y1: "0", x2: "1", y2: "0" });
+    lg.appendChild(svgEl("stop", { offset: "0", "stop-color": "var(--accent, #4f7cff)" }));
+    lg.appendChild(svgEl("stop", { offset: "1", "stop-color": "var(--pass, #2fae66)" }));
+    defs.appendChild(lg);
+    g.appendChild(defs);
+
+    var stepX = W / (n + 1);
+    var pts = layers.map(function (_w, i) { return stepX * (i + 1); });
+
+    // the spine first, so nodes sit on top of it
+    for (var i = 0; i < n - 1; i++) {
+      var x1 = pts[i], x2 = pts[i + 1], mx = (x1 + x2) / 2;
+      // a gentle S-curve rather than a straight rule — a dependency chain is a flow, and a
+      // straight line between two dots reads as a divider
+      var d = "M " + x1.toFixed(1) + " " + MID + " C " + mx.toFixed(1) + " " + MID + ", "
+            + mx.toFixed(1) + " " + MID + ", " + x2.toFixed(1) + " " + MID;
+      g.appendChild(svgEl("path", { d: d, class: "dag-edge on-path", fill: "none" }));
+    }
+
     layers.forEach(function (width, i) {
-      var x = stepX * (i + 1);
-      var shown = Math.min(width, 9);
+      var x = pts[i];
+      var shown = Math.min(width, CAP);
+      // a soft column wash so a WIDE layer is visible as mass, not just as more dots
+      if (width > 1) {
+        g.appendChild(svgEl("rect", {
+          x: (x - 17).toFixed(1), y: (MID - (shown - 1) / 2 * 19 - 15).toFixed(1),
+          width: "34", height: ((shown - 1) * 19 + 30).toFixed(1),
+          rx: "17", class: "dag-col" }));
+      }
       for (var k = 0; k < shown; k++) {
-        var y = H / 2 + (k - (shown - 1) / 2) * 15;
-        g.appendChild(svgEl("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: "4",
-          class: "dag-node" + (k === 0 ? " on-path" : "") }));
+        var y = MID + (k - (shown - 1) / 2) * 19;
+        var onPath = k === 0;
+        if (onPath) {
+          g.appendChild(svgEl("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: "9",
+            class: "dag-halo" }));
+        }
+        g.appendChild(svgEl("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: onPath ? "5.5" : "4",
+          class: "dag-node" + (onPath ? " on-path" : "") }));
       }
       if (width > shown) {
-        var more = svgEl("text", { x: x.toFixed(1), y: (H / 2 + (shown / 2) * 15 + 12).toFixed(1),
-          "text-anchor": "middle", class: "dag-more", "font-size": "9" });
+        var more = svgEl("text", { x: x.toFixed(1), y: (MID + (shown - 1) / 2 * 19 + 26).toFixed(1),
+          "text-anchor": "middle", class: "dag-more", "font-size": "10" });
         more.textContent = "+" + (width - shown);
         g.appendChild(more);
       }
-      if (i < layers.length - 1) {
-        g.appendChild(svgEl("line", { x1: (x + 4).toFixed(1), y1: (H / 2).toFixed(1),
-          x2: (stepX * (i + 2) - 4).toFixed(1), y2: (H / 2).toFixed(1), class: "dag-edge on-path" }));
-      }
+      // per-layer width label along the base — the frontier's shape, in numbers
+      var lbl = svgEl("text", { x: x.toFixed(1), y: (H - 8).toFixed(1), "text-anchor": "middle",
+        class: "dag-axis", "font-size": "10" });
+      lbl.textContent = String(width);
+      g.appendChild(lbl);
     });
+
+    var cap = svgEl("text", { x: (W / 2).toFixed(1), y: (H - 24).toFixed(1), "text-anchor": "middle",
+      class: "dag-axis dag-axis-cap", "font-size": "9.5" });
+    cap.textContent = "tasks workable at each step  →";
+    g.appendChild(cap);
     return g;
   }
   function dagCard(dg) {
@@ -1282,6 +1330,25 @@
     if (!meta) return;
     meta.textContent = "seq " + LIVE.cursor + " · " + (LIVE.lastEventAt ? relativeTime(LIVE.lastEventAt) : "awaiting event");
   }
+  function paintBackdrop() {
+    // The ambient field is a READOUT, not decoration: its brightness and tempo come from how many
+    // workers are actually holding a lease, and its hue from whether anything needs a human. A
+    // board nobody is working on is nearly still — which is the honest thing for it to look like.
+    var L = live();
+    var working = (L.fleet || []).filter(function (c) {
+      return c.status === "working" || c.status === "stalled";
+    }).length;
+    var band = working >= 3 ? "many" : String(Math.min(2, working));
+    var attn = L.attention || [];
+    var worst = attn.reduce(function (m, a) {
+      var tone = ATTN_TONE[a.kind] || "info";
+      return tone === "fail" ? "fail" : (tone === "warn" && m !== "fail") ? "warn" : m;
+    }, "calm");
+    if (D.audit && D.audit.ok === false) worst = "fail";
+    doc.body.setAttribute("data-fleet", band);
+    doc.body.setAttribute("data-mood", worst);
+  }
+
   function tickRelativeTimes() {
     // Ages keep moving between snapshots. Without this the feed freezes at "2m ago" on a quiet
     // board and the page looks disconnected precisely when it is healthy and simply idle.
@@ -1317,7 +1384,11 @@
     _panes.overview = fresh;
     var freshScroll = fresh.querySelector(".overview-scroll");
     if (freshScroll) freshScroll.scrollTop = top;
+    // A live patch must not replay the arrival animation — the page would flinch every time a
+    // worker heartbeated. The cards animate on mount only.
+    [].forEach.call(fresh.querySelectorAll(".card, .ov-grid"), function (n) { n.style.animation = "none"; });
     primeLaunchControls();
+    paintBackdrop();
   }
 
   var PREFERS_REDUCED = !!(global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -1759,6 +1830,7 @@
     var mc = doc.getElementById("modalClose"); if (mc) mc.addEventListener("click", closeModal);
     doc.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
     tickClock(); setInterval(tickClock, 1000);
+    paintBackdrop();
     setStatus("connecting", "Connecting");
 
     global.HubCommands = [
