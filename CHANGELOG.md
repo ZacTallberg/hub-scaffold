@@ -14,6 +14,35 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### A design pass: the board became something to look at
+
+The cockpit was correct and quiet — clean cards, right numbers, no presence. Three defects,
+measured in the rendered page rather than argued about:
+
+- **A ~600px dead zone in the hero.** `justify-content: space-between` on a flex row pinned the
+  stat tiles to the far edge and opened a void in the middle at wide viewports. Now a grid whose
+  stats claim the remaining track and wrap into their own auto-fit row: **600px → 28px**.
+- **The dependency chart floated in an empty box.** First `height:auto` scaled the drawing off the
+  card's width and opened a 400px void under four dots; the fix for that (`width:100%`) caused the
+  opposite failure, letterboxing a small graph into the middle of a 1300px frame. The height is
+  now fixed and the width FOLLOWS the viewBox, so a 2-layer board draws a small centred graph and
+  a wide board draws a wide one that scrolls — the drawing is always its own size.
+- **Every card was the same flat slab**, so the eye had nowhere to land.
+
+**The living backdrop** is the new piece, and it is a READOUT rather than decoration: an aurora
+field behind the whole board whose brightness and tempo are driven by how many workers actually
+hold a lease, and whose hue follows the attention rail — amber when something needs a human, red
+when the audit fails. An idle board is nearly still. Glance at it from across the room and you
+know whether anything is happening before you read a number. It is inert by construction
+(`pointer-events:none`, `z-index:-1`, `aria-hidden`) and fully disabled under
+`prefers-reduced-motion`.
+
+Also: cards now sit ON that field with a translucent, blurred ground (so the aurora reads as depth
+without eating contrast), the hero carries the page's only full-bleed treatment, the frontier
+chart gained curved flowing edges / breathing halos / per-layer width labels, and the overview
+cards ARRIVE staggered on mount — once, never on a live patch, which would make the page flinch
+every time a worker heartbeated.
+
 ### The interop edges, the missing writers, and the rest of the engine
 
 Everything the instances carried that is not domain-specific now lives here.
@@ -57,8 +86,8 @@ Fixed while porting, because a port is not done until it runs here:
 - `work_kind` added to the task schema (with the conditional rules that make it enforce rather
   than label), since the agent card publishes one skill per kind.
 
-Deliberately NOT ported, as instance-specific rather than template material: a game-balance tuning
-console, an openmic-domain site packager, and a promoter card.
+Deliberately NOT ported, as instance-specific rather than template material: a gameplay-balance
+tuning console, a single-domain site packager, and a domain-specific directory card.
 
 ### The board became LIVE, and became a cockpit
 

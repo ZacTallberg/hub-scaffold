@@ -14,6 +14,11 @@
 <body class="hub-app">
 <a class="skip-link" href="#tabPanes">Skip to content</a>
 
+<!-- The living backdrop. Purely presentational and inert (aria-hidden, pointer-events:none, and
+     pinned behind everything at z-index -1); hub.js drives its intensity from how many workers
+     are actually working, so the page's ambient motion is itself a readout of the fleet. -->
+<div class="hub-backdrop" id="hubBackdrop" aria-hidden="true"><span class="grid-veil"></span></div>
+
 <!-- Everything the dialog must shut out lives inside #appShell: openModal sets inert on it, which
      removes the background from BOTH the tab order and the accessibility tree. aria-modal alone
      only asks assistive tech to do that; inert makes it true for keyboard users too. The modal and

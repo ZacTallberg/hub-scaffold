@@ -1069,17 +1069,48 @@ body.hub-app {
 
 /* ============================ Operator cockpit ============================ */
 /* Progress hero — the number the operator watches climb. */
-.progress-hero { padding: 18px 20px; margin-bottom: 14px; }
-.progress-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+/* The hero is the first thing the eye lands on, so it carries the page's only full-bleed
+   treatment: a soft accent wash bleeding from the top-left behind the headline number, and a hair
+   of light along the top edge. Everything else on the page stays quiet so this reads as the
+   entry point rather than one more slab. */
+.progress-hero {
+  padding: 22px 24px; margin-bottom: 14px; position: relative; isolation: isolate;
+  background:
+    radial-gradient(120% 150% at 0% 0%, var(--accent-wash, rgba(79,124,255,.13)) 0%, transparent 58%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, var(--accent, #4f7cff)) 0%, var(--surface) 46%);
+}
+.progress-hero::after {
+  content: ""; position: absolute; inset: 0 0 auto; height: 1px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--accent, #4f7cff) 22%, var(--pass, #2fae66) 68%, transparent);
+  opacity: .55;
+}
+/* GRID, not space-between. A flex row with space-between pins the stats to the far edge and opens
+   a dead gap in the middle at wide viewports — measured at ~600px of nothing on a 1440 board. The
+   stats now claim the remaining track and wrap into their own auto-fit grid, so the row is dense
+   at every width instead of only at narrow ones. */
+.progress-top {
+  display: grid; grid-template-columns: minmax(190px, auto) minmax(0, 1fr);
+  align-items: center; gap: 18px 28px;
+}
+@media (max-width: 660px) { .progress-top { grid-template-columns: 1fr; } }
 .progress-pctwrap { display: flex; flex-direction: column; line-height: 1; }
 .progress-pct { font-size: clamp(38px, 6vw, 60px); font-weight: 800; letter-spacing: -.02em;
   background: linear-gradient(90deg, var(--accent-gradient-from, var(--accent, #4f7cff)), var(--accent-gradient-to, var(--pass, #2fae66)));
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .progress-sub { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
-.progress-stats { display: flex; gap: 22px; }
-.pstat { display: flex; flex-direction: column; align-items: flex-end; }
-.pstat-num { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.pstat-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 2px; }
+/* An auto-fit GRID, so tiles fill the track they were given instead of huddling at the right
+   edge. Each tile gets its own faint surface so the row reads as instruments on a panel. */
+.progress-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; }
+.pstat {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 9px 11px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  transition: border-color 180ms ease, transform 180ms ease;
+}
+.pstat:hover { border-color: var(--accent, #4f7cff); transform: translateY(-1px); }
+.pstat-num { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.pstat-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 2px; line-height: 1.25; }
 .pstat.is-up .pstat-num { color: var(--pass, #2fae66); }
 .pstat.is-alert .pstat-num { color: var(--warn-fg, #a2640c); }
 /* An unmeasurable leg is neither green nor red: it reads as unknown, so nobody mistakes a question
@@ -1225,23 +1256,31 @@ body.hub-app {
 .dag-fact.is-alert { border-color: var(--warn-solid, #d99a2b); background: var(--warn, rgba(217,154,43,.10)); }
 .dag-n { font-size: var(--step-2); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .dag-l { font-size: var(--step--1); color: var(--muted); }
-.dag-chart { overflow-x: auto; padding: 4px 0 10px; }
-/* A FIXED height, not `auto`. The viewBox is wide and short, so `height:auto` scales the drawing
-   by the card's width and a 3-node graph opened a 400px void under four dots. Letterboxing the
-   drawing inside a bounded box keeps a small graph small and a big one scrollable. */
+.dag-chart { overflow-x: auto; padding: 4px 0 10px; display: flex; justify-content: center; }
+/* Height is FIXED and the width FOLLOWS the viewBox aspect — never `width:100%`.
+   Two opposite failures live in this one rule. `height:auto` scaled the drawing off the card's
+   width and opened a 400px void under four dots; `width:100%` then letterboxed a small graph into
+   the middle of a 1300px box with dead margins either side. Pinning the height and letting width
+   follow means a 2-layer board draws a small centred graph and a 12-layer board draws a wide one
+   that scrolls — the drawing is always its own natural size. */
 .dag-svg {
-  width: 100%; min-width: 260px; height: clamp(90px, 18vh, 170px); overflow: visible;
-  display: block;
+  height: 178px; width: auto; max-width: 100%; overflow: visible; display: block;
 }
+/* the column wash behind a wide layer — mass you can see, not just more dots */
+.dag-col { fill: var(--accent, #4f7cff); opacity: .07; }
 .dag-node { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
-.dag-node.on-path { fill: var(--accent, #4f7cff); stroke: var(--accent, #4f7cff); }
+.dag-node.on-path { fill: var(--accent, #4f7cff); stroke: none; }
+.dag-halo { fill: var(--accent, #4f7cff); opacity: .18; animation: dag-breathe 2.6s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+@keyframes dag-breathe { 0%,100% { opacity: .16; } 50% { opacity: .34; } }
 .dag-edge { stroke: var(--border); stroke-width: 1.5; }
 .dag-edge.on-path {
-  stroke: var(--accent, #4f7cff); stroke-width: 2; stroke-dasharray: 5 4;
-  animation: dag-flow 1.4s linear infinite;
+  stroke: url(#dagSpine); stroke-width: 2.5; stroke-linecap: round;
+  stroke-dasharray: 6 5; animation: dag-flow 1.5s linear infinite;
 }
-@keyframes dag-flow { to { stroke-dashoffset: -18; } }
-.dag-more { fill: var(--muted); font-family: var(--sans); }
+@keyframes dag-flow { to { stroke-dashoffset: -22; } }
+.dag-more { fill: var(--muted); font-family: var(--sans); font-weight: 600; }
+.dag-axis { fill: var(--muted); font-family: var(--sans); font-variant-numeric: tabular-nums; }
+.dag-axis-cap { fill: var(--muted); opacity: .7; letter-spacing: .06em; text-transform: uppercase; }
 .dag-path-wrap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .dag-path-lbl { font-size: var(--step--1); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .dag-path { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
@@ -1351,4 +1390,104 @@ body.hub-app {
   .adh-fill, .dag-edge.on-path, .lease-dot, .status-pill.beat, .card.bumped { animation: none !important; }
   .tcard, .tcard-fill, .adh-row, .dag-step, .ready-item { transition: none !important; }
   .tcard:hover { transform: none; }
+}
+
+/* ============================================================================
+   THE LIVING BACKDROP
+
+   An ambient field behind the whole board that is DRIVEN BY THE BOARD, never
+   decorative noise: `data-fleet` on <body> carries how many workers are
+   actually working, and the aurora's opacity and tempo scale with it. An idle
+   board is nearly still; a fleet at full tilt visibly breathes. So the page's
+   motion is another honest readout — glance at it from across the room and you
+   know whether anything is happening, before you read a single number.
+
+   Painted on ::before/::after of a fixed layer at z-index -1, so it never
+   intercepts a click and never repaints the cards above it.
+   ========================================================================= */
+.hub-backdrop {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden;
+  background: var(--bg);
+}
+.hub-backdrop::before,
+.hub-backdrop::after {
+  content: ""; position: absolute; border-radius: 50%; filter: blur(70px);
+  opacity: var(--aurora-opacity, .18);
+  transition: opacity 1200ms ease;
+  will-change: transform;
+}
+.hub-backdrop::before {
+  width: 58vw; height: 58vw; min-width: 420px; min-height: 420px; top: -22vw; left: -12vw;
+  background: radial-gradient(circle at 50% 50%, var(--accent, #4f7cff), transparent 68%);
+  animation: aurora-a var(--aurora-tempo, 34s) ease-in-out infinite alternate;
+}
+.hub-backdrop::after {
+  width: 52vw; height: 52vw; min-width: 380px; min-height: 380px; bottom: -24vw; right: -14vw;
+  background: radial-gradient(circle at 50% 50%, var(--pass, #2fae66), transparent 68%);
+  animation: aurora-b calc(var(--aurora-tempo, 34s) * 1.28) ease-in-out infinite alternate;
+}
+/* A stalled worker or a failing audit tints the field amber — the ambient layer agrees with the
+   attention rail rather than glowing calmly beside a red board. */
+body[data-mood="warn"] .hub-backdrop::after { background: radial-gradient(circle at 50% 50%, var(--warn-solid, #d99a2b), transparent 68%); }
+body[data-mood="fail"] .hub-backdrop::before { background: radial-gradient(circle at 50% 50%, var(--fail-solid, #d9534f), transparent 68%); }
+
+@keyframes aurora-a {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(6vw, 4vh, 0) scale(1.12); }
+  100% { transform: translate3d(-3vw, 7vh, 0) scale(1.04); }
+}
+@keyframes aurora-b {
+  0%   { transform: translate3d(0, 0, 0) scale(1.06); }
+  50%  { transform: translate3d(-7vw, -5vh, 0) scale(1); }
+  100% { transform: translate3d(4vw, -8vh, 0) scale(1.14); }
+}
+
+/* A hairline grid over the field: enough texture that large empty regions read as a surface
+   rather than a void, faint enough to never compete with content. */
+.hub-backdrop .grid-veil {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(to right, currentColor 1px, transparent 1px),
+    linear-gradient(to bottom, currentColor 1px, transparent 1px);
+  background-size: 46px 46px;
+  color: var(--border);
+  opacity: .22;
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 20%, transparent 78%);
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, #000 20%, transparent 78%);
+}
+
+/* A working fleet pushes the field brighter and quicker; the values are set by hub.js from the
+   live block, so these are the resting defaults for a board with nobody pulling. */
+body { --aurora-opacity: .16; --aurora-tempo: 40s; }
+body[data-fleet="1"] { --aurora-opacity: .24; --aurora-tempo: 30s; }
+body[data-fleet="2"] { --aurora-opacity: .30; --aurora-tempo: 24s; }
+body[data-fleet="many"] { --aurora-opacity: .38; --aurora-tempo: 18s; }
+
+/* Cards sit ON the field, so they need their own ground or the aurora reads through them and the
+   text loses contrast. Slightly translucent + blurred keeps the depth without the mush. */
+.hub-app .card {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(9px) saturate(1.05);
+  -webkit-backdrop-filter: blur(9px) saturate(1.05);
+  transition: border-color 200ms ease, box-shadow 260ms ease, transform 260ms cubic-bezier(.22,.9,.3,1);
+}
+.hub-app .card:hover { box-shadow: var(--shadow-2); }
+/* The cockpit's cards ARRIVE rather than appearing, staggered down the page, so a fresh load
+   reads as the board assembling itself. One shot on mount — never on every live patch, which
+   would make the page flinch each time a worker breathed. */
+.overview-scroll > .card { animation: card-arrive 520ms cubic-bezier(.22,.9,.3,1) both; }
+.overview-scroll > .card:nth-child(2) { animation-delay: 60ms; }
+.overview-scroll > .card:nth-child(3) { animation-delay: 120ms; }
+.overview-scroll > .card:nth-child(4) { animation-delay: 170ms; }
+.overview-scroll > .card:nth-child(n+5) { animation-delay: 210ms; }
+.overview-scroll > .ov-grid { animation: card-arrive 520ms cubic-bezier(.22,.9,.3,1) both; animation-delay: 150ms; }
+@keyframes card-arrive {
+  from { opacity: 0; transform: translateY(12px) scale(.995); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-backdrop::before, .hub-backdrop::after { animation: none !important; }
+  .overview-scroll > .card, .overview-scroll > .ov-grid { animation: none !important; }
+  .hub-app .card { transition: none !important; }
 }
