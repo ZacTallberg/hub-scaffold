@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite
+from . import hub_api, hub_write, hubsite, mcp_server
 
 app_name = "hub"
 urlpatterns = [
@@ -28,8 +28,19 @@ urlpatterns = [
     path("api/adr", hub_write.adr),
     path("api/capability", hub_write.capability),
     path("api/decision", hub_write.decision),
+    # The remaining entity types shipped as schemas with no writer — an agent could read and
+    # validate them and had no way to create one through the API.
+    path("api/gap", hub_write.gap),
+    path("api/feat", hub_write.feat),
+    path("api/note", hub_write.note),
+    path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),
+    # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP
+    # client can discover the board, pull ready work, spec a stub, and finish with a receipt. It
+    # never touches the ledger directly — every mutation goes through the /hub/api/* write seam
+    # above, so the receipt gate, lease fencing, OCC and schema validation all apply unchanged.
+    path("api/mcp", mcp_server.mcp_endpoint, name="mcp"),
 ]

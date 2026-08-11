@@ -14,7 +14,7 @@ from django.views.decorators.http import require_GET
 
 from hub_core import adherence, cost, dag, failure_taxonomy, project, projections, telemetry, wip
 
-from . import hub_app
+from . import delivery, hub_app
 
 _COLLECTION = {"task": "tasks", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
                "deploy": "deploys", "note": "notes"}
@@ -161,7 +161,7 @@ def _readiness(state):
 _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 
 
-def _attention(state, audit, inflight, adher=None):
+def _attention(state, audit, inflight, adher=None, deliv=None):
     """The consolidated 'Needs the operator' rail: every signal a human (or a spec pass) must act
     on, unioned from sources otherwise scattered across tabs and the audit JSON — a poison-blocked
     task, a stuck worker, a dep that can never be satisfied, governance amber, blocked work,
@@ -190,6 +190,22 @@ def _attention(state, audit, inflight, adher=None):
             add(1, "stalled-lease",
                 f"{r.get('agent')} has held the lease {_fmt_age(r.get('age_s'))} without finishing",
                 r.get("task"), r.get("title"))
+
+    # DELIVERY: a done task master never received is a worker's finished work sitting outside the
+    # integration branch — the same class of loss as a stuck seat, and invisible to every
+    # status-based check.
+    for tid in ((deliv or {}).get("unlanded") or []):
+        rec = (deliv.get("records") or {}).get(tid) or {}
+        add(1, "unlanded", rec.get("state_reason") or "done on the board, not on the branch",
+            tid, (entities.get(tid) or {}).get("title"))
+    # An UNMEASURABLE leg is not a passing one. Without these rows a gitless container shows a
+    # silent rail beside a hero that just implied every done task landed.
+    for leg in ("landing", "release", "live"):
+        if deliv and deliv["measured"].get(leg) is False and deliv.get("records"):
+            add(3, "delivery-unmeasured-" + leg,
+                "%s — %d done task(s) carry no checked %s"
+                % (deliv["notes"].get(leg) or "no measurement", len(deliv["records"]), leg),
+                None, "%s unmeasured here" % leg, route={"view": "overview", "focus": "delivery"})
 
     for t in tasks:
         if t.get("status") not in ("todo", "blocked"):
@@ -238,7 +254,7 @@ def _attention(state, audit, inflight, adher=None):
     return items[:32]
 
 
-def _progress(events, state):
+def _progress(events, state, deliv=None):
     """Progress the operator can watch CLIMB.
 
     done/total alone does not climb: a working fleet discovers new work, so the denominator grows
@@ -272,10 +288,26 @@ def _progress(events, state):
         age = (now - t).total_seconds()
         if 0 <= age < span * nb:
             spark[nb - 1 - int(age // span)] += 1
-    return {"done": counts.get("done", 0), "total": counts.get("total", 0),
-            "pct": counts.get("pct", 0), "completed_total": len(comps),
-            "last_1h": last_1h, "last_24h": last_24h, "spark": spark,
-            "spark_bucket_s": span}
+    out = {"done": counts.get("done", 0), "total": counts.get("total", 0),
+           "pct": counts.get("pct", 0), "completed_total": len(comps),
+           "last_1h": last_1h, "last_24h": last_24h, "spark": spark,
+           "spark_bucket_s": span}
+    if deliv is not None:
+        # A LANDED COUNT IS A MEASUREMENT, NOT A SUBTRACTION. Where the ancestry probe cannot run,
+        # done-minus-zero-unlanded would assert that every done task is on the branch — a positive
+        # claim from a question nobody asked. So the numerator is what measured TRUE, and the
+        # never-measured remainder is its own number rather than hiding inside the claim.
+        dc = deliv["counts"]
+        measured = deliv["measured"]
+        out["landing_measured"] = bool(measured.get("landing"))
+        out["landing_note"] = deliv["notes"].get("landing")
+        out["landed"] = dc["landed"] if measured.get("landing") else None
+        out["unlanded"] = dc["unlanded"] if measured.get("landing") else None
+        out["landed_unmeasured"] = dc["landed_unmeasured"] if measured.get("landing") else None
+        out["deployed"] = dc["deployed"] if measured.get("release") else None
+        out["live"] = dc["live"] if measured.get("live") else None
+        out["live_attested"] = bool(deliv.get("live_attested"))
+    return out
 
 
 def _failure_modes(events, top=6):
@@ -445,7 +477,9 @@ def _snapshot(served=None):
     s = hub_app.store()
     try:
         cur = s.latest_cursor()
-        key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp())
+        # git head rides in the key because the delivery legs (rail + hero) depend on what the
+        # integration branch carries, which changes with no board event at all — a landing.
+        key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(), hub_app._git_head())
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
         events = s.events()
@@ -455,6 +489,10 @@ def _snapshot(served=None):
         last = events[-1] if events else {}
         inflight = _inflight(state)
         adher = adherence.score(events, state, leases=inflight)
+        # WHERE THE WORK ACTUALLY IS, per task, from recorded evidence. Computed ONCE and handed to
+        # both the hero and the rail, so the cockpit cannot grow two answers to "is this landed"
+        # — and so an unmeasurable leg reaches the operator as an honest unknown, not silent green.
+        deliv = delivery.block(state, served=served)
         hub_dir = hub_app.HUB_DIR
         live = {
             "transport": "event-stream",
@@ -463,7 +501,10 @@ def _snapshot(served=None):
             "activity": _activity(events, state),
             "inflight": inflight,
             "readiness": _readiness(state),
-            "progress": _progress(events, state),
+            "progress": _progress(events, state, deliv),
+            # Per-task delivery: done / landed / deployed / live are four different questions, and
+            # each leg reports UNMEASURED rather than false where it could not be asked.
+            "delivery": deliv,
             # Is the board still being FOLLOWED and kept current — six dimensions, each with its
             # denominator (hub_core.adherence).
             "adherence": adher,
@@ -475,7 +516,7 @@ def _snapshot(served=None):
             "fleet": _fleet(events, state, inflight),
             "worker_health": _worker_health(state, events, inflight),
             "failure_modes": _failure_modes(events),
-            "attention": _attention(state, audit, inflight, adher),
+            "attention": _attention(state, audit, inflight, adher, deliv),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
             # aggregate, never a bespoke side-channel field.
             "telemetry": telemetry.read_aggregate(hub_dir),
@@ -558,7 +599,7 @@ def delta_json(request):
         # next full sync — the most-watched part of the page was the last to move.
         "live": {k: live.get(k) for k in ("cursor", "progress", "adherence", "fleet", "inflight",
                                           "attention", "readiness", "activity", "dag",
-                                          "worker_health", "wip")},
+                                          "worker_health", "wip", "delivery")},
         "metadata": {"since": since, "changed": len(changed)},
     })
 

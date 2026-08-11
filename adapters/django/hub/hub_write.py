@@ -13,7 +13,7 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import ids, validate
+from hub_core import collision, ids, validate
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
@@ -134,8 +134,15 @@ def task(request, b):
         return JsonResponse({"errors": [{"code": "use_complete",
             "msg": "status 'done' must go through POST /hub/api/complete (evidence + verify + audit gated)"}]},
             status=409)
+    twins = []
     if is_create:
         state = hub_app.current_state()
+        # MINT-TIME TWIN DETECTION. Two seats bitten by the same incident file the same unit
+        # minutes apart and nothing on the write path compares them. Titles were never going to
+        # catch it — what a pair of duplicates actually SHARE is the surfaces they touch, which is
+        # what hub_core.collision compares. This WARNS and never refuses: a false positive that
+        # blocks a legitimate mint is worse than a duplicate the operator can see and fold.
+        twins = collision.mint_collisions(b, state)
         eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "task")
         b.setdefault("status", "todo")
     else:
@@ -144,6 +151,10 @@ def task(request, b):
     payload["type"] = "task"
     resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"), agent=agent,
                            idem=b.get("idem_key"), etype="task.created" if is_create else "task.updated")
+    if twins and status < 400:
+        resp["warnings"] = [{"code": "possible_twin",
+                             "msg": "this task shares surfaces with existing work; fold if duplicate",
+                             "candidates": twins}]
     return JsonResponse(resp, status=status)
 
 
@@ -304,6 +315,61 @@ def capability(request, b):
     resp, status = _append("cap", eid, payload, expected_version=b.get("expected_version"), agent=agent,
                            idem=b.get("idem_key"), etype="capability.registered")
     return JsonResponse(resp, status=status)
+
+
+def _slug(text, fallback):
+    s = "".join(c if c.isalnum() or c in "._-" else "-" for c in str(text or "").lower())
+    s = re.sub(r"-{2,}", "-", s).strip("-._")[:48].strip("-._")
+    return s or fallback
+
+
+def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None):
+    """The upsert every remaining entity type needs, in one shape.
+
+    The scaffold shipped `gap`, `feat`, `note` and `deploy` SCHEMAS with no writer at all: an
+    agent could read those collections and validate them, and had no way to create one through
+    the API. Four documented entity types were effectively write-only-by-hand.
+
+    IDENTITY IS DERIVED, NOT RANDOM, wherever the content supports it. A slug type (feat, note)
+    mints from its own name, and a type with a natural key (deploy's sha) mints from that — so a
+    retried POST UPDATES the entity instead of minting a twin, which is the whole of idempotency
+    here and needs no separate key. Numeric types without a natural key fall back to the
+    high-water allocator, and a caller who wants exactly-once there passes `idem_key`.
+    """
+    @writer
+    def view(request, b):
+        agent = b.get("agent", "agent")
+        eid = b.get("id")
+        if not eid:
+            if not str(b.get(name_field) or "").strip():
+                return JsonResponse({"errors": [{"code": "need_" + name_field,
+                    "msg": f"{name_field} is required to create a {type_}"}]}, status=400)
+            state = hub_app.current_state()
+            if natural_key and str(b.get(natural_key) or "").strip():
+                eid = ids.make_id(hub_app.PROJECT_KEY, type_,
+                                  _slug(b[natural_key], type_))
+            elif numeric:
+                eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, type_)
+            else:
+                eid = ids.make_id(hub_app.PROJECT_KEY, type_,
+                                  b.get("local") or _slug(b[name_field], type_))
+        payload = {k: v for k, v in b.items()
+                   if k not in ("agent", "expected_version", "idem_key", "local")}
+        payload["type"] = type_
+        resp, status = _append(type_, eid, payload, expected_version=b.get("expected_version"),
+                               agent=agent, idem=b.get("idem_key"), etype=etype)
+        return JsonResponse(resp, status=status)
+    view.__name__ = type_
+    return view
+
+
+# `deploy` keys on its SHA: one release, one record. Without that a retried deploy notification
+# mints a second record for the same build, and the coherence block then has two answers to
+# "what is running".
+gap = _simple_writer("gap", "gap.created", name_field="title", numeric=True)
+feat = _simple_writer("feat", "feat.upserted", name_field="name")
+note = _simple_writer("note", "note.created", name_field="title")
+deploy = _simple_writer("deploy", "deploy.created", name_field="sha", natural_key="sha")
 
 
 @writer
