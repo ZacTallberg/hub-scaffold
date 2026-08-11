@@ -14,6 +14,60 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### The board became LIVE, and became a cockpit
+
+The scaffold rendered a correct board that never moved: no SSE, no delta, and a client that was
+~27% of what the working instances had grown. A dashboard you must reload is a dashboard nobody
+watches, so this closes the whole gap in one unit.
+
+**Realtime.** `GET /hub/live/events` is a bounded Server-Sent Events cursor emitting event
+IDENTITY only (`{seq, ts, event, aggregate, version, agent}`) — never payload content — with
+`Last-Event-ID` resume, heartbeats to defeat proxy buffering, and a closing `reconnect`. The
+browser learns THAT something moved and re-reads the canonical board to learn what, so animation
+never becomes a second source of truth. `GET /hub/delta.json?since=` patches a held snapshot
+(entities *and* the cockpit blocks, so the most-watched part of the page is not the last to
+move); `GET /hub/cursor.json` is a contents-free liveness cursor for canaries; `hub.json` now
+answers **304** on a matching `If-None-Match`. The client degrades to polling, then to a manual
+sync, and says which mode it is in.
+
+**Cockpit.** Progress hero with monotonic counters and a completion sparkline, the "needs the
+operator" attention rail, per-agent fleet cards with live plan-step progress, an in-flight task
+stage, the work queue split into ready / needs-spec / waiting-on-a-timer, an activity feed
+carrying the receipt that granted each completion, facet bars, and a real focus trap with `inert`
+— which the shell had *promised* since it was written and never implemented.
+
+**Two blocks that did not exist anywhere.**
+- `hub_core/adherence.py` — **is the board still being followed and kept current?** Six
+  dimensions (specced, proven, evidenced, fresh, current, moving), each carrying its denominator
+  and its unmeasured count. An empty denominator reports `null`, never 100%: a board with no done
+  tasks is not a perfectly-proven board. The composite averages only measured dimensions and
+  names the ones it skipped; the ring draws unmeasurable segments as ghosts so "nothing to
+  measure" cannot look like "everything passed".
+- `hub_core/dag.py` gained `critical_path()` and layer membership, so the cockpit can DRAW the
+  dependency frontier and the longest chain instead of asserting a number the operator has to
+  take on faith.
+
+Also ported, environment-agnostic: `failure_taxonomy` (what kind of refusal the fleet keeps
+hitting), `telemetry` + `cost` (the OTLP GenAI aggregate and its dollarized fold), and
+`identity` — rewritten to resolve from `PROJECT/project.json`, then env, then a packaged default,
+because the scaffold must boot on a fresh clone with nothing edited.
+
+### Fixes the audit surfaced
+
+- **The RCE description outlived the RCE.** `governance/AGENTS.md.template` and
+  `CLAUDE.md.template` still told every agent the write token was "command-execution-grade
+  because task verification commands run on the server". The 2026-08-08 sweep corrected nine
+  surfaces and missed these two because they are named `*.md.template`, so every `-- '*.md'`
+  pathspec skipped them. The first file a worker reads was still describing a vulnerability that
+  no longer exists as if it were the security model. Same stale wording removed from
+  `task.schema.json` and the example seed.
+- **`not_before` and `poison_blocked` were unreachable.** `hub_core/project.py` reads both, but
+  `task.schema.json` omits them under `additionalProperties: false`, so durable timers and the
+  poison circuit-breaker could not be set through the write API at all. Added, with
+  `poison_reason`.
+- **`common.schema.json` accepted 7 id types; `ids.py` mints 13.** `finding`/`review` ids were
+  mintable and then rejected by validation. Patterns aligned.
+
 ### 2026-08-09 (later) — licensed, and the last battery-era doctrine out
 
 - **MIT LICENSE added** (Copyright (c) 2026 Zac Oberg); README's "no license granted" section

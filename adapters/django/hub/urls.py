@@ -14,6 +14,12 @@ urlpatterns = [
     path("audit.json", hub_api.audit_json),
     path("graph.json", hub_api.graph_json),
     path("next.json", hub_api.next_json),
+    # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
+    # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
+    path("live/events", hub_api.live_events, name="live-events"),
+    path("cursor.json", hub_api.cursor_json, name="cursor"),
+    path("delta.json", hub_api.delta_json, name="delta"),
+    path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
     path("<str:type>/<str:local>.json", hub_api.entity_json),

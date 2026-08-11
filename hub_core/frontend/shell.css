@@ -1,5 +1,5 @@
 /* =============================================================================
-   HUB KIT — shell.css
+   PINNACLE HUB — shell.css
    The APP-SHELL component layer: a tabbed, single-file admin dashboard at the
    app-foundry design bar. Sits ON TOP of tokens.css (color/radius/status/motion)
    and reuses its semantic tokens, so dark mode / forced-colors / reduced-motion
@@ -169,10 +169,58 @@ body.hub-app {
 .filter-pill:hover { border-color: var(--accent); color: var(--accent); }
 .filter-pill.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .filter-pill .pill-n { font-variant-numeric: tabular-nums; opacity: 0.8; }
+.facet-bar {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px clamp(1rem, 3vw, 24px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.facet-bar.is-empty { display: none; }
+.facet-chip {
+  padding: 4px 12px; font: inherit; font-size: 12px; font-weight: 500;
+  border-radius: 20px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px;
+  transition: all var(--motion-base, 0.15s ease);
+}
+.facet-chip:hover { border-color: var(--accent); color: var(--accent); }
+.facet-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.facet-chip .facet-count { font-variant-numeric: tabular-nums; opacity: 0.8; font-size: 11px; }
+.facet-chip.on .facet-count { opacity: 0.9; }
 .toolbar-spacer { flex: 1; }
 .stats-bar { display: flex; align-items: center; gap: 18px; }
 .stat-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .stat-item .stat-value { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.compact-task-sort {
+  display: none;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.45px;
+}
+.compact-task-sort select,
+.compact-sort-direction {
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.compact-task-sort select { padding: 5px 28px 5px 9px; text-transform: none; letter-spacing: 0; }
+.compact-sort-direction {
+  width: 32px;
+  padding: 0;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+.compact-task-sort select:focus-visible,
+.compact-sort-direction:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: 2px; }
 
 /* =============================================================================
    CONTENT AREA (the inset canvas; only the toolbar spans wall-to-wall)
@@ -207,6 +255,12 @@ body.hub-app {
   border-bottom: 2px solid var(--border); white-space: nowrap;
 }
 .data-table th.sortable { cursor: pointer; user-select: none; }
+/* The sort control is what actually takes focus, so it carries the focus ring — inheriting the
+   cell's box would draw the ring around the whole column header instead of the thing focused. */
+.data-table th .sort-btn { display: inline-flex; align-items: center; cursor: pointer; }
+.data-table th .sort-btn:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px;
+}
 .data-table th .sort-ind { display: inline-block; width: 10px; margin-left: 4px; opacity: 0.4; }
 .data-table th.sort-asc .sort-ind, .data-table th.sort-desc .sort-ind { opacity: 1; color: var(--accent); }
 .data-table td { padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
@@ -219,6 +273,31 @@ body.hub-app {
 .data-table td.col-title { color: var(--text); font-weight: 500; }
 .cell-sub { color: var(--muted); font-size: 11px; }
 .data-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.task-table .col-pickup { width: 84px; white-space: nowrap; }
+.task-table .col-priority { width: 58px; white-space: nowrap; }
+.pickup-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 50px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: 700 10px/1 var(--mono);
+  letter-spacing: 0.035em;
+  white-space: nowrap;
+}
+.pickup-now {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: var(--accent-wash);
+  color: var(--accent);
+  box-shadow: 0 0 18px -8px var(--accent);
+}
+.pickup-next { border-color: color-mix(in srgb, var(--info-fg) 35%, var(--border)); color: var(--info-fg); }
+.pickup-waiting { color: var(--warn-fg); }
+.pickup-done { color: var(--muted); opacity: 0.74; }
 
 /* =============================================================================
    CARDS + KPI tiles
@@ -258,6 +337,376 @@ body.hub-app {
 .coherence-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: var(--muted); }
 .coherence-strip .ci { display: flex; align-items: center; gap: 6px; }
 .coherence-strip code { font-family: var(--mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1px 6px; color: var(--text); }
+
+/* =============================================================================
+   LIVE OPERATIONS EXPERIENCE
+   The event chain remains the product; motion only makes canonical state change legible.
+   ========================================================================== */
+.status-pill { min-width: 190px; justify-content: center; }
+.status-pill .status-meta {
+  padding-left: 8px;
+  border-left: 1px solid rgba(255,255,255,0.25);
+  opacity: 0.78;
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.status-pill.live .status-dot { background: #4ade80; box-shadow: 0 0 0 5px rgba(74,222,128,0.16); }
+.status-pill.connecting .status-dot,
+.status-pill.reconnecting .status-dot { background: #fbbf24; animation: liveBeacon 1.25s ease-in-out infinite; }
+.status-pill.degraded .status-dot { background: #fb923c; }
+.status-pill.paused .status-dot { background: #cbd5e1; box-shadow: none; }
+.btn-white.is-syncing svg { animation: spin 0.8s linear infinite; }
+.tab-btn.is-loading .tab-badge { animation: softPulse 1s ease-in-out infinite; }
+
+.ops-kicker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+}
+.live-orb {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: #4ade80;
+  box-shadow: 0 0 0 5px rgba(74,222,128,0.13), 0 0 28px rgba(74,222,128,0.72);
+}
+
+.overview-scroll {
+  background:
+    radial-gradient(circle at 8% 1%, color-mix(in srgb, var(--accent-wash) 70%, transparent), transparent 27rem),
+    radial-gradient(circle at 94% 28%, color-mix(in srgb, var(--info) 58%, transparent), transparent 24rem),
+    var(--bg);
+}
+.overview-signal-strip {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 52px;
+  margin-bottom: 16px;
+  padding: 11px 14px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: calc(var(--radius) + 2px);
+  background:
+    linear-gradient(112deg, color-mix(in srgb, var(--surface) 96%, var(--accent)), var(--surface));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 50%, transparent),
+    0 14px 45px -34px var(--accent),
+    var(--shadow-1);
+}
+.overview-signal-strip::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: -30%;
+  bottom: 0;
+  width: 30%;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--accent), #4ade80, transparent);
+  filter: drop-shadow(0 0 7px var(--accent));
+  animation: signalTravel 8s linear infinite;
+}
+.signal-primary, .signal-meta { display: flex; align-items: center; min-width: 0; }
+.signal-primary { flex-wrap: wrap; gap: 8px 11px; }
+.signal-primary .live-orb { animation: liveBeacon 2.4s ease-in-out infinite; }
+.signal-primary strong {
+  color: var(--text);
+  font-size: 12px;
+  letter-spacing: -0.01em;
+}
+.signal-primary > span:last-child {
+  color: var(--muted);
+  font-size: 11px;
+}
+.signal-meta { flex: none; gap: 7px; }
+.signal-meta span {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  color: var(--muted);
+  font: 650 9px/1.25 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.operations-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(310px, 0.8fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.live-work-card, .activity-card {
+  min-height: 0;
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+  box-shadow: 0 20px 58px -48px var(--accent), var(--shadow-1);
+}
+.live-work-card .card-header, .activity-card .card-header {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent-wash) 58%, var(--bg)), var(--bg) 58%);
+}
+.live-task-stack { display: grid; gap: 12px; }
+.text-action {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: 650 11px/1 var(--sans);
+  cursor: pointer;
+}
+.text-action:hover { text-decoration: underline; text-underline-offset: 3px; }
+.chain-chip {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font: 600 10px/1.3 var(--mono);
+}
+
+.mission-stage {
+  flex: 0 0 auto;
+  max-height: min(46vh, 430px);
+  overflow: auto;
+  padding: 18px clamp(1rem, 3vw, 24px);
+  border-bottom: 1px solid var(--border);
+  background:
+    radial-gradient(circle at 18% -20%, var(--accent-wash), transparent 34%),
+    var(--bg);
+}
+.mission-stage-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+}
+.mission-stage-head h2 { margin: 3px 0 2px; font-size: clamp(1.35rem, 2vw, 1.8rem); letter-spacing: -0.03em; }
+.mission-stage-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.mission-stage-meta { display: flex; align-items: center; gap: 7px; color: var(--muted); white-space: nowrap; }
+.stage-updated { font-size: 11px; }
+.mission-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 12px; }
+
+.mission-card {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 1px);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--surface) 94%, var(--accent)), var(--surface));
+  color: var(--text);
+  text-align: left;
+  box-shadow: var(--shadow-1);
+  cursor: pointer;
+  transition: transform 180ms cubic-bezier(.2,.8,.2,1), border-color 180ms ease, box-shadow 180ms ease;
+}
+.mission-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(112deg, transparent 20%, color-mix(in srgb, var(--accent) 10%, transparent) 48%, transparent 74%);
+  transform: translateX(-110%);
+}
+.mission-card:hover, .mission-card:focus-visible {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: var(--shadow-2), 0 12px 40px -28px var(--accent);
+}
+.mission-card.status-active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--accent-wash) 82%, transparent), transparent 42%),
+    linear-gradient(145deg, color-mix(in srgb, var(--surface) 92%, var(--accent)), var(--surface));
+  box-shadow: inset 3px 0 0 var(--accent), 0 16px 45px -38px var(--accent), var(--shadow-1);
+  animation: activeGlow 2.4s ease-in-out infinite;
+}
+.mission-card.status-blocked { box-shadow: inset 3px 0 0 var(--warn-solid), var(--shadow-1); }
+.mission-card.status-done { box-shadow: inset 3px 0 0 var(--pass-solid), var(--shadow-1); }
+/* DONE STYLING MAY NOT IMPLY PRODUCTION AVAILABILITY. A done row or card whose delivery projection
+   cannot prove the bytes are in production (unlanded, undeployed, live sha differs, live off master,
+   unmeasurable here) drops the pass rail — green is reserved for work the box is actually serving.
+   Both selectors read the SAME hook the client sets from delivery.available, so a row and a card can
+   never style the same task differently, and the discrimination survives a dropped CSS class. */
+.mission-card.status-done:not([data-available="true"]) { box-shadow: inset 3px 0 0 var(--warn-solid), var(--shadow-1); }
+.status-done:not([data-available="true"]) .mission-signal { background: var(--warn-solid); }
+.data-table tbody tr[data-status="done"]:not([data-available="true"]) { box-shadow: inset 3px 0 0 var(--warn-solid); }
+.mission-card.status-active::after { animation: missionSweep 5.5s ease-in-out infinite; }
+.mission-card.compact { padding: 15px; }
+.mission-card.compact .mission-title { font-size: 14px; }
+.mission-card.compact .mission-plan {
+  gap: 5px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+}
+.mission-card.compact .mission-plan li { font-size: 10px; }
+.mission-card.compact .step-mark { width: 14px; height: 14px; }
+.mission-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.mission-head > div:first-child { min-width: 0; }
+.mission-eyebrow { display: flex; align-items: center; gap: 7px; color: var(--muted); font: 700 9px/1.2 var(--mono); letter-spacing: 0.09em; }
+.mission-signal { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--stale-solid); }
+.status-active .mission-signal { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-wash); animation: liveBeacon 1.8s ease-in-out infinite; }
+.status-blocked .mission-signal { background: var(--warn-solid); }
+.status-done .mission-signal { background: var(--pass-solid); }
+.mission-id { margin-left: auto; opacity: 0.72; letter-spacing: 0; }
+.mission-title { margin: 7px 0 0; font-size: 16px; line-height: 1.25; letter-spacing: -0.018em; }
+.mission-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.priority { display: inline-flex; align-items: center; justify-content: center; min-width: 27px; padding: 2px 6px; border-radius: 999px; font: 750 10px/1.35 var(--mono); border: 1px solid var(--border); color: var(--muted); }
+.priority-P0 { color: var(--fail-fg); background: var(--fail); border-color: transparent; }
+.priority-P1 { color: var(--warn-fg); background: var(--warn); border-color: transparent; }
+.mission-meter-wrap { margin-top: 14px; }
+.mission-meter-copy { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: var(--muted); font-size: 10px; }
+.mission-meter-copy strong { color: var(--text); font-family: var(--mono); }
+.mission-meter, .mini-progress {
+  position: relative;
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.mission-meter > span, .mini-progress > span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 62%, #fff));
+  transition: width 520ms cubic-bezier(.2,.8,.2,1);
+}
+.status-active .mission-meter > span,
+.data-table tr[data-status="active"] .mini-progress > span {
+  background-size: 220% 100%;
+  animation: progressFlow 3.4s ease-in-out infinite;
+}
+.mission-plan, .detail-plan { display: grid; gap: 7px; margin: 13px 0 0; padding: 0; list-style: none; }
+.mission-plan li, .detail-plan li { display: grid; grid-template-columns: 17px 1fr; gap: 8px; align-items: start; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.mission-plan li.is-done, .detail-plan li.is-done { color: var(--text); }
+.step-mark { display: grid; place-items: center; width: 15px; height: 15px; border: 1px solid var(--border); border-radius: 50%; color: var(--pass-fg); font-size: 9px; line-height: 1; }
+.is-done > .step-mark { border-color: var(--pass-solid); background: var(--pass); }
+.mission-empty { padding: 22px; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); text-align: center; }
+.detail-plan-summary { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.detail-plan-summary strong { color: var(--text); }
+
+.task-progress-cell { min-width: 130px; }
+.mini-progress { display: inline-block; width: 78px; height: 5px; vertical-align: middle; }
+.mini-progress-label { margin-left: 7px; color: var(--muted); font: 600 10px/1 var(--mono); }
+
+.activity-list { max-height: 430px; overflow-y: auto; padding: 7px 14px 13px; }
+.activity-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 19px 1fr;
+  gap: 8px;
+  padding: 11px 4px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.activity-item:hover:not(:disabled) { background: var(--surface-2); }
+.activity-item:disabled { cursor: default; }
+.activity-item.is-new {
+  margin-top: 5px;
+  padding-inline: 8px;
+  background: color-mix(in srgb, var(--accent-wash) 58%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.activity-rail { position: relative; display: flex; justify-content: center; }
+.activity-rail::after { content: ""; position: absolute; top: 15px; bottom: -20px; width: 1px; background: var(--border); }
+.activity-item:last-child .activity-rail::after { display: none; }
+.activity-node { position: relative; z-index: 1; width: 9px; height: 9px; margin-top: 3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-wash); }
+.activity-copy, .activity-topline, .activity-title, .activity-meta { display: block; min-width: 0; }
+.activity-topline { display: flex; justify-content: space-between; gap: 10px; }
+.activity-topline strong { font-size: 11px; }
+.activity-topline time { flex: none; color: var(--muted); font: 500 9px/1.4 var(--mono); }
+.activity-title { margin-top: 3px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-meta { margin-top: 3px; color: var(--muted); font: 500 9px/1.3 var(--mono); }
+
+.data-table tbody tr.is-live-change { animation: rowArrive 1.4s ease both; }
+.data-table tbody tr[data-status="active"] {
+  box-shadow: inset 3px 0 0 var(--accent);
+  animation: runningRowGlow 2.8s ease-in-out infinite;
+}
+.data-table tbody tr.change-done { box-shadow: inset 4px 0 0 var(--pass-solid); }
+.data-table tbody tr.change-blocked { box-shadow: inset 4px 0 0 var(--warn-solid); }
+.mission-card.is-live-change { animation: cardArrive 1.2s cubic-bezier(.2,.8,.2,1) both; }
+.mission-card.change-done { box-shadow: inset 3px 0 0 var(--pass-solid), 0 0 0 1px var(--pass-solid), 0 18px 55px -30px var(--pass-solid); }
+/* The live-change flash is the loudest green on the board and it fires on the BOARD transition, when
+   the branch is least likely to have landed — so it, too, keeps the pass wash only for delivered work. */
+.data-table tbody tr[data-status="done"]:not([data-available="true"]).change-done { box-shadow: inset 4px 0 0 var(--warn-solid); }
+.mission-card.status-done:not([data-available="true"]).change-done { box-shadow: inset 3px 0 0 var(--warn-solid), 0 0 0 1px var(--warn-solid), 0 18px 55px -30px var(--warn-solid); }
+
+.completion-celebration {
+  position: fixed;
+  left: 50%;
+  top: 19vh;
+  z-index: calc(var(--z-toast) + 2);
+  width: min(calc(100vw - 32px), 480px);
+  display: grid;
+  grid-template-columns: 54px 1fr;
+  gap: 15px;
+  align-items: center;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--pass-solid) 55%, transparent);
+  border-radius: calc(var(--radius) + 5px);
+  background: color-mix(in srgb, var(--surface) 92%, var(--pass));
+  color: var(--text);
+  box-shadow: 0 30px 90px -32px var(--pass-solid), var(--shadow-2);
+  opacity: 0;
+  transform: translate(-50%, -18px) scale(0.94);
+  pointer-events: none;
+}
+/* A completion the projection cannot prove is live keeps the shape and loses the green: the copy
+   already names the step it reached, and the wash must not contradict the words. */
+.completion-celebration.not-live {
+  border-color: color-mix(in srgb, var(--warn-solid) 55%, transparent);
+  background: color-mix(in srgb, var(--surface) 92%, var(--warn));
+  box-shadow: 0 30px 90px -32px var(--warn-solid), var(--shadow-2);
+}
+.completion-celebration.show { animation: completionPop 620ms cubic-bezier(.16,1,.3,1) forwards; }
+.completion-celebration.leave { opacity: 0; transform: translate(-50%, -8px) scale(0.98); transition: opacity 420ms ease, transform 420ms ease; }
+.completion-check {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--pass);
+  color: var(--pass-fg);
+  border: 1px solid var(--pass-solid);
+  font-size: 26px;
+  font-weight: 800;
+}
+.completion-copy { display: block; min-width: 0; }
+.completion-copy strong { display: block; color: var(--pass-fg); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; }
+.completion-copy span { display: block; margin-top: 4px; overflow: hidden; font-size: 15px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.completion-particles { position: absolute; left: 45px; top: 50%; width: 1px; height: 1px; }
+.completion-particles i {
+  --angle: calc(var(--particle) * 36deg);
+  position: absolute;
+  width: 5px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--pass-solid);
+  opacity: 0;
+  transform: rotate(var(--angle)) translateY(-12px) scaleY(0.3);
+  transform-origin: 50% 0;
+  animation: completionSpark 780ms calc(var(--particle) * 22ms) cubic-bezier(.2,.7,.2,1) forwards;
+}
 
 /* =============================================================================
    BADGES (semantic chips — mapped onto the 5 status tokens for dark-mode safety)
@@ -331,6 +780,25 @@ body.hub-app {
 .callout.fail { background: var(--fail); color: var(--fail-fg); }
 .callout.info { background: var(--info); color: var(--info-fg); }
 
+/* 'Needs the operator' attention rail (Overview) */
+.attn-list { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px 13px; max-height: 340px; overflow-y: auto; }
+.attn-item {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;
+  padding: 9px 11px; border: 0; border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); cursor: pointer; font: inherit;
+  border-left: 3px solid var(--border);
+}
+.attn-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
+.attn-item:disabled { cursor: default; opacity: 0.85; }
+.attn-item.t-fail { border-left-color: var(--fail); }
+.attn-item.t-warn { border-left-color: var(--warn); }
+.attn-item.t-info { border-left-color: var(--info); }
+.attn-kind { flex: 0 0 auto; }
+.attn-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.attn-title { font-weight: 600; font-size: 12px; }
+.attn-reason { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.attn-clear { display: flex; align-items: center; gap: 8px; padding: 12px 14px; font-size: 12px; color: var(--muted); }
+
 /* =============================================================================
    TOASTS
    ========================================================================== */
@@ -375,22 +843,512 @@ body.hub-app {
 @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(110%); opacity: 0; } }
 @keyframes modalIn { from { opacity: 0; transform: scale(0.96) translateY(-8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 @keyframes highlightFade { 0% { background: var(--accent-wash); } 100% { background: transparent; } }
+@keyframes liveBeacon {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.48; transform: scale(0.76); }
+}
+@keyframes softPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes signalTravel {
+  from { transform: translateX(0); }
+  to { transform: translateX(435%); }
+}
+@keyframes missionSweep {
+  0%, 42% { transform: translateX(-110%); }
+  70%, 100% { transform: translateX(110%); }
+}
+@keyframes progressFlow {
+  0%, 100% { background-position: 0% 50%; filter: saturate(1); }
+  50% { background-position: 100% 50%; filter: saturate(1.28) brightness(1.08); }
+}
+@keyframes rowArrive {
+  0% { opacity: 0.45; background: color-mix(in srgb, var(--accent-wash) 82%, transparent); }
+  35% { opacity: 1; background: color-mix(in srgb, var(--accent-wash) 95%, transparent); }
+  100% { background: transparent; }
+}
+@keyframes cardArrive {
+  0% { opacity: 0.35; transform: translateY(12px) scale(0.985); }
+  55% { opacity: 1; transform: translateY(-2px) scale(1.005); }
+  100% { transform: translateY(0) scale(1); }
+}
+@keyframes activeGlow {
+  0%, 100% { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: inset 3px 0 0 var(--accent), 0 0 0 0 transparent, var(--shadow-1); }
+  50% { border-color: color-mix(in srgb, var(--accent) 88%, #fff); box-shadow: inset 3px 0 0 var(--accent), 0 0 0 4px var(--accent-wash), 0 16px 48px -32px var(--accent); }
+}
+@keyframes runningRowGlow {
+  0%, 100% { background: transparent; }
+  50% { background: color-mix(in srgb, var(--accent-wash) 72%, transparent); }
+}
+@keyframes completionPop {
+  0% { opacity: 0; transform: translate(-50%, -18px) scale(0.94); }
+  58% { opacity: 1; transform: translate(-50%, 3px) scale(1.015); }
+  100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes completionSpark {
+  0% { opacity: 0; transform: rotate(var(--angle)) translateY(-12px) scaleY(0.3); }
+  28% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(var(--angle)) translateY(-54px) scaleY(1); }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .toast, .modal-content, .data-table tbody tr.is-hit, .status-pill.scanning .status-dot { animation: none !important; }
+  .toast, .modal-content, .data-table tbody tr.is-hit, .data-table tbody tr.is-live-change,
+  .data-table tbody tr[data-status="active"], .status-pill .status-dot, .mission-card,
+  .mission-card::after, .mission-signal, .tab-btn.is-loading .tab-badge,
+  .mission-meter > span, .mini-progress > span, .overview-signal-strip::before,
+  .btn-white.is-syncing svg, .completion-celebration, .completion-particles i { animation: none !important; transform: none !important; }
+  .completion-celebration.show { opacity: 1; left: 50%; transform: translateX(-50%) !important; }
+  .completion-particles { display: none; }
 }
 
 /* =============================================================================
    RESPONSIVE — below 720px, the modal detail grid + overview grids collapse.
    ========================================================================== */
+@media (max-width: 1200px) {
+  .compact-task-sort { display: flex; }
+  .task-table-wrapper { overflow-x: hidden; }
+  .task-table { display: block; width: 100%; }
+  .task-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: block;
+  }
+  .task-table thead tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    background: var(--bg);
+    border-bottom: 2px solid var(--border);
+  }
+  .task-table thead th { display: none; border: 0; }
+  .task-table thead th.col-title,
+  .task-table thead th.col-pickup { display: block; }
+  .task-table thead th.col-title { grid-column: 1; grid-row: 1; }
+  .task-table thead th.col-pickup { grid-column: 2; grid-row: 1; width: auto; text-align: right; }
+  .task-table tbody { display: block; }
+  .task-table tbody tr[data-hub-row] {
+    display: grid;
+    grid-template-columns: auto auto auto minmax(112px, 1fr);
+    grid-template-areas:
+      "title title title title"
+      "id id phase phase"
+      "pickup status priority progress";
+    align-items: center;
+    gap: 10px 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .task-table tbody tr[data-hub-row]:last-child { border-bottom: 0; }
+  .task-table tbody tr[data-hub-row] > td {
+    width: auto;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+  .task-table tbody tr[data-hub-row] > .col-title {
+    grid-area: title;
+    font-size: 14px;
+    font-weight: 650;
+    line-height: 1.35;
+    white-space: normal;
+  }
+  .task-table tbody tr[data-hub-row] > .col-id {
+    grid-area: id;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+  .task-table tbody tr[data-hub-row] > .col-phase {
+    grid-area: phase;
+    justify-self: end;
+  }
+  .task-table tbody tr[data-hub-row] > .col-id,
+  .task-table tbody tr[data-hub-row] > .col-phase {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+  }
+  .task-table tbody tr[data-hub-row] > .col-id::before,
+  .task-table tbody tr[data-hub-row] > .col-phase::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-family: var(--font);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.55px;
+    text-transform: uppercase;
+  }
+  .task-table tbody tr[data-hub-row] > .col-pickup { grid-area: pickup; }
+  .task-table tbody tr[data-hub-row] > .col-status { grid-area: status; }
+  .task-table tbody tr[data-hub-row] > .col-priority { grid-area: priority; }
+  .task-table tbody tr[data-hub-row] > .col-progress { grid-area: progress; }
+  .task-table .task-progress-cell { justify-content: flex-end; }
+  .task-table .mini-progress { flex: 1; width: auto; max-width: none; }
+}
+
 @media (max-width: 720px) {
+  /* The navbar must WRAP under 720px: it is a non-wrapping space-between row, and once brand +
+     pills + theme select exceed the viewport the right group runs past the edge — body clips it
+     (overflow-x hidden), so the theme control was silently CUT OFF on phones, measured at
+     right=405px in a 375px viewport on every tab. Wrapping drops the right group to its own
+     line instead of off the screen. */
+  .navbar-main { height: auto; min-height: var(--navbar-height); gap: 4px 8px; padding-block: 8px;
+                 flex-wrap: wrap; }
+  .navbar-brand { font-size: 13px; min-width: 0; }
+  .navbar-right { gap: 6px; flex-wrap: wrap; min-width: 0; justify-content: flex-end; }
+  .hub-theme-select { max-width: 42vw; }
+  .status-pill { min-width: 0; padding: 6px 9px; }
+  .status-pill .status-meta, .status-pill .clock { display: none; }
+  .overview-signal-strip { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .signal-meta { flex-wrap: wrap; }
+  .operations-grid { grid-template-columns: 1fr; }
+  .mission-stage-head { align-items: flex-start; flex-direction: column; }
+  .mission-stage-meta { white-space: normal; }
   .detail-grid { grid-template-columns: 1fr; }
   .ov-hero { gap: 14px; }
   .tab-btn { padding: 14px 14px; }
   .navbar-right .btn-white .btn-label { display: none; }
+
+  /* Non-task tables (ADRs, Features, Gaps, Capabilities, Deploys, Findings) stack into labeled
+     cards, mirroring the task-table treatment above: the renderer already stamps every cell's
+     data-label, so the header row folds into per-cell labels and nothing needs to scroll
+     sideways. The row rule below is the shared card seam for every stacked table. */
+  .table-wrapper { overflow-x: hidden; }
+  .data-table tbody tr[data-hub-row] { border-bottom: 1px solid var(--border); }
+  .data-table:not(.task-table) { display: block; width: 100%; }
+  .data-table:not(.task-table) thead { display: none; }
+  .data-table:not(.task-table) tbody { display: block; }
+  .data-table:not(.task-table) tbody tr[data-hub-row] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 14px;
+    padding: 13px 16px;
+  }
+  .data-table:not(.task-table) tbody tr[data-hub-row]:last-child { border-bottom: 0; }
+  .data-table:not(.task-table) tbody tr[data-hub-row] > td {
+    display: flex; flex-direction: column; gap: 3px;
+    width: auto; min-width: 0; padding: 0; border: 0;
+    white-space: normal; overflow-wrap: anywhere; text-align: left;
+  }
+  .data-table:not(.task-table) tbody tr[data-hub-row] > td::before {
+    content: attr(data-label);
+    color: var(--muted); font-family: var(--font);
+    font-size: 9px; font-weight: 700; letter-spacing: 0.55px; text-transform: uppercase;
+  }
+  /* the first cell is the row's identity: full width, no label shim, title weight */
+  .data-table:not(.task-table) tbody tr[data-hub-row] > td:first-child {
+    grid-column: 1 / -1; font-size: 14px; font-weight: 650; line-height: 1.35;
+  }
+  .data-table:not(.task-table) tbody tr[data-hub-row] > td:first-child::before { display: none; }
+  .data-table:not(.task-table) td.num { text-align: left; }
+}
+
+@media (max-width: 480px) {
+  .mission-card { padding: 13px; }
+  .mission-head { display: block; }
+  .mission-badges { margin-top: 9px; flex-direction: row; justify-content: flex-start; }
+  .task-progress-cell { min-width: 108px; }
+  .mini-progress { width: 58px; }
+  .task-table tbody tr[data-hub-row] {
+    grid-template-columns: auto auto 1fr;
+    grid-template-areas:
+      "title title title"
+      "id id id"
+      "phase phase phase"
+      "pickup status priority"
+      "progress progress progress";
+  }
+  .task-table tbody tr[data-hub-row] > .col-phase { justify-self: start; }
+  .task-table .task-progress-cell { min-width: 0; justify-content: flex-start; }
+  .task-table .mini-progress { width: auto; }
 }
 
 /* Forced-colors: keep structure legible. */
 @media (forced-colors: active) {
   .card, .modal-content, .data-table th, .data-table td, .badge, .tab-btn.active { border: 1px solid CanvasText; }
+}
+
+/* ============================ Operator cockpit ============================ */
+/* Progress hero — the number the operator watches climb. */
+.progress-hero { padding: 18px 20px; margin-bottom: 14px; }
+.progress-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.progress-pctwrap { display: flex; flex-direction: column; line-height: 1; }
+.progress-pct { font-size: clamp(38px, 6vw, 60px); font-weight: 800; letter-spacing: -.02em;
+  background: linear-gradient(90deg, var(--accent-gradient-from, var(--accent, #4f7cff)), var(--accent-gradient-to, var(--pass, #2fae66)));
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.progress-sub { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.progress-stats { display: flex; gap: 22px; }
+.pstat { display: flex; flex-direction: column; align-items: flex-end; }
+.pstat-num { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pstat-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 2px; }
+.pstat.is-up .pstat-num { color: var(--pass, #2fae66); }
+.pstat.is-alert .pstat-num { color: var(--warn-fg, #a2640c); }
+/* An unmeasurable leg is neither green nor red: it reads as unknown, so nobody mistakes a question
+   that could not be asked here for one that was asked and passed. */
+.pstat.is-unmeasured .pstat-num { color: var(--stale-fg, var(--muted)); }
+.pstat.is-unmeasured .pstat-lbl { color: var(--warn-fg, #a2640c); }
+.progress-track { height: 10px; border-radius: 999px; background: var(--l-surface-2, rgba(127,127,127,.16)); overflow: hidden; margin: 16px 0 12px; }
+.progress-fill { height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-gradient-from, var(--accent, #4f7cff)), var(--accent-gradient-to, var(--pass, #2fae66)));
+  transition: width 900ms cubic-bezier(.2,.7,.2,1); box-shadow: 0 0 14px -2px var(--accent-ring, rgba(79,124,255,.5)); }
+.progress-velocity { margin: 10px 0 2px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.progress-spark-row { display: flex; align-items: flex-end; gap: 12px; }
+.progress-spark-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); white-space: nowrap; }
+.spark { display: flex; align-items: flex-end; gap: 3px; height: 30px; }
+.spark-bar { width: 8px; border-radius: 3px 3px 1px 1px; background: var(--accent, #4f7cff); opacity: .9; transition: height 500ms ease; }
+.spark-bar.is-zero { background: var(--border); opacity: .5; }
+
+/* Fleet — one card per worker, showing what it is doing NOW. */
+.fleet-card { margin-bottom: 14px; }
+.fleet-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; padding: 4px 2px 2px; }
+.agent-card { text-align: left; background: var(--l-surface, rgba(127,127,127,.05)); border: 1px solid var(--border);
+  border-left: 3px solid var(--muted); border-radius: var(--radius, 12px); padding: 12px 13px; cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease; display: flex; flex-direction: column; gap: 8px; }
+.agent-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-2, 0 8px 24px -10px rgba(0,0,0,.4)); }
+.agent-card.s-working { border-left-color: var(--pass, #2fae66); }
+.agent-card.s-stalled { border-left-color: var(--fail, #e5484d); }
+.agent-card.s-recent { border-left-color: var(--info, #4f7cff); }
+.agent-card.s-idle { opacity: .72; }
+.agent-head { display: flex; align-items: center; gap: 8px; }
+.agent-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.agent-dot.s-working { background: var(--pass, #2fae66); box-shadow: 0 0 0 0 var(--pass, #2fae66); animation: agent-pulse 1.8s infinite; }
+.agent-dot.s-stalled { background: var(--fail, #e5484d); animation: agent-pulse 1.8s infinite; }
+.agent-dot.s-recent { background: var(--info, #4f7cff); }
+@keyframes agent-pulse { 0% { box-shadow: 0 0 0 0 currentColor; } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.agent-name { font-weight: 650; font-size: 12.5px; font-family: var(--mono, ui-monospace, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-status { margin-left: auto; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; padding: 2px 6px; border-radius: 999px; background: var(--l-surface-2, rgba(127,127,127,.14)); color: var(--muted); }
+.agent-status.s-working { color: var(--pass-fg, #fff); background: var(--pass, #2fae66); }
+.agent-status.s-stalled { color: var(--fail-fg, #fff); background: var(--fail, #e5484d); }
+.agent-now { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; }
+.agent-now-lbl { color: var(--muted); font-size: 11px; }
+.agent-now-task { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-now-age { margin-left: auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-now.is-idle { color: var(--muted); font-size: 11.5px; font-style: italic; }
+.agent-prog { margin: 2px 0 6px; }
+.agent-prog-track { height: 5px; border-radius: 999px; background: var(--l-surface-2, rgba(127,127,127,.16)); overflow: hidden; }
+.agent-prog-fill { height: 100%; border-radius: 999px; background: var(--pass, #2fae66); transition: width 700ms cubic-bezier(.2,.7,.2,1); }
+.agent-prog-lbl { display: flex; gap: 8px; align-items: baseline; margin-top: 4px; font-size: 10.5px; }
+.agent-prog-steps { color: var(--pass, #2fae66); font-weight: 700; font-variant-numeric: tabular-nums; flex: none; }
+.agent-prog-cur { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-trail { list-style: none; margin: 0; padding: 6px 0 0; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 4px; }
+.trail-item { display: flex; align-items: baseline; gap: 6px; font-size: 11px; }
+.trail-action { flex: none; font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; padding: 1px 5px; border-radius: 4px; background: var(--l-surface-2, rgba(127,127,127,.14)); color: var(--muted); }
+.trail-item.t-completed .trail-action { background: color-mix(in srgb, var(--pass, #2fae66) 22%, transparent); color: var(--pass, #2fae66); }
+.trail-item.t-committed .trail-action { background: color-mix(in srgb, var(--info, #4f7cff) 22%, transparent); color: var(--info, #4f7cff); }
+.trail-item.t-deployed .trail-action { background: color-mix(in srgb, var(--accent, #4f7cff) 22%, transparent); color: var(--accent, #4f7cff); }
+.trail-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--l-text); }
+.trail-time { margin-left: auto; flex: none; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.signal-warn { color: var(--fail, #e5484d); font-weight: 700; }
+@media (prefers-reduced-motion: reduce) { .agent-dot { animation: none !important; } .progress-fill, .spark-bar { transition: none; } }
+
+/* Live reactions — the cockpit visibly RESPONDS the instant a canonical event lands. */
+.progress-hero.bumped { animation: hero-bump 900ms ease; }
+@keyframes hero-bump {
+  0% { box-shadow: none; }
+  22% { box-shadow: 0 0 0 2px var(--pass, #2fae66), 0 0 36px -6px var(--pass, #2fae66); }
+  100% { box-shadow: none; }
+}
+.progress-hero.bumped .progress-fill { filter: brightness(1.3) saturate(1.2); }
+.spark-bar.pulsed { animation: spark-pulse 900ms ease; transform-origin: bottom; }
+@keyframes spark-pulse {
+  0% { transform: scaleY(1); background: var(--accent, #4f7cff); }
+  30% { transform: scaleY(1.55); background: var(--pass, #2fae66); box-shadow: 0 0 10px -1px var(--pass, #2fae66); }
+  100% { transform: scaleY(1); }
+}
+.agent-card.just-acted { animation: agent-acted 1500ms ease; }
+@keyframes agent-acted {
+  0% { box-shadow: 0 0 0 2px var(--pass, #2fae66), 0 10px 30px -12px var(--pass, #2fae66); background: color-mix(in srgb, var(--pass, #2fae66) 15%, transparent); }
+  100% { box-shadow: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-hero.bumped, .spark-bar.pulsed, .agent-card.just-acted { animation: none !important; }
+}
+
+/* ============================================================================
+   BOARD ADHERENCE — the ring that says whether the board is still being kept
+   current. Tone is carried by BOTH colour and arc length, and an unmeasurable
+   dimension renders as a dashed ghost: "nothing to measure" must never be able
+   to look like "everything passed".
+   ========================================================================= */
+.adh-body { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 640px) { .adh-body { grid-template-columns: 1fr; justify-items: center; } }
+.adh-ring { position: relative; width: 128px; height: 128px; flex: none; }
+.adh-ring svg { width: 128px; height: 128px; display: block; }
+.adh-track { stroke: var(--border); stroke-width: 9; opacity: .5; }
+.adh-ghost {
+  stroke: var(--stale, #8b93a7); stroke-width: 9; stroke-dasharray: 2 5; opacity: .75;
+}
+.adh-fill {
+  stroke-width: 9;
+  /* Each segment sweeps in on first paint, so the ring reads as a measurement being taken
+     rather than a static badge. */
+  animation: adh-sweep 900ms cubic-bezier(.22,.9,.3,1) both;
+  stroke-dasharray: 200;
+}
+.adh-fill.t-pass { stroke: var(--pass-solid, #2fae66); }
+.adh-fill.t-warn { stroke: var(--warn-solid, #d99a2b); }
+.adh-fill.t-fail { stroke: var(--fail-solid, #d9534f); }
+@keyframes adh-sweep { from { stroke-dashoffset: 200; } to { stroke-dashoffset: 0; } }
+.adh-score { fill: var(--text); font-weight: 700; font-family: var(--sans); }
+.adh-sub { fill: var(--muted); font-family: var(--sans); letter-spacing: .04em; text-transform: uppercase; }
+
+.adh-legend { display: grid; gap: 4px; min-width: 0; }
+.adh-row {
+  display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 10px; align-items: baseline;
+  padding: 6px 9px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+.adh-row:hover:not(:disabled) { background: var(--surface-2); border-color: var(--border); transform: translateX(2px); }
+.adh-row:disabled { cursor: default; opacity: .92; }
+.adh-row:focus-visible { outline: var(--ring-w) solid var(--accent-ring); outline-offset: var(--ring-offset); }
+.adh-key { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.adh-swatch { width: 9px; height: 9px; border-radius: 3px; flex: none; background: var(--stale, #8b93a7); }
+.adh-row.t-pass .adh-swatch { background: var(--pass-solid, #2fae66); }
+.adh-row.t-warn .adh-swatch { background: var(--warn-solid, #d99a2b); }
+.adh-row.t-fail .adh-swatch { background: var(--fail-solid, #d9534f); }
+.adh-row.t-ghost .adh-swatch { background: repeating-linear-gradient(45deg, var(--stale, #8b93a7) 0 2px, transparent 2px 4px); }
+.adh-val { font-variant-numeric: tabular-nums; font-weight: 650; }
+.adh-row.t-ghost .adh-val { color: var(--muted); font-weight: 500; font-style: italic; }
+.adh-den { color: var(--muted); font-size: var(--step--1); font-variant-numeric: tabular-nums; }
+.adh-weakest {
+  margin: 10px 0 0; padding: 8px 11px; border-left: 3px solid var(--warn-solid, #d99a2b);
+  background: var(--warn, rgba(217,154,43,.10)); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--step--1); color: var(--text);
+}
+
+/* ============================================================================
+   DEPENDENCY FRONTIER — the shape of what is left. The critical path is drawn,
+   not merely counted, so "11 steps" is something the operator can look at.
+   ========================================================================= */
+.dag-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.dag-fact { display: flex; flex-direction: column; gap: 2px; padding: 9px 12px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+.dag-fact.is-alert { border-color: var(--warn-solid, #d99a2b); background: var(--warn, rgba(217,154,43,.10)); }
+.dag-n { font-size: var(--step-2); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.dag-l { font-size: var(--step--1); color: var(--muted); }
+.dag-chart { overflow-x: auto; padding: 4px 0 10px; }
+/* A FIXED height, not `auto`. The viewBox is wide and short, so `height:auto` scales the drawing
+   by the card's width and a 3-node graph opened a 400px void under four dots. Letterboxing the
+   drawing inside a bounded box keeps a small graph small and a big one scrollable. */
+.dag-svg {
+  width: 100%; min-width: 260px; height: clamp(90px, 18vh, 170px); overflow: visible;
+  display: block;
+}
+.dag-node { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+.dag-node.on-path { fill: var(--accent, #4f7cff); stroke: var(--accent, #4f7cff); }
+.dag-edge { stroke: var(--border); stroke-width: 1.5; }
+.dag-edge.on-path {
+  stroke: var(--accent, #4f7cff); stroke-width: 2; stroke-dasharray: 5 4;
+  animation: dag-flow 1.4s linear infinite;
+}
+@keyframes dag-flow { to { stroke-dashoffset: -18; } }
+.dag-more { fill: var(--muted); font-family: var(--sans); }
+.dag-path-wrap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+.dag-path-lbl { font-size: var(--step--1); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.dag-path { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.dag-arrow { color: var(--muted); }
+.dag-step {
+  font-family: var(--mono); font-size: var(--step--1); padding: 3px 8px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  background: var(--surface-2); color: var(--text); transition: all 140ms ease;
+}
+.dag-step:hover:not(:disabled) { border-color: var(--accent, #4f7cff); color: var(--accent, #4f7cff); transform: translateY(-1px); }
+.dag-step:disabled { cursor: default; opacity: .6; }
+.dag-step:focus-visible { outline: var(--ring-w) solid var(--accent-ring); outline-offset: var(--ring-offset); }
+
+/* ============================================================================
+   LEASES — who is holding what, right now. The dot BREATHES while the lease is
+   live, so a held task is distinguishable from a merely in-progress one at a
+   glance; a stalled lease stops breathing and turns amber.
+   ========================================================================= */
+.lease-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px;
+  border-radius: var(--radius-pill); border: 1px solid var(--accent, #4f7cff);
+  background: var(--accent-wash, rgba(79,124,255,.12)); color: var(--accent, #4f7cff);
+  font-size: var(--step--1); font-weight: 600; white-space: nowrap;
+}
+.lease-chip.is-stalled { border-color: var(--warn-solid, #d99a2b); color: var(--warn-solid, #d99a2b); background: var(--warn, rgba(217,154,43,.12)); }
+.lease-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; animation: lease-breathe 2s ease-in-out infinite; }
+.lease-chip.is-stalled .lease-dot { animation: none; }
+@keyframes lease-breathe { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
+
+/* ---- in-flight task cards (the live stage above the tasks table) ---- */
+.task-stage { margin-bottom: 16px; }
+.stage-head { display: flex; align-items: center; gap: 7px; font-weight: 650; margin-bottom: 9px; color: var(--text); }
+.stage-head svg { width: 17px; height: 17px; color: var(--accent, #4f7cff); }
+.stage-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 11px; }
+.tcard {
+  display: flex; flex-direction: column; gap: 7px; padding: 12px 13px; text-align: left;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+  color: var(--text); font: inherit; cursor: pointer;
+  transition: transform 160ms cubic-bezier(.22,.9,.3,1), box-shadow 160ms ease, border-color 160ms ease;
+}
+.tcard:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); border-color: var(--accent, #4f7cff); }
+.tcard:focus-visible { outline: var(--ring-w) solid var(--accent-ring); outline-offset: var(--ring-offset); }
+.tcard.is-live { border-left: 3px solid var(--accent, #4f7cff); }
+.tcard.is-stalled { border-left-color: var(--warn-solid, #d99a2b); }
+.tcard-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.tcard-id { font-family: var(--mono); font-size: var(--step--1); color: var(--muted); }
+.tcard-agent { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: var(--step--1); color: var(--accent, #4f7cff); font-weight: 600; }
+.tcard-agent.is-stalled { color: var(--warn-solid, #d99a2b); }
+.tcard-title { font-weight: 600; line-height: var(--leading-tight); }
+.tcard-track { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
+.tcard-fill {
+  height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-gradient-from, #4f7cff), var(--accent-gradient-to, #7aa2ff));
+  transition: width 520ms cubic-bezier(.22,.9,.3,1);
+}
+.tcard-steps { display: flex; gap: 9px; font-size: var(--step--1); color: var(--muted); flex-wrap: wrap; }
+.tcard-step { color: var(--text); font-style: italic; }
+.tcard-steps.is-noplan { font-style: italic; }
+.tcard-alert { font-size: var(--step--1); color: var(--warn-solid, #d99a2b); font-weight: 600; }
+
+/* ---- work queue rail ---- */
+.ready-group { padding: 10px 0; border-top: 1px solid var(--border); }
+.ready-group:first-child { border-top: none; padding-top: 0; }
+.ready-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.ready-n { font-size: var(--step-2); font-weight: 700; font-variant-numeric: tabular-nums; }
+.ready-group.t-pass .ready-n { color: var(--pass-solid, #2fae66); }
+.ready-group.t-warn .ready-n { color: var(--warn-solid, #d99a2b); }
+.ready-group.t-info .ready-n { color: var(--info-solid, #4f7cff); }
+.ready-lbl { font-weight: 620; }
+.ready-why { font-size: var(--step--1); color: var(--muted); }
+.ready-items { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.ready-item {
+  font-size: var(--step--1); padding: 3px 9px; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  background: var(--surface-2); color: var(--text); transition: all 140ms ease;
+}
+.ready-item:hover:not(:disabled) { border-color: var(--accent, #4f7cff); color: var(--accent, #4f7cff); }
+.ready-item:disabled { cursor: default; opacity: .65; }
+.ready-item:focus-visible { outline: var(--ring-w) solid var(--accent-ring); outline-offset: var(--ring-offset); }
+
+/* ---- receipt box (what actually granted `done`) ---- */
+.receipt-box { padding: 9px 11px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); }
+.receipt-box.ok { border-left: 3px solid var(--pass-solid, #2fae66); }
+.receipt-box.bad { border-left: 3px solid var(--fail-solid, #d9534f); }
+.receipt-box .mono { font-family: var(--mono); font-size: var(--step--1); word-break: break-all; }
+
+.agent-done { font-size: var(--step--1); color: var(--muted); }
+.fleet-health { margin: 0 0 11px; }
+.fleet-empty { padding: 18px; text-align: center; color: var(--muted); font-style: italic; }
+
+/* ---- the live beacon: the status pill ticks when the stream carries traffic,
+   which is how an operator can tell a healthy IDLE board from a dead socket. --- */
+.status-pill.beat { animation: pill-beat 650ms cubic-bezier(.22,.9,.3,1); }
+@keyframes pill-beat {
+  0% { box-shadow: 0 0 0 0 var(--accent-ring, rgba(79,124,255,.5)); }
+  55% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.card.bumped { animation: card-bump 1300ms cubic-bezier(.22,.9,.3,1); }
+@keyframes card-bump {
+  0% { box-shadow: 0 0 0 2px var(--accent, #4f7cff); }
+  100% { box-shadow: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .adh-fill, .dag-edge.on-path, .lease-dot, .status-pill.beat, .card.bumped { animation: none !important; }
+  .tcard, .tcard-fill, .adh-row, .dag-step, .ready-item { transition: none !important; }
+  .tcard:hover { transform: none; }
 }

@@ -177,12 +177,12 @@ project key are renameable bindings; the rules are not.
   "$defs": {
     "id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|commit|note|finding|lesson|method|review|telemetry):[a-z0-9][a-z0-9._-]*$",
       "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
     },
     "idref": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|commit|note|finding|lesson|method|review|telemetry):[a-z0-9][a-z0-9._-]*$",
       "description": "A machine-resolvable reference to another entity by id. The audit FAILS on any dangling idref."
     },
     "isoDate": { "type": "string", "format": "date-time" },
@@ -228,7 +228,7 @@ project key are renameable bindings; the rules are not.
     "priority": { "enum": ["P0", "P1", "P2", "P3"] },
     "phase": { "type": "string" },
     "acceptance": { "type": "string", "description": "Definition of done for this task." },
-    "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Trusted server-side shell command run on completion whenever present; required only in strict mode. Possession of write authority can set this command." },
+    "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "The command a worker runs OUT-OF-BAND to prove this task; the hub never executes it (that was an RCE path). Its exit-0 verification_run receipt is what grants done." },
     "verification_run": {
       "type": "array",
       "description": "Typed receipts of the verification_command being run OUT-OF-BAND by the worker. The exit-0 receipt is what grants done; the hub validates it and never executes the command itself (that was an RCE path).",
@@ -250,6 +250,9 @@ project key are renameable bindings; the rules are not.
       "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" } }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
+    "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
+    "poison_blocked": { "type": "boolean", "description": "The circuit breaker opened after repeated failing receipts; the task is withheld from the queue until an exit-0 receipt clears it, so a broken task cannot consume the whole fleet in a retry storm." },
+    "poison_reason": { "type": "string", "description": "Why the circuit breaker opened, surfaced verbatim on the attention rail." },
     "deps": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Blocked iff any dep is not done." },
     "implements": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/cap this realizes." },
     "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },

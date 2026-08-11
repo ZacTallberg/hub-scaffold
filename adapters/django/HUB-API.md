@@ -38,13 +38,41 @@ VERIFY    (the server re-runs the audit inside complete; a red audit refuses the
 | Endpoint | Returns |
 |---|---|
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`; `?served=<sha>` adds a caller-observed build to coherence checks. |
-| `GET /hub/hub.json` | Full snapshot: `tasks, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, and worker-launch capability metadata. Add `?served=<sha>` to compare a live-observed build. |
+| `GET /hub/hub.json` | Full snapshot: `tasks, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Add `?served=<sha>` to compare a live-observed build. |
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
 | `GET /hub/audit.json` | the computed audit: `{ok, exit_code, counts, violations[]}`. exit_code 0=pass, 3=warn, 2=violation. |
 | `GET /hub/graph.json` | dependency edges + dangling references. |
 | `GET /hub/<type>.json` | a whole collection — type ∈ `task, adr, feat, gap, cap, deploy, note`. |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
+| `GET /hub/live/events` | **Server-Sent Events.** A bounded (~52s) stream of `{seq, ts, event, aggregate, version, agent}` envelopes — event IDENTITY only, never payload content. Resume with `Last-Event-ID` or `?since=<seq>`. Emits `ready`, `hub`, `heartbeat` and a closing `reconnect`. Learn THAT something moved, then re-read the canonical board to learn what. |
+| `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
+| `GET /hub/delta.json?since=<seq>` | Everything CHANGED since your cursor: `{changed[], removed[], cursor, audit, live}`. Patch a held snapshot in place instead of re-pulling the whole fold. `since >= head` yields an empty set; a `cursor.seq` below your `since` means the head regressed — fall back to a full snapshot. |
+| `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
+
+`GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
+unchanged, so an idle poll or a re-grounding pull costs an empty body.
+
+### The `live` block — what the cockpit reads
+
+Every key is derived from the same fold the rest of the snapshot uses; none of it is a second
+source of truth, and every ratio carries its denominator.
+
+| key | what it answers |
+| --- | --- |
+| `cursor` | `{seq, hash, ts}` — the head this payload was folded at. |
+| `activity` | recent canonical events; a done task carries the `receipt` that granted it. |
+| `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
+| `fleet` | per-agent cards: current lease, plan step, recent action trail, completions. |
+| `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. A task with no `verification_command` is not ready — a worker handed one stalls. |
+| `adherence` | **is the board still being FOLLOWED and kept current** — six dimensions (`specced, proven, evidenced, fresh, current, moving`), each `{ok, total, unmeasured, pct}`. An empty denominator reports `pct: null`, never 100. `score` averages only the MEASURED dimensions and `unmeasurable` names the rest. |
+| `dag` | critical path length, widest frontier, layer widths, the critical `path` itself, and the min-makespan `eta_tasks` for the fleet actually present. `acyclic: false` means the numbers are a floor, not a schedule. |
+| `progress` | done/total/pct plus MONOTONIC signals — `completed_total`, `last_1h`, `last_24h`, and a per-bucket `spark`. A ratio alone does not climb when the fleet discovers work as fast as it finishes it. |
+| `attention` | the ranked "needs the operator" rail. |
+| `worker_health` | receipt outcomes and completions per seat, with denominators. |
+| `failure_modes` | what KIND of refusal the fleet keeps hitting, plus the unclassified count. |
+| `wip` | the adaptive concurrency ceiling the claim seam enforces. |
+| `telemetry` / `cost` | OTLP GenAI aggregate and its dollarized fold; absent until a first instrumented run exists. |
 
 ## WRITE endpoints (POST, `X-Write-Token` required)
 
