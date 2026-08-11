@@ -12,6 +12,10 @@
     "priority": { "enum": ["P0", "P1", "P2", "P3"] },
     "phase": { "type": "string" },
     "acceptance": { "type": "string", "description": "Definition of done for this task." },
+    "work_kind": {
+      "enum": ["product", "content", "corpus", "governance", "verification", "decision", "research", "migration", "duplicate", "legacy"],
+      "description": "The kind of work represented, so records that are not executable work stay queryable without masquerading as it. Each kind carries its own completion requirements (see allOf), and the A2A agent card publishes one skill per kind straight from this enum."
+    },
     "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "The command a worker runs OUT-OF-BAND to prove this task; the hub never executes it (that was an RCE path). Its exit-0 verification_run receipt is what grants done." },
     "verification_run": {
       "type": "array",
@@ -51,6 +55,9 @@
   "required": ["id", "type", "title", "status", "version"],
   "allOf": [
     { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 }, "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["verified_by", "evidence_uri"] } },
-    { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } }
+    { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } },
+    { "if": { "properties": { "work_kind": { "enum": ["product", "verification"] } }, "required": ["work_kind"] }, "then": { "properties": { "acceptance": { "minLength": 1 }, "verification_command": { "minLength": 1 } }, "required": ["acceptance", "verification_command"] } },
+    { "if": { "properties": { "work_kind": { "const": "decision" } }, "required": ["work_kind"] }, "then": { "properties": { "decided_by": { "type": "array", "minItems": 1 } }, "required": ["decided_by"] } },
+    { "if": { "properties": { "work_kind": { "const": "research" } }, "required": ["work_kind"] }, "then": { "properties": { "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["evidence_uri"] } }
   ]
 }

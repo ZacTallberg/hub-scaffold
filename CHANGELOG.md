@@ -14,6 +14,52 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### The interop edges, the missing writers, and the rest of the engine
+
+Everything the instances carried that is not domain-specific now lives here.
+
+**Standards-speaking edges.** `POST /hub/api/mcp` is an MCP server (Model Context Protocol
+2026-07-28 + the tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless, with
+`board_next` / `spec_task` / `start_task` / `finish_task`. It never touches the ledger directly —
+every mutation goes back through the same `/hub/api/*` seam a worker uses, so the receipt gate,
+lease fencing, OCC and schema validation apply unchanged. `/.well-known/agent-card.json` is an A2A
+AgentCard: one skill per task `work_kind`, read live from the schema so it cannot drift, and
+`securitySchemes` DESCRIBING the write header — the token value never appears.
+
+**Four entity types had schemas and no writer.** `gap`, `feat`, `note` and `deploy` could be read
+and validated with no way to create one through the API. Added, with identity DERIVED where the
+content supports it: `feat`/`note` mint a slug from their own name and `deploy` keys on its sha
+(one release, one record), so a retried POST updates instead of minting a twin.
+
+**Delivery.** `done` is a claim about a receipt; *landed*, *deployed* and *live* are three other
+questions, and collapsing them is how a board reports success for work sitting on a branch. Each
+leg has one evidence source, and a leg that cannot be measured here reports UNMEASURED — never
+false, never quietly true. Counts are COUNTED from what measured true, never done-minus-alerts,
+because subtraction silently promotes every task whose ancestry nobody asked about.
+
+**Engine.** `verifier` (argv-form execution, scrubbed environment, and a spec-time exfil gate),
+`metamorphic` (properties that must hold between two folds — the corruption class no oracle can
+see), `collision` (mint-time twin detection), `judge` (position-swap invariance + a calibration
+floor), `bitemporal` (valid-time/transaction-time `as_of` replay), and `caches` (structural
+discovery of process-level memos).
+
+Fixed while porting, because a port is not done until it runs here:
+- **`collision` read a hardcoded `game:` id prefix** — origin-specific residue the scrub gate
+  cannot see, because the word is ordinary English. On any other board that pattern matched
+  nothing, and a detector that quietly finds nothing is indistinguishable from a clean board. Now
+  matches the real id grammar. It also ignored `touches` — the one field that exists to state
+  which surfaces a task changes — and parsed prose instead. Proven to fire on a seeded twin AND
+  stay quiet on unrelated work.
+- **The agent card 500'd on a field this scaffold does not have** (`identity['app_host']`, dropped
+  as deploy-layer config) and imported `cryptography` unconditionally. Its URL now derives from
+  the request, which is more truthful than any config, and an unsigned card is served with a
+  stated `signatureStatus` — a discovery document that 500s hides the whole hub.
+- `work_kind` added to the task schema (with the conditional rules that make it enforce rather
+  than label), since the agent card publishes one skill per kind.
+
+Deliberately NOT ported, as instance-specific rather than template material: a game-balance tuning
+console, an openmic-domain site packager, and a promoter card.
+
 ### The board became LIVE, and became a cockpit
 
 The scaffold rendered a correct board that never moved: no SSE, no delta, and a client that was

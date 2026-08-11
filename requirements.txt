@@ -11,3 +11,13 @@ Django>=5.2,<6.1
 # The write API's evidence-dereference check (strict mode) uses only urllib from the stdlib — no
 # `requests`. The Hub page inlines its small frontend kit, so the adapter adds no static-file
 # serving dependency.
+
+# OPTIONAL — deliberately NOT installed by default, so uncomment it if you want a signed card:
+#
+#   cryptography>=42
+#
+# Only the A2A agent card (/.well-known/agent-card.json) uses it, and only to SIGN itself: the card
+# is an ES256 JWS so a consumer can verify it without trusting the transport. Without the library
+# the card is still served, unsigned, and says so in its own `signatures` field. A discovery
+# document that 500s because it could not sign hides the whole hub from every standard client,
+# which is a worse failure than an unsigned card. Nothing else in the scaffold imports it.

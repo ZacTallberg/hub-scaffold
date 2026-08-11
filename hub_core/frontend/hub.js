@@ -784,7 +784,24 @@
       el("div", { class: "pstat" }, [el("span", { class: "pstat-num", "data-countup": "h24", text: "+" + (P.last_24h || 0) }), el("span", { class: "pstat-lbl", text: "last 24h" })]),
       el("div", { class: "pstat" + (rd && rd.needs_spec ? " is-alert" : "") }, [
         el("span", { class: "pstat-num", text: String((rd && rd.needs_spec) || 0) }),
-        el("span", { class: "pstat-lbl", text: "need spec before a worker can pull" })])
+        el("span", { class: "pstat-lbl", text: "need spec before a worker can pull" })]),
+      /* LANDED IS A MEASUREMENT, NOT A SUBTRACTION. Where the ancestry probe cannot run there is
+         no number to print: the tile renders "? / done" with the caveat, because done-minus-zero-
+         unlanded would assert every done task is on the branch from a question nobody asked. */
+      P.landing_measured === false
+        ? el("div", { class: "pstat is-unmeasured", title: P.landing_note || "landing unverifiable in this context" }, [
+            el("span", { class: "pstat-num", text: "? / " + (P.done || 0) }),
+            el("span", { class: "pstat-lbl", text: "landed — unverifiable here" })])
+        : el("div", { class: "pstat" + (P.unlanded ? " is-alert" : (P.landed_unmeasured ? " is-unmeasured" : "")) }, [
+            el("span", { class: "pstat-num", text: (P.landed != null ? P.landed : "?") + " / " + (P.done || 0) }),
+            el("span", { class: "pstat-lbl", text: P.unlanded ? "landed (" + P.unlanded + " NOT on the branch)"
+              : P.landed_unmeasured ? "landed (" + P.landed_unmeasured + " never measured)" : "landed on the branch" })]),
+      /* The one tile that speaks about PRODUCTION. Unmeasured liveness prints "?" rather than
+         borrowing the landed number. */
+      el("div", { class: "pstat" + (P.live != null && !P.live_attested ? " is-unmeasured" : "") }, [
+        el("span", { class: "pstat-num", text: (P.live != null ? P.live : "?") + " / " + (P.done || 0) }),
+        el("span", { class: "pstat-lbl", text: P.live == null ? "live — unprobed here"
+          : P.live_attested ? "live in production" : "live — unattested probe" })])
     ]);
     return el("section", { class: "card progress-hero" }, [
       el("div", { class: "progress-top" }, [
