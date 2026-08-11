@@ -1,0 +1,128 @@
+"""Grandfather baselines: a guard does not indict history it was not there to watch.
+
+A guard wired at ledger seq N has no standing over a condition that was already frozen into the
+ledger before N. The worker who could have acted is gone, the event is immutable, and an amber
+nobody can clear is exactly how an operator learns to ignore the whole rail — the failure mode
+that buries the ONE warn that matters. This module silences that class and only that class.
+
+Three fences keep the silencing from becoming a vacuous green:
+
+  * SEVERITY — only `warn` is ever grandfathered. A critical or high is a claim about the PRESENT
+    (the chain is broken, master lacks the work); no baseline may touch one.
+  * SUBJECT — a violation is grandfathered only when it names a `subject` aggregate whose
+    condition seq resolves in the ledger. No subject, no silencing — never a text guess.
+  * ACCOUNTING — suppression returns what it dropped. The caller reports the count; a rail that
+    silently shrinks is worse than a noisy one.
+
+The CONDITION seq of an aggregate is the seq of the event that established its current status
+(its birth seq when it never carries one) — the moment the violating fact became true, which is
+what a baseline must be compared against. A pre-gate `done` is anchored at the completion that
+granted it, while a task reverted out of `done` last hour anchors at that recent reversion, so a
+legacy completion goes quiet and a fresh anomaly stays loud. The baseline seq itself belongs to
+the guard: a condition established AT it happened with the guard already present.
+"""
+
+
+def condition_seq(events):
+    """{aggregate: seq of the event that established its CURRENT status}. Aggregates that never
+    carry a status (commits, notes) anchor at their first event — the moment the record froze."""
+    seqs, current = {}, {}
+    for ev in events:
+        agg = ev.get("aggregate")
+        if not agg:
+            continue
+        seq = ev.get("seq") or 0
+        if agg not in seqs:
+            seqs[agg] = seq
+        status = (ev.get("payload") or {}).get("status")
+        if status is not None and current.get(agg) != status:
+            current[agg] = status
+            seqs[agg] = seq
+    return seqs
+
+
+def anchors_at(events, seqs):
+    """{seq: event hash} for exactly the seqs asked for — the chain points the baselines name."""
+    want = set(seqs)
+    return {ev["seq"]: ev.get("hash") for ev in events
+            if ev.get("seq") in want}
+
+
+def baseline_index(guards, baselines, anchors=None):
+    """[(violation-id prefix, baseline seq, guard name)], longest prefix first.
+
+    `guards` are registry-shaped ({name, ids}); `baselines` is {guard name: {"seq", "anchor_hash"}}.
+    A guard with no recorded baseline is simply absent — it grandfathers nothing, the fail-closed
+    direction (it keeps firing over everything, exactly as it did before).
+
+    A seq alone is meaningless off its own ledger: seq 199 on a fresh temp board is a different
+    moment entirely, and applying the canonical board's numbers there would silence a guard's
+    whole fixture. So a baseline also names the HASH of the event at that seq, and `anchors` is
+    what this board actually carries there. A baseline whose anchor is missing or mismatched does
+    not apply — which also means a rewritten prefix disables the baselines rather than quietly
+    widening what they hide."""
+    index = []
+    for g in guards:
+        rec = baselines.get(g["name"])
+        if not rec:
+            continue
+        seq = rec.get("seq")
+        if not isinstance(seq, int) or seq <= 0:
+            continue
+        if anchors is not None:
+            anchor = rec.get("anchor_hash")
+            if not anchor or anchors.get(seq) != anchor:
+                continue
+        for gid in g["ids"]:
+            index.append((gid, seq, g["name"]))
+    index.sort(key=lambda e: (-len(e[0]), e[0]))
+    return index
+
+
+def _baseline_for(vid, index):
+    """The baseline of the MOST SPECIFIC guard whose id prefixes this violation (the index is
+    longest-first), so a broad core id never shadows the precise guard that owns the finding."""
+    for gid, seq, name in index:
+        if vid == gid or vid.startswith(gid):
+            return seq, name
+    return None, None
+
+
+def partition(violations, index, conditions):
+    """(kept, suppressed) — suppressed are the warns whose subject's condition predates the
+    baseline of the guard that emitted them. Everything else is kept, untouched."""
+    kept, suppressed = [], []
+    for v in violations:
+        if v.get("severity") != "warn":
+            kept.append(v)
+            continue
+        subject = v.get("subject")
+        cond = conditions.get(subject) if subject else None
+        if cond is None:
+            kept.append(v)
+            continue
+        baseline, guard = _baseline_for(v.get("id", ""), index)
+        if baseline is not None and cond < baseline:
+            suppressed.append(dict(v, grandfathered={"guard": guard, "baseline_seq": baseline,
+                                                     "condition_seq": cond}))
+        else:
+            kept.append(v)
+    return kept, suppressed
+
+
+def suppressor(events, guards, baselines):
+    """Bind one audit pass: returns fn(violations) -> (kept, suppressed), or None when nothing
+    applies to THIS board — no baselines recorded, or none whose anchor this ledger carries — so
+    the audit runs exactly as it always did."""
+    events = list(events)
+    anchors = anchors_at(events, (r.get("seq") for r in baselines.values()
+                                  if isinstance(r, dict) and isinstance(r.get("seq"), int)))
+    index = baseline_index(guards, baselines, anchors)
+    if not index:
+        return None
+    conditions = condition_seq(events)
+
+    def _suppress(violations):
+        return partition(violations, index, conditions)
+
+    return _suppress

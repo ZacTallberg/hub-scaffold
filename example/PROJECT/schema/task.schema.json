@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:task",
+  "title": "Task",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "task" },
+    "title": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["todo", "in_progress", "blocked", "done", "dropped", "shadow"], "description": "shadow = wired-but-inert, NOT done." },
+    "priority": { "enum": ["P0", "P1", "P2", "P3"] },
+    "phase": { "type": "string" },
+    "acceptance": { "type": "string", "description": "Definition of done for this task." },
+    "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "The command a worker runs OUT-OF-BAND to prove this task; the hub never executes it (that was an RCE path). Its exit-0 verification_run receipt is what grants done." },
+    "verification_run": {
+      "type": "array",
+      "description": "Typed receipts of the verification_command being run OUT-OF-BAND by the worker. The exit-0 receipt is what grants done; the hub validates it and never executes the command itself (that was an RCE path).",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "command": { "type": "string", "minLength": 1 },
+          "exit_code": { "type": "integer" },
+          "output_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "ran_by": { "type": "string", "minLength": 1 },
+          "ran_at": { "type": "string" }
+        },
+        "required": ["command", "exit_code"]
+      }
+    },
+    "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
+    "plan": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" } }, "required": ["step", "done"] },
+      "description": "Persisted, resumable checklist."
+    },
+    "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
+    "poison_blocked": { "type": "boolean", "description": "The circuit breaker opened after repeated failing receipts; the task is withheld from the queue until an exit-0 receipt clears it, so a broken task cannot consume the whole fleet in a retry storm." },
+    "poison_reason": { "type": "string", "description": "Why the circuit breaker opened, surfaced verbatim on the attention rail." },
+    "deps": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Blocked iff any dep is not done." },
+    "implements": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/cap this realizes." },
+    "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },
+    "verified_by": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" }, "description": "Substantive verification evidence summaries; >=1 required for done." },
+    "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+    "surfaced_by": { "$ref": "hub:common#/$defs/idref", "description": "The task/work during which this was scouted." },
+    "source": { "type": "string", "description": "Where it came from, e.g. REVIEW-G3, CHARTER, RESEARCH-HISTORY." },
+    "legacy_ref": { "type": "string", "description": "Pre-migration id, e.g. #V4.7 / A3." },
+    "version": { "type": "integer", "minimum": 0, "description": "Per-aggregate OCC version." },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "title", "status", "version"],
+  "allOf": [
+    { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 }, "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["verified_by", "evidence_uri"] } },
+    { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } }
+  ]
+}

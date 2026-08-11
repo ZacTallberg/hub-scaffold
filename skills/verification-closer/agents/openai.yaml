@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verification Closer"
+  short_description: "Independent boundary verification and evidence"
+  default_prompt: "Use $verification-closer to independently verify this completed change and return a fail-closed evidence-backed verdict."

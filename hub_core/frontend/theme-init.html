@@ -1,0 +1,197 @@
+<!--
+  ============================================================================
+  HUB KIT  ·  theme-init.html
+  ============================================================================
+  Shared, portable, zero-dependency theme bootstrap for every project hub.
+  NO build step, NO framework, NO web fonts, NO external deps. Vanilla JS,
+  plain CSS. Copy-paste portable.
+
+  THREE PIECES, all in this one file:
+    [A] NO-FOUC HEAD SNIPPET   — paste in <head> BEFORE any stylesheet/<style>.
+    [B] CONTROL MARKUP         — the System/Light/Dark <select>, put it in the nav.
+    [C] TOGGLE SCRIPT          — paste before </body> (after the control markup).
+
+  CONTRACT (matches tokens.css and the rest of the kit — DO NOT rename):
+    - localStorage key ............ "hub-theme"   values: "system" | "light" | "dark"
+    - DOM attribute ............... <html data-theme="light"|"dark">  (ABSENT  = system)
+    - color-scheme ................ tokens.css sets `color-scheme: light dark` on :root,
+                                    enabling light-dark(). For explicit overrides we ALSO
+                                    set the inline color-scheme on <html> so form controls,
+                                    scrollbars and light-dark() resolve correctly even
+                                    before the stylesheet parses (no-FOUC) and with CSS off.
+    - JS global namespace ......... window.HubTheme = { get, set, cycle, KEY, apply }
+    - DOM event ................... "hub:themechange"  detail:{ choice, resolved }
+                                    (choice = stored pref; resolved = "light"|"dark" actually shown)
+
+  WHY "system" leaves the attribute ABSENT: tokens.css's `color-scheme: light dark`
+  defers to the OS via prefers-color-scheme automatically. Setting an explicit
+  attribute only for Light/Dark means System "just works" and live-tracks OS
+  changes with zero JS. Pure-CSS / JS-disabled clients still get correct system
+  theming because the attribute is simply not present.
+  ============================================================================
+-->
+
+
+<!-- ==========================================================================
+  [A]  NO-FOUC HEAD SNIPPET
+       Paste this <script> in <head> *BEFORE* tokens.css / any <style>.
+       It runs synchronously, blocking first paint, so there is no flash.
+       It is intentionally tiny, dependency-free, and try/catch-guarded so a
+       blocked/throwing localStorage (private mode, sandboxed iframe) degrades
+       gracefully to System instead of breaking the page.
+========================================================================== -->
+<script>
+  /* HUB KIT · no-FOUC theme bootstrap. Runs before paint. */
+  (function () {
+    try {
+      var choice = localStorage.getItem("hub-theme"); /* "system" | "light" | "dark" | null */
+      var root = document.documentElement;
+      if (choice === "light" || choice === "dark") {
+        root.setAttribute("data-theme", choice);
+        root.style.colorScheme = choice;            /* controls/scrollbars + light-dark() pre-CSS */
+      } else {
+        /* System (or unset/invalid): no attribute — tokens.css `color-scheme:light dark`
+           defers to the OS via prefers-color-scheme automatically. */
+        root.removeAttribute("data-theme");
+        root.style.colorScheme = "light dark";
+      }
+    } catch (e) {
+      /* localStorage unavailable: fall back to System, never throw before paint. */
+      document.documentElement.style.colorScheme = "light dark";
+    }
+  })();
+</script>
+
+
+<!-- ==========================================================================
+  [B]  CONTROL MARKUP
+       Drop inside the sticky <nav class="hub-nav"> (or any toolbar).
+       A real <select> = native keyboard support, mobile-friendly, target-size
+       >= 24px, full name/role/value for AT — no custom widget to re-implement
+       for WCAG 2.2 (4.1.2 / 2.5.8). The <label> is the accessible name; the
+       visible text is kept short. tokens.css styles `.hub-theme-select` and
+       gives :focus-visible the --ring.
+
+       If you prefer an icon-only single-button cycle instead of a <select>,
+       use the commented button below and call HubTheme.cycle() — it also
+       satisfies the 24px target size and announces via aria-label.
+========================================================================== -->
+
+<!-- Preferred: explicit 3-state <select> (System default). -->
+<label class="hub-theme" for="hub-theme-select">
+  <span class="hub-theme__label">Theme</span>
+  <select id="hub-theme-select" class="hub-theme-select"
+          autocomplete="off" data-src="localStorage:hub-theme">
+    <option value="system">System</option>
+    <option value="light">Light</option>
+    <option value="dark">Dark</option>
+  </select>
+</label>
+
+<!--  Alternative: icon-only cycle button (uncomment to use INSTEAD of the select).
+      Glyphs follow OS scheme; aria-label is updated by the toggle script.
+<button type="button" id="hub-theme-toggle" class="hub-theme-toggle"
+        aria-label="Theme: System" title="Theme: System (click to change)">
+  <span aria-hidden="true" class="hub-theme-toggle__glyph">◐</span>
+</button>
+-->
+
+
+<!-- ==========================================================================
+  [C]  TOGGLE SCRIPT
+       Paste once, before </body> (must run AFTER the control markup exists).
+       Exposes window.HubTheme and wires whichever control(s) are present.
+       Keeps the in-page state in sync with: the <select>, the optional cycle
+       button, live OS scheme changes (when in System mode), and changes made
+       in OTHER TABS (the `storage` event) so all hub tabs stay consistent.
+========================================================================== -->
+<script>
+  (function () {
+    "use strict";
+
+    var KEY = "hub-theme";
+    var ORDER = ["system", "light", "dark"];
+    var root = document.documentElement;
+    var mql = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+    function read() {
+      try {
+        var v = localStorage.getItem(KEY);
+        return (v === "light" || v === "dark" || v === "system") ? v : "system";
+      } catch (e) { return "system"; }
+    }
+
+    /* The scheme actually shown right now, given the stored choice + OS. */
+    function resolve(choice) {
+      if (choice === "light" || choice === "dark") return choice;
+      return (mql && mql.matches) ? "dark" : "light";
+    }
+
+    /* Apply a choice to the DOM (idempotent) and notify listeners. Does NOT persist. */
+    function apply(choice) {
+      if (choice === "light" || choice === "dark") {
+        root.setAttribute("data-theme", choice);
+        root.style.colorScheme = choice;
+      } else {
+        root.removeAttribute("data-theme");
+        root.style.colorScheme = "light dark"; /* let the OS drive it */
+      }
+      var resolved = resolve(choice);
+      syncControls(choice);
+      root.dispatchEvent(new CustomEvent("hub:themechange", {
+        bubbles: true, detail: { choice: choice, resolved: resolved }
+      }));
+      return resolved;
+    }
+
+    /* Persist + apply. */
+    function set(choice) {
+      if (ORDER.indexOf(choice) === -1) choice = "system";
+      try { localStorage.setItem(KEY, choice); } catch (e) { /* private mode: still apply for this session */ }
+      return apply(choice);
+    }
+
+    /* System -> Light -> Dark -> System ... (for the optional cycle button). */
+    function cycle() {
+      return set(ORDER[(ORDER.indexOf(read()) + 1) % ORDER.length]);
+    }
+
+    /* Reflect current state into whatever controls exist on the page. */
+    function syncControls(choice) {
+      var sel = document.getElementById("hub-theme-select");
+      if (sel && sel.value !== choice) sel.value = choice;
+      var btn = document.getElementById("hub-theme-toggle");
+      if (btn) {
+        var label = "Theme: " + choice.charAt(0).toUpperCase() + choice.slice(1);
+        btn.setAttribute("aria-label", label);
+        btn.setAttribute("title", label + " (click to change)");
+        var glyph = btn.querySelector(".hub-theme-toggle__glyph");
+        if (glyph) glyph.textContent = choice === "light" ? "☀" : choice === "dark" ? "☾" : "◐";
+      }
+    }
+
+    /* ---- wire controls ---- */
+    var sel = document.getElementById("hub-theme-select");
+    if (sel) sel.addEventListener("change", function () { set(sel.value); });
+
+    var btn = document.getElementById("hub-theme-toggle");
+    if (btn) btn.addEventListener("click", function () { cycle(); });
+
+    /* Live-track the OS while in System mode (addEventListener; older Safari = addListener). */
+    if (mql) {
+      var onOS = function () { if (read() === "system") apply("system"); };
+      if (mql.addEventListener) mql.addEventListener("change", onOS);
+      else if (mql.addListener) mql.addListener(onOS);
+    }
+
+    /* Keep every open hub tab in sync. */
+    window.addEventListener("storage", function (e) {
+      if (e.key === KEY) apply(read());
+    });
+
+    /* Initialize controls to the already-applied (no-FOUC) state. */
+    syncControls(read());
+
+    window.HubTheme = { KEY: KEY, get: read, set: set, cycle: cycle, apply: apply, resolve: resolve };
+  })();
+</script>

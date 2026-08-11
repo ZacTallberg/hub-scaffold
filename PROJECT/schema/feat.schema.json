@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:feat",
+  "title": "Feature",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "feat" },
+    "name": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["shipped", "partial", "planned", "experimental", "removed"] },
+    "summary": { "type": "string" },
+    "tasks": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Implementing tasks. Required for shipped/partial (no orphan feature claims)." },
+    "adrs": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
+    "capability": { "$ref": "hub:common#/$defs/idref", "description": "The capability this feature realizes." },
+    "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+    "legacy_ref": { "type": "string" },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "name", "status", "version"],
+  "allOf": [
+    { "if": { "properties": { "status": { "enum": ["shipped", "partial"] } }, "required": ["status"] }, "then": { "properties": { "tasks": { "type": "array", "minItems": 1 } }, "required": ["tasks"] } }
+  ]
+}

@@ -1,0 +1,81 @@
+"""Minimal, born-safe Django settings for the hub example site.
+
+Security posture is fail-closed: SECRET_KEY is REQUIRED in prod (no committed literal — the hub
+audit's AST gate enforces this), ephemeral only under DEBUG; ALLOWED_HOSTS never defaults to '*';
+general Hub mutations are token-gated via the HUB_WRITE_TOKEN environment variable. Reads remain
+unauthenticated in this example, and the optional launch mint uses its narrow CSRF gate. This file is also what
+`manage.py hubaudit` AST-scans, so it doubles as the reference shape for a mounted project.
+"""
+import os
+import secrets
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+DEBUG = os.environ.get("DEBUG", "") == "1"
+
+# SECRET_KEY: required in prod (NO literal fallback). In DEBUG, mint an ephemeral per-process key.
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "dev-ephemeral-" + secrets.token_urlsafe(32)
+    else:
+        raise RuntimeError("SECRET_KEY must be set in production (no insecure default).")
+
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
+_extra = os.environ.get("ALLOWED_HOSTS", "")
+if _extra:
+    ALLOWED_HOSTS += [h.strip() for h in _extra.split(",") if h.strip()]
+
+if not DEBUG:
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+INSTALLED_APPS = [
+    "hub",  # the agent-operable /hub surface (event-sourced; renders from hub_core; token-gated writes)
+]
+
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "hub.middleware.NoStoreHTMLMiddleware",
+]
+
+ROOT_URLCONF = "example_site.urls"
+TEMPLATES = []
+WSGI_APPLICATION = "example_site.wsgi.application"
+
+# The hub itself has no relational models; this DB exists so `migrate` and any host apps work.
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": os.environ.get("HUB_TEST_DB", str(BASE_DIR / "db.sqlite3")),
+        "OPTIONS": {"timeout": 20},
+    },
+}
+
+LANGUAGE_CODE = "en-us"
+TIME_ZONE = "UTC"
+USE_TZ = True
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# --- hub configuration (see adapters/django/MOUNTING.md) ---
+HUB_PROJECT_KEY = "example"        # entity-id prefix -> example:task:0001
+HUB_BRAND = "Example"              # navbar reads "Example · Hub"
+HUB_BUILD_STAMP = "build_sha.txt"  # BASE_DIR-relative build-identity stamp (written by the build)
+HUB_DONE_STRICTNESS = "strict"     # example runs strict so the selftest ladder proves the full
+                                   # machinery; the adapter DEFAULT is "tracked" (flow-first)
+
+# Optional local-worker bridge. The example enables it only so selftest can prove the narrow
+# CSRF-grant boundary; no process is launched by the test suite.
+HUB_WORKER_LAUNCH_ENABLED = True
+HUB_WORKER_PROTOCOL = "hub-worker"
+HUB_WORKER_LAUNCH_ISSUER_URL = "https://example.invalid/hub/api/launch-grant/consume"
+HUB_WORKER_GRANT_TTL_S = 120
+
+# Token for general Hub writes (X-Write-Token). Reads are unauthenticated; the narrow launch mint is
+# CSRF-gated. General writes and launch consume fail closed when the token is unset.
+HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
