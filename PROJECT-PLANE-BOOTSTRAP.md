@@ -1888,6 +1888,11 @@ information density, and coherent depth, color, type, motion, and interaction. I
 for its project rather than like an interchangeable admin template. Delight is welcome when it makes
 state, causality, or attention easier to understand; decoration must never compete with truth.
 
+Every viewport has one dominant above-the-fold operational decision. A metric appears only once
+above the fold. Each visual region has at most one persistent animated signal; all other motion is
+caused by meaningful state change. Every generated Hub declares a project-specific mark, accent
+pairing, display voice, surface character, and optional visual motif before visual construction.
+
 When constructing a new Hub or making a material redesign, use the rendered product at its empty,
 ordinary, dense, loading, live, degraded, and error states. Ask: where does the eye land, what needs
 action, what changed, what is trustworthy, and can the next useful action be taken without hunting?

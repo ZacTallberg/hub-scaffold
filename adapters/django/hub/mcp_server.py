@@ -48,6 +48,24 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "agent": {"type": "string"}},
          "required": ["id", "agent"]}},
+    {"name": "take_task",
+     "description": "Atomically select and claim the highest-ranked ready task, avoiding the discover-then-claim race; returns the task and its lease token.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"},
+         "ttl_s": {"type": "integer", "minimum": 1, "maximum": 86400}},
+         "required": ["agent"]}},
+    {"name": "heartbeat_task",
+     "description": "Renew a live task lease before heartbeat_after_s elapses; this proves liveness, not task progress.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "lease_token": {"type": "string"},
+         "ttl_s": {"type": "integer", "minimum": 1, "maximum": 86400}},
+         "required": ["id", "lease_token"]}},
+    {"name": "release_task",
+     "description": "Release exactly the caller's fenced lease so blocked or interrupted work can return to the ready queue without waiting for expiry.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "lease_token": {"type": "string"}},
+         "required": ["id", "agent", "lease_token"]}},
     {"name": "finish_task",
      "description": "Submit completion; include an exit-0 verification_run only when this task explicitly carries a transient critical-boundary command.",
      "inputSchema": {"type": "object", "properties": {
@@ -103,11 +121,28 @@ def _call_tool(name, args, token):
         # report a tool error, and leave the successfully granted lease hidden from the caller.
         return _tool_result(*_seam(
             "/hub/api/claim", {"id": args["id"], "agent": args["agent"]}, token))
+    if name == "take_task":
+        payload = {"agent": args["agent"]}
+        if args.get("ttl_s") is not None:
+            payload["ttl_s"] = args["ttl_s"]
+        return _tool_result(*_seam("/hub/api/take", payload, token))
+    if name == "heartbeat_task":
+        payload = {"id": args["id"], "token": args["lease_token"]}
+        if args.get("ttl_s") is not None:
+            payload["ttl_s"] = args["ttl_s"]
+        return _tool_result(*_seam("/hub/api/heartbeat", payload, token))
+    if name == "release_task":
+        return _tool_result(*_seam("/hub/api/release", {
+            "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
+        }, token))
     if name == "finish_task":
-        return _tool_result(*_seam("/hub/api/complete", {
+        payload = {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
             "accept_note": args["note"], "evidence_uri": args["evidence"],
-            "verification_run": args["verification_run"]}, token))
+        }
+        if args.get("verification_run"):
+            payload["verification_run"] = args["verification_run"]
+        return _tool_result(*_seam("/hub/api/complete", payload, token))
     return None
 
 

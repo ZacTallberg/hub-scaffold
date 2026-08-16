@@ -163,6 +163,18 @@
     for (var i = runs.length - 1; i >= 0; i--) if (runs[i] && runs[i].exit_code === 0) return runs[i];
     return runs.length ? runs[runs.length - 1] : null;
   }
+  function completionProof(task) {
+    var command = String((task && task.verification_command) || "").trim();
+    var receipt = receiptOf(task);
+    var passed = !!(receipt && receipt.exit_code === 0);
+    return {
+      command: command,
+      declared: !!command,
+      receipt: receipt,
+      passed: passed,
+      complete: !command || passed
+    };
+  }
   function taskProgress(task) {
     var plan = (task && task.plan) || [];
     if (!plan.length) return null;
@@ -171,16 +183,21 @@
              step: (plan.filter(function (s) { return s && !s.done; })[0] || {}).step || null };
   }
   function taskStatusBadge(task) {
-    // A done task says HOW it was granted. Under the receipt gate `done` means an exit-0
-    // verification_run was submitted with it — a done row with no receipt behind it is a
-    // different claim, and the badge must not render them identically.
+    // `done` means the real operation completed. A receipt is required only when this task
+    // explicitly declared a rare critical-boundary probe; ordinary work is never downgraded for
+    // correctly having no verification artifact.
     var b = badge("task", task.status);
     if (task.status !== "done") return b;
-    var r = receiptOf(task);
-    var proven = !!(r && r.exit_code === 0);
-    b.setAttribute("title", proven ? ("granted by receipt: " + (r.command || "") + " → exit 0")
-                                   : "done recorded WITHOUT a passing receipt");
-    if (!proven) b.className = "badge b-warn";
+    var proof = completionProof(task), r = proof.receipt;
+    if (proof.passed) {
+      b.setAttribute("title", "Completed · critical probe passed: " + (r.command || proof.command) + " → exit 0");
+    } else if (proof.declared) {
+      b.setAttribute("title", r ? ("Completed · declared critical probe recorded exit " + r.exit_code)
+                                : "Completed · declared critical probe has no recorded receipt");
+      b.className = "badge b-warn";
+    } else {
+      b.setAttribute("title", "Completed through the real operation · no separate critical probe declared");
+    }
     return b;
   }
 
@@ -482,10 +499,17 @@
 
   /* ============================ COCKPIT ============================ */
   function eventLabel(event) {
+    if (event.event === "task.transitioned") {
+      return event.status === "done" ? "Task completed"
+        : event.status === "in_progress" ? "Task started"
+        : event.status === "blocked" ? "Task blocked"
+        : event.status === "canceled" ? "Task canceled"
+        : event.status === "todo" ? "Task returned to the queue"
+        : "Task state changed";
+    }
     var labels = {
       "task.created": "Task entered the system",
       "task.updated": "Task progress changed",
-      "task.transitioned": "Task completed",
       "decision.logged": "Decision recorded",
       "deploy.created": "Release recorded",
       "adr.upserted": "Architecture decision changed",
@@ -587,9 +611,11 @@
       el("span", { class: "activity-meta", text: "event " + (event.seq || "—") + (event.agent ? " · " + event.agent : "") })
     ];
     if (event.receipt) {
-      copy.push(el("span", { class: "activity-receipt", text:
-        "verified: " + (event.receipt.command || "") + "  exit " + event.receipt.exit_code +
-        (event.receipt.ran_by ? "  by " + event.receipt.ran_by : "") }));
+      copy.push(el("span", { class: "activity-receipt",
+        title: event.receipt.command || "Critical-probe receipt",
+        text: "critical probe " + (event.receipt.exit_code === 0 ? "passed" : "recorded") +
+          (event.receipt.ran_by ? " · " + event.receipt.ran_by : "") +
+          " · exit " + event.receipt.exit_code }));
     }
     var node = el("button", { class: "activity-item" + (newest ? " is-new" : ""), type: "button",
       "data-seq": String(event.seq || ""), "data-entity-id": event.aggregate || "",
@@ -843,33 +869,11 @@
     return el("div", { class: "progress-velocity progress-telemetry", text: text });
   }
 
-  function commandStrip(L) {
-    L = L || {};
-    var fleet = L.fleet || [], attention = L.attention || [], readiness = L.readiness || {};
-    var productive = fleet.filter(function (c) { return c.status === "working"; }).length;
-    var stalled = fleet.filter(function (c) { return c.status === "stalled"; }).length;
-    var primary = productive ? (productive + (productive === 1 ? " worker is moving work" : " workers are moving work"))
-      : readiness.ready ? (readiness.ready + " ready for pickup") : "The ready queue is drained";
-    return el("section", { class: "overview-signal-strip", "aria-label": "Command deck status" }, [
-      el("div", { class: "signal-primary" }, [
-        el("span", { class: "live-orb", "aria-hidden": "true" }),
-        el("strong", { text: "Command deck" }),
-        el("span", { text: primary })
-      ]),
-      el("div", { class: "signal-meta" }, [
-        el("span", { text: (readiness.ready || 0) + " ready" }),
-        el("span", { text: productive + " productive" }),
-        stalled ? el("span", { class: "signal-warn", text: stalled + " stalled" }) : null,
-        el("span", { text: attention.length + " need attention" })
-      ].filter(Boolean))
-    ]);
-  }
-
   function deliveryCard(deliv) {
     if (!deliv || !deliv.counts) return null;
     var c = deliv.counts, measured = deliv.measured || {}, notes = deliv.notes || {};
     var legs = [
-      { key: "verified", label: "Verified", value: c.verified, measured: measured.verified !== false },
+      { key: "done", label: "Completed", value: c.done, measured: true },
       { key: "landing", label: "Landed", value: c.landed, measured: measured.landing !== false },
       { key: "release", label: "Released", value: c.deployed, measured: measured.release !== false },
       { key: "live", label: "Live", value: c.live, measured: measured.live !== false }
@@ -897,13 +901,14 @@
     ]);
   }
 
-  function progressHero(P, rd, fleet, tel, cost, wipSt) {
+  function progressHero(P, rd, fleet, tel, cost, wipSt, attention) {
     P = P || {};
     var pct = P.pct || 0;
     var perHr = P.last_1h || 0;
     var ready = (rd && rd.ready) || 0;
     var working = (fleet || []).filter(function (c) { return c.status === "working"; }).length;
     var stalled = (fleet || []).filter(function (c) { return c.status === "stalled"; }).length;
+    var attentionN = (attention || []).length;
     var etaMin = (perHr > 0 && ready > 0) ? Math.round(ready / (perHr / 60)) : null;
     var vel = "≈ " + perHr + " tasks/hr"
       + (working ? "  ·  " + working + (working === 1 ? " worker working" : " workers working") : "")
@@ -913,32 +918,30 @@
       vel += "  ·  WIP " + wipSt.active + "/" + wipSt.ceiling + (wipSt.saturated ? " (saturated)" : "");
     }
     var telLine = telemetryLine(tel, cost);
+    var constraint = stalled ? stalled + (stalled === 1 ? " worker needs intervention" : " workers need intervention")
+      : attentionN ? attentionN + (attentionN === 1 ? " operator decision is waiting" : " operator decisions are waiting")
+      : ready ? ready + (ready === 1 ? " task is ready for pickup" : " tasks are ready for pickup")
+      : working ? working + (working === 1 ? " worker is advancing the board" : " workers are advancing the board")
+      : "The queue is clear and no work is waiting";
     var stats = el("div", { class: "progress-stats" }, [
-      el("div", { class: "pstat" }, [el("span", { class: "pstat-num", "data-countup": "ct", text: String(P.completed_total || 0) }), el("span", { class: "pstat-lbl", text: "completed, total" })]),
-      el("div", { class: "pstat is-up" }, [el("span", { class: "pstat-num", "data-countup": "h1", text: "+" + (P.last_1h || 0) }), el("span", { class: "pstat-lbl", text: "last hour" })]),
-      el("div", { class: "pstat" }, [el("span", { class: "pstat-num", "data-countup": "h24", text: "+" + (P.last_24h || 0) }), el("span", { class: "pstat-lbl", text: "last 24h" })]),
-      el("div", { class: "pstat" + (rd && rd.needs_spec ? " is-alert" : "") }, [
-        el("span", { class: "pstat-num", text: String((rd && rd.needs_spec) || 0) }),
-        el("span", { class: "pstat-lbl", text: "need spec before a worker can pull" })]),
-      /* LANDED IS A MEASUREMENT, NOT A SUBTRACTION. Where the ancestry probe cannot run there is
-         no number to print: the tile renders "? / done" with the caveat, because done-minus-zero-
-         unlanded would assert every done task is on the branch from a question nobody asked. */
-      P.landing_measured === false
-        ? el("div", { class: "pstat is-unmeasured", title: P.landing_note || "landing unverifiable in this context" }, [
-            el("span", { class: "pstat-num", text: "? / " + (P.done || 0) }),
-            el("span", { class: "pstat-lbl", text: "landed — unverifiable here" })])
-        : el("div", { class: "pstat" + (P.unlanded ? " is-alert" : (P.landed_unmeasured ? " is-unmeasured" : "")) }, [
-            el("span", { class: "pstat-num", text: (P.landed != null ? P.landed : "?") + " / " + (P.done || 0) }),
-            el("span", { class: "pstat-lbl", text: P.unlanded ? "landed (" + P.unlanded + " NOT on the branch)"
-              : P.landed_unmeasured ? "landed (" + P.landed_unmeasured + " never measured)" : "landed on the branch" })]),
-      /* The one tile that speaks about PRODUCTION. Unmeasured liveness prints "?" rather than
-         borrowing the landed number. */
-      el("div", { class: "pstat" + (P.live != null && !P.live_attested ? " is-unmeasured" : "") }, [
-        el("span", { class: "pstat-num", text: (P.live != null ? P.live : "?") + " / " + (P.done || 0) }),
-        el("span", { class: "pstat-lbl", text: P.live == null ? "live — unprobed here"
-          : P.live_attested ? "live in production" : "live — unattested probe" })])
+      el("div", { class: "pstat" + (working ? " is-live" : "") }, [
+        el("span", { class: "pstat-num", text: String(working) }), el("span", { class: "pstat-lbl", text: "active now" })]),
+      el("div", { class: "pstat" + (ready ? " is-ready" : "") }, [
+        el("span", { class: "pstat-num", text: String(ready) }), el("span", { class: "pstat-lbl", text: "ready next" })]),
+      el("div", { class: "pstat" + (attentionN ? " is-alert" : "") }, [
+        el("span", { class: "pstat-num", text: String(attentionN) }), el("span", { class: "pstat-lbl", text: "need attention" })]),
+      el("div", { class: "pstat is-rate" }, [
+        el("span", { class: "pstat-num", text: String(perHr) }), el("span", { class: "pstat-lbl", text: "completed / hour" })])
     ]);
     return el("section", { class: "card progress-hero" }, [
+      el("div", { class: "hero-command" }, [
+        el("div", { class: "hero-command-copy" }, [
+          el("span", { class: "live-orb", "aria-hidden": "true" }),
+          el("span", { class: "hero-command-kicker", text: "Flow state" }),
+          el("strong", { text: constraint })
+        ]),
+        el("span", { class: "hero-command-mode", text: working ? "in motion" : ready ? "ready" : attentionN ? "decision" : "clear" })
+      ]),
       el("div", { class: "progress-top" }, [
         el("div", { class: "progress-pctwrap" }, [
           el("span", { class: "progress-pct", "data-countup": "pct", text: pct + "%" }),
@@ -1000,14 +1003,13 @@
 
   function workerHealthRow(h) {
     if (!h) return null;
-    var parts = [];
+    var parts = [h.seats_with_done_work + (h.seats_with_done_work === 1 ? " seat" : " seats") + " with completed work"];
     if (h.receipts) {
-      parts.push("receipts " + (h.receipts - h.failed) + "/" + h.receipts + " green"
-        + (h.fail_rate_pct == null ? "" : " (" + h.fail_rate_pct + "% failed)"));
+      parts.push("critical probes " + (h.receipts - h.failed) + "/" + h.receipts + " passed"
+        + (h.failed ? " (" + h.failed + " needs attention)" : ""));
     } else {
-      parts.push("no receipts recorded in the last " + h.window + " — outcome unmeasured");
+      parts.push("no critical-probe receipts in the last " + h.window + " events — ordinary completions need none");
     }
-    parts.push(h.seats_with_done_work + (h.seats_with_done_work === 1 ? " seat" : " seats") + " with done work");
     if (h.stalled_now) parts.push(h.stalled_now + " stalled now");
     var top = (h.tasks_per_worker || []).slice(0, 4).map(function (r) {
       return String(r.worker || "").replace(/^worker-/, "") + " " + r.done;
@@ -1116,6 +1118,16 @@
     return el("div", { class: "donut" }, [s]);
   }
 
+  function overviewHeading(kicker, title, copy) {
+    return el("div", { class: "overview-heading" }, [
+      el("span", { class: "overview-heading-kicker", text: kicker }),
+      el("div", { class: "overview-heading-copy" }, [
+        el("h2", { text: title }),
+        el("p", { text: copy })
+      ])
+    ]);
+  }
+
   function buildOverview() {
     var pane = el("div", { class: "tab-content", id: "tab-overview", role: "tabpanel",
       "aria-labelledby": "tab-btn-overview", tabindex: "0" });
@@ -1123,20 +1135,19 @@
     var au = D.audit || {}, b = D.build || {}, L = live();
     var activity = L.activity || [];
 
-    scroll.appendChild(commandStrip(L));
-    scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip));
+    scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip, L.attention));
+    scroll.appendChild(overviewHeading("Now", "Execution and intervention",
+      "See who is advancing work and the decisions that can change throughput immediately."));
     scroll.appendChild(el("div", { class: "operations-grid" }, [
       fleetView(L.fleet, L.worker_health), attentionRail(L.attention)
     ]));
 
-    var mid = el("div", { class: "ov-grid" }, [adherenceCard(L.adherence), readinessRail(L.readiness)]);
-    scroll.appendChild(mid);
+    var dc = dagCard(L.dag);
+    scroll.appendChild(overviewHeading("Next", "The pullable frontier",
+      "Ready work and dependency shape reveal the fastest truthful path forward."));
+    scroll.appendChild(el("div", { class: "next-grid" }, [readinessRail(L.readiness), dc].filter(Boolean)));
 
     var delivery = deliveryCard(L.delivery);
-    if (delivery) scroll.appendChild(delivery);
-
-    var dc = dagCard(L.dag);
-    if (dc) scroll.appendChild(dc);
 
     // activity feed
     var feed = el("div", { class: "activity-feed" });
@@ -1153,11 +1164,14 @@
       ]),
       feed
     ]);
+    scroll.appendChild(overviewHeading("Outcome", "From completion to reality",
+      "Follow delivered work through the branch, release, live state, and canonical event record."));
+    scroll.appendChild(el("div", { class: "outcome-grid" }, [delivery, actCard].filter(Boolean)));
 
     // audit card
     var auBody = el("div", { class: "card-body" });
     auBody.appendChild(el("p", { class: "cell-sub", style: "margin-bottom:12px",
-      text: "Computed per request (never a cached boolean) · exit " + (au.exit_code) + " · critical " + ((au.counts || {}).critical || 0) + " · high " + ((au.counts || {}).high || 0) + " · warn " + ((au.counts || {}).warn || 0) }));
+      text: "Structural snapshot · exit " + (au.exit_code) + " · critical " + ((au.counts || {}).critical || 0) + " · high " + ((au.counts || {}).high || 0) + " · warn " + ((au.counts || {}).warn || 0) }));
     if ((au.violations || []).length) {
       au.violations.slice(0, 12).forEach(function (v) {
         auBody.appendChild(el("div", { class: "callout " + (v.severity === "warn" ? "warn" : "fail") }, [
@@ -1169,7 +1183,7 @@
     } else {
       auBody.appendChild(el("div", { class: "callout info" }, [
         el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
-        el("div", { text: "No violations — independently verified." })]));
+        el("div", { text: "No structural violations in this snapshot." })]));
     }
     var auCard = el("section", { class: "card", id: "auditCard" }, [
       el("div", { class: "card-header" }, [
@@ -1193,21 +1207,33 @@
       el("div", { class: "card-body ov-donutrow" }, [donut((L.progress || {}).pct || 0, au.ok), phBody])
     ]);
 
-    scroll.appendChild(el("div", { class: "ov-grid" }, [actCard, phCard]));
-
     var fm = failureModes(L.failure_modes);
-    scroll.appendChild(el("div", { class: "ov-grid" }, [auCard, fm].filter(Boolean)));
 
     function ci(label, val) { return el("span", { class: "ci" }, [doc.createTextNode(label + " "), el("code", { text: val == null ? "—" : String(val) })]); }
-    scroll.appendChild(el("section", { class: "card" }, [
+    var coCard = el("section", { class: "card" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title" }, [icon("rocket"), doc.createTextNode("Build coherence")]),
         el("span", { class: "badge b-" + (b.coherent === true ? "pass" : (b.coherent === false ? "fail" : "stale")),
-                     text: b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unverified") })]),
+                     text: b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unmeasured") })]),
       el("div", { class: "card-body" }, [el("div", { class: "coherence-strip" }, [
         ci("repo", b.repo), ci("deploy", b.deploy), ci("stamped sha", b.sha), ci("HEAD", b.head), ci("served", b.served_sha)
       ])])
-    ]));
+    ]);
+
+    var adherence = adherenceCard(L.adherence);
+    var integrityCards = [adherence, phCard, auCard, fm, coCard].filter(Boolean);
+    var integrity = el("details", { class: "integrity-drawer" }, [
+      el("summary", { class: "integrity-summary" }, [
+        el("span", { class: "integrity-summary-icon", "aria-hidden": "true" }, [icon("stack")]),
+        el("span", { class: "integrity-summary-copy" }, [
+          el("strong", { text: "Integrity and system depth" }),
+          el("span", { text: "Adherence, phases, structural audit, failure modes, and build identity" })
+        ]),
+        el("span", { class: "badge b-" + (au.ok ? "pass" : "warn"), text: au.ok ? "structurally clear" : "attention" })
+      ]),
+      el("div", { class: "integrity-grid" }, integrityCards)
+    ]);
+    scroll.appendChild(integrity);
 
     pane.appendChild(scroll);
     return pane;
@@ -1260,9 +1286,10 @@
     if (detailRows.filter(Boolean).length) grid.appendChild(section("Detail", iconName, detailRows));
     body.appendChild(grid);
 
-    // LIVE: what is happening to this task right now, and what proved it done.
+    // LIVE: what is happening now, plus the optional transient probe when this task explicitly
+    // declared a critical boundary. Ordinary done work stands on the completed operation itself.
     if (type === "task") {
-      var lease = leaseOf(r.id), prog = taskProgress(r), rec = receiptOf(r);
+      var lease = leaseOf(r.id), prog = taskProgress(r), proof = completionProof(r), rec = proof.receipt;
       var liveRows = [];
       if (lease) {
         liveRows.push(row("Held by", el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : "") }, [
@@ -1274,16 +1301,22 @@
           el("div", { class: "cell-sub", text: "step " + prog.done + "/" + prog.total + (prog.step ? (" — " + prog.step) : "") })
         ])));
       }
-      if (r.verification_command) liveRows.push(rowMono("Verification command", r.verification_command));
+      if (proof.declared) liveRows.push(rowMono("Declared critical probe", proof.command));
       if (rec) {
-        liveRows.push(row("Receipt", el("div", { class: "receipt-box" + (rec.exit_code === 0 ? " ok" : " bad") }, [
+        liveRows.push(row("Critical-probe receipt", el("div", { class: "receipt-box" + (rec.exit_code === 0 ? " ok" : " bad") }, [
           el("div", { class: "mono", text: rec.command || "" }),
-          el("div", { class: "cell-sub", text: "exit " + rec.exit_code + (rec.ran_by ? (" · ran by " + rec.ran_by) : "") + (rec.ran_at ? (" · " + rec.ran_at) : "") })
-        ])));
-      } else if (r.status === "done") {
-        liveRows.push(row("Receipt", el("div", { class: "callout warn" }, [
+          el("div", { class: "cell-sub", text: "exit " + rec.exit_code + (rec.ran_by ? (" · ran by " + rec.ran_by) : "") + (rec.ran_at ? (" · " + rec.ran_at) : "") }),
+          rec.output_sha256 ? el("div", { class: "cell-sub mono", text: "output sha256 " + rec.output_sha256 }) : null
+        ].filter(Boolean))));
+      } else if (r.status === "done" && proof.declared) {
+        liveRows.push(row("Critical-probe receipt", el("div", { class: "callout warn" }, [
           el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
-          el("div", { text: "This task is done with no recorded verification_run. Under the receipt gate, done is granted by an exit-0 receipt — this one was recorded another way." })])));
+          el("div", { text: "This task declared a critical probe, but no matching receipt was recorded." })])));
+      } else if (r.status === "done") {
+        liveRows.push(row("Completion", el("div", { class: "receipt-box ok" }, [
+          el("div", { text: "Real operation completed" }),
+          el("div", { class: "cell-sub", text: "No separate critical probe was declared or required." })
+        ])));
       }
       if (liveRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Live", "pulse", liveRows)]));
     }
@@ -1374,20 +1407,26 @@
   function celebrateTask(task) {
     var existing = doc.querySelector(".completion-celebration");
     if (existing) existing.remove();
-    var rec = receiptOf(task);
-    var proven = !!(rec && rec.exit_code === 0);
-    var particles = el("span", { class: "completion-particles", "aria-hidden": "true" });
-    for (var i = 0; i < 12; i++) particles.appendChild(el("i", { style: "--particle:" + i }));
-    // The loudest moment on the board must not overstate what happened. `done` was either GRANTED
-    // by an exit-0 receipt or merely recorded, and the celebration says which.
-    var celebration = el("div", { class: "completion-celebration" + (proven ? "" : " not-proven"), role: "status", "aria-live": "assertive" }, [
+    var proof = completionProof(task);
+    var boardDrained = (((live().progress || {}).pct || 0) >= 100);
+    var particles = null;
+    if (boardDrained) {
+      particles = el("span", { class: "completion-particles", "aria-hidden": "true" });
+      for (var i = 0; i < 12; i++) particles.appendChild(el("i", { style: "--particle:" + i }));
+    }
+    // Celebrate real delivery by default. Only a task that declared a critical probe and lacks its
+    // passing receipt gets the warning treatment; an absent, undeclared test is not a defect.
+    var headline = proof.passed ? "Task complete · critical probe passed"
+      : proof.declared ? "Task complete · critical probe needs attention"
+      : "Task complete · work delivered";
+    var celebration = el("div", { class: "completion-celebration" + (proof.complete ? "" : " not-proven") + (boardDrained ? " is-milestone" : ""), role: "status", "aria-live": "assertive" }, [
       particles,
-      el("span", { class: "completion-check", "aria-hidden": "true", text: proven ? "✓" : "◌" }),
+      el("span", { class: "completion-check", "aria-hidden": "true", text: proof.complete ? "✓" : "◌" }),
       el("span", { class: "completion-copy" }, [
-        el("strong", { text: proven ? "Task complete · verified" : "Task complete · no receipt" }),
+        el("strong", { text: headline }),
         el("span", { text: task.title || localId(task.id) })
       ])
-    ]);
+    ].filter(Boolean));
     doc.body.appendChild(celebration);
     (global.requestAnimationFrame || setTimeout)(function () { celebration.classList.add("show"); });
     setTimeout(function () {
@@ -1593,11 +1632,13 @@
       var current = BY_ID[id];
       if (current && ["done", "blocked", "in_progress"].indexOf(changes[id]) >= 0) {
         if (changes[id] === "done") celebrateTask(current);
-        var rec = changes[id] === "done" ? receiptOf(current) : null;
-        var proven = !!(rec && rec.exit_code === 0);
-        toast((changes[id] === "done" ? (proven ? "Completed (verified): " : "Completed (no receipt): ")
+        var proof = changes[id] === "done" ? completionProof(current) : null;
+        var completionCopy = proof && proof.passed ? "Completed · critical probe passed: "
+          : proof && proof.declared ? "Completed · critical probe needs attention: "
+          : "Completed: ";
+        toast((changes[id] === "done" ? completionCopy
               : changes[id] === "blocked" ? "Blocked: " : "Started: ") + (current.title || localId(id)),
-          changes[id] === "done" ? (proven ? "success" : "info") : (changes[id] === "blocked" ? "error" : "info"));
+          changes[id] === "done" ? (proof.complete ? "success" : "error") : (changes[id] === "blocked" ? "error" : "info"));
       }
     });
   }

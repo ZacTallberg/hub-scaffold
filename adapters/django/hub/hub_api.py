@@ -72,8 +72,8 @@ def _activity(events, state, limit=36):
             "agent": event.get("agent_id"),
             "version": event.get("result_version"),
         }
-        # Surface the completion PROOF: a done task carries the exit-0 receipt that granted it, so
-        # a watcher sees WHAT verified the work, not merely that a row turned green.
+        # Surface an OPTIONAL critical-probe receipt when one exists. Ordinary done work stands on
+        # the successful real operation and emits no synthetic receipt merely to turn the row green.
         if event_type == "task.transitioned" and payload.get("status") == "done":
             runs = payload.get("verification_run") or []
             if runs:
@@ -87,7 +87,7 @@ def _activity(events, state, limit=36):
 def _inflight(state, stall_s=STALL_S):
     """The live fleet: open tasks currently held by a worker's lease.
 
-    Under the receipt gate a task can go todo->done directly, so the LEASE — not a status word —
+    Under the throughput-first model a task can go todo->done directly, so the LEASE — not a status word —
     is the true in-flight signal, and this reads the claims dir. An expired lease is not in
     flight (the task is already free to reclaim); a live lease older than stall_s is flagged so a
     stuck worker is visible rather than merely absent from the completions feed."""
@@ -338,12 +338,10 @@ def _failure_modes(events, top=6):
 
 def _worker_health(state, events, inflight, window=25):
     """The fleet's own health, folded from what this board can actually see: completions per
-    seat, and the receipt outcomes behind them.
+    seat, plus outcomes for the rare critical probes workers explicitly recorded.
 
-    Rates carry their DENOMINATOR, never a bare percentage — a fleet with two recorded receipts
-    is not a 50%-failure fleet, and a board with none is not a healthy one. With nothing recorded
-    the block says so rather than rendering 0%, which reads as a clean fleet instead of an
-    unmeasured one."""
+    Probe rates carry their DENOMINATOR, never a bare percentage. No receipt is a normal state when
+    no critical probe was declared; it says nothing negative about ordinary completed work."""
     tasks_by_worker = {}
     for t in state.get("by_type", {}).get("task", []):
         if t.get("status") == "done" and (t.get("provenance") or {}).get("agent"):
@@ -776,7 +774,8 @@ def live_events(request):
 def next_json(request):
     """DISCOVER: ranked unblocked tasks without a live lease, including stale reclaims.
 
-    A worker's entrypoint — pull the top task, claim it, complete it with a receipt. The board
+    A worker's entrypoint — pull the top task, claim it, and complete the real operation. A receipt
+    accompanies completion only when the task declared a transient critical probe. The board
     sequences the fleet by readiness and priority; there is no dedicated leader. Non-ready todos
     are returned SEPARATELY with the reason, never silently withheld: a worker handed a stub
     stalls trying to write its own acceptance."""
