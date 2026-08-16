@@ -13,7 +13,7 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import collision, ids, validate
+from hub_core import collision, flow, ids, schedule, validate
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
@@ -171,6 +171,9 @@ def complete(request, b):
         return JsonResponse({"errors": [{"code": "must_claim", "msg": "claim the task first (POST /hub/api/claim)"}]}, status=409)
     if not hub_app.lease_valid(eid, token):
         return JsonResponse({"errors": [{"code": "lease", "msg": "claimed by another agent / stale token"}]}, status=409)
+    if cur.get("agent") != agent:
+        return JsonResponse({"errors": [{"code": "identity",
+            "msg": "completing agent must be the lease owner", "lease_agent": cur.get("agent")}]}, status=409)
     evidence = b.get("evidence_uri")
     if isinstance(evidence, str):
         evidence = [evidence]
@@ -240,13 +243,15 @@ def complete(request, b):
                        "submit what happened — the hub does not run it for you (it would be "
                        "executing caller-supplied text on the server)."}]}, status=422)
         problems = []
-        if " ".join(str(run.get("command") or "").split()) != " ".join(vc.split()):
+        if str(run.get("command") or "") != str(vc):
             problems.append("verification_run.command must be the task's own verification_command "
                             f"({vc!r}), not {run.get('command')!r}")
         if run.get("exit_code") != 0:
             problems.append(f"exit_code is {run.get('exit_code')!r}; only 0 grants done")
-        if run.get("ran_by") and b.get("agent") and run["ran_by"] != b.get("agent"):
-            problems.append(f"ran_by {run['ran_by']!r} is not the completing agent {b.get('agent')!r}")
+        if run.get("ran_by") != cur.get("agent"):
+            problems.append(f"ran_by {run.get('ran_by')!r} is not the lease owner {cur.get('agent')!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(run.get("output_sha256") or "")):
+            problems.append("output_sha256 must be a 64-character lowercase hexadecimal digest")
         if problems:
             return JsonResponse({"errors": [{"code": "bad_verification_run",
                                              "problems": problems}]}, status=422)
@@ -414,12 +419,22 @@ def claim(request, b):
             return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]}, status=404)
         status = ent.get("status")
         flags = state.get("flags", {}).get(eid, {})
-        if flags.get("deps_unmet"):
-            return JsonResponse({"errors": [{"code": "deps_blocked", "msg": "task dependencies are not done",
-                                             "deps_unmet": flags.get("deps_unmet")}]}, status=409)
-        if status not in ("todo", "in_progress"):
-            return JsonResponse({"errors": [{"code": "not_claimable",
-                                             "msg": "only todo or in_progress tasks can be claimed"}]}, status=409)
+        live = hub_app.leases()
+        existing = next((lease for lease in live if lease.get("task") == eid), None)
+        same_lease = existing and existing.get("agent") == agent
+        other = next((lease for lease in live
+                      if lease.get("agent") == agent and lease.get("task") != eid), None)
+        if other:
+            return JsonResponse({"errors": [{"code": "one_active", "task": other.get("task"),
+                                             "msg": "agent already owns an active task"}]}, status=409)
+        if not same_lease and hub_app.wip_status(len(live))["saturated"]:
+            return JsonResponse({"errors": [{"code": "board_saturated",
+                                             "msg": "configured WIP ceiling reached"}]}, status=429)
+        verdict = flow.classify(ent, flags, existing,
+                                strictness=hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked"))
+        if not same_lease and not verdict["available"]:
+            return JsonResponse({"errors": [{"code": verdict["state"],
+                                             "msg": verdict["reason"]}]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl)
         if not res["ok"]:
             return JsonResponse(res, status=409)
@@ -436,6 +451,68 @@ def claim(request, b):
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+@writer
+def release(request, b):
+    eid, token = b.get("id"), b.get("token")
+    if not isinstance(eid, str) or not eid.strip() or not isinstance(token, str) or not token.strip():
+        return JsonResponse({"errors": [{"code": "need_id_token"}]}, status=400)
+    lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
+    if not lease or lease.get("token") != token:
+        return JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+    agent = b.get("agent")
+    if agent and agent != lease.get("agent"):
+        return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
+    hub_app.release_lease(eid, token)
+    return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
+
+
+@writer
+def take(request, b):
+    agent = b.get("agent")
+    if not isinstance(agent, str) or not agent.strip() or len(agent) > 256:
+        return JsonResponse({"errors": [{"code": "need_agent"}]}, status=400)
+    try:
+        ttl = int(b.get("ttl_s", 900))
+    except (TypeError, ValueError):
+        ttl = 0
+    if ttl < 1 or ttl > 86400:
+        return JsonResponse({"errors": [{"code": "bad_ttl"}]}, status=422)
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        state, live = hub_app.current_state(), hub_app.leases()
+        owned = next((row for row in live if row.get("agent") == agent), None)
+        if owned:
+            return JsonResponse({"errors": [{"code": "one_active", "task": owned.get("task")}]}, status=409)
+        if hub_app.wip_status(len(live))["saturated"]:
+            return JsonResponse({"errors": [{"code": "board_saturated"}]}, status=429)
+        lease_ids = {row.get("task") for row in live}
+        candidates = []
+        strictness = hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")
+        for task in state.get("entities", {}).values():
+            if task.get("type") != "task" or task.get("id") in lease_ids:
+                continue
+            verdict = flow.classify(task, state.get("flags", {}).get(task.get("id"), {}), None,
+                                    strictness=strictness)
+            if verdict["available"]:
+                candidates.append(task)
+        if not candidates:
+            return JsonResponse({"errors": [{"code": "no_ready_task"}]}, status=409)
+        task = schedule.order_ready(candidates, busy_touches=set())[0]
+        eid = task["id"]
+        res = hub_app.claim(eid, agent, ttl_s=ttl)
+        if not res["ok"]:
+            return JsonResponse(res, status=409)
+        if task.get("status") != "in_progress":
+            transition, code = _append("task", eid, {"type": "task", "status": "in_progress"},
+                                       expected_version=task.get("version"), agent=agent,
+                                       idem=b.get("idem_key"), etype="task.transitioned")
+            if code != 200:
+                hub_app.release_lease(eid, res["token"])
+                return JsonResponse(transition, status=code)
+            res["version"] = transition["data"]["version"]
+        res["task"] = task
+    return JsonResponse(res)
 
 
 @writer

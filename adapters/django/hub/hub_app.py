@@ -317,11 +317,9 @@ def _claim_path(task_id):
 
 def _read_lease(task_id):
     p = _claim_path(task_id)
-    if not p.exists():
-        return None
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except ValueError:
+    except (OSError, ValueError):
         return None
 
 
@@ -342,13 +340,53 @@ def claim(task_id, agent, ttl_s=900):
                 return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
+            cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
             _write_lease(task_id, cur)
-            return {"ok": True, **cur}
+            return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
-                 "claimed": now, "expires": now + ttl_s}
+                 "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
-        return {"ok": True, **lease}
+        return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **lease}
+
+
+def leases(*, now=None, include_expired=False):
+    """Read lease sidecars safely, newest claims first.
+
+    A vanished/torn file is an absent lease, never a request-wide failure.  Heartbeat and claim
+    timestamps remain separate so presence cannot masquerade as task progress.
+    """
+    now = _time.time() if now is None else float(now)
+    rows = []
+    try:
+        paths = list(CLAIMS.glob("*.json"))
+    except OSError:
+        return rows
+    for path in paths:
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if include_expired or row.get("expires", 0) > now:
+            rows.append(row)
+    rows.sort(key=lambda row: (row.get("claimed", 0), row.get("task", "")), reverse=True)
+    return rows
+
+
+def wip_status(active=None):
+    """The configured, enforced WIP contract.
+
+    Adaptive control is intentionally not claimed here: a controller is only real once its loss
+    signals are wired.  The same setting feeds the claim gate and every read projection.
+    """
+    try:
+        ceiling = int(_dj_setting("HUB_WIP_LIMIT", 8))
+    except (TypeError, ValueError):
+        ceiling = 8
+    ceiling = max(1, min(256, ceiling))
+    active = len(leases()) if active is None else int(active)
+    return {"ceiling": ceiling, "active": active, "saturated": active >= ceiling,
+            "source": "configured"}
 
 
 def lease_valid(task_id, token):
@@ -361,9 +399,12 @@ def heartbeat(task_id, token, ttl_s=900):
         cur = _read_lease(task_id)
         if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
             return {"ok": False, "reason": "no/stale lease"}
-        cur["expires"] = _time.time() + ttl_s
+        now = _time.time()
+        cur["last_heartbeat"] = now
+        cur["expires"] = now + ttl_s
         _write_lease(task_id, cur)
-        return {"ok": True, "expires": cur["expires"]}
+        return {"ok": True, "expires": cur["expires"], "last_heartbeat": now,
+                "heartbeat_after_s": max(1, ttl_s // 3)}
 
 
 def release_lease(task_id, token) -> bool:
