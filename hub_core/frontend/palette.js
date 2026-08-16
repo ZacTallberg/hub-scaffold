@@ -46,7 +46,8 @@
     { key: "feats", type: "feat", label: "Features" },
     { key: "gaps", type: "gap", label: "Gaps" },
     { key: "caps", type: "cap", label: "Capabilities" },
-    { key: "deploys", type: "deploy", label: "Deploys" }
+    { key: "deploys", type: "deploy", label: "Deploys" },
+    { key: "notes", type: "note", label: "Findings" }
   ];
 
   var _data = null, _index = null, _root = null, _input = null, _list = null,
@@ -103,7 +104,7 @@
         out.push({
           group: g.label, type: g.type, id: id, local: local, title: String(title),
           sub: String(sub), anchor: anchor, status: statusOf(rec), hay: hay,
-          run: typeof rec.run === "function" ? rec.run : null
+          run: typeof rec.run === "function" ? rec.run : null, rec: rec
         });
       });
     });
@@ -271,6 +272,12 @@
     close();
     // Runnable command verb (window.HubCommands): execute its action instead of navigating.
     if (s.it.run) { try { s.it.run(); } catch (e) {} return; }
+    if (global.Hub && global.Hub.openEntity && s.it.rec) {
+      var tabs = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes" };
+      if (global.Hub.activate && tabs[s.it.type]) global.Hub.activate(tabs[s.it.type]);
+      global.Hub.openEntity(s.it.type, s.it.rec);
+      return;
+    }
     var anchor = s.it.anchor;
     var id = anchor.charAt(0) === "#" ? anchor.slice(1) : anchor;
     var target = document.getElementById(id);
@@ -313,6 +320,8 @@
     _prevFocus = document.activeElement;
     _root.hidden = false;
     document.documentElement.classList.add("hp-open");
+    var shell = document.getElementById("appShell");
+    if (shell) { shell.inert = true; shell.setAttribute("aria-hidden", "true"); }
     _input.value = "";
     renderResults();
     _input.focus();
@@ -322,6 +331,8 @@
     if (!_root || _root.hidden) return;
     _root.hidden = true;
     document.documentElement.classList.remove("hp-open");
+    var shell = document.getElementById("appShell");
+    if (shell) { shell.inert = false; shell.removeAttribute("aria-hidden"); }
     if (_prevFocus && _prevFocus.focus) { try { _prevFocus.focus(); } catch (e) {} }
   }
 
@@ -382,6 +393,12 @@
     wireInlineFilter();
   }
 
+  function refresh(nextData) {
+    _data = nextData || null;
+    _index = null;
+    if (_root && !_root.hidden) renderResults();
+  }
+
   function injectStyle() {
     if (document.getElementById("hp-style")) return;
     var css =
@@ -432,7 +449,7 @@
 
   var HubPalette = {
     open: open, close: close, toggle: toggle, init: init,
-    data: data, index: buildIndex, fuzzy: fuzzy, GLYPH: GLYPH
+    data: data, index: buildIndex, fuzzy: fuzzy, refresh: refresh, GLYPH: GLYPH
   };
   global.HubPalette = HubPalette;
 

@@ -34,6 +34,7 @@ def render(snap, brand, csrf_token=""):
         "shell_css": _asset("shell.css"),
         "print_css": _asset("print.css"),
         "snapshot_json": snap_json,
+        "theme_js": _asset("theme.js").replace("</script", "<\\/script"),
         "hub_js": _asset("hub.js").replace("</script", "<\\/script"),
         "palette_js": _asset("palette.js").replace("</script", "<\\/script"),
     }

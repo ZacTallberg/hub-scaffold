@@ -423,3 +423,20 @@
     scroll-behavior: auto !important;
   }
 }
+
+@media print {
+  html, body.hub-app { height: auto !important; overflow: visible !important; display: block !important; }
+  .navbar-main, .tabs-bar, .toolbar, .facet-bar, .task-stage, .hub-backdrop,
+  .toast-container, .completion-celebration, .hp-overlay, .modal-overlay { display: none !important; }
+  #appShell, .page-wrapper, #tabPanes, .tab-content, .content-area, .full-table-view,
+  .overview-scroll, .table-wrapper { display: block !important; height: auto !important; max-height: none !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; }
+  .tab-content { break-before: page; }
+  .tab-content:first-child { break-before: auto; }
+  .card, .ov-grid, .operations-grid { display: block !important; break-inside: avoid !important; margin: 0 0 8pt !important; }
+  .agent-card, .attn-item, .activity-item, .adh-row, .ready-item, .dag-step, .tcard { display: block !important; color: #111 !important; border: 1px solid #999 !important; padding: 4pt 6pt !important; margin: 0 0 3pt !important; text-align: left !important; }
+  .data-table { display: table !important; }
+  .data-table thead { display: table-header-group !important; }
+  .data-table tbody { display: table-row-group !important; }
+  .data-table tr { display: table-row !important; }
+  .data-table th, .data-table td { display: table-cell !important; }
+}
