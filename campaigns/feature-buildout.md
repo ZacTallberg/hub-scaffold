@@ -19,8 +19,8 @@ Read `00-orchestration-method.md` first. Substitute `{{DEPLOY_CMD}}`, `{{LIVE_UR
 > 3. **IMPLEMENT** — do ONLY that task. If you discover new work mid-task, add it as a NEW task first —
 >    never silently expand scope. Find the root cause before fixing; no speculative patches.
 > 4. **RECORD** — mark it `done` WITH evidence (a commit SHA, a passing check, a live URL, a screenshot).
->    In `strict` mode the server won't grant `done` without a `verification_command` it can run and
->    evidence that dereferences — set those on the task, don't fight the gate.
+>    In `strict` mode the server won't grant `done` without dereferencing evidence and a typed
+>    exit-0 receipt for the task's `verification_command`. Run it yourself; the Hub never does.
 > 5. **VERIFY proportionally** — the Hub re-runs its cheap audit. Run focused checks when the change
 >    has a plausible failure mode. Dispatch a fresh independent closer only for a release/risky
 >    boundary or an occasional sample; do not attach the full selftest ladder to every small task,

@@ -14,6 +14,35 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Interop truth, portable identity, and bounded realtime correctness
+
+- `start_task` now delegates the entire lease + `todo -> in_progress` transition to the claim
+  seam. It no longer follows a successful claim with a schema-invalid `active/planning_state`
+  update that hid the granted lease behind an MCP tool error. MCP argument errors are JSON-RPC
+  `-32602`, `tasks/get` no longer imports a removed helper, and discovery identity is read live.
+- `init.sh` now emits `PROJECT/project.json` with `key`, `brand`, `app_name`, `app_host`, and the
+  per-project `worker_scheme`; the runnable example carries and proves its own identity. Receipt
+  predicates, MCP, discovery signing, and the launch default share that source.
+- Root agent discovery is explicit about the protocol boundary: no A2A task transport or A2A
+  streaming is advertised. The only callable protocol it names is the MCP endpoint that exists.
+- Snapshot ETags now cover the complete representation, including lease-only heartbeats and
+  telemetry. Delta reads page to the exact folded cursor, so event 501 and append races cannot be
+  omitted while the response advances past them.
+- Removed three capability-looking modules that were not callable scaffold capabilities:
+  `ownership` had no shipped register/builder or schema fields and its sole projection hook was a
+  no-op; `bitemporal` had no route/import and targeted fact types/validity fields the base schemas
+  do not admit; `caches` existed only for the deliberately deleted single-interpreter battery
+  runner and had no runtime consumer. The append-only event history, live lease fencing, adaptive
+  WIP, scheduling, and per-task provenance remain intact.
+- Removed phantom optional entity projections with their stale registration hook. The fold, ID
+  grammar, snapshot, routes, and mirrored schemas now agree on the seven shipped base types;
+  optional types remain an end-to-end augmentation, and the tamper helper reads commit SHAs from
+  canonical task provenance instead of an unsupported `commit` entity.
+- Corrected every live contract that still claimed the Hub executes `verification_command`. The
+  worker executes it out-of-band; the Hub validates the typed receipt.
+- The mounted-app self-test now covers identity/discovery, MCP start/finish, cursor/delta/SSE
+  framing, and representation ETag behavior.
+
 ### A design pass: the board became something to look at
 
 The cockpit was correct and quiet — clean cards, right numbers, no presence. Three defects,
@@ -51,9 +80,9 @@ Everything the instances carried that is not domain-specific now lives here.
 2026-07-28 + the tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless, with
 `board_next` / `spec_task` / `start_task` / `finish_task`. It never touches the ledger directly —
 every mutation goes back through the same `/hub/api/*` seam a worker uses, so the receipt gate,
-lease fencing, OCC and schema validation apply unchanged. `/.well-known/agent-card.json` is an A2A
-AgentCard: one skill per task `work_kind`, read live from the schema so it cannot drift, and
-`securitySchemes` DESCRIBING the write header — the token value never appears.
+lease fencing, OCC and schema validation apply unchanged. `/.well-known/agent-card.json` is signed
+agent discovery: one skill per task `work_kind`, read live from the schema so it cannot drift, and
+an explicit pointer to the real MCP transport — the token value never appears.
 
 **Four entity types had schemas and no writer.** `gap`, `feat`, `note` and `deploy` could be read
 and validated with no way to create one through the API. Added, with identity DERIVED where the
@@ -79,10 +108,9 @@ Fixed while porting, because a port is not done until it runs here:
   matches the real id grammar. It also ignored `touches` — the one field that exists to state
   which surfaces a task changes — and parsed prose instead. Proven to fire on a seeded twin AND
   stay quiet on unrelated work.
-- **The agent card 500'd on a field this scaffold does not have** (`identity['app_host']`, dropped
-  as deploy-layer config) and imported `cryptography` unconditionally. Its URL now derives from
-  the request, which is more truthful than any config, and an unsigned card is served with a
-  stated `signatureStatus` — a discovery document that 500s hides the whole hub.
+- **The agent card 500'd on a missing identity field** and imported `cryptography`
+  unconditionally. Portable identity now guarantees the field, and an unsigned card is served
+  with a stated `signatureStatus` when signing support is unavailable.
 - `work_kind` added to the task schema (with the conditional rules that make it enforce rather
   than label), since the agent card publishes one skill per kind.
 
@@ -140,8 +168,9 @@ because the scaffold must boot on a fresh clone with nothing edited.
   `task.schema.json` omits them under `additionalProperties: false`, so durable timers and the
   poison circuit-breaker could not be set through the write API at all. Added, with
   `poison_reason`.
-- **`common.schema.json` accepted 7 id types; `ids.py` mints 13.** `finding`/`review` ids were
-  mintable and then rejected by validation. Patterns aligned.
+- **The base type contract had drifted.** The schemas and routes shipped seven entity types while
+  the fold, ID grammar, and snapshot projected unsupported optional nouns. The base is seven again;
+  extensions must be added end-to-end via the augmentation recipe.
 
 ### 2026-08-09 (later) — licensed, and the last battery-era doctrine out
 

@@ -10,9 +10,10 @@ the contract.
   `X-Write-Token: <HUB_WRITE_TOKEN>` and fail closed when it is absent. Reads need nothing. The
   optional browser launch-mint endpoint is the one narrow exception: it is same-origin CSRF-gated,
   cannot mutate board entities, and its separate authoritative consume remains write-token-gated.
-- **Write-token power:** a writer can set `verification_command`, which the server executes with
-  `shell=True` during completion; strict evidence URLs are also fetched by the server. Treat the
-  token as production credentials and read [SECURITY.md](../../SECURITY.md) before distributing it.
+- **Write-token power:** a writer can set `verification_command` and grant terminal board states,
+  but the server never executes that command; the worker submits a typed receipt. Strict evidence
+  URLs are fetched by the server. Treat the token as production credentials and read
+  [SECURITY.md](../../SECURITY.md) before distributing it.
 - **Ids** are `{{PROJECT_KEY}}:<type>:<local>`, e.g. `{{PROJECT_KEY}}:task:0001`. Allocated once, never renumbered.
 - **Content type:** send `Content-Type: application/json`; bodies are JSON objects.
 
@@ -47,7 +48,7 @@ VERIFY    (the server re-runs the audit inside complete; a red audit refuses the
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` `deploy` | upsert the remaining entity types. Identity is DERIVED where the content supports it — `feat`/`note` mint a slug from their own name, `deploy` keys on its sha (one release, one record) — so a retried POST updates rather than minting a twin. |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Tools: `board_next`, `spec_task`, `start_task`, `finish_task`. It never touches the ledger directly — every mutation goes back through the write seam above, so the receipt gate, lease fencing, OCC and schema validation all apply unchanged. |
-| `GET /.well-known/agent-card.json` | **A2A AgentCard** (mounted at the ROOT by the host urlconf, where the spec fixes it). Read-only discovery: one skill per task `work_kind`, read live from the schema so it cannot drift, plus `securitySchemes` DESCRIBING the `X-Write-Token` header — the token value never appears. Signed as an ES256 JWS when `cryptography` is installed; served unsigned with a stated `signatureStatus` when it is not. |
+| `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
 | `GET /hub/live/events` | **Server-Sent Events.** A bounded (~52s) stream of `{seq, ts, event, aggregate, version, agent}` envelopes — event IDENTITY only, never payload content. Resume with `Last-Event-ID` or `?since=<seq>`. Emits `ready`, `hub`, `heartbeat` and a closing `reconnect`. Learn THAT something moved, then re-read the canonical board to learn what. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
 | `GET /hub/delta.json?since=<seq>` | Everything CHANGED since your cursor: `{changed[], removed[], cursor, audit, live}`. Patch a held snapshot in place instead of re-pulling the whole fold. `since >= head` yields an empty set; a `cursor.seq` below your `since` means the head regressed — fall back to a full snapshot. |
@@ -138,7 +139,8 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 `precondition_required` (428 OCC) · `conflict` (409 OCC version race) ·
 `must_claim`/`lease`/`deps_blocked`/`not_claimable` (409) · `bad_ttl` (422) ·
 `need_evidence`/`evidence_unresolvable`/
-`need_verification_command`/`verify_failed`/`verify_error`/`audit_unsound` (422) ·
+`need_verification_command`/`need_verification_run`/`bad_verification_run`/
+`verification_command_is_a_suite`/`audit_unsound` (422) ·
 `adr_immutable` (409) · `bad_grant_request` (422) · `launch_disabled`/`not_found` (404) ·
 `launch_refused` (403) · `launch_unavailable` (503).
 

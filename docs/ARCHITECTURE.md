@@ -92,8 +92,9 @@ General HTTP writes pass through one gate:
 6. append with aggregate-scoped idempotency and optimistic concurrency.
 
 Task completion has additional steps: a live lease, an acceptance note, evidence, optional or
-required proof checks according to `HUB_DONE_STRICTNESS`, execution of any stored
-`verification_command`, and a recomputed audit that refuses completion on critical violations.
+required proof checks according to `HUB_DONE_STRICTNESS`, validation of the worker-produced typed
+receipt for any stored `verification_command`, and a recomputed audit that refuses completion on
+critical violations. The Hub never executes the command.
 The final append rechecks the fencing token under the cross-process claim lock and uses the version
 whose command was verified, preventing an expired worker or concurrently changed task from landing
 an obsolete completion.
@@ -136,7 +137,8 @@ may share it because SQLite serializes event writers and claim/launch sidecars u
 locks. Multiple independent machines must not use separate copies of the same ledger; use a shared
 filesystem with appropriate semantics or replace the store adapter.
 
-The Django adapter expects `BASE_DIR/PROJECT/schema/` and resolves evidence paths and verification
-commands relative to `BASE_DIR`. `HUB_DIR` can relocate runtime state, which is useful for durable
+The Django adapter expects `BASE_DIR/PROJECT/schema/` and resolves strict-mode evidence paths
+relative to `BASE_DIR`. Workers execute verification commands out-of-band in their own context;
+the Hub validates their typed receipts. `HUB_DIR` can relocate runtime state, which is useful for durable
 mounts and tests. The optional launcher currently ships a Windows registration adapter; the grant
 protocol itself is Python and vendor-neutral.

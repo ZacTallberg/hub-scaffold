@@ -15,6 +15,8 @@ cd "$ROOT"
 PATTERNS=(
   'zacoberg'
   'zcobe'
+  '\bember\b'
+  '\bpinnacle\b'
   'everyopenmic'
   'openmic'
   'fairy'
@@ -34,19 +36,20 @@ PATTERNS=(
   '147\.182\.'
   '\b64\.23\.'
   '/c/code'
-  'C:\\code'
-  'C:/code'
+  'C:(\\+|/)code'
   '\bplots?\b'
 )
 
 combined="$(IFS='|'; echo "${PATTERNS[*]}")"
 
 if [ "${1:-}" = "--selftest" ]; then
-  printf '%s\n' 'loom' '192.168.10.20' | grep -Eiq -e "$combined" || {
-    echo "SCRUB SELFTEST: FAIL — seeded forbidden text was not detected" >&2
-    exit 1
-  }
-  if printf '%s\n' 'bloom' 'ordinary portable text' | grep -Eiq -e "$combined"; then
+  for seeded in 'loom' '192.168.10.20' 'ember:task:0001' 'C:\\code\\source'; do
+    printf '%s\n' "$seeded" | grep -Eiq -e "$combined" || {
+      echo "SCRUB SELFTEST: FAIL — seeded forbidden text was not detected: $seeded" >&2
+      exit 1
+    }
+  done
+  if printf '%s\n' 'bloom' 'remember' 'ordinary portable text' | grep -Eiq -e "$combined"; then
     echo "SCRUB SELFTEST: FAIL — boundary-safe text was rejected" >&2
     exit 1
   fi

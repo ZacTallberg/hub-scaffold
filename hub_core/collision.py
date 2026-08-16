@@ -1,24 +1,13 @@
-"""Mint-time collision detection: does this NEW task already have a twin in flight?
+"""Mint-time collision detection: does this new task already have a twin in flight?
 
-Two seats built the same unit twice in one hour on 2026-08-03 (the live-seat lander fence, and the
-oracle-tamper refactor-into-helper false positive) because each seat was bitten by the same
-incident, each filed its own task minutes apart, and nothing on the write path compared them. The
-existing dedup (tools/board_digest.covered) reads TITLE tokens and only the discovery-scout mints
-run it; a worker filing discovered work POSTs straight to /hub/api/task and is compared to nothing.
-Titles were never going to catch that pair anyway — "land-worktree.ps1 must not reap a LIVE seat's
-worktree" and "worktree reaper eats live seats" share two loose tokens and no stem.
+Titles alone are weak identity. Duplicate work is more reliably signaled by the concrete surfaces
+both tasks name: touched paths, verification subjects, and entity references. Those deterministic
+tokens are extracted by pattern and compared by set intersection; fuzzy text similarity never
+decides identity.
 
-What they DID share is what the work touches. Every acceptance here names its own surfaces: file
-paths, the command that proves it, the entity ids it argues about. Those are deterministic tokens
-- extracted by pattern, compared by set intersection, never by string similarity deciding identity
-(the no-fragile-text-matching law). Measured on the live board (50 non-terminal tasks): the
-oracle-tamper pair shares 3 signals and the lander pair shares exactly 1 - so a rarity cutoff would
-have MISSED the pair that motivated this, and the rule takes any shared signal.
-
-The finding is ADVISORY, never a refusal: 42% of that backlog shares at least one signal with some
-other task (median 2 partners), which is a glance when it rides along with the write and a wall if
-it blocks one. Filing is never the place to lose work; the ranked list is there so the second seat
-notices the first before it spends an hour.
+The result is advisory, never a refusal. Shared infrastructure legitimately appears in unrelated
+tasks, while blocking a task mint can lose work. Candidates ride with the write response so a
+worker can fold a real duplicate before implementation begins.
 """
 import re
 
@@ -26,7 +15,7 @@ _PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./\\-]*\.(?:py|ps1|sh|json|md|txt|js
 # ANY project's id grammar, matching hub_core.ids.ID_RE — never one project's literal key. A
 # hardcoded prefix here silently matches nothing on every board but the one it was written for,
 # and a detector that quietly finds nothing is indistinguishable from a clean board.
-_EID = re.compile(r"\b[a-z0-9][a-z0-9-]*:(?:task|adr|feat|gap|cap|deploy|commit|note|finding|lesson|method|review|telemetry):[A-Za-z0-9_.-]+")
+_EID = re.compile(r"\b[a-z0-9][a-z0-9-]*:(?:task|adr|feat|gap|cap|deploy|note):[A-Za-z0-9_.-]+")
 _TERMINAL = ("done", "dropped")
 _SIGNAL_FIELDS = ("acceptance", "verification_command", "title")
 

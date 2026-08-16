@@ -44,7 +44,7 @@ Strict completion strengthens proof of a claim; it does not reduce the authority
    URL, a screenshot. Evidence must be *dereferenceable* — a reviewer who was not present can
    follow it and re-check. Evidence must postdate the final edit; a run from before the last
    change is void. Run the Hub in `strict` mode when the server itself must enforce
-   dereferenceability and a passing verification command.
+   dereferenceability and a matching typed exit-0 receipt for the task's verification command.
 5. **VERIFY proportionally** — use the smallest check that can catch the plausible failure. Routine
    low-risk work may need only a diff/evidence review or no executable test. Invoke a fresh,
    independent closer for releases, security/auth, migrations/destructive work, public contracts,

@@ -13,33 +13,14 @@ from . import upcast as _upcast
 
 # Entity types that fold into the projected state (everything else, e.g. decision/claim, is a
 # log-only event kept in the event store but not materialized as an entity).
-_KNOWN = {"task", "adr", "feat", "gap", "cap", "contract", "deploy", "commit", "note",
-          # Ported/redesigned for this project (see ADR-9): finding + lesson are generic;
-          # method is redesigned for CHARTER §5 (a method here is governance AND public content);
-          # review replaces a domain-specific "surfacing" step with the §4.3/§10.4 human gate.
-          "finding", "lesson", "method", "review",
-          # telemetry = one worker SESSION (hub.worker-telemetry-event-and-cockpit): the fleet's
-          # own health folds like every other entity instead of hiding in note bodies.
-          "telemetry"}
-
-
-def register_types(names):
-    """Admit instance-local entity types to the fold.
-
-    The Django adapter calls this with every name PROJECT/schema/*.schema.json declares, so a
-    domain-specific instance (an older generation's own nouns) keeps
-    folding its whole history without an engine edit — dropping events an older generation of
-    this engine recorded is a capture failure, not a migration."""
-    _KNOWN.update(n for n in names if n)
+_KNOWN = {"task", "adr", "feat", "gap", "cap", "deploy", "note"}
 # Statuses that count as "satisfied" for dependency purposes.
 _DONE = {"done", "closed", "shipped", "accepted", "extracted", "reusable", "proven"}
 # Dependency SATISFACTION additionally treats a dropped dep as terminally resolved, matching the
 # deps-before-done write gate (done, dropped) — a dropped dep blocks nothing forever. Without this
 # a todo task whose only unmet-status dep was dropped is never unblocked, never listed by
-# /hub/next.json, and not on the dangling rail: it appears NOWHERE (task 0003).
+# /hub/next.json, and not on the dangling rail: it appears nowhere.
 _DEP_SATISFIED = _DONE | {"dropped"}
-_ACTIVE_TASK = {"active"}
-_TASKBED_PLANNING = {"active", "queued"}
 
 
 def _snoozed_until(task, now):
@@ -106,7 +87,7 @@ def fold(events) -> dict:
         # COPY before stamping: a payload that carries its own provenance dict arrives ALIASED
         # into ent (the k/v merge is by reference), and stamping through the alias mutates the
         # in-memory EVENT — the served-index cross-check then reports the audit's own write-through
-        # as a critical db/file divergence (observed live: index:divergence:seq1640).
+        # as a critical db/file divergence.
         # Gen-1 ledgers carried provenance as PROSE ("shipped <sha> ..."); folding an older
         # instance's board must preserve that record, never crash on it.
         legacy_prov = ent.get("provenance")
@@ -166,18 +147,10 @@ def derive(entities: dict, now=None) -> dict:
             else:
                 backrefs.setdefault(target, []).append({"from": e["id"], "rel": rel})
 
-    # The operative task bed is a projection over the immutable event history. Legacy expansions,
-    # content records, duplicates, and review-only rows remain addressable without flooding DISCOVER
-    # or the human Tasks tab. Missing planning_state retains legacy behaviour until a migration
-    # explicitly classifies the row.
-    def in_taskbed(t):
-        return t.get("planning_state", "active") in _TASKBED_PLANNING
+    task_bed = list(by_type.get("task", []))
 
-    task_bed = [t for t in by_type.get("task", []) if in_taskbed(t)]
-    task_archive = [t for t in by_type.get("task", []) if not in_taskbed(t)]
-
-    # Downstream impact is an operative planning signal, so archived dependencies must not inflate
-    # urgency in DISCOVER. Historical dependency edges remain available in the full graph.
+    # Downstream impact is an operative planning signal. Terminal dependencies do not inflate
+    # urgency in DISCOVER; their historical edges remain available in the full graph.
     blocks = {}
     for t in task_bed:
         for d in (t.get("deps") or []):
@@ -220,7 +193,7 @@ def derive(entities: dict, now=None) -> dict:
         # A poison-blocked task (the circuit breaker opened after repeated verification fails) is
         # never unblocked — next must not re-serve it into a retry storm until an exit-0 clears it.
         snoozed = _snoozed_until(t, now)
-        unblocked = (in_taskbed(t) and t.get("status") == "todo" and not unmet
+        unblocked = (t.get("status") == "todo" and not unmet
                      and not t.get("poison_blocked") and not snoozed)
         bc = blocks.get(t["id"], 0)
         flags[t["id"]] = {"deps_unmet": unmet, "deps_blocked": bool(unmet), "unblocked": unblocked,
@@ -228,55 +201,9 @@ def derive(entities: dict, now=None) -> dict:
                           "rank_u": rank_u(t["id"]) if t["id"] in open_ids else 0,
                           "urgency": (_PRI.get((t.get("priority") or "").upper(), 20) + bc * 8) if unblocked else 0}
 
-    # THE PLAYABLE SLICE, taken from the board's own typed edges (ADR-0008: a seat picks the task
-    # that most unblocks a playable slice ahead of an equal-or-lower-priority instrument repair).
-    # The slice is the EARLIEST milestone feature — the one no other feature precedes in the feat
-    # depends_on chain — and the path to it is that feature's tasks (from either end of the
-    # has_task/implements pairing) plus everything they transitively depend on.
-    #
-    # Derived, never named: hardcoding the release gate's task id would bake one instance's board
-    # into the shared engine. Derived also keeps it SELECTIVE, which is the whole value — measured
-    # on the live board, the terminal release gate's dependency closure covers 401 of 520 task-bed
-    # rows and would order almost nothing, while the slice closure is 13. A signal that says yes to
-    # three quarters of the board is not a signal.
-    #
-    # A feat graph with no root (every feature preceded by another — a cycle) yields the EMPTY set
-    # and the order is exactly what it was: a tie-break that cannot identify the slice must not
-    # guess at one.
-    def _slice_path():
-        feats = [f for f in by_type.get("feat", []) if f.get("status") != "removed"]
-        roots = sorted((f for f in feats if not (f.get("depends_on") or [])),
-                       key=lambda f: f.get("id") or "")
-        if not roots:
-            return frozenset()
-        seed = set()
-        for f in roots:
-            seed.update(tid for tid in (f.get("tasks") or []) if tid in entities)
-            seed.update(t["id"] for t in by_type.get("task", [])
-                        if f["id"] in (t.get("implements") or []))
-        seen, stack = set(seed), list(seed)
-        while stack:
-            for d in (entities.get(stack.pop(), {}).get("deps") or []):
-                if d not in seen and d in entities:
-                    seen.add(d)
-                    stack.append(d)
-        return frozenset(seen)
-
-    slice_path = _slice_path()
-    for t in by_type.get("task", []):
-        flags[t["id"]]["on_slice_path"] = t["id"] in slice_path
-
     # Make the worker's real DISCOVER order visible to every projection. Priority and downstream
-    # impact establish urgency; the slice signal breaks what urgency leaves tied, and numbered
-    # phase and stable id resolve the rest deterministically.
-    #
-    # The slice term sits AFTER urgency, so it never overrides priority: ADR-0008 puts slice work
-    # ahead of an equal-or-lower-priority instrument repair, which means a P0 repair still outranks
-    # a P2 slice task. What it changes is the case the old key decided by phase number and then by
-    # id — arbitrary from the ruling's point of view — where two equally urgent tasks sit side by
-    # side and exactly one of them advances a playable slice.
-    #
-    # BETWEEN urgency and the slice sits the upward rank (critical-path scheduling): among
+    # impact establish urgency. Between urgency and ordinary deterministic tie-breakers sits the
+    # upward rank (critical-path scheduling): among
     # equally urgent work the longest open chain's head pulls first — the HEFT insight that a
     # short independent task can always fill a later slot, while delaying the chain head delays
     # everything behind it. Age (created_at, event-ts) breaks what phase number leaves tied.
@@ -287,7 +214,6 @@ def derive(entities: dict, now=None) -> dict:
         return (
             -f["urgency"],
             -f["rank_u"],
-            0 if f["on_slice_path"] else 1,
             int(match.group(1)) if match else 10**9,
             (task.get("provenance") or {}).get("created_at") or "9999",
             task["id"],
@@ -303,7 +229,7 @@ def derive(entities: dict, now=None) -> dict:
     # counts
     tasks = task_bed
     counts = {}
-    for st in ("todo", "active", "in_progress", "blocked", "done", "dropped", "shadow"):
+    for st in ("todo", "in_progress", "blocked", "done", "dropped", "shadow"):
         counts[st] = sum(1 for t in tasks if t.get("status") == st)
     # A dropped task leaves the completion denominator ONLY when its descope was RULED — decided_by
     # resolving to an ADR. An undecided drop stays owed, so dropping a task can never RAISE pct
@@ -354,7 +280,6 @@ def derive(entities: dict, now=None) -> dict:
         "coverage": coverage,
         "flags": flags,
         "task_bed": task_bed,
-        "task_archive": task_archive,
     }
 
 

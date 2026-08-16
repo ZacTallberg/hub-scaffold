@@ -22,7 +22,9 @@ RECEIPT_PREDICATE_SUFFIX = "verification_run/v1"
 
 def receipt_predicate_type() -> str:
     from . import identity
-    return f"{identity.load()['app_host']}/{RECEIPT_PREDICATE_SUFFIX}"
+    ident = identity.load()
+    host = str(ident.get("app_host") or f"urn:hub:{ident.get('key') or 'hub'}").rstrip("/")
+    return f"{host}/{RECEIPT_PREDICATE_SUFFIX}"
 
 
 def receipt_predicate_version(receipt) -> int:

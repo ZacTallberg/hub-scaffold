@@ -133,7 +133,7 @@ class LedgerLock:
     def _depth_on_this_file(self):
         """Is this process inside the critical section for THIS lock file, under any spelling of
         its path? Scoped to the file on purpose: one process legitimately holds several boards'
-        locks at once (the shared battery runner drives a different temp HUB_DIR per test), and
+        locks at once (independent mounted apps can use different temporary HUB_DIRs), and
         asking 'is any depth held anywhere' called that a self-deadlock and refused a lock that
         was never contended."""
         mine = os.path.normcase(os.path.abspath(str(self.path)))
@@ -234,8 +234,8 @@ class EventStore:
         # `CREATE TRIGGER` is database-level DDL rather than connection-local. Unlocked, any store
         # OPEN re-armed the trigger while another process sat between its own `_drop_trigger()` and
         # its rebuild's `DELETE FROM events`, and that DELETE then aborted with `events is
-        # append-only` - observed live 2026-08-05 in a `fastcheck --core` run (42/43; the next
-        # identical run green). `_reconcile` already takes this lock and LedgerLock is reentrant
+        # append-only` during a concurrent open/reconcile race. `_reconcile` already takes this
+        # lock and LedgerLock is reentrant
         # within a process, so taking it here simply widens the same critical section to cover the
         # arming that was previously outside it. This deliberately does NOT touch the rebuild's data
         # path: an earlier attempt to remove the drop entirely (rebuild into side tables and swap by
@@ -439,9 +439,8 @@ class EventStore:
 
     def _linearize_forks(self, events):
         """Heal an append-race FORK the way _reconcile already heals a torn line: two writers can
-        read the same head and both append seq N (observed live 2026-08-02: two gate.decisions,
-        one second apart, same prev_hash — every later store open then died on the index's UNIQUE
-        seq). A race LOSER is an honestly-appended event whose seq/prev_hash are merely stale, so
+        read the same head and both append seq N. A race LOSER is an honestly-appended event whose
+        seq/prev_hash are merely stale, so
         it is re-chained in FILE ORDER (new seq + prev_hash, hash recomputed) — deterministic, so
         concurrent healers produce identical bytes. Fail-closed: an event that does not self-verify
         against its OWN claimed fields, or whose claimed prev_hash names no event in this log, is

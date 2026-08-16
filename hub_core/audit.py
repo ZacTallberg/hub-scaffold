@@ -15,14 +15,11 @@ import os as _os
 import time as _time
 import uuid as _uuid
 
-# The declared deadlines, sized from a MEASURED live run rather than picked. A full audit measured
-# 92.4s (python tools/audit.py, post ember:task:0506/0514), well inside AUDIT_DEADLINE_S.
-#
-# THE PER-ADAPTER BOUND-SETTER CHANGES AS ADAPTERS GET FIXED (ember:adr:0015, amended
-# ember:task:0525) — read this as "which adapter sets 180s today", not as a fact about any one
-# adapter. Two have already been fixed in turn: oracle_tamper_adapter (cold 56s -> ~2.85s,
-# ember:task:0506) and receipt_subject_adapter (cold 57-118s -> 0.20-1.16s, ember:task:0521), both
-# by the same move — batch the git calls behind a persistent per-repo cache keyed on something
+# The declared deadlines are sized from measured cold production runs rather than guessed.
+# THE PER-ADAPTER BOUND-SETTER CHANGES AS ADAPTERS GET FIXED: read the limit as "which adapter
+# sets the bound today", not as a fact about any one adapter. Expensive adapters were brought
+# from roughly a minute to a few seconds or less by the same move — batch git calls behind a
+# persistent per-repo cache keyed on something
 # immutable (a commit's diff, a commit's tree). Neither can regress silently: each fix shipped a
 # spawn-count guard, not a stopwatch, so a re-introduced per-commit shell-out is caught structurally.
 #
@@ -778,7 +775,7 @@ class _OracleVerdictCache:
 # nothing said so: a silent fallback to the correct-but-slow path is invisible from the outside.
 # Freshly random per process, so no diff body can contain it (a literal marker is text a commit could
 # legitimately carry, and then a diff would split itself in half).
-_DIFF_SPLIT = "\x1eEMBER-COMMIT-" + _uuid.uuid4().hex + "\x1e"
+_DIFF_SPLIT = "\x1eHUB-COMMIT-" + _uuid.uuid4().hex + "\x1e"
 
 # Batched vs per-commit git fetches, so a fallback is COUNTABLE rather than merely slow. The guard
 # holds the adapter to ~zero marginal spawns per commit; a wall-clock bound alone cannot tell a
@@ -957,8 +954,7 @@ def _batch_diffs(repo_dir, shas):
             continue
         # %H answers in the FULL sha, but the board records abbreviations (a commit record carries
         # `fc48ca087dc8`). Keying only on what git echoed put every diff under a name the caller never
-        # asks for, so the batch filled and every lookup still missed: on the live board that was 114
-        # batched diffs and 114 per-commit `git show` spawns anyway. Store the caller's own spelling
+        # asks for, so the batch filled and every lookup still missed. Store the caller's own spelling
         # too, resolved by exact prefix - git's own identity rule for an abbreviated sha, not a
         # similarity test.
         by_len = {}
@@ -1107,7 +1103,7 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
                 return ""
             # UTF-8 with a defined error policy: text=True on Windows decodes cp1252 and DIES
             # on a diff containing e.g. curly quotes — the reader thread's UnicodeDecodeError
-            # silently skipped that commit's tamper analysis (observed live 2026-08-03).
+            # can silently skip that commit's tamper analysis.
             _BATCH_STATS["fallback"] += 1
             r = subprocess.run(["git", "-C", str(repo_dir), "show", "--format=", "--unified=0", sha],
                                capture_output=True, text=True, encoding="utf-8",
@@ -1154,13 +1150,6 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
 
     injected = git_diff is not None          # a test's stub diff must never touch a real repo's cache
     git_diff = git_diff or _default_diff
-    commits_by_task = {}
-    for cm in state.get("by_type", {}).get("commit", []):
-        if cm.get("task") and cm.get("sha"):
-            commits_by_task.setdefault(cm["task"], []).append(cm["sha"])
-        for task_id in (cm.get("also_tasks") or []):
-            if task_id and cm.get("sha"):
-                commits_by_task.setdefault(task_id, []).append(cm["sha"])
     cache = None if injected else _OracleVerdictCache(repo_dir)
 
     # STRUCTURAL eligibility, resolved first so the git work can be batched: a done task is
@@ -1174,7 +1163,8 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
         vc_files = _oracle_vc_files(t.get("verification_command"))
         if not vc_files:
             continue
-        for sha in commits_by_task.get(t["id"], []):
+        # Base tasks record implementation SHAs in provenance; there is no separate commit entity.
+        for sha in ((t.get("provenance") or {}).get("commits") or []):
             work.append((t, sha, vc_files))
 
     # ONLY CACHE MISSES COST ANYTHING — and a repeat audit spawns no git at all. Diff text is
@@ -1282,7 +1272,8 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
 
 # ---- worker spin: a thrashing (worker, task), not just a dead one (live-worker-spin-guard) ----
 # A dead worker stops emitting; a THRASHING one keeps emitting the SAME non-advancing events — k
-# consecutive failed-finishes, or an A-B-A-B oscillation (claim->fail->claim->fail, active<->todo)
+# consecutive failed-finishes, or an A-B-A-B oscillation
+# (claim->fail->claim->fail, in_progress<->todo)
 # — burning tokens on a loop that never moves the task's state frontier. This generalizes the
 # poison consecutive-fail fold to (worker, task) and adds oscillation detection. AMBER (warn): a
 # stuck worker is an operator signal to look, not proof the board is unsound — it never blocks a
@@ -1322,14 +1313,15 @@ def _spin_event_sig(ev):
 def _spin_is_advance(sig):
     """A signature that RESETS the spin run — real forward progress. An exit-0 verification or a
     transition to 'done' is progress; a failed verification or any status revisit is not. (A bare
-    version/result_version bump is deliberately NOT progress: it increments on active<->todo churn,
+    version/result_version bump is deliberately NOT progress: it increments on
+    in_progress<->todo churn,
     so it cannot distinguish a thrash from a step.)"""
     return sig == ("verify", "ok") or sig == ("status", "done")
 
 
 # A "regression/failure" signature: a failed finish, or a release back to 'todo' (the task went
-# UN-claimed — a regression from active). A spin MUST involve one of these — an oscillation between
-# two forward working states (active<->in_progress, active<->blocked-while-waiting) is not a stuck
+# UN-claimed — a regression from in_progress). A spin MUST involve one of these — an oscillation
+# between two forward working states (in_progress<->blocked-while-waiting) is not a stuck
 # loop and must not amber-spam the operator (adversarial-verify false-positive finding).
 _SPIN_REGRESS = frozenset({("verify", "fail"), ("status", "todo")})
 
@@ -1421,4 +1413,3 @@ def spin_guard_adapter(events, k=_SPIN_K_DEFAULT):
             remediation="release the lease and let a fresh worker (or the operator) re-scope the task; "
                         "the poison-task breaker also opens on repeated failed-finishes"))
     return viols
-

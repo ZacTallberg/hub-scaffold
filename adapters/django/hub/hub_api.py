@@ -13,6 +13,7 @@ from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpRespon
 from django.views.decorators.http import require_GET
 
 from hub_core import adherence, cost, dag, failure_taxonomy, project, projections, telemetry, wip
+from hub_core.canonical import content_hash
 
 from . import delivery, hub_app
 
@@ -545,12 +546,13 @@ def _snapshot(served=None):
 
 
 def _etag(snap):
-    """The snapshot's ETag is its head-cursor hash: the ledger is append-only and hash-chained, so
-    an unchanged head hash means byte-identical content. `served` is folded in because it feeds
-    the coherence block — two different probes must not share one ETag."""
-    cur = (snap.get("live") or {}).get("cursor") or {}
-    served = ((snap.get("build") or {}).get("served_sha")) or ""
-    return '"%s.%s"' % (cur.get("hash", ""), served)
+    """A validator for the WHOLE representation, including lease-only and telemetry changes.
+
+    The ledger head alone is insufficient: heartbeat rewrites, lease expiry, and OTLP appends all
+    change the live cockpit without appending a board event. Hashing the already-built snapshot is
+    bounded by the response size and makes a 304 a truthful byte-representation claim.
+    """
+    return '"%s"' % content_hash(snap)
 
 
 def hub_json(request):
@@ -570,19 +572,29 @@ def delta_json(request):
     cursor, so a live board moves KBs per event instead of re-sending the entire fold.
     since >= head yields an empty changed set."""
     state, snap = _snapshot(request.GET.get("served"))
+    target = ((snap.get("live") or {}).get("cursor") or {"seq": 0, "hash": ""})
     s = hub_app.store()
     try:
-        head = s.latest_cursor()
         try:
             since = max(0, int(request.GET.get("since", "0")))
         except (TypeError, ValueError):
             since = 0
         changed_aggs, seen = [], set()
-        for ev in s.events_after(since, limit=10_000):
-            agg = ev.get("aggregate")
-            if agg and agg not in seen:
-                seen.add(agg)
-                changed_aggs.append(agg)
+        # EventStore deliberately caps one events_after query at 500. Page to the exact cursor
+        # whose state `_snapshot` folded; never advance to a newer head whose entity is absent from
+        # this response, and never omit event 501 while claiming the final cursor.
+        page_cursor = since
+        while page_cursor < target["seq"]:
+            batch = [ev for ev in s.events_after(page_cursor, limit=500)
+                     if ev.get("seq", 0) <= target["seq"]]
+            if not batch:
+                break
+            for ev in batch:
+                agg = ev.get("aggregate")
+                if agg and agg not in seen:
+                    seen.add(agg)
+                    changed_aggs.append(agg)
+            page_cursor = batch[-1]["seq"]
     finally:
         s.close()
     entities = state.get("entities", {})
@@ -592,7 +604,7 @@ def delta_json(request):
     live = snap.get("live") or {}
     return JsonResponse({
         "changed": changed, "removed": [],
-        "cursor": {"seq": head["seq"], "hash": head["hash"]},
+        "cursor": {"seq": target["seq"], "hash": target["hash"]},
         "audit": {"ok": audit.get("ok")},
         # The cockpit blocks ride the delta too. Without them a live board patched entity rows
         # while its hero, fleet and attention rail stayed frozen at page-load values until the
