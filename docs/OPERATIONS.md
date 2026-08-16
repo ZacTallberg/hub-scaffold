@@ -153,7 +153,8 @@ not use `-NoExit` and closes its own host when the wrapper returns.
 | Heartbeat returns `409 no/stale lease` | Ownership expired or was reclaimed; stop and rediscover |
 | Completion returns `409 must_claim` | Claim first and retain its fencing token |
 | Completion returns `422 evidence_unresolvable` | Strict mode cannot fetch/find one evidence item |
-| Completion returns `422 verify_failed` | Stored verification command exited nonzero; inspect returned stderr tail |
+| Completion returns `422 need_verification_run` | Run the task's command out-of-band and submit its typed receipt |
+| Completion returns `422 bad_verification_run` | Receipt command/agent does not match, or its exit code is nonzero |
 | Completion returns `422 audit_unsound` | Critical chain/schema integrity issue; run JSON audit before retrying |
 | Audit reports `coherence:unknown` | No Git/build stamp or no first-deploy record |
 | Schema load fails after copy | `PROJECT/schema/` is absent or does not match the adapter's `BASE_DIR` |

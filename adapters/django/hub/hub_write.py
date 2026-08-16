@@ -56,8 +56,9 @@ def writer(fn):
 def _evidence_problem(ev):
     """Return None if the evidence string dereferences to something real, else the reason it
     doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
-    file path resolved from BASE_DIR. This proves existence, not confinement: the general write
-    token is already command-execution-grade. 'done' evidence that cannot resolve is decoration."""
+    file path resolved from BASE_DIR. This proves existence, not confinement: strict URL evidence
+    is fetched from the Hub service account's network. 'done' evidence that cannot resolve is
+    decoration."""
     import re
     import urllib.request
 
@@ -181,10 +182,10 @@ def complete(request, b):
     # HUB_DONE_STRICTNESS is the flow-vs-proof dial (settings; default "tracked"):
     #   "tracked" — done always carries WHO/WHAT/EVIDENCE (lease + accept_note + evidence), but
     #               evidence may be anything non-empty (auth-walled ticket links are fine) and a
-    #               verification_command is optional (still RUNS when present).
+    #               verification_command is optional; when present, the worker must submit its
+    #               typed exit-0 receipt (the Hub never runs it).
     #   "strict"  — evidence must dereference and a verification_command is required. For
-    #               environments where completions cannot be taken on trust (e.g. autonomous
-    #               agents — the mode this hub's origin system runs).
+    #               environments where completions cannot be taken on trust.
     strict = str(hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")).lower() == "strict"
     if strict:
         # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.

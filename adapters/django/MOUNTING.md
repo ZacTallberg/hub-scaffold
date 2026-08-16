@@ -55,7 +55,7 @@ HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 
 # Optional workstation worker bridge (disabled unless explicitly enabled):
 HUB_WORKER_LAUNCH_ENABLED = False
-HUB_WORKER_PROTOCOL = "hub-worker"
+HUB_WORKER_PROTOCOL = "hub-{{PROJECT_KEY}}"
 # HUB_WORKER_LAUNCH_ISSUER_URL = "{{LIVE_URL}}/hub/api/launch-grant/consume"
 # HUB_WORKER_GRANT_TTL_S = 120
 ```
@@ -67,8 +67,8 @@ who (claim lease), what (accept note), and evidence (≥1 URI) — that is the t
 it is deliberately cheap: one claim, one complete, no ceremony.
 
 - `"tracked"` (default) — flow-first. Evidence can be anything non-empty (auth-walled ticket
-  links, doc URLs, file paths); a `verification_command` on the task is optional, though the
-  server still RUNS it when present and refuses `done` if it fails.
+  links, doc URLs, file paths); a `verification_command` on the task is optional. When present,
+  the worker must submit its matching typed exit-0 receipt; the Hub never runs the command.
 - `"strict"` — proof-first. Every evidence URI must dereference (URL <400 / commit in this
   repo / existing path resolved from `BASE_DIR`) and every task needs a `verification_command` before it can be
   completed. Use this where completion claims cannot be taken on trust—for example an autonomous
@@ -78,13 +78,10 @@ it is deliberately cheap: one claim, one complete, no ceremony.
 Ratcheting up later is a one-line settings change and applies only to future completions —
 start tracked, go strict for the projects (or the agents) that earn it.
 
-Security consequence: any configured `verification_command` is executed with `shell=True` as the
-Hub service account, even in tracked mode. Strict URL evidence is fetched from the server's network.
-`HUB_WRITE_TOKEN` therefore grants terminal board authority (done, deploys, ADRs), though NOT code
-execution — the hub never runs a task's verification_command; the worker does, and submits a
-receipt. Only
-trusted operators/agents may hold it; isolate or replace the command runner before admitting
-untrusted writers.
+Security consequence: strict URL evidence is fetched from the server's network.
+`HUB_WRITE_TOKEN` grants terminal board authority (done, deploys, ADRs), but not shell execution:
+the worker runs a task's `verification_command` out-of-band and submits a receipt. Only trusted
+operators/agents may hold it because terminal governance authority is still privileged.
 
 Notes:
 
@@ -103,6 +100,7 @@ The hub's canonical state lives under `PROJECT/` at the repo root:
 
 ```
 PROJECT/
+  project.json       # required portable identity (key/brand/app/host/worker scheme)
   schema/            # required: the JSON-Schema registry (task/adr/feat/gap/cap/deploy/note/common)
   seed.json          # required for genesis: {"adrs":[...], "tasks":[...], "notes":[...]}
   state.json         # written by your deploy script: {"last_deploy_sha": "...", ...}
@@ -110,6 +108,10 @@ PROJECT/
 ```
 
 Copy `PROJECT/schema/` from this scaffold's plane tree (or from `example/PROJECT/schema/`).
+`init.sh` emits `PROJECT/project.json`; keep its `key` and `brand` aligned with the Django settings
+above. `app_host` is the public app origin, `app_name` names the app for discovery/signing, and
+`worker_scheme` is the per-project local launch scheme. The file is also the identity source for
+MCP server discovery, the root agent discovery card, and receipt predicate types.
 The runtime store (`PROJECT/.hub/`) is created on first store access; add `PROJECT/.hub/` to `.gitignore`
 if you do not want runtime events in version control. The `HUB_DIR` environment variable
 overrides the event-log location (useful for tests).
@@ -119,12 +121,18 @@ overrides the event-log location (useful for tests).
 ```python
 # project urls.py
 from django.urls import include, path
+from hub.agent_card import agent_card_view
 
 urlpatterns = [
     # ... your routes ...
+    path(".well-known/agent-card.json", agent_card_view),  # ROOT discovery document
     path("hub/", include("hub.urls")),   # NEVER mount at the front door ("")
 ]
 ```
+
+The root card is discovery-only because this adapter does not implement an A2A task transport. It
+advertises no A2A interface or streaming capability; its callable-protocol extension points to the
+real token-gated MCP JSON-RPC endpoint at `/hub/api/mcp`.
 
 Read surface (unauthenticated; safe to expose only when all board data is publishable):
 
@@ -192,8 +200,9 @@ is amber so it cannot block the very deploy that creates it.
   `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, and
   `/hub/api/launch-grant/consume`.
 
-The write token authorizes all of those endpoints and, through task verification commands,
-operating-system shell execution. It is never suitable for browser storage or an untrusted client.
+The write token authorizes all of those endpoints and therefore terminal board/governance state.
+It does not authorize operating-system shell execution. It is never suitable for browser storage
+or an untrusted client.
 
 The sole exception is the optional `POST /hub/api/launch-grant`: it is a same-origin,
 `@csrf_protect` browser capability that can mint only a short-lived grant bound to
@@ -215,9 +224,9 @@ general `@writer` routes and the narrow origin-gated mint route.
    **422 evidence_unresolvable**. This is a resolvability check, not a path/network sandbox.
 5. In `strict` mode, the task must carry a `verification_command`; absence is
    **422 need_verification_command**. In either mode, if the task carries a command, the server
-   requires a typed exit-0 `verification_run` receipt the WORKER produced (the hub never runs the
-   command — that was an RCE path). A receipt for another command, or a nonzero exit, is
-   **422 verify_failed** and an invocation/timeout error is **422 verify_error**.
+   requires a typed exit-0 `verification_run` receipt the WORKER produced (the Hub never runs the
+   command). A missing receipt is **422 need_verification_run**; a receipt for another command or
+   a nonzero exit is **422 bad_verification_run**.
 6. The audit is recomputed server-side at completion time; CRITICAL violations (tampered chain,
    schema corruption) block with **422 audit_unsound**.
 7. Immediately before append, the fencing token is rechecked and the transition is bound to the

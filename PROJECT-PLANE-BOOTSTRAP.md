@@ -142,9 +142,9 @@ The structured audit uses `exit_code`: `0` PASS · `2` blocking (critical/high) 
 amber. The Django management command returns process exit `0` for PASS or amber, `2` for blocking,
 and `1` for an internal error (treat as RED). The write path adds its own guards: `done` cannot be minted directly. Completion
 always requires a live claim, acceptance note, evidence, and a sound critical audit. In the default
-`tracked` mode a verification command is optional but runs when present; `strict` additionally
-requires a passing command and dereferenceable evidence. Because writers can set commands, the
-general write token grants terminal board authority.
+`tracked` mode a verification command is optional; when present, the Hub requires the worker's
+matching typed exit-0 receipt. `strict` additionally requires a command and dereferenceable
+evidence. The Hub never executes task commands; the write token grants terminal board authority.
 
 ## §3 The entity model
 
@@ -177,12 +177,12 @@ project key are renameable bindings; the rules are not.
   "$defs": {
     "id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|commit|note|finding|lesson|method|review|telemetry):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
       "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
     },
     "idref": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|commit|note|finding|lesson|method|review|telemetry):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
       "description": "A machine-resolvable reference to another entity by id. The audit FAILS on any dangling idref."
     },
     "isoDate": { "type": "string", "format": "date-time" },
@@ -461,7 +461,25 @@ project key are renameable bindings; the rules are not.
 ````
 <!-- /TPL -->
 
-### 3.2 Genesis seed (example shape)
+### 3.2 Portable project identity
+
+`init.sh` emits this file with every placeholder substituted. It is the shared identity for the
+Hub core, MCP server discovery, the root agent discovery card, receipt predicates, and the local
+worker scheme.
+
+<!-- TPL:PROJECT/project.json -->
+````json
+{
+  "key": "{{PROJECT_KEY}}",
+  "brand": "{{BRAND}}",
+  "app_name": "{{PROJECT_KEY}}",
+  "app_host": "{{LIVE_URL}}",
+  "worker_scheme": "hub-{{PROJECT_KEY}}"
+}
+````
+<!-- /TPL -->
+
+### 3.3 Genesis seed (example shape)
 
 <!-- TPL:PROJECT/seed.json -->
 ````json
@@ -496,7 +514,7 @@ a role header (`canonical | view | channel | template`); fill-ins are `<...>`.
 
 ```
 PROJECT/
-  README.md  CHARTER.md  DOCTRINE.md  HANDOFF.md  seed.json  schema/(8 files)
+  README.md  CHARTER.md  DOCTRINE.md  HANDOFF.md  project.json  seed.json  schema/(8 files)
   ADR/README.md + 0000-template.md
   research/README.md + RESEARCH-HISTORY.md
   registers/FAILURE-MODES.md INCIDENTS.md TRUTH-MATRIX.md BLINDSPOTS.md DECISIONS-PENDING.md GLOSSARY.md
@@ -549,6 +567,7 @@ Hub.
 | `CHARTER.md` | mission · scope · quality bar · definition of done | canonical |
 | `DOCTRINE.md` | standing laws (operator contract + crystallized project laws) | canonical |
 | `HANDOFF.md` | living continuity file — the single resume entry point | canonical, always current |
+| `project.json` | portable identity: key · brand · app name/host · worker scheme | canonical identity for Hub/MCP/discovery |
 | `seed.json` · `schema/` · `.hub/` | reference-Hub genesis · entity schemas · runtime hash-chained event ledger | `.hub/events.jsonl` = the entity ledger after the reference Hub is activated |
 | `ADR/` | numbered decision records (full prose of record) | canonical prose; hub `adr` entity canonical for status/links |
 | `research/` | deep research: dossiers, MoE panels, improvement-surface memos + `RESEARCH-HISTORY.md` chronicle | canonical |

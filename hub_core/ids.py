@@ -3,15 +3,15 @@ locals from a high-water mark; dotted types (feat/cap) use caller-supplied valid
 IDs are allocated once and never reused/renumbered."""
 import re
 
-_NUMERIC = {"task", "adr", "gap", "deploy", "finding", "review"}
+_NUMERIC = {"task", "adr", "gap", "deploy"}
 _PAD = 4
 # The type set is CLOSED on purpose: an id whose type this regex does not know cannot be minted,
 # so adding an entity type means registering it in FIVE places: the entity schema, _KNOWN
 # (hub_core/project.py), _COLLECTION (hub/hub_api.py), this regex, AND the id pattern in
 # PROJECT/schema/common.schema.json. Adding four of the five leaves a route and a schema that
 # both exist while every write 422s. Counted the hard way — the first version of this comment
-# said FOUR and was wrong within a minute. Project types per ADR-9: finding, lesson, method, review.
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|commit|note|finding|lesson|method|review|telemetry):[a-z0-9][a-z0-9._-]*$")
+# said FOUR and was wrong within a minute.
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$")
 
 
 def valid_id(s) -> bool:

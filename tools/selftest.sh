@@ -5,8 +5,8 @@
 #   2. python surfaces compile    (compileall — syntax/import floor, costs a second)
 #   3. documentation integrity    (tools/docs_check.py)
 #   4. bootstrap doc integrity    (tools/build_bootstrap.py --check)
-#   5. example site boots + the write API refuses correctly, proves the CSRF-mint/token-consume
-#      launch boundary, then runs the full server-granted-done hardening ladder
+#   5. init emits explicit identity; example site boots + the write API refuses correctly, proves
+#      the CSRF-mint/token-consume launch boundary, then runs the mounted interop/realtime ladder
 # There is deliberately NO unit battery: a suite passes whenever the repo is healthy, whether or
 # not your change works. Prove a guard by watching it fire on a seeded positive; prove a feature
 # against the real example app (step 5 is exactly that, for the write path).
@@ -103,6 +103,11 @@ step_example() {
     esac
   }
   trap cleanup_runtime EXIT
+  local stamped="$runtime_root/stamped"
+  bash "$ROOT/init.sh" "$stamped" selftest "Self Test" "https://selftest.example.invalid" \
+    >/dev/null || return 1
+  "$PY" -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p, encoding="utf-8")); expected={"key":"selftest","brand":"Self Test","app_name":"selftest","app_host":"https://selftest.example.invalid","worker_scheme":"hub-selftest"}; assert d == expected, d' \
+    "$stamped/PROJECT/project.json" || return 1
   cd "$ROOT/example"
   export DEBUG=1
   export HUB_WRITE_TOKEN="selftest-token"

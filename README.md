@@ -140,14 +140,16 @@ python manage.py hubaudit
 `HUB_DONE_STRICTNESS` separates cheap tracking from stronger proof:
 
 - `tracked` (default): completion requires a live claim, acceptance note, and at least one non-empty
-  evidence value. A `verification_command` is optional, but the server executes it when present.
+  evidence value. A `verification_command` is optional; when present, the worker must submit its
+  matching typed exit-0 receipt. The Hub never executes it.
 - `strict`: every evidence item must resolve as a URL, repository commit, or existing path resolved
   from `BASE_DIR` (absolute paths are accepted too), and the completion must carry a typed exit-0 receipt for the task's own
   verification command.
 
 Both modes refuse direct `status: done` writes and block completion on critical Hub audit failures.
-Strict mode provides stronger mechanical evidence, but it also makes the write-token command
-execution boundary unavoidable. See [the API completion gate](adapters/django/HUB-API.md#the-completion-gate-hubapicomplete--what-it-checks-in-order).
+Strict mode provides stronger mechanical evidence without granting the write token shell authority.
+Strict URL evidence is still fetched from the Hub service account's network. See
+[the API completion gate](adapters/django/HUB-API.md#the-completion-gate-hubapicomplete--what-it-checks-in-order).
 
 ## Optional worker launch
 

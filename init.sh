@@ -10,7 +10,8 @@
 #   Brand Name    human-facing name; becomes {{BRAND}} everywhere
 #   live-url      optional; becomes {{LIVE_URL}} (default: https://<project-key>.example.com)
 #
-# What it does: copies PROJECT/, hub_core/, adapters/, patterns/, OPERATING-AGREEMENT.md,
+# What it does: copies PROJECT/ (including its explicit project.json identity), hub_core/,
+# adapters/, patterns/, OPERATING-AGREEMENT.md,
 # SECURITY.md, and docs/ARCHITECTURE.md into
 # the target, renames governance templates into place (CLAUDE.md, AGENTS.md), substitutes the
 # three placeholders across all text files (fail-closed if any survive), then git init -b main
@@ -105,6 +106,7 @@ git -C "$TARGET" "${GIT_ID[@]}" commit -qm "genesis: $KEY project plane + hub fr
 cat <<EOF
 
 Initialized '$KEY' ($BRAND) at $TARGET — placeholders substituted, git genesis committed.
+Portable identity written to PROJECT/project.json (app host: $LIVE_URL; worker: hub-$KEY://).
 
 Next steps (the adoption runbook lives in the scaffold README):
   1. Mount the hub in your web project per adapters/django/MOUNTING.md

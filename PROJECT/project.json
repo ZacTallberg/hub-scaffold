@@ -1,0 +1,7 @@
+{
+  "key": "{{PROJECT_KEY}}",
+  "brand": "{{BRAND}}",
+  "app_name": "{{PROJECT_KEY}}",
+  "app_host": "{{LIVE_URL}}",
+  "worker_scheme": "hub-{{PROJECT_KEY}}"
+}

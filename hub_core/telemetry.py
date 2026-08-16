@@ -1,4 +1,4 @@
-"""OTel GenAI-semconv telemetry for worker runs + the receipt gate (ADR-0009 interop edge).
+"""OTel GenAI-semconv telemetry for worker runs and the receipt gate.
 
 One worker CLI invocation = one trace, in the GenAI semantic-conventions shape:
   - root span  `invoke_agent <agent>`  (gen_ai.operation.name=invoke_agent, gen_ai.agent.name,

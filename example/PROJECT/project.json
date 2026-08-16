@@ -1,0 +1,7 @@
+{
+  "key": "example",
+  "brand": "Example",
+  "app_name": "example",
+  "app_host": "https://example.invalid",
+  "worker_scheme": "hub-example"
+}

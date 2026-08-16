@@ -184,11 +184,9 @@ def hardened_env(base=None, extra=None):
     payload that reaches for one finds nothing. UTF-8 is forced so captured bytes are stable
     (a cp1252 child mangles output and makes the receipt digest irreproducible).
 
-    The seat's identity file is REDIRECTED rather than scrubbed: a test that drives the worker
-    CLI enrolls agent names, and with the variable merely removed the child would fall back to the
-    seat's own .agent-cred.json and write test identities into it — observed live as a battery run
-    leaving fifteen stale test credentials there, which then 403'd six later tests against their
-    fresh boards. A throwaway path keeps a verification child unable to touch the real map."""
+    The worker identity file is REDIRECTED rather than scrubbed: a verification process that
+    enrolls temporary agent names must never fall back to and mutate the operator's real identity
+    map. A throwaway path keeps the child unable to touch it."""
     env = dict(os.environ if base is None else base)
     for key in list(env):
         upper = key.upper()

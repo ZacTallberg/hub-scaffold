@@ -13,8 +13,8 @@ substitutes at scaffold time):
     HUB_DONE_STRICTNESS completion proof dial: tracked or strict.       Default "tracked".
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
-    HUB_WRITE_TOKEN   general write bearer token; verification commands make it
-                      command-execution-grade (see SECURITY.md). Fail-closed when empty.
+    HUB_WRITE_TOKEN   general write bearer token; grants terminal board authority, not shell
+                      execution. Fail-closed when empty.
     HUB_WORKER_LAUNCH_ENABLED   expose the optional grant-backed local launcher. Default False.
     HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
@@ -31,6 +31,7 @@ from pathlib import Path
 
 import hub_core
 from hub_core import audit as _audit
+from hub_core import identity as _identity
 from hub_core import project as _project
 
 
@@ -47,8 +48,9 @@ BASE_DIR = Path(_dj_setting("BASE_DIR") or os.environ.get("HUB_BASE_DIR") or Pat
 PROJECT = BASE_DIR / "PROJECT"
 HUB_DIR = Path(os.environ.get("HUB_DIR") or (PROJECT / ".hub"))
 SCHEMA_DIR = PROJECT / "schema"
-PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", "{{PROJECT_KEY}}")
-BRAND = _dj_setting("HUB_BRAND", "{{BRAND}}")
+_IDENTITY = _identity.load()
+PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", _IDENTITY["key"])
+BRAND = _dj_setting("HUB_BRAND", _IDENTITY["brand"])
 
 
 def worker_launch_enabled() -> bool:
@@ -63,7 +65,8 @@ def worker_protocol() -> str:
     """Return a syntactically safe custom URL scheme (the Windows adapter must use the same one)."""
     import re
 
-    value = str(_dj_setting("HUB_WORKER_PROTOCOL", "hub-worker") or "hub-worker").lower()
+    value = str(_dj_setting("HUB_WORKER_PROTOCOL", _IDENTITY["worker_scheme"])
+                or _IDENTITY["worker_scheme"]).lower()
     return value if re.fullmatch(r"hub-[a-z0-9][a-z0-9+.-]{0,26}", value) else "hub-worker"
 
 

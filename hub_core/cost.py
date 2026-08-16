@@ -1,4 +1,4 @@
-"""Per-agent-run token/cost accounting over the OTLP GenAI lines (ADR-0009).
+"""Per-agent-run token/cost accounting over OTLP GenAI lines.
 
 The cockpit's cost numbers derive from the SAME OTLP telemetry the workers emit
 (hub_core.telemetry) — never a bespoke side-channel field. This module folds the
@@ -171,9 +171,7 @@ def cache_hitrate(hub_dir, window=CACHE_WINDOW_RUNS):
     """Rolling cache hit rate over the most recent `window` runs, or None when nothing cacheable
     was recorded.
 
-    None, never 0.0, on an empty window — and the distinction is the whole point. The deleted
-    cost_unmeasured guard (ADR-0020) fired on every done task forever because no live launch
-    exports GEN_AI_USAGE_*, so its amber could not be cleared by doing the work right. A rate of
+    None, never 0.0, on an empty window — and the distinction is the whole point. A rate of
     "0% hits out of 0 tokens" would recreate exactly that: a permanent alarm about a lane nobody
     feeds. An unmeasured lane is not a degraded one.
     """

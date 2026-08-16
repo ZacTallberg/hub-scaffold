@@ -1,22 +1,18 @@
-"""Project identity — key, brand, and the per-instance worker URL scheme.
+"""Portable project identity for every standards-speaking edge.
 
-The standards-speaking edges (the MCP server's serverInfo, the A2A agent card's name, the
-`<key>-worker://` launch scheme) all need to say WHICH instance they are. They read it from
-here so the answer is derived in one place: two hubs running side by side on one workstation
-must never present the same identity, or one board's launch click routes into the other's fleet.
+The board, MCP discovery, public agent discovery, receipt predicates, and local worker scheme all
+need to say WHICH instance they belong to. They read the same five fields here so two hubs running
+side by side never present the same identity or route a launch click into the wrong fleet.
 
 Resolution order, most specific first:
 
-  1. ``PROJECT/project.json``  — a committed file, when the instance wants identity in the repo.
-  2. environment             — ``HUB_PROJECT_KEY`` / ``HUB_BRAND``.
-  3. the packaged default    — key ``hub``.
+  1. ``PROJECT/project.json`` — the committed identity emitted by ``init.sh``.
+  2. environment — the matching ``HUB_*`` values described in ``load()``.
+  3. deterministic packaged defaults — key ``hub`` and a ``urn:hub:hub`` host.
 
-There is deliberately no *required* config file: the scaffold must boot on a fresh clone with
-nothing edited, because an adopter's first run is `init.sh` and then the example app. An instance
-that wants a hard identity writes project.json and gets a loud error if it is malformed — but a
-missing file is a default, not a crash.
-
-``PROJECT_IDENTITY_FILE`` overrides the path (fixtures point it at a scratch identity).
+A raw scaffold checkout still boots without a file so development tools remain usable. A file
+that exists but is malformed raises rather than silently presenting another identity.
+``PROJECT_IDENTITY_FILE`` overrides the path (the example and fixtures use it).
 """
 import json
 import os
@@ -25,9 +21,10 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_KEY = "hub"
+_KEY_SAFE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_NAME_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # A scheme must survive being pasted into a URL and an OS protocol registration, so it is limited
-# to what RFC 3986 allows in a scheme name. A key that cannot make one falls back rather than
-# minting `my project://` and failing at the browser instead of here.
+# to what RFC 3986 allows in a scheme name.
 _SCHEME_SAFE = re.compile(r"^[a-z][a-z0-9+.-]*$")
 _CACHE = {"key": None, "value": None}
 
@@ -37,11 +34,7 @@ def path() -> Path:
 
 
 def _from_file(p):
-    """The committed identity, or None when the instance keeps identity in settings/env.
-
-    A malformed file RAISES: it was written on purpose, so silently falling back to the default
-    would let a board serve somebody else's identity from a typo.
-    """
+    """Return the committed identity, or None when no identity file exists."""
     if not p.exists():
         return None
     ident = json.loads(p.read_text(encoding="utf-8"))
@@ -51,28 +44,55 @@ def _from_file(p):
 
 
 def load() -> dict:
-    """{key, brand, worker_scheme} for this instance. Cached on the identity file's mtime, so an
-    edit is picked up without a restart and an unchanged file costs one stat."""
+    """Return ``key/brand/app_name/app_host/worker_scheme`` for this instance.
+
+    The result is cached on the identity file's mtime and relevant environment values, so an edit
+    is picked up without a restart while an unchanged file costs only one stat.
+    """
     p = path()
     try:
         stamp = p.stat().st_mtime_ns
     except OSError:
-        stamp = None  # absorbs: no identity file — env/default path, nothing to invalidate on
-    cache_key = (str(p), stamp, os.environ.get("HUB_PROJECT_KEY"), os.environ.get("HUB_BRAND"))
+        stamp = None
+    cache_key = (
+        str(p), stamp,
+        os.environ.get("HUB_PROJECT_KEY"), os.environ.get("HUB_BRAND"),
+        os.environ.get("HUB_APP_NAME"), os.environ.get("HUB_PUBLIC_URL"),
+        os.environ.get("HUB_WORKER_PROTOCOL"),
+    )
     if _CACHE["key"] == cache_key:
         return _CACHE["value"]
 
     ident = dict(_from_file(p) or {})
-    key = str(ident.get("key") or os.environ.get("HUB_PROJECT_KEY") or _DEFAULT_KEY).strip()
-    # A settings placeholder that init.sh never substituted is not an identity. Left alone it
-    # would reach an MCP serverInfo and an agent card as the literal template token.
+    key = str(ident.get("key") or ident.get("project_key")
+              or os.environ.get("HUB_PROJECT_KEY") or _DEFAULT_KEY).strip().lower()
+    # An unsubstituted scaffold template is not an identity.
     if not key or key.startswith("{{"):
         key = _DEFAULT_KEY
+    if not _KEY_SAFE.fullmatch(key):
+        raise ValueError(f"{p}: key must match {_KEY_SAFE.pattern!r}")
     ident["key"] = key
-    ident["brand"] = str(ident.get("brand") or os.environ.get("HUB_BRAND") or key.title()).strip()
-    scheme = str(ident.get("worker_scheme") or f"{key}-worker").lower()
-    ident["worker_scheme"] = scheme if _SCHEME_SAFE.match(scheme) else f"{_DEFAULT_KEY}-worker"
 
+    brand_value = str(ident.get("brand") or os.environ.get("HUB_BRAND") or key.title()).strip()
+    ident["brand"] = key.title() if not brand_value or brand_value.startswith("{{") else brand_value
+
+    app_name = str(ident.get("app_name") or os.environ.get("HUB_APP_NAME") or key).strip()
+    if not app_name or app_name.startswith("{{") or not _NAME_SAFE.fullmatch(app_name):
+        app_name = key
+    ident["app_name"] = app_name
+
+    app_host = str(ident.get("app_host") or os.environ.get("HUB_PUBLIC_URL")
+                   or f"urn:hub:{key}").strip().rstrip("/")
+    if not app_host or app_host.startswith("{{"):
+        app_host = f"urn:hub:{key}"
+    ident["app_host"] = app_host
+
+    fallback_scheme = f"hub-{key}"
+    scheme = str(ident.get("worker_scheme") or os.environ.get("HUB_WORKER_PROTOCOL")
+                 or fallback_scheme).strip().lower()
+    ident["worker_scheme"] = scheme if _SCHEME_SAFE.fullmatch(scheme) else fallback_scheme
+
+    # Preserve extension fields but guarantee the portable five are always present.
     _CACHE["key"], _CACHE["value"] = cache_key, ident
     return ident
 
@@ -86,5 +106,13 @@ def brand() -> str:
 
 
 def worker_scheme() -> str:
-    """The per-instance protocol the Launch Worker control opens (`<key>-worker://`)."""
+    """The per-instance protocol the Launch Worker control opens (``hub-<key>://``)."""
     return load()["worker_scheme"]
+
+
+def app_name() -> str:
+    return load()["app_name"]
+
+
+def app_host() -> str:
+    return load()["app_host"]

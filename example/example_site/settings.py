@@ -12,6 +12,10 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# The example imports hub_core from the scaffold parent, so point portable identity at this
+# example's own PROJECT plane rather than the template file in the parent checkout.
+os.environ.setdefault("PROJECT_IDENTITY_FILE", str(BASE_DIR / "PROJECT" / "project.json"))
+
 DEBUG = os.environ.get("DEBUG", "") == "1"
 
 # SECRET_KEY: required in prod (NO literal fallback). In DEBUG, mint an ephemeral per-process key.
@@ -72,7 +76,7 @@ HUB_DONE_STRICTNESS = "strict"     # example runs strict so the selftest ladder 
 # Optional local-worker bridge. The example enables it only so selftest can prove the narrow
 # CSRF-grant boundary; no process is launched by the test suite.
 HUB_WORKER_LAUNCH_ENABLED = True
-HUB_WORKER_PROTOCOL = "hub-worker"
+HUB_WORKER_PROTOCOL = "hub-example"
 HUB_WORKER_LAUNCH_ISSUER_URL = "https://example.invalid/hub/api/launch-grant/consume"
 HUB_WORKER_GRANT_TTL_S = 120
 

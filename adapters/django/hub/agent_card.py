@@ -1,18 +1,18 @@
-"""A2A AgentCard at /.well-known/agent-card.json — the standards-speaking edge (ADR-0009 gap B).
+"""Signed agent discovery at ``/.well-known/agent-card.json``.
 
-A READ-ONLY discovery document in the Agent2Agent v1.0.1 AgentCard shape, so any A2A consumer can
-discover this hub's worker roles (one skill per task work_kind, derived live from
-PROJECT/schema/task.schema.json — the card can never drift from the enum) and how to authenticate
-(securitySchemes DESCRIBES the X-Write-Token header; the token VALUE never appears — the
-self-test seeds a canary and asserts absence). Interop lives at the edge: this module reads the
-schema and signs a dict; it never appends to the ledger.
+This hub does not implement an A2A task transport. The document therefore uses current AgentCard
+discovery vocabulary but advertises NO A2A ``supportedInterfaces`` and NO A2A streaming. Its
+explicit ``x-hub.callableProtocols`` extension points only to the MCP endpoint that really exists.
+That distinction matters: the board's SSE read lane is not an A2A streaming method, and the human
+``/hub/`` page is not a JSON-RPC endpoint.
 
-Signature: an ES256 JWS (RFC 7515) in the card's `signatures` array. The payload is the card
-without `signatures`, canonicalized as UTF-8 JSON with sorted keys and minimal separators (the
-verifier MUST canonicalize the same way — documented here as the card's one canonical form). The
-public JWK rides in the protected header, so verification is self-contained; the private key
-lives OUTSIDE the repo (AGENT_CARD_KEY_FILE env, default ~/.ssh/<app_name>_agent_card_es256.pem) and is
-generated once on first use — a fresh box mints its own identity rather than shipping one.
+Skills are derived live from ``PROJECT/schema/task.schema.json`` so discovery cannot drift from
+the task ``work_kind`` enum. Authentication metadata describes the ``X-Write-Token`` header; the
+token value never appears.
+
+When available, an ES256 JWS signature covers the card without ``signatures``, canonicalized as
+UTF-8 JSON with sorted keys and minimal separators. The private key lives outside the repo
+(``AGENT_CARD_KEY_FILE``, default ``~/.ssh/<app_name>_agent_card_es256.pem``) and is minted once.
 """
 import base64
 import json
@@ -24,35 +24,27 @@ from django.views.decorators.http import require_GET
 
 from hub_core import identity
 
-from . import hub_app
-
-_IDENT = identity.load()
-
-PROTOCOL_VERSION = "1.0.1"
-def _default_key_file():
-    app = "hub"
-    try:
-        from hub_core import identity
-        app = identity.load().get("app_name") or app
-    except Exception:
-        pass  # absorbs: identity file absent/corrupt - the generic "hub" key name still works
-    return str(Path.home() / ".ssh" / f"{app}_agent_card_es256.pem")
-
-
-DEFAULT_KEY_FILE = _default_key_file()
+from . import hub_app, mcp_server
 
 _SKILL_BLURBS = {
     "product": "Build a product change to its task's own acceptance and prove it with a typed exit-0 receipt.",
     "content": "Author content the board tracks as queryable, non-executable work.",
     "corpus": "Curate corpus records that stay queryable without masquerading as executable work.",
-    "governance": "Mechanize a board law: guards, gates, and audits with both-directions self-tests.",
-    "verification": "Write the falsifiable proof for a surface: a self-test that fires on a seeded defect and stays quiet on a healthy run.",
+    "governance": "Mechanize a board law with both-directions proof.",
+    "verification": "Write falsifiable proof for a surface and capture its receipt.",
     "decision": "Record a ruling as an ADR and re-point the affected work to it.",
-    "research": "Ground a question in dereferenceable evidence and file the findings as board entities.",
+    "research": "Ground a question in dereferenceable evidence and file the result as a base entity.",
     "migration": "Move a surface between representations without losing coverage or history.",
     "duplicate": "Fold duplicate work into its canonical task.",
     "legacy": "Keep a legacy expansion queryable without presenting it as live work.",
 }
+
+
+def _default_key_file():
+    return str(Path.home() / ".ssh" / f"{identity.app_name()}_agent_card_es256.pem")
+
+
+DEFAULT_KEY_FILE = _default_key_file()
 
 
 def _b64u(raw: bytes) -> str:
@@ -60,36 +52,32 @@ def _b64u(raw: bytes) -> str:
 
 
 def canonical(obj) -> bytes:
-    """The card's ONE canonical byte form (signer and verifier must agree byte-for-byte)."""
+    """The card's one canonical byte form (signer and verifier must agree byte-for-byte)."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def work_kinds():
-    """The task work_kind enum, read from the schema itself so the card tracks it verbatim.
-
-    An adopter who has removed work_kind gets a card with no skills rather than a 500: the card is
-    a DISCOVERY document, and failing to serve it hides the whole hub from every A2A consumer over
-    a field one instance chose not to keep."""
+    """Read the task ``work_kind`` enum; an adopter may intentionally remove it."""
     try:
         doc = json.loads((hub_app.BASE_DIR / "PROJECT" / "schema" / "task.schema.json")
                          .read_text(encoding="utf-8"))
         return list(doc["properties"]["work_kind"]["enum"])
     except (OSError, ValueError, KeyError, TypeError):
-        return []  # absorbs: schema absent/unreadable or work_kind removed by the adopter
+        return []
 
 
 def signing_key():
-    """Load (or mint once) the ES256 signing key at AGENT_CARD_KEY_FILE — never inside the repo."""
+    """Load or mint the ES256 signing key at ``AGENT_CARD_KEY_FILE``."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
-    path = Path(os.environ.get("AGENT_CARD_KEY_FILE") or DEFAULT_KEY_FILE)
-    if path.exists():
-        return serialization.load_pem_private_key(path.read_bytes(), password=None)
+    key_path = Path(os.environ.get("AGENT_CARD_KEY_FILE") or DEFAULT_KEY_FILE)
+    if key_path.exists():
+        return serialization.load_pem_private_key(key_path.read_bytes(), password=None)
     key = ec.generate_private_key(ec.SECP256R1())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
-                                       serialization.PrivateFormat.PKCS8,
-                                       serialization.NoEncryption()))
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
     return key
 
 
@@ -100,45 +88,68 @@ def public_jwk(key) -> dict:
             "y": _b64u(nums.y.to_bytes(32, "big"))}
 
 
-def build_card(base_url=None) -> dict:
-    """The card. `base_url` is where a consumer should talk to this hub.
+def _origin(value):
+    """Normalize a configured public app origin; tolerate the old ``.../hub`` form."""
+    value = str(value or "").strip().rstrip("/")
+    if value.endswith("/hub"):
+        value = value[:-4]
+    return value
 
-    Preference order is deliberate: an explicit HUB_PUBLIC_URL (the operator knows the public
-    name behind a proxy), then whatever the REQUEST arrived on, then a relative path. Deriving it
-    from the live request is more truthful than any config — a card that advertises a hostname
-    the caller cannot reach is a discovery document that mis-routes every client that trusts it.
-    """
-    base_url = os.environ.get("HUB_PUBLIC_URL") or base_url or "/hub/"
+
+def build_card(hub_url=None, mcp_url=None) -> dict:
+    """Build truthful discovery metadata for the board and its real MCP transport."""
+    ident = identity.load()
+    configured = _origin(os.environ.get("HUB_PUBLIC_URL") or ident["app_host"])
+    if configured.startswith(("http://", "https://")):
+        hub_url = hub_url or configured + "/hub/"
+        mcp_url = mcp_url or configured + "/hub/api/mcp"
+    else:
+        hub_url = hub_url or "/hub/"
+        mcp_url = mcp_url or "/hub/api/mcp"
+
     return {
-        "protocolVersion": PROTOCOL_VERSION,
-        "name": f"{_IDENT['key']}-hub-worker",
-        "description": ("Interchangeable worker fleet sequenced by the project hub's hash-chained "
-                        "board: pull the top ready task, claim its lease, build to the task's own "
-                        "acceptance, prove it with a typed exit-0 verification receipt."),
-        "url": base_url,
-        "preferredTransport": "JSONRPC",
+        "name": f"{ident['key']}-hub-worker",
+        "description": ("Discovery metadata for the interchangeable worker fleet coordinated by "
+                        "this project's hash-chained Hub. This document is discovery-only; use "
+                        "the advertised MCP endpoint for callable board operations."),
         "version": hub_app._git_head() or "unversioned",
-        "capabilities": {"streaming": True,            # /hub/api/live SSE lane
-                         "pushNotifications": False,
-                         "stateTransitionHistory": True},  # append-only hash-chained ledger
-        "securitySchemes": {"hubWriteToken": {
-            "type": "apiKey", "in": "header", "name": "X-Write-Token",
-            "description": "Write token for /hub/api/ mutations; reads under /hub need a grant. "
-                           "Obtain out-of-band from the operator — never from this card."}},
-        "security": [{"hubWriteToken": []}],
+        "documentationUrl": hub_url,
+        # These are A2A capabilities. The board's SSE cursor is a separate read API and must not
+        # be mislabeled as A2A streaming.
+        "capabilities": {"streaming": False, "pushNotifications": False,
+                         "extendedAgentCard": False},
+        # There is no A2A SendMessage/GetTask transport in this adapter. An empty declaration is
+        # more useful than routing a standards client into the human page or the MCP server.
+        "supportedInterfaces": [],
         "defaultInputModes": ["application/json"],
         "defaultOutputModes": ["application/json"],
         "skills": [{
-            "id": f"work_kind.{k}",
-            "name": f"{k} work",
-            "description": _SKILL_BLURBS.get(k, f"{k} work on the hub board."),
-            "tags": ["hub", "worker", k],
-        } for k in work_kinds()],
+            "id": f"work_kind.{kind}",
+            "name": f"{kind} work",
+            "description": _SKILL_BLURBS.get(kind, f"{kind} work on the hub board."),
+            "tags": ["hub", "worker", kind],
+        } for kind in work_kinds()],
+        "x-hub": {
+            "discoveryOnly": True,
+            "identity": {field: ident[field] for field in
+                         ("key", "brand", "app_name", "app_host", "worker_scheme")},
+            "readUrl": hub_url,
+            "callableProtocols": [{
+                "name": "MCP",
+                "protocolVersion": mcp_server.PROTOCOL_VERSION,
+                "transport": "streamable-http-stateless",
+                "url": mcp_url,
+                "authentication": {
+                    "type": "apiKey", "in": "header", "name": "X-Write-Token",
+                    "valueIncluded": False,
+                },
+            }],
+        },
     }
 
 
 def sign_card(card: dict, key=None) -> dict:
-    """Attach an A2A AgentCardSignature: ES256 JWS over protected + '.' + b64u(canonical(card))."""
+    """Attach an ES256 JWS over ``protected + '.' + b64u(canonical(card))``."""
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec, utils
     key = key or signing_key()
@@ -153,21 +164,19 @@ def sign_card(card: dict, key=None) -> dict:
 
 @require_GET
 def agent_card_view(request):
-    """The card, signed when this box CAN sign and honestly unsigned when it cannot.
-
-    Signing needs `cryptography`, which the scaffold does not install by default, and a writable
-    key path. Neither is a reason to 500: this is the document a standard A2A client fetches to
-    discover the hub at all, so failing to serve it hides everything behind it. An unsigned card
-    says `signatures: []` and states why in `signatureStatus`, which a consumer can act on — a 500
-    is indistinguishable from "no such hub"."""
-    card = build_card(base_url=request.build_absolute_uri("/hub/"))
+    """Serve signed discovery when possible and an explicitly unsigned card otherwise."""
+    configured = _origin(os.environ.get("HUB_PUBLIC_URL") or identity.app_host())
+    if configured.startswith(("http://", "https://")):
+        card = build_card(configured + "/hub/", configured + "/hub/api/mcp")
+    else:
+        card = build_card(request.build_absolute_uri("/hub/"),
+                          request.build_absolute_uri("/hub/api/mcp"))
     try:
         return JsonResponse(sign_card(card))
     except ImportError:
         card["signatureStatus"] = ("unsigned: the `cryptography` package is not installed on this "
                                    "host — install it to serve a verifiable ES256 JWS card")
     except (OSError, ValueError) as exc:
-        # absorbs: key path unwritable/unreadable, or a malformed existing key
         card["signatureStatus"] = "unsigned: the signing key could not be loaded or minted (%s)" % (
             type(exc).__name__)
     card.setdefault("signatures", [])

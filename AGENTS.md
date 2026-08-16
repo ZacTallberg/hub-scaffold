@@ -66,7 +66,8 @@ disposable `verification-closer` only when consequence or sampling warrants it.
 
 ## The two dials you should know
 - **`HUB_DONE_STRICTNESS`** (`tracked` default | `strict`) — flow-first vs proof-first completion. A
-  command is optional in tracked but still executes when present; strict requires one. See
+  command is optional in tracked; when present, completion requires the worker's matching typed
+  exit-0 receipt. Strict also requires a command and resolvable evidence. See
   `adapters/django/MOUNTING.md` → "The strictness dial". Start `tracked`; go `strict` when completion
   claims need mechanical proof. Strict does not make an untrusted token holder safe.
 - **Entity extensibility** — a new hub type is a schema + write path + tab. `campaigns/augment-hub.md`
