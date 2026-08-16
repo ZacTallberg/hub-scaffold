@@ -12,7 +12,7 @@ import time
 from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
 
-from hub_core import adherence, cost, dag, failure_taxonomy, project, projections, telemetry, wip
+from hub_core import adherence, cost, dag, failure_taxonomy, flow, project, projections, telemetry, upcast
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app
@@ -46,16 +46,19 @@ def _fmt_age(s):
 
 
 def _activity(events, state, limit=36):
-    """Recent canonical events as a payload-safe activity rail."""
-    rows = []
-    entities = state.get("entities", {})
-    for event in reversed(events):
+    """Recent canonical events rendered at event time, never rewritten by current state."""
+    rows, event_entities = [], {}
+    current = state.get("entities", {})
+    for event in events:
         aggregate = event.get("aggregate") or ""
-        entity = entities.get(aggregate, {})
         event_type = event.get("type") or ""
         if not event_type.startswith(("task.", "adr.", "gap.", "feat.", "cap.", "deploy.",
                                       "note.", "decision.")):
             continue
+        payload = upcast.apply(event_type, event.get("payload") or {})
+        entity = dict(event_entities.get(aggregate, {}))
+        entity.update(payload)
+        event_entities[aggregate] = entity
         row = {
             "seq": event.get("seq"),
             "ts": event.get("ts"),
@@ -64,21 +67,21 @@ def _activity(events, state, limit=36):
             "entity_type": aggregate.split(":")[1] if aggregate.count(":") >= 2 else None,
             "title": entity.get("title") or entity.get("name") or aggregate.rsplit(":", 1)[-1],
             "status": entity.get("status") or entity.get("maturity"),
+            "current_status": (current.get(aggregate) or {}).get("status")
+                              or (current.get(aggregate) or {}).get("maturity"),
             "agent": event.get("agent_id"),
             "version": event.get("result_version"),
         }
         # Surface the completion PROOF: a done task carries the exit-0 receipt that granted it, so
         # a watcher sees WHAT verified the work, not merely that a row turned green.
-        if entity.get("status") == "done":
-            runs = entity.get("verification_run") or []
+        if event_type == "task.transitioned" and payload.get("status") == "done":
+            runs = payload.get("verification_run") or []
             if runs:
                 r = runs[-1] if isinstance(runs, list) else runs
                 row["receipt"] = {"command": r.get("command"), "exit_code": r.get("exit_code"),
                                   "ran_by": r.get("ran_by")}
         rows.append(row)
-        if len(rows) >= limit:
-            break
-    return rows
+    return list(reversed(rows[-limit:]))
 
 
 def _inflight(state, stall_s=STALL_S):
@@ -108,12 +111,17 @@ def _inflight(state, stall_s=STALL_S):
         if lease.get("expires", 0) <= now:
             continue
         claimed = lease.get("claimed", 0)
+        heartbeat = lease.get("last_heartbeat", claimed)
         age = int(now - claimed) if claimed else None
+        heartbeat_age = int(now - heartbeat) if heartbeat else None
         rows.append({
             "task": task, "agent": lease.get("agent"),
             "title": ent.get("title") or task.rsplit(":", 1)[-1],
             "status": ent.get("status"), "age_s": age,
-            "stalled": bool(age is not None and age > stall_s),
+            "heartbeat_age_s": heartbeat_age,
+            "expires_in_s": max(0, int(lease.get("expires", 0) - now)),
+            "last_heartbeat": heartbeat,
+            "stalled": bool(heartbeat_age is not None and heartbeat_age > stall_s),
             **_plan_progress(ent),
         })
     rows.sort(key=lambda r: (r.get("age_s") or 0), reverse=True)
@@ -132,7 +140,7 @@ def _plan_progress(ent):
             "plan_pct": (round(done * 100 / total) if total else None)}
 
 
-def _readiness(state):
+def _readiness_legacy(state):
     """Pipeline health: which unblocked todos are READY to complete (they carry a
     verification_command a worker can run to a receipt) vs which NEED SPEC first. A worker that
     pulls a needs-spec task stalls trying to write one, so the queue must distinguish them."""
@@ -159,6 +167,32 @@ def _readiness(state):
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
 # silent revert, a bypassed scope edit, or an out-of-order completion is something the operator
 # SEES, rather than something only the audit JSON carries.
+def _readiness(state, lease_rows=None):
+    """Pipeline health from the same classifier the claim seam enforces."""
+    flags = state.get("flags", {})
+    strictness = hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")
+    lease_map = {row.get("task"): row for row in
+                 (hub_app.leases() if lease_rows is None else lease_rows)}
+    groups = {name: [] for name in ("ready", "needs_spec", "snoozed", "blocked")}
+    for task in state.get("by_type", {}).get("task", []):
+        cls = flow.classify(task, flags.get(task["id"], {}), lease_map.get(task["id"]),
+                            strictness=strictness)
+        item = {"id": task["id"], "title": task.get("title"),
+                "priority": task.get("priority"), "flow_state": cls["state"],
+                "reason": cls["reason"], "stale_reclaim": cls["stale_reclaim"]}
+        if cls["available"]:
+            groups["ready"].append(item)
+        elif cls["state"] == "needs_spec":
+            groups["needs_spec"].append(item)
+        elif cls["state"] == "snoozed":
+            item["not_before"] = flags.get(task["id"], {}).get("snoozed_until")
+            groups["snoozed"].append(item)
+        elif cls["state"] in ("blocked", "poison"):
+            groups["blocked"].append(item)
+    return {**{name: len(rows) for name, rows in groups.items()},
+            **{name + "_top": rows[:5] for name, rows in groups.items()}}
+
+
 _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 
 
@@ -392,11 +426,14 @@ def _fleet(events, state, inflight):
         if not et.startswith(("task.", "adr.", "gap.", "deploy.")):
             continue
         ent = ents.get(e.get("aggregate", ""), {})
+        payload = upcast.apply(et, e.get("payload") or {})
         if et == "task.transitioned":
-            action = "completed" if ent.get("status") == "done" else "moved"
+            action = "completed" if payload.get("status") == "done" else \
+                     "started" if payload.get("status") == "in_progress" else "moved"
         else:
             action = LABEL.get(et, et)
-        title = ent.get("title") or ent.get("name") or (e.get("aggregate", "").rsplit(":", 1)[-1])
+        title = payload.get("title") or payload.get("name") or ent.get("title") \
+                or ent.get("name") or (e.get("aggregate", "").rsplit(":", 1)[-1])
         last_ts.setdefault(ag, e.get("ts"))
         tr = trails.setdefault(ag, [])
         if len(tr) < 5:
@@ -418,9 +455,9 @@ def _fleet(events, state, inflight):
             "task_id": lease.get("task") if lease else None,
             "age_s": lease.get("age_s") if lease else None,
             "idle_s": idle_s, "trail": trails.get(ag, []),
-            "done_total": sum(1 for t in state.get("by_type", {}).get("task", [])
-                              if t.get("status") == "done"
-                              and (t.get("provenance") or {}).get("agent") == ag),
+            "done_total": sum(1 for e in events if e.get("agent_id") == ag
+                              and e.get("type") == "task.transitioned"
+                              and (e.get("payload") or {}).get("status") == "done"),
             **_plan_progress(ents.get(lease.get("task"), {}) if lease else {}),
         })
     rank = {"working": 0, "stalled": 0, "recent": 1, "idle": 2}
@@ -457,8 +494,16 @@ def _leases_fp():
     changes a (name, mtime_ns, size) triple. One scandir — trivial next to a ledger fold."""
     import os as _os
     try:
-        return tuple(sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size)
-                            for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")))
+        now = time.time()
+        stats = {e.name: (e.stat().st_mtime_ns, e.stat().st_size)
+                 for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")}
+        semantic = []
+        for lease in hub_app.leases(now=now, include_expired=True):
+            name = hub_app._claim_path(lease.get("task", "")).name
+            heartbeat = lease.get("last_heartbeat", lease.get("claimed", 0))
+            semantic.append((name, lease.get("expires", 0) > now,
+                             bool(heartbeat and now - heartbeat > STALL_S), stats.get(name)))
+        return tuple(sorted(semantic))
     except OSError:
         return None  # absorbs: claims dir absent/entry vanished mid-scan — unfingerprintable just
                      # skips the memo and the fold recomputes
@@ -480,7 +525,12 @@ def _snapshot(served=None):
         cur = s.latest_cursor()
         # git head rides in the key because the delivery legs (rail + hero) depend on what the
         # integration branch carries, which changes with no board event at all — a landing.
-        key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(), hub_app._git_head())
+        # Several projections cross time-only boundaries (lease expiry/stall, not_before and
+        # rolling throughput windows). A static ledger/file key can otherwise cache a worker as
+        # live forever after its lease expires. Five seconds bounds truth lag without per-second
+        # refolds.
+        key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
+               hub_app._git_head(), int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
         events = s.events()
@@ -501,7 +551,7 @@ def _snapshot(served=None):
                        "ts": last.get("ts")},
             "activity": _activity(events, state),
             "inflight": inflight,
-            "readiness": _readiness(state),
+            "readiness": _readiness(state, inflight),
             "progress": _progress(events, state, deliv),
             # Per-task delivery: done / landed / deployed / live are four different questions, and
             # each leg reports UNMEASURED rather than false where it could not be asked.
@@ -524,7 +574,7 @@ def _snapshot(served=None):
             "cost": cost.cost_block(hub_dir, state),
             # The adaptive WIP ceiling the claim seam enforces, so the cockpit shows the fleet's
             # own concurrency budget rather than the operator guessing at it.
-            "wip": wip.status(events, len(inflight)),
+            "wip": hub_app.wip_status(len(inflight)),
             "fallback_poll_ms": 2500,
         }
         snap = projections.hub_snapshot(state, build=build, audit=audit, live=live)
@@ -697,6 +747,7 @@ def live_events(request):
         try:
             head = store.latest_cursor()
             cursor = min(requested, head["seq"]) if requested else head["seq"]
+            lease_fp = _leases_fp()
             yield "retry: 1500\n\n"
             yield (f"id: {cursor}\nevent: ready\n"
                    f"data: {json.dumps({'seq': cursor, 'ts': head.get('ts')}, separators=(',', ':'))}\n\n")
@@ -709,6 +760,17 @@ def live_events(request):
                         cursor = event["seq"]
                         payload = json.dumps(_event_envelope(event), separators=(",", ":"))
                         yield f"id: {cursor}\nevent: hub\ndata: {payload}\n\n"
+                    heartbeat_at = time.monotonic() + 8
+                    continue
+                current_lease_fp = _leases_fp()
+                if current_lease_fp != lease_fp:
+                    lease_fp = current_lease_fp
+                    payload = json.dumps({"seq": cursor, "ts": None, "event": "lease.changed",
+                                          "aggregate": None, "version": None, "agent": None},
+                                         separators=(",", ":"))
+                    # Reuse the client's canonical reconciliation path without pretending this
+                    # sidecar-only presence change advanced the ledger cursor.
+                    yield f"id: {cursor}\nevent: hub\ndata: {payload}\n\n"
                     heartbeat_at = time.monotonic() + 8
                     continue
                 if time.monotonic() >= heartbeat_at:
@@ -742,30 +804,31 @@ def next_json(request):
     finally:
         s.close()
     state = project.state(events)
-    wip_st = wip.status(events, len(_inflight(state)))
+    live_leases = hub_app.leases()
+    wip_st = hub_app.wip_status(len(live_leases))
     if wip_st["saturated"]:
         # At saturation the rail answers 429 rather than handing out work the claim seam would
         # refuse to lease. A GET records nothing — the recorded signals come from the claim seam.
         return JsonResponse({"error": "board_saturated", **wip_st}, status=429)
     flags = state.get("flags", {})
     entities = state.get("entities", {})
-    now = time.time()
-
-    def available(t):
-        lease = hub_app._read_lease(t["id"])
-        held = bool(lease and lease.get("expires", 0) > now)
-        # A crashed worker can leave projected status=in_progress after its lease expires. Offer
-        # that task again once its dependencies are satisfied; a live lease always removes it.
-        return (t.get("status") in ("todo", "in_progress")
-                and not flags.get(t["id"], {}).get("deps_unmet") and not held)
-
+    lease_map = {row.get("task"): row for row in live_leases}
+    strictness = hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")
     tasks = state["by_type"].get("task", [])
-    cand = [t for t in tasks if available(t)]
     ready, needs_spec = [], []
-    for t in cand:
-        (ready if (t.get("verification_command") or "").strip() else needs_spec).append(t)
+    for t in tasks:
+        cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]),
+                            strictness=strictness)
+        if cls["available"]:
+            ready.append(dict(t, flow_state=cls["state"], flow_reason=cls["reason"],
+                              stale_reclaim=cls["stale_reclaim"]))
+        elif cls["state"] == "needs_spec":
+            needs_spec.append(dict(t, needs=cls["reason"], flow_state=cls["state"]))
     from hub_core import schedule
-    ready = schedule.order_ready(ready, flags)
+    busy_touches = set()
+    for lease in live_leases:
+        busy_touches.update(schedule.normalized_touches(entities.get(lease.get("task"), {})))
+    ready = schedule.order_ready(ready, flags, busy_touches=busy_touches)
 
     # BLOCKED-ON-DANGLING: an unmet dep referencing NO entity can never be satisfied by work
     # completing — it is a spec defect, not a wait. Without this rail such a task appears NOWHERE.
@@ -785,8 +848,7 @@ def next_json(request):
         n = max(1, min(int(request.GET.get("n", "1")), 50))
     except ValueError:
         n = 1
-    rows = [dict(t, available=True, stale_reclaim=t.get("status") == "in_progress")
-            for t in ready[:n]]
+    rows = [dict(t, available=True) for t in ready[:n]]
     return JsonResponse({"data": rows, "needs_spec": needs_spec[:n], "snoozed": snoozed[:n],
                          "metadata": {"available": len(ready), "unblocked": len(ready),
                                       "ready": len(ready), "needs_spec": len(needs_spec),
