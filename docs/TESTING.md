@@ -1,77 +1,73 @@
-# Verification
+# Proof without test accumulation
 
-Verification means exercising the real artifact your change touched and recording what actually
-happened. This repo deliberately ships **no unit battery**: a suite is green whenever the repo is
-healthy, whether or not your change works, so a battery proves the repo, never the change — and
-once a battery exists, every completion learns to pay its price and to trust its green. The engine
-that once lived in `hub_core/tests/` was removed on those grounds (upstream ruling, 2026-08-08),
-and the write API refuses a bare suite runner as a task's `verification_command` for the same
-reason.
+The default proof is the real operation the task exists to change. Run the command, use the
+workflow, open the live surface, or perform the transition. If it fails, that failure is the notice
+to capture as fresh task input for a repair lane. If it succeeds and the task did not cross a
+critical boundary, record the result and stop.
 
-What replaces it is not "no verification" — it is verification with the right subject:
+This repository does not accumulate permanent tests, verifier scripts, fixture suites, or automatic
+test workflows. A standing battery makes every future task pay for old proof and encourages teams
+to validate the checker instead of finishing the work. Proof belongs to the task that needs it.
 
-## Three obligations
+## The default
 
-**1. A guard is proven by watching it fire.** When you write or change a guard, seed a real
-positive and watch it go red, then confirm it stays quiet on a true negative — at the time you
-write it, in the session. A one-directional proof does not count, and a guard nobody ever saw fire
-is a vacuous guard. Leave no test file behind; record the two runs (command + output) as the
-task's receipt. `tools/scrub_check.sh --selftest` is the standing example of the form: it seeds a
-violation, proves the gate catches it, and proves boundary-safe text passes.
+- Exercise the changed artifact through its real operation.
+- If that operation exposes a failure, record the failure as fresh Hub task input. It may later route
+  to a dedicated repair/error-fixing lane; the delivery agent does not speculate about unrelated
+  causes or preemptively become the repair agent.
+- Record a truthful receipt: the resulting commit, live URL, screenshot, command output, or Hub
+  event, whichever naturally demonstrates the outcome.
+- Do not create or run a test for copy, wording, spacing, color, animation polish, routine styling,
+  or another non-critical fix. Looking at and using the real page is sufficient.
+- Do not add a test merely because code changed, a release is approaching, or a task asks for
+  "verification." The plausible consequence must justify it.
 
-**2. A feature is proven against the real thing.** Boot the actual example app and drive the
-actual surface — `tools/selftest.sh` step 5 does exactly this for the write path (real Django
-process, real refusal ladder, real CSRF-mint/token-consume boundary). For your own change, the
-receipt is a command whose subject is the artifact you touched: a probe against the running
-mount, a CLI invocation of the tool you changed, a diff of generated output. Not a suite.
+## The rare critical exception
 
-**3. The floor is compile-and-import.** `bash tools/check.sh` keeps the cheap floor on every
-edit: the agnosticism scrub plus `compileall` over every python surface. It costs seconds and
-catches the class a battery only ever caught incidentally.
+A focused test is justified only when the task crosses a boundary where an unnoticed failure could
+cause material harm: security or authorization, destructive behavior, data integrity, a migration,
+public protocol compatibility, or concurrency.
 
-## Levels
+When one is justified:
 
-| Level | Use when | Mechanism |
-|---|---|---|
-| Judgment | Tiny, low-risk, directly inspectable change | Read the diff; record truthful evidence. No command is mandatory. |
-| Fast sanity | Ordinary pending work | `bash tools/check.sh` — scrub + compile floor, selected from changed paths. |
-| Focused proof | A behavior changed | The smallest command that exercises the changed artifact itself, run by you, receipt recorded. |
-| Independent boundary verification | Release, security/auth, migration/destructive work, public API/schema compatibility, concurrency/process launch | One fresh read-only `verification-closer` against the real mount; `bash tools/selftest.sh` when the boundary justifies the full ladder. |
+1. Create the smallest probe that exercises only that boundary in a temporary directory or other
+   disposable work area.
+2. Run it once against the real changed artifact.
+3. Record the exact operation and result as the task receipt.
+4. Delete the probe, fixture, generated database, and every other test artifact before committing.
 
-Independent closers are disposable. They receive the raw target and claim, return one
-`PASS`/`FAIL`/`INCONCLUSIVE` verdict with evidence and gaps, and exit. They do not fix their own
-findings or wait for more work. See [the prompt](../campaigns/verification-closer.md) and reusable
-[$verification-closer skill](../skills/verification-closer/SKILL.md).
+The receipt is durable; the test is not. Do not promote the probe into a repository test, verifier,
+fixture, package script, pre-commit hook, CI job, or scheduled workflow.
 
-## The selftest ladder
+## Proof composes
 
-```bash
-bash tools/selftest.sh
-```
+A completed dependency contributes its receipt to every parent task, milestone, and release that
+contains it. Parents inherit that proof; they do not rerun it. A release may exercise only the new
+integration seam created by combining already-proven work, and only when that seam is itself a
+critical boundary.
 
-Four cheap steps and one real one: agnosticism scrub (both directions), compile floor, doc
-integrity, bootstrap integrity — then the step that matters, booting the example site and running
-the write API's full refusal ladder in-process. Use it for releases and risky boundaries, not as
-an every-edit ritual.
+Never build a verifier that launches other verifiers, never make one task replay every child's
+checks, and never expand a focused probe into a general suite. Nested verifier fan-out is forbidden
+by default because it multiplies latency without producing new information.
 
-On Windows, run it under Git Bash:
+## Stop rule
 
-```powershell
-& "$env:ProgramFiles\Git\bin\bash.exe" tools/selftest.sh
-```
+Once the real changed behavior succeeds, the receipt is recorded, and no critical boundary remains
+unproven, stop. Do not add another check to increase confidence cosmetically. Copy and visual polish
+receive no automated validation. A critical transient probe is complete when it has produced its
+receipt and has been deleted.
 
-If `py` is a launcher rather than a directly executable interpreter in Bash, set `PYTHON` to the
-full forward-slash path of `python.exe`. Do not mix WSL Bash with a Windows interpreter accidentally.
+When the operation fails, stop the proof attempt after capturing enough evidence to create the new
+task. Do not fan out speculative diagnostics inside the delivery task. A repair lane can claim and
+resolve that failure through the same actual-operation-first loop.
 
-## What is deliberately not proven here
+## What remains adopter-owned
 
-A production reverse proxy/TLS/read-auth boundary, a real deployment provider or canary, alert
-delivery, backup restoration, browser-specific external-protocol prompts, the operator's worker
-wrapper, project business behavior, or safety from an untrusted write-token holder. A closer must
-name these as coverage gaps when they matter.
+Production TLS and read-auth boundaries, deployment providers, canaries, alert delivery, backup
+restoration, external-protocol prompts, worker wrappers, and project business behavior can only be
+proven in the adopting environment. Perform the real operation there when a task changes one of
+them; use a transient probe only for the critical boundaries named above.
 
-## CI
-
-`.github/workflows/ci.yml` runs only `tools/check.sh --all-fast` on ordinary pushes and pull
-requests. `.github/workflows/verify.yml` is manual-dispatch only and runs the selftest ladder —
-verification stays a decision someone makes for a boundary, never a schedule.
+There is intentionally no standing test workflow. Repository maintenance utilities may be invoked
+manually when their artifact is the subject of the task, but they are not a completion ladder and
+must never be run to validate page copy or routine visual work.

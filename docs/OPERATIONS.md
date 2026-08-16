@@ -4,6 +4,16 @@ This guide covers the shipped filesystem/Django deployment. For first-time integ
 [MOUNTING.md](../adapters/django/MOUNTING.md); for request bodies and errors, use
 [HUB-API.md](../adapters/django/HUB-API.md).
 
+## Operational proof policy
+
+The successful real operation is the default proof. Do not add or run tests for copy, wording,
+style, motion, routine fixes, or other non-critical work, and do not install permanent tests,
+fixtures, checker scripts, or CI verification workflows. A rare security, destructive-data,
+migration, protocol, or concurrency boundary may use one temporary one-shot probe in disposable
+scratch. Retain its receipt and delete the probe before commit. Completed receipts compose;
+upgrades and releases inspect only a newly created critical integration seam. A real failure opens
+a fresh repair task and may route to a dedicated error-fixing agent.
+
 ## Configuration reference
 
 | Setting/environment | Default | Operational meaning |
@@ -30,9 +40,7 @@ them before Django starts; changing them in a live process is unsupported.
 python -m pip install -r requirements.txt
 export HUB_WRITE_TOKEN='<generated secret>'
 python manage.py migrate
-python manage.py seedhub --dry-run
 python manage.py seedhub
-python manage.py hubaudit
 ```
 
 `seedhub` is idempotent by entity id. A rejected seed exits nonzero; an existing id is skipped, not
@@ -57,35 +65,40 @@ loss of the complete board is acceptable.
 
 1. Stop or drain Hub writers, or take a filesystem snapshot with atomic snapshot semantics.
 2. Copy the whole `HUB_DIR` to protected storage.
-3. Test restoration into a separate path by setting `HUB_DIR` and opening the EventStore.
-4. Run `hubaudit`; require a valid chain and expected entity counts.
-5. Start serving only after the restored board has been compared with the pre-loss record.
+3. During an explicitly scoped disaster-recovery operation, restore into a disposable separate
+   path, set `HUB_DIR`, and open the EventStore.
+4. Because restore is a destructive-data boundary, use one decisive integrity observation such as
+   `hubaudit`, retain its receipt, and delete the disposable restored copy before commit.
+5. Start serving only after the actual restored board matches the pre-loss record.
 
 `events.db` may be deleted from an offline restored copy; the EventStore rebuilds it from
 `events.jsonl`. Do not “repair” JSONL manually. A non-final malformed line is treated as corruption;
 an incomplete final line is quarantined by truncating to the last complete event when the store
 opens.
 
-## Health and audit
+## On-demand ledger diagnosis
 
 ```bash
 python manage.py hubaudit
 python manage.py hubaudit --json
 ```
 
-The management command returns:
+Use this only when ledger integrity, migration, or recovery is actually in scope; it is not a
+routine completion gate or a standing CI job. The management command returns:
 
 - `0` for pass or warn-only;
 - `2` for critical/high violations;
 - `1` for an internal audit error.
 
 The JSON payload's internal `exit_code` uses `3` for warn-only even though the management command
-maps that state to process exit `0`. CI should parse JSON if amber needs distinct handling.
+maps that state to process exit `0`. An explicitly scoped caller may parse JSON if amber needs
+distinct handling.
 
 The audit checks schema validity, dangling references, ADR numbering, event-chain integrity,
 build/deploy coherence, focused Django settings safety, and explicit guards on Hub mutation routes.
-It does not test backups, TLS, authorization in front of reads, the live front door, or alert
-delivery. Those require deployment-specific probes.
+It does not prove backups, TLS, authorization in front of reads, the live front door, or alert
+delivery. When one of those is a critical boundary for the current task, perform the real operation
+or use one disposable probe and retain only its receipt.
 
 ## Build coherence
 
@@ -135,10 +148,12 @@ not use `-NoExit` and closes its own host when the wrapper returns.
 ## Upgrade procedure
 
 1. Back up `HUB_DIR` and record the current commit/build.
-2. Review changes to schemas and adapter settings.
-3. Run `python tools/build_bootstrap.py --check` and the complete self-test in the new checkout.
-4. Test the mounted project against the new code with a copy of its ledger.
-5. Deploy from a committed SHA, run `hubaudit`, and verify the live build stamp.
+2. Review changes to schemas and adapter settings, reusing completed child-task receipts.
+3. Only when the upgrade crosses a critical migration, destructive-data, protocol, security, or
+   concurrency boundary, exercise that one seam with a disposable ledger copy or temporary probe;
+   retain its receipt and delete all scratch before commit.
+4. Deploy from a committed SHA and perform the changed real operation on the mounted project.
+5. Record the observed live build stamp and outcome. Do not rerun child proof or a broad suite.
 6. Keep the prior artifact and backup available for rollback; do not rewrite the event log to
    downgrade projected state.
 
@@ -153,9 +168,8 @@ not use `-NoExit` and closes its own host when the wrapper returns.
 | Heartbeat returns `409 no/stale lease` | Ownership expired or was reclaimed; stop and rediscover |
 | Completion returns `409 must_claim` | Claim first and retain its fencing token |
 | Completion returns `422 evidence_unresolvable` | Strict mode cannot fetch/find one evidence item |
-| Completion returns `422 need_verification_run` | Run the task's command out-of-band and submit its typed receipt |
-| Completion returns `422 bad_verification_run` | Receipt command/agent does not match, or its exit code is nonzero |
-| Completion returns `422 audit_unsound` | Critical chain/schema integrity issue; run JSON audit before retrying |
+| Completion returns `422 need_verification_run` | This task explicitly declared a one-shot critical probe; run it out-of-band, submit its typed receipt, and delete the temporary probe before commit |
+| Completion returns `422 bad_verification_run` | The exceptional receipt does not match the declared action/agent or reports failure; open a fresh repair task from the observed failure |
 | Audit reports `coherence:unknown` | No Git/build stamp or no first-deploy record |
 | Schema load fails after copy | `PROJECT/schema/` is absent or does not match the adapter's `BASE_DIR` |
 | Different workers see different boards | Server processes are using different `HUB_DIR` paths |

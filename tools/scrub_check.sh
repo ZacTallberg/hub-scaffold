@@ -42,23 +42,8 @@ PATTERNS=(
 
 combined="$(IFS='|'; echo "${PATTERNS[*]}")"
 
-if [ "${1:-}" = "--selftest" ]; then
-  for seeded in 'loom' '192.168.10.20' 'ember:task:0001' 'C:\\code\\source'; do
-    printf '%s\n' "$seeded" | grep -Eiq -e "$combined" || {
-      echo "SCRUB SELFTEST: FAIL — seeded forbidden text was not detected: $seeded" >&2
-      exit 1
-    }
-  done
-  if printf '%s\n' 'bloom' 'remember' 'ordinary portable text' | grep -Eiq -e "$combined"; then
-    echo "SCRUB SELFTEST: FAIL — boundary-safe text was rejected" >&2
-    exit 1
-  fi
-  echo "SCRUB SELFTEST: PASS — seeded violation detected; boundary-safe text accepted"
-  exit 0
-fi
-
 if [ -n "${1:-}" ]; then
-  echo "usage: bash tools/scrub_check.sh [--selftest]" >&2
+  echo "usage: bash tools/scrub_check.sh" >&2
   exit 2
 fi
 

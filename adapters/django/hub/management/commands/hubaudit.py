@@ -7,7 +7,7 @@ from hub import hub_app
 
 
 class Command(BaseCommand):
-    help = "Run the computed hub audit (CI/pre-deploy gate)."
+    help = "Run the computed hub audit as an explicit structural-maintenance action."
 
     def add_arguments(self, p):
         p.add_argument("--json", action="store_true")

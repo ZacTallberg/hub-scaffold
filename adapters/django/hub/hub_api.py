@@ -140,43 +140,17 @@ def _plan_progress(ent):
             "plan_pct": (round(done * 100 / total) if total else None)}
 
 
-def _readiness_legacy(state):
-    """Pipeline health: which unblocked todos are READY to complete (they carry a
-    verification_command a worker can run to a receipt) vs which NEED SPEC first. A worker that
-    pulls a needs-spec task stalls trying to write one, so the queue must distinguish them."""
-    flags = state.get("flags", {})
-    ready, needs_spec, snoozed = [], [], []
-    for t in state.get("by_type", {}).get("task", []):
-        if t.get("status") != "todo":
-            continue
-        f = flags.get(t["id"], {})
-        item = {"id": t["id"], "title": t.get("title"), "priority": t.get("priority")}
-        # A task whose durable timer has not fired is not READY and not BROKEN — it is waiting,
-        # and it says so with its wake time. Excluded-and-silent is how a snoozed task becomes a
-        # task that appears NOWHERE, which is the failure the dangling-dep rail exists to prevent.
-        if f.get("snoozed_until"):
-            snoozed.append(dict(item, not_before=f["snoozed_until"]))
-            continue
-        if not f.get("unblocked"):
-            continue
-        (ready if (t.get("verification_command") or "").strip() else needs_spec).append(item)
-    return {"ready": len(ready), "needs_spec": len(needs_spec), "snoozed": len(snoozed),
-            "ready_top": ready[:5], "needs_spec_top": needs_spec[:5], "snoozed_top": snoozed[:5]}
-
-
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
 # silent revert, a bypassed scope edit, or an out-of-order completion is something the operator
 # SEES, rather than something only the audit JSON carries.
 def _readiness(state, lease_rows=None):
     """Pipeline health from the same classifier the claim seam enforces."""
     flags = state.get("flags", {})
-    strictness = hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")
     lease_map = {row.get("task"): row for row in
                  (hub_app.leases() if lease_rows is None else lease_rows)}
     groups = {name: [] for name in ("ready", "needs_spec", "snoozed", "blocked")}
     for task in state.get("by_type", {}).get("task", []):
-        cls = flow.classify(task, flags.get(task["id"], {}), lease_map.get(task["id"]),
-                            strictness=strictness)
+        cls = flow.classify(task, flags.get(task["id"], {}), lease_map.get(task["id"]))
         item = {"id": task["id"], "title": task.get("title"),
                 "priority": task.get("priority"), "flow_state": cls["state"],
                 "reason": cls["reason"], "stale_reclaim": cls["stale_reclaim"]}
@@ -276,9 +250,10 @@ def _attention(state, audit, inflight, adher=None, deliv=None):
     for t in tasks:
         if t.get("status") != "todo" or not flags.get(t["id"], {}).get("unblocked"):
             continue
-        if not (t.get("verification_command") or "").strip():
+        if t.get("work_kind") in ("product", "verification") and not str(
+                t.get("acceptance") or "").strip():
             add(5, "needs-spec",
-                "unblocked but no verification_command — spec it before a worker can pull it",
+                "unblocked executable work has no concrete acceptance — spec it before pull",
                 t["id"], t.get("title"))
 
     if _readiness(state).get("ready", 0) == 0 and not (inflight or []):
@@ -487,6 +462,7 @@ def _dag_block(state, workers):
 # `served` is in the key because it feeds the build/coherence block; one probe must never be
 # handed another probe's cached verdict. Races just recompute, which is benign.
 _SNAP_CACHE = {"key": None, "value": None}
+_AUDIT_CACHE = {"key": None, "value": None}
 
 
 def _leases_fp():
@@ -529,13 +505,22 @@ def _snapshot(served=None):
         # rolling throughput windows). A static ledger/file key can otherwise cache a worker as
         # live forever after its lease expires. Five seconds bounds truth lag without per-second
         # refolds.
+        git_head = hub_app._git_head()
         key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
-               hub_app._git_head(), int(time.time() // 5))
+               git_head, int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
         events = s.events()
         state = project.state(events)
-        audit = hub_app.run_audit(s, served=served)
+        # Realtime lease/telemetry refreshes must not repeatedly pay for a repository audit whose
+        # inputs did not change. Structural audit truth changes with the ledger or build identity;
+        # cache on exactly those inputs and keep the five-second live cockpit refresh lightweight.
+        audit_key = (cur["seq"], cur["hash"], served, git_head)
+        if _AUDIT_CACHE["key"] == audit_key:
+            audit = _AUDIT_CACHE["value"]
+        else:
+            audit = hub_app.run_audit(s, served=served)
+            _AUDIT_CACHE["key"], _AUDIT_CACHE["value"] = audit_key, audit
         build = hub_app.build_meta(served)
         last = events[-1] if events else {}
         inflight = _inflight(state)
@@ -813,12 +798,10 @@ def next_json(request):
     flags = state.get("flags", {})
     entities = state.get("entities", {})
     lease_map = {row.get("task"): row for row in live_leases}
-    strictness = hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")
     tasks = state["by_type"].get("task", [])
     ready, needs_spec = [], []
     for t in tasks:
-        cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]),
-                            strictness=strictness)
+        cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]))
         if cls["available"]:
             ready.append(dict(t, flow_state=cls["state"], flow_reason=cls["reason"],
                               stale_reclaim=cls["stale_reclaim"]))

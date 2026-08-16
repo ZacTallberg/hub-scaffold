@@ -10,9 +10,10 @@ the contract.
   `X-Write-Token: <HUB_WRITE_TOKEN>` and fail closed when it is absent. Reads need nothing. The
   optional browser launch-mint endpoint is the one narrow exception: it is same-origin CSRF-gated,
   cannot mutate board entities, and its separate authoritative consume remains write-token-gated.
-- **Write-token power:** a writer can set `verification_command` and grant terminal board states,
-  but the server never executes that command; the worker submits a typed receipt. Strict evidence
-  URLs are fetched by the server. Treat the token as production credentials and read
+- **Write-token power:** a writer can grant terminal board states and, for a rare critical boundary,
+  can set an optional `verification_command`. The server never executes that command; the worker
+  runs the temporary probe out-of-band and submits its typed receipt. Strict evidence URLs are
+  fetched by the server. Treat the token as production credentials and read
   [SECURITY.md](../../SECURITY.md) before distributing it.
 - **Ids** are `{{PROJECT_KEY}}:<type>:<local>`, e.g. `{{PROJECT_KEY}}:task:0001`. Allocated once, never renumbered.
 - **Content type:** send `Content-Type: application/json`; bodies are JSON objects.
@@ -24,9 +25,9 @@ The endpoints exist to serve one loop. Follow it and you won't hit the common re
 ```
 DISCOVER  GET  /hub/next.json?n=1      → the top unblocked, unclaimed task (your entrypoint)
 CLAIM     POST /hub/api/claim          → take the lease BEFORE touching anything; keep the returned token
-IMPLEMENT (do the work; new work you find becomes a NEW task via POST /hub/api/task first)
+IMPLEMENT (do the work; the real operation is the default proof; discovered work becomes a task)
 RECORD    POST /hub/api/complete       → done, WITH the lease token + accept_note + evidence
-VERIFY    (the server re-runs the audit inside complete; a red audit refuses the done)
+INTEGRITY (the server re-runs its board audit inside complete; a critical violation refuses done)
 ```
 
 - **CLAIM before COMPLETE** — completing an unclaimed task returns `409 must_claim`. Claim first, hold the token.
@@ -68,7 +69,7 @@ source of truth, and every ratio carries its denominator.
 | `activity` | recent canonical events; a done task carries the `receipt` that granted it. |
 | `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
 | `fleet` | per-agent cards: current lease, plan step, recent action trail, completions. |
-| `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. A task with no `verification_command` is not ready — a worker handed one stalls. |
+| `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. Readiness comes from actionable acceptance and dependencies, never from the presence of a test command. |
 | `adherence` | **is the board still being FOLLOWED and kept current** — six dimensions (`specced, proven, evidenced, fresh, current, moving`), each `{ok, total, unmeasured, pct}`. An empty denominator reports `pct: null`, never 100. `score` averages only the MEASURED dimensions and `unmeasurable` names the rest. |
 | `dag` | critical path length, widest frontier, layer widths, the critical `path` itself, and the min-makespan `eta_tasks` for the fleet actually present. `acyclic: false` means the numbers are a floor, not a schedule. |
 | `progress` | done/total/pct plus MONOTONIC signals — `completed_total`, `last_1h`, `last_24h`, and a per-bucket `spark`. A ratio alone does not climb when the fleet discovers work as fast as it finishes it. |
@@ -104,10 +105,10 @@ for the workstation half of the issuer-bound consume protocol.
 2. `accept_note` + at least one `evidence_uri` — else `422 need_evidence`.
 3. **strict mode only** (`HUB_DONE_STRICTNESS=strict`): every `evidence_uri` must dereference — a URL returning
    <400, a commit sha in this repo, or an existing path resolved from `BASE_DIR` (absolute paths are
-   also accepted) — else
-   `422 evidence_unresolvable` (checked BEFORE the verification_command check); and the task must carry a
-   `verification_command` (set it via `/hub/api/task` first) — else `422 need_verification_command`.
-4. If the task has a `verification_command`, you must supply a typed `verification_run` receipt —
+   also accepted) — else `422 evidence_unresolvable`. Strict changes evidence resolvability; it does
+   not require a `verification_command`.
+4. If the task has an optional `verification_command`, you must supply a matching typed
+   `verification_run` receipt —
    else `422 need_verification_run`. **The server does NOT run the command.** It used to
    (`shell=True`, from `BASE_DIR`), which made the write token equivalent to arbitrary shell on
    the hub's host; that path is removed. You run it yourself, out-of-band, and report what
@@ -121,14 +122,24 @@ for the workstation half of the issuer-bound consume protocol.
    ```
    Refused as `422 bad_verification_run` if the command is not the task's own (a receipt cannot be
    borrowed from another task), if `exit_code` is non-zero, or if `ran_by` is not the completing
-   agent. The receipt is stored on the entity, so the completion stays falsifiable afterwards.
-5. The server re-runs the audit; a `critical` violation is `422 audit_unsound` — fix the unsoundness, don't retry.
+   agent. The receipt is stored on the entity, so the completion stays falsifiable afterwards. The
+   probe itself is transient: create it only for a critical security, destructive-data, migration,
+   protocol-compatibility, or concurrency boundary, run it once, record the receipt, and remove the
+   probe artifact before commit. Do not create tests for ordinary fixes, copy, styling, spacing,
+   color, animation polish, or routine implementation.
+5. Completion stops after recording the result. It does not fan out into a repository audit or
+   make every task pay for unrelated proof.
 6. Immediately before append, the server rechecks the fencing token under the lease lock and binds
    completion to the exact entity version whose command was verified. A concurrent edit or expired/
    reclaimed lease refuses completion. Success releases the lease; an abandoned `in_progress` task
    becomes discoverable again after expiry.
 
-See `MOUNTING.md → The strictness dial` for `tracked` (flow-first, the default) vs `strict` (proof-first).
+Completed dependency receipts compose upward: downstream and release tasks inherit them and examine
+only a newly introduced critical integration seam. They do not rerun child proof or nest verifier
+fan-out. Once the actual changed behavior succeeds and no critical boundary remains, stop.
+
+See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
+(dereferenceable-evidence mode).
 
 ## Error responses
 
@@ -139,8 +150,8 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 `precondition_required` (428 OCC) · `conflict` (409 OCC version race) ·
 `must_claim`/`lease`/`deps_blocked`/`not_claimable` (409) · `bad_ttl` (422) ·
 `need_evidence`/`evidence_unresolvable`/
-`need_verification_command`/`need_verification_run`/`bad_verification_run`/
-`verification_command_is_a_suite`/`audit_unsound` (422) ·
+`need_verification_run`/`bad_verification_run`/
+`verification_command_is_a_suite` (422) ·
 `adr_immutable` (409) · `bad_grant_request` (422) · `launch_disabled`/`not_found` (404) ·
 `launch_refused` (403) · `launch_unavailable` (503).
 
@@ -155,15 +166,17 @@ BASE={{LIVE_URL}}/hub ; TOK=$HUB_WRITE_TOKEN ; H="-H Content-Type:application/js
 # DISCOVER
 curl -s "$BASE/next.json?n=1"
 # CREATE (if you need a new task) — capture the id from the response
-curl -s $H -d '{"title":"Wire the export endpoint","agent":"me","priority":"P1"}' "$BASE/api/task"
+curl -s $H -d '{"title":"Wire the export endpoint","acceptance":"the export works","agent":"me","priority":"P1"}' "$BASE/api/task"
 # CLAIM — capture token
 curl -s $H -d '{"id":"{{PROJECT_KEY}}:task:0001","agent":"me"}' "$BASE/api/claim"
-# COMPLETE — with the lease token + evidence
-# You run the verification_command YOURSELF first, then report it — the hub never runs it.
+# COMPLETE — with the lease token + evidence. The successful real operation is the default proof.
 curl -s $H -d '{"id":"{{PROJECT_KEY}}:task:0001","token":"<lease-token>","agent":"me",
-                "accept_note":"shipped + verified","evidence_uri":["<commit-sha-or-url-or-path>"],
-                "verification_run":{"command":"<the task'"'"'s verification_command>","exit_code":0,
-                                    "output_sha256":"<sha256 of its output>","ran_by":"me"}}' "$BASE/api/complete"
+                "accept_note":"the changed operation succeeded","evidence_uri":["<commit-sha-or-url-or-path>"]}' "$BASE/api/complete"
 ```
+
+For the rare critical task that explicitly carries a `verification_command`, run that temporary
+probe yourself and add its verbatim command, exit-0 result, output hash, and agent id as
+`verification_run`. Remove the probe artifact before committing; keep only the receipt. Never add
+one merely to validate page copy or other ordinary visual/content edits.
 
 Reads are a plain `curl "$BASE/hub.json"`. That's the whole API — reach for the loop, not the endpoints.

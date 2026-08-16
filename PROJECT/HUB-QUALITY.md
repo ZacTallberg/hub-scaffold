@@ -2,10 +2,10 @@
 
 > canonical contract · owner: project operator · update: whenever the Hub's product, truth, flow, or coordination bar changes
 
-This is the minimum bar for every Hub surface. It is both enforceable and aspirational: automation
-may verify that the contract is present and that objective invariants have evidence, but visual taste
-requires a rendered-state design review. A linter, passing API test, or screenshot alone cannot certify
-that a Hub is beautiful, legible, alive, and useful.
+This is the minimum and aspirational bar for every Hub surface. A Hub should be phenomenally useful,
+visually unmistakable, alive with truthful realtime feedback, and tuned for extraordinary task
+throughput. Quality is established by using the real thing. Permanent tests, copy assertions, and
+ceremonial verifier ladders are not substitutes for an authored product.
 
 ## 1. Product and visual excellence
 
@@ -14,9 +14,10 @@ information density, and coherent depth, color, type, motion, and interaction. I
 for its project rather than like an interchangeable admin template. Delight is welcome when it makes
 state, causality, or attention easier to understand; decoration must never compete with truth.
 
-Review the rendered product at its empty, ordinary, dense, loading, live, degraded, and error states.
-Ask: where does the eye land, what needs action, what changed, what is trustworthy, and can the next
-useful action be taken without hunting?
+When constructing a new Hub or making a material redesign, use the rendered product at its empty,
+ordinary, dense, loading, live, degraded, and error states. Ask: where does the eye land, what needs
+action, what changed, what is trustworthy, and can the next useful action be taken without hunting?
+This is product work, not a demand for a permanent visual test suite.
 
 ## 2. Required invariants
 
@@ -77,34 +78,54 @@ parallelize only independent work and return structured results. Carry task, age
 correlation across boundaries. Advertise MCP, A2A, streaming, or other capabilities only when the
 callable transport and behavior actually exist.
 
-## 3. Proof matrix
+## 3. Proof without test accumulation
 
-Before calling a Hub-facing change complete, retain evidence for the affected cells:
+The default proof is the actual operation: make the change, exercise the changed path on the real
+surface, and observe whether it works. If it breaks, that observed failure is the notice and becomes
+fresh board input. The delivery agent records it without speculative repair or silently changing
+roles; the operator may later route it to a dedicated repair/error-fixing lane.
 
-| Dimension | Required states |
+- Do not create or run a test for copy, wording, spacing, color, ordinary style or animation tuning,
+  or another non-critical narrow fix. Do not validate page copy with assertions, snapshots, pixel
+  comparisons, screenshots-as-gates, or a second agent. Implement it on the page and move on.
+- A test is justified only for a rare critical boundary such as security or authorization, destructive
+  data integrity, a migration, public protocol compatibility, or concurrency/fencing. That test must
+  be a one-shot transient probe in temporary storage, run only for the named risk, and deleted before
+  commit. Retain its result as the task receipt; never retain the test artifact.
+- A completed child task's receipt composes into its parent. Parents and releases inherit those
+  receipts rather than rerunning child proof. A release may probe only the genuinely new integration
+  seam created by composing the children.
+- Never nest verifiers. A closer may not dispatch another closer, suite, or proof ladder. One boundary,
+  one smallest decisive operation, one receipt, then it exits.
+
+For a new Hub or material redesign, the following is a design-coverage guide, not a standing suite or
+a requirement for every edit:
+
+| Dimension | States to use when materially affected |
 |---|---|
 | Width | 320, 768, and 1440 CSS px |
 | Theme | light and dark, where both are supported |
 | User preference | normal motion, reduced motion, forced colors |
-| Input | keyboard-only path plus pointer path |
+| Input | keyboard and pointer paths |
 | Data/transport | empty, ordinary, dense, live update, degraded, and error |
 
-Use screenshots or short recordings for visual/interaction claims and receipts for state, transport,
-accessibility, and performance claims. Reviewers must inspect hierarchy, rhythm, density, identity,
-motion meaning, focus continuity, and false-green risk—not merely compare pixels.
+**Stop rule:** once the real changed behavior succeeds and no critical boundary was crossed, record
+the work and stop. Do not add a check, test, screenshot ritual, independent verifier, or release rerun
+merely to make simple work look more proven.
 
 ## 4. Elevation workflow
 
 1. Research current primary standards and the project's audience and visual identity.
-2. Audit rendered states and live behavior; record the concrete defects.
-3. Write a design brief that names hierarchy, tokens, motion grammar, state semantics, and budgets.
+2. Audit rendered states and live behavior; record concrete product defects.
+3. Write a design brief naming hierarchy, tokens, motion grammar, state semantics, and budgets.
 4. Implement from canonical data through the renderer, preserving local identity.
-5. Prove the affected matrix, realtime convergence, flow semantics, and agent lifecycle.
+5. Use the affected real paths. Keep their receipts; create a transient probe only for a critical
+   boundary, and remove that probe before commit.
 6. Curate generally useful improvements back into `hub-scaffold`; never bulk-merge an instance.
 
 Use `campaigns/elevate-hub.md` for the executable campaign. Exceptions belong in an ADR with owner,
 expiry/revisit trigger, user impact, and evidence. Upgrades preserve project identity and local theme,
-diff this contract explicitly, upsert generic units, and re-run the matrix.
+diff this contract explicitly, and upsert generic units without imposing redundant proof work.
 
 ## 5. Primary standards
 
@@ -119,4 +140,3 @@ diff this contract explicitly, upsert generic units, and re-run the matrix.
 - [MCP Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks)
 - [A2A specification](https://a2a-protocol.org/dev/specification/)
 - [OpenTelemetry overview](https://opentelemetry.io/docs/specs/otel/overview/)
-

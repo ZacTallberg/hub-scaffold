@@ -8,11 +8,11 @@ TERMINAL = frozenset({"done", "dropped", "shadow"})
 CLAIMABLE = frozenset({"todo", "in_progress"})
 
 
-def classify(task, flags=None, lease=None, *, strictness="tracked"):
+def classify(task, flags=None, lease=None):
     """Return ``{state, available, stale_reclaim, reason}`` for one task.
 
-    A verification command is a pull prerequisite only in strict mode.  Product and verification
-    tasks already require it in their schema; tracked mode intentionally permits lightweight work.
+    Executable work needs a concrete acceptance statement, never a standing test. An optional
+    verification command is a rare, transient critical-boundary probe and is not a pull gate.
     """
     task = task or {}
     flags = flags or {}
@@ -36,11 +36,10 @@ def classify(task, flags=None, lease=None, *, strictness="tracked"):
         return result("leased", "held by " + str(lease.get("agent") or "another worker"))
     if status not in CLAIMABLE:
         return result("not_claimable", f"task status is {status}")
-    if str(strictness or "tracked").lower() == "strict" and not str(
-            task.get("verification_command") or "").strip():
-        return result("needs_spec", "strict mode requires a verification_command")
+    if task.get("work_kind") in {"product", "verification"} and not str(
+            task.get("acceptance") or "").strip():
+        return result("needs_spec", "executable work requires concrete acceptance")
     stale = status == "in_progress"
     return result("stale_reclaim" if stale else "ready",
                   "expired or released lease; ready to reclaim" if stale else "ready to pull",
                   available=True, stale=stale)
-

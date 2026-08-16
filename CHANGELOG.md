@@ -2,8 +2,8 @@
 
 **This repository IS the canonical template** (since 2026-08-09; from 2026-08-07 to then it was a
 generated export of a private upstream, now retired — its engine history is fully carried here).
-Improvements are committed directly, gated by `tools/scrub_check.sh` (nothing project-, host-, or
-person-specific) and proven by `tools/selftest.sh` against the real example app. Changes born
+Improvements are committed directly and kept portable with the explicitly invoked
+`tools/scrub_check.sh` (nothing project-, host-, or person-specific). Changes born
 inside a working instance arrive as curated, scrubbed upserts after the instance has proven them
 in production — never as a bulk merge. The 2026-08-07 consolidation resolved a three-way engine
 fork; committing anything here that an instance also carries divergently is how that fork starts
@@ -14,11 +14,23 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Proof without test accumulation
+
+- Made the real operation the default proof and removed permanent selftests, verifier scripts, and
+  automatic test workflows. Copy, style, animation polish, and ordinary non-critical work now ship
+  without a validation ritual.
+- Made `verification_command` optional for every task and in both completion strictness modes.
+  Only rare critical boundaries may declare a one-shot out-of-band probe; its receipt persists and
+  its temporary artifact is deleted before commit.
+- Removed repository-audit fan-out from task completion. Child receipts compose upward, releases
+  prove only a newly created critical integration seam, and observed failures become fresh repair
+  tasks instead of speculative work imposed on every delivery agent.
+
 ### Hub Excellence Contract and live throughput cockpit
 
 - Made `PROJECT/HUB-QUALITY.md` canonical for extraordinary visual design, purposeful motion,
   realtime truth, accessible interaction, performance, flow metrics, and durable agent coordination.
-- Added `campaigns/elevate-hub.md` and a focused contract verifier, propagated through orientation,
+- Added `campaigns/elevate-hub.md` and propagated the contract through orientation,
   governance, mounting, construction, and bootstrap paths.
 - Reconciled cockpit theme, responsive, keyboard, print, palette, and live-update contracts; strengthened
   event-time history, heartbeat presence, WIP enforcement, atomic pickup, and proof truth.

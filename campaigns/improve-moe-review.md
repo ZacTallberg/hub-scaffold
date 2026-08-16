@@ -1,9 +1,9 @@
-# IMPROVE — multi-expert review → verify → committed report
+# IMPROVE — multi-expert review → grounded report
 
 The flagship campaign: a mixture-of-experts audit of a codebase (or a slice of one), where each expert
-is an independent perspective, findings are adversarially verified, and a closer writes a durable report.
-This is how you take an existing thing to a higher standard *honestly* — every finding is grounded and
-re-checked before it's written down. Use it on one repo or fan it across many (one panel per repo).
+is an independent perspective and one synthesizer writes a durable report. This is how you take an
+existing thing to a higher standard *honestly* — every reported finding is grounded in evidence already
+read. Use it on one repo or fan it across many (one panel per repo).
 
 Read `00-orchestration-method.md` first. Substitute `{{REPO_PATH}}`, `{{LIVE_URL}}`.
 
@@ -17,11 +17,12 @@ Preamble given to EVERY expert agent:
 > tools and the web; do NOT edit, run, migrate, deploy, or git-mutate anything. Exclude from scope:
 > virtualenvs, `node_modules`, build/dist output, vendored bundles, minified files, binary assets —
 > audit the project's OWN source. Read enough to be RIGHT, not fast: open the load-bearing files fully,
-> trace the real call paths, and VERIFY a claim before reporting it. Every finding MUST cite a
+> trace the real call paths, and substantiate a claim before reporting it. Every finding MUST cite a
 > `file:line` you actually read plus a concrete failure scenario (inputs/state → wrong result), not a
 > vague worry. Prefer a few high-confidence findings over many speculative ones. Return structured
 > findings: `{title, severity(critical|high|med|low), file, line, description, evidence,
-> failure_scenario, verify_hint, fix_sketch}`.
+> failure_scenario, reproduction_hint, fix_sketch}`. Do not evaluate copy, wording, visual taste, or
+> animation style, and do not propose tests for non-critical work.
 
 The five experts (each appended to the preamble as "YOUR FOCUS"):
 
@@ -34,7 +35,7 @@ The five experts (each appended to the preamble as "YOUR FOCUS"):
   CORS/host-allowlist/DEBUG-in-prod, path traversal, `shell=True` on user input, token handling. Judge
   the live posture, not theoretical worries.
 - **ARCHITECTURE & DEPENDENCY-HEALTH** — structural coupling, dead/duplicated code, leaky abstractions,
-  missing tests around risky code, performance hot paths (N+1, unbounded loops, sync-in-request). Read
+  unguarded critical boundaries, performance hot paths (N+1, unbounded loops, sync-in-request). Read
   the dependency manifests and assess pinned-vs-floating, outdated/deprecated/EOL packages, anything
   that smells vulnerable — cite the manifest line.
 - **TRUTH-vs-LIVE (is it honest)** — reconcile what the CODE does against what the repo CLAIMS. Compare
@@ -51,16 +52,15 @@ The five experts (each appended to the preamble as "YOUR FOCUS"):
 For a small repo, collapse to one **survey** expert (correctness + security + honesty in one pass,
 proportional to size). For a medium repo, run correctness + security + truth.
 
-## Stage 2 — the closer (one per repo; adversarial verify + write + commit)
+## Stage 2 — synthesis (one per repo; ground + write + commit)
 
-> You are the CLOSER + adversarial verifier for `{{REPO_PATH}}`. STRICT read-only on code; the ONLY
+> You are the REPORT SYNTHESIZER for `{{REPO_PATH}}`. STRICT read-only on code; the ONLY
 > write is the report. The expert panel produced these raw findings: `<JSON>`.
 >
 > 1. **Merge & dedupe** across experts. Drop duplicates and anything that is not a real, grounded defect.
-> 2. **Adversarially verify** the top findings (up to ~12, most-severe first): re-open the cited
->    `file:line` yourself and try to REFUTE each. Mark **CONFIRMED** (you re-read the exact code and the
->    logic holds) or **PLAUSIBLE** (real-looking, not fully grounded). Discard what you can refute;
->    count refutations. Check for existing mitigations before confirming.
+> 2. For critical/high findings only, re-open the cited `file:line` and check for an existing mitigation.
+>    Mark **CONFIRMED** when the cited code and concrete failure scenario agree or **PLAUSIBLE** when
+>    evidence is incomplete. Discard refuted claims. Do not run suites or create validation artifacts.
 > 3. Write a meticulous **`AUDIT-<date>.md`**: repo headline + a justified health score (0–100); a
 >    severity-ranked table of CONFIRMED/PLAUSIBLE findings (title · sev · `file:line` · failure scenario
 >    · fix sketch); a stack-currency section (latest-vs-pinned, CVEs, better-tool notes with source
@@ -74,7 +74,7 @@ proportional to size). For a medium repo, run correctness + security + truth.
 
 ## Stage 3 — estate rollup (only when auditing many repos)
 
-> You are the estate synthesizer. Given every closer's summary, write the machine-wide rollup: an
+> You are the estate synthesizer. Given every repository summary, write the machine-wide rollup: an
 > executive summary (overall health + the single most important thing to know); a ranked table of every
 > repo; **cross-cutting themes** (a bug class, a shared vulnerable dep, a coherence gap that recurs —
 > worth one systemic fix); the estate TOP-20 findings severity-ranked (repo + `file` + one-line failure
@@ -84,6 +84,10 @@ proportional to size). For a medium repo, run correctness + security + truth.
 ## From findings to fixes
 
 This campaign is **report-only** by design. Remediation is a SEPARATE campaign: turn each CONFIRMED
-finding into a hub task (with a `verification_command` if you run `strict`), then drive them with
-`feature-buildout.md`, re-verifying before each fix. Never fix in the same pass that finds — the
-finder and the fixer having different eyes is a feature.
+finding into a hub repair-lane task and drive it with `feature-buildout.md`. The real operation is the
+default proof, and `verification_command` is optional in both tracked and strict modes. Copy/style and
+other non-critical fixes get no test. Only a critical security, destructive/data-integrity, migration,
+protocol-compatibility, or concurrency boundary may justify a focused transient probe; create it in
+temporary space, run it once, record its receipt, and delete it before commit. Receipts from completed
+child tasks compose upward, so a parent or release task addresses only a new integration seam. Any
+failure observed later becomes its own repair-lane task instead of a permanent preventive check.

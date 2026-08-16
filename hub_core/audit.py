@@ -1091,8 +1091,8 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
             # COMBINED diff whose line prefixes are two characters (`++`, `--`), so a 1:1 assertion
             # replacement inside a conflict resolution reads to a prefix counter as a net REMOVAL -
             # observed 2026-08-05, where a merge that swapped one assert for a stronger one raised
-            # oracle:tamper CRITICAL and, because audit_unsound refuses every completion while a
-            # critical stands, wedged the whole fleet's ability to finish anything. A merge also
+            # oracle:tamper CRITICAL and historically wedged the whole fleet when audits were
+            # coupled to completion. Structural audits are now explicitly invoked. A merge also
             # authors nothing: every change it integrates arrived in a non-merge commit that names
             # its own task and was analysed there. So there is no coverage to lose by skipping it,
             # and a real weakening still cannot hide behind one.

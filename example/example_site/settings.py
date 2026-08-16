@@ -70,12 +70,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 HUB_PROJECT_KEY = "example"        # entity-id prefix -> example:task:0001
 HUB_BRAND = "Example"              # navbar reads "Example · Hub"
 HUB_BUILD_STAMP = "build_sha.txt"  # BASE_DIR-relative build-identity stamp (written by the build)
-HUB_DONE_STRICTNESS = "strict"     # example runs strict so the selftest ladder proves the full
-                                   # machinery; the adapter DEFAULT is "tracked" (flow-first)
+HUB_DONE_STRICTNESS = "tracked"    # ordinary work records evidence; checks remain exceptional
 
-# Optional local-worker bridge. The example enables it only so selftest can prove the narrow
-# CSRF-grant boundary; no process is launched by the test suite.
-HUB_WORKER_LAUNCH_ENABLED = True
+# Optional local-worker bridge. Adopters enable it only after wiring their own launch protocol.
+HUB_WORKER_LAUNCH_ENABLED = False
 HUB_WORKER_PROTOCOL = "hub-example"
 HUB_WORKER_LAUNCH_ISSUER_URL = "https://example.invalid/hub/api/launch-grant/consume"
 HUB_WORKER_GRANT_TTL_S = 120

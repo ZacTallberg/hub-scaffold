@@ -18,8 +18,8 @@ truthful documentation, and fail-closed behavior at privileged boundaries.
 - Validate merged entity state before append; preserve optimistic concurrency and idempotency.
 - Never add a second way to mint terminal task state. `done` remains a completion transition.
 - Keep general write routes behind `@writer`; a narrower capability needs an explicit threat model,
-  marker, route-audit coverage, and a refusal PROVEN to fire (seeded positive red, true negative
-  quiet, both runs recorded).
+  marker, route-audit coverage, and a refusal proven to fire with a focused transient probe. Record
+  the refusal and successful operation, then delete the probe before commit.
 - Do not put the general write token in URLs, pages, browser storage, registry values, or process
   arguments.
 - A new entity type requires a schema, projection/fold registration, write path where needed, read
@@ -36,31 +36,36 @@ truthful documentation, and fail-closed behavior at privileged boundaries.
 - Keep `PROJECT/schema/` and `example/PROJECT/schema/` identical.
 - Add a changelog entry for user-visible scaffold changes.
 - Prefer links to canonical docs over copying a rule into several places; when duplication is useful,
-  update every copy and let `tools/docs_check.py` guard the file relationships.
+  update every intentional copy.
 
-## Proportional verification
+## Proof policy
 
-```bash
-bash tools/check.sh
-```
+The real operation is the default proof. Use the changed command, workflow, API transition, or live
+surface and record what happened. Do not create or run tests for copy, wording, spacing, color,
+animation polish, or another non-critical fix. When the real behavior succeeds and no critical
+boundary remains, stop.
 
-This impact-aware sanity pass is sufficient for ordinary work unless the changed boundary demands
-more. Use `bash tools/check.sh --all-fast` for the complete cheap set. A release, security/auth,
-migration/destructive, public API/schema, concurrency/process-launch, regression, or sampled audit
-should dispatch the disposable `verification-closer` and may justify `bash tools/selftest.sh`.
+An observed failure becomes fresh Hub task input with the operation and output attached. Leave it
+for an explicit repair/error-fixing lane unless it is already the claimed task; delivery agents do
+not speculate or preemptively widen their role into repair work.
 
-See `docs/TESTING.md` for exact selection guidance. A new declared gate/refusal must be PROVEN to
-fire before it counts: seed a real positive, watch it go red, confirm it stays quiet on a true
-negative — in the session, at the time you write it, with both runs recorded as the receipt.
-Leave no test file behind; this repo ships no battery, and the write API refuses a bare suite
-runner as a task's proof for the same reason the battery is gone.
+Only security/authorization, destructive behavior, data integrity, migrations, public protocol
+compatibility, or concurrency may justify a test. Create the smallest focused probe in temporary
+space, run it once, record the exact result as the task receipt, and delete the probe and fixtures
+before commit. No test is permanent, and no probe becomes a suite, verifier, hook, CI job, or
+scheduled workflow.
+
+Receipts compose upward. Parent work and releases inherit completed child-task proof and may exercise
+only a newly created critical integration seam. Do not replay child proof or dispatch verifiers from
+inside verifiers. See `docs/TESTING.md` for the complete policy.
 
 ## Pull requests and publication
 
 - Explain the behavior and trust-boundary impact, not just the edited files.
-- Include exact verification results.
+- Include the real-operation receipt and, only when a critical transient probe was justified, its
+  exact result.
 - Do not weaken or bypass a failing check to make a change green.
-- Verify generated files and the scrub before pushing.
+- Generate required derived files when their source changes; do not add a second validation ritual.
 - Use targeted commits and review `git diff --cached` before publication.
 
 The repository currently grants no license. Public visibility does not itself permit reuse or

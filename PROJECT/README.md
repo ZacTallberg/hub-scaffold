@@ -5,7 +5,7 @@
 `HUB-QUALITY.md` is the canonical construction contract for every new or materially upgraded Hub.
 
 Every app owns its code; **this folder owns everything about how the project is run**: decisions,
-research, doctrine, gaps, verification, audit history, agent coordination. It is **content-agnostic**
+research, doctrine, gaps, completion receipts, incident routing, and agent coordination. It is **content-agnostic**
 — nothing in the framework refers to any particular app. It was crystallized from live-fire
 multi-agent campaigns, the hub platform, and a hard-won doctrine corpus. Your organization's global
 doctrine documents (lifecycle framework · method playbook · quality charter) are home-ecosystem
@@ -16,20 +16,35 @@ the hub ledger now.
 ## Contract status: normative versus active
 
 This tree is a portable framework and set of templates. The reference Hub makes the entity ledger,
-schemas, projections, and `hubaudit` active after it is mounted. Empty directories/contracts such
-as `verify/`, `runs/`, `worklogs/`, `audit/`, and the multi-seat `pm/` topology describe what an
-adopting project must implement and operate; the scaffold does not silently create verifier tools,
-run artifacts, monitors, alerts, backups, or deploys. A document may state a project law without
-proving that its enforcement has been wired. Record that status honestly in `HANDOFF.md` and the
-Hub.
+schemas, projections, and on-demand `hubaudit` available after it is mounted. Empty
+directories/contracts such as `verify/`, `runs/`, `worklogs/`, `audit/`, and the multi-seat `pm/`
+topology describe optional roles and durable records; they do not require standing verifiers,
+tests, fixtures, scheduled checks, monitors, or CI workflows. Record only controls that are
+actually active in `HANDOFF.md` and the Hub.
+
+## Throughput-first completion law
+
+- The successful real operation is the default proof. Perform it, record the observed outcome,
+  mark the task done, and stop.
+- Copy, wording, style, spacing, color, animation polish, and all other non-critical changes get no
+  test or automated page-copy validation.
+- Permanent tests, fixtures, checker scripts, and standing verification workflows are prohibited.
+  A rare security, destructive-data, migration, protocol, or concurrency boundary may use one
+  temporary probe outside the durable product tree; run it once, retain its receipt, and delete it
+  before commit.
+- Completed receipts compose. Parent tasks and releases inherit child receipts and inspect only a
+  new critical integration seam; they never replay accepted proof or create verifier fan-out.
+- A real failure becomes a fresh Hub repair task and may route to a dedicated error-fixing agent,
+  preserving delivery-agent focus and queue throughput.
 
 ## 0. Read-order for a cold agent
 
 1. **`HANDOFF.md`** — you-are-here: current state, in-flight work, quirks. Always first.
 2. **`CHARTER.md`** — what this project is, its quality bar, its definition of done.
 3. **`DOCTRINE.md`** — the standing laws you must not violate.
-4. **The hub** — `python manage.py hubaudit` + `/hub` (or fold `PROJECT/.hub/events.jsonl`) for
-   canonical tasks/ADRs/gaps/features/deploys.
+4. **The hub** — `/hub` (or fold `PROJECT/.hub/events.jsonl`) for canonical
+   tasks/ADRs/gaps/features/deploys. Use `hubaudit` only for an explicitly scoped ledger-integrity
+   operation, not as a routine task-completion gate.
 5. **`pm/PROTOCOL.md`** — only if a multi-agent campaign is active (HANDOFF says so).
 
 ## 1. The manifest
@@ -46,14 +61,14 @@ Hub.
 | `research/` | deep research: dossiers, MoE panels, improvement-surface memos + `RESEARCH-HISTORY.md` chronicle | canonical |
 | `registers/` | what hub schemas don't model: failure-mode taxonomy, incidents, truth matrix, blind spots, pending operator decisions, glossary | canonical |
 | `audit/` | filed point-in-time audit artifacts (MoE registers, audit runs, security reviews) | canonical artifacts |
-| `verify/` | independent-verification contract and target layout | canonical contract; harness is adopter-implemented |
-| `runs/` | target shape for project-specific machine-readable run artifacts | canonical once a runner is wired |
+| `verify/` | transient critical-boundary proof contract | canonical policy; no standing harness |
+| `runs/` | optional durable receipts for completed real operations | canonical only for receipts actually filed |
 | `worklogs/` | per-workstream execution logs with measured before/after | canonical |
 | `ops/` | infra inventory / deploy runbook | canonical, date-stamped |
 | `pm/` | multi-agent campaign kit: protocol, seats, channels | channels = operational log, NOT a governance store |
 
 **Not in this folder:** tasks, gaps, features, deploys, capabilities — those are **hub entities**
-(schema-validated, hash-chained, audit-gated). Markdown renderings of hub data are views and must
+(schema-constrained and hash-chained). Markdown renderings of hub data are views and must
 say so (see §3).
 
 ## 2. Where the audit history lives (the user-visible answer to "what happened?")
@@ -67,11 +82,9 @@ say so (see §3).
   is wired. The base HTTP API has no deploy endpoint; the deploy integration must validate and
   append it, and must derive `audit_ok` rather than accept a human assertion.
 - **`audit/`** — dated point-in-time audit artifacts (MoE finding registers, review verdicts).
-- **`verify/gate/`** — fail-closed ship-gate artifacts after the project implements the verifier
-  contract.
-- **`runs/`** — one JSON per operational run after project tooling is wired;
-  `runs/status.json` is the contract's current green/red rollup, not a base-Hub output.
-- **`registers/INCIDENTS.md`** — every defect instance: class, detection, resolution, detector born.
+- **Hub task evidence / `runs/`** — durable receipts for completed real operations and the rare
+  critical one-shot probe. The temporary probe itself never lives here.
+- **`registers/INCIDENTS.md`** — observed failures, their fresh repair tasks, routes, and successful retries.
 
 ## 3. Source-of-truth law
 
@@ -84,7 +97,7 @@ say so (see §3).
 3. **Views declare and never lead.** A rendered table of hub data carries
    `RENDERED VIEW — canonical: hub` and is regenerated, never hand-drifted.
 4. **The ledger is LIVE.** Entity transitions are recorded at the moment of the event (claim →
-   `in_progress`, decision → ADR, verified → `done`+evidence, deploy → deploy entity) — never
+   `in_progress`, decision → ADR, real operation completed → `done`+evidence, deploy → deploy entity) — never
    batched, never reconstructed later. Doctrine or decisions born in pm traffic MUST be recorded
    (ADR + register + hub) before the traffic moves on — see `pm/PROTOCOL.md` §11; in campaigns
    the LEADER owns this personally.
@@ -101,7 +114,7 @@ say so (see §3).
 | `INC-NNN` | defect/incident instance | `registers/INCIDENTS.md` |
 | `DP-NN` | pending operator decision | `registers/DECISIONS-PENDING.md` |
 | `BS-NN` | blind-spot / missing signal | `registers/BLINDSPOTS.md` |
-| run ids (`<UTCstamp>` / `<scope>-v<n>`) | runs and gate artifacts | `runs/` · `verify/gate/` |
+| receipt ids (`<UTCstamp>` / `<scope>-v<n>`) | optional durable operation/critical-boundary receipts | hub evidence · `runs/` |
 
 New namespaces must be declared in `registers/GLOSSARY.md` before first use.
 
@@ -121,20 +134,21 @@ New namespaces must be declared in `registers/GLOSSARY.md` before first use.
 ## 6. Lifecycle
 
 This folder is phase-agnostic; the lifecycle spine (CREATE → REFINE → DEPLOY → INTEGRATE →
-MAINTAIN), the multi-expert (MoE) review method, and the four false-green enforcement primitives
-live in your organization's global doctrine documents (see the header). `DOCTRINE.md` carries the laws that must be in-context at all
-times; everything else is subsumed by reference — do not re-paste global doctrine here.
+MAINTAIN) and any organization-specific collaboration methods live in your organization's global
+doctrine documents (see the header). `DOCTRINE.md` carries the throughput and critical-boundary
+laws that must be in context at all times; everything else is subsumed by reference—do not
+re-paste global doctrine here.
 
 ## 7. Portability — rebinding the Plane to any environment
 
-The framework is a set of **roles**, not tools. It runs anywhere that can provide three substrate
-roles; everything else in this folder is plain files:
+The framework is a set of **roles**, not tools. It runs anywhere that can provide the two standing
+substrate roles below and, only when required, the transient third role:
 
 | Role the Plane requires | Home-ecosystem binding | Rebind to (examples) |
 |---|---|---|
 | **Tamper-evident append-only ledger** (entity transitions, hash-chained) | `hub_core` store → `.hub/events.jsonl` | any event store, signed git log, ledgered DB |
-| **Schema-validated entity store with false-claim-unsatisfiable rules** (done⇒verified_by+evidence, etc.) | hub entities + `schema/*.json` + `seedhub` | Jira/Linear + required-field rules, GitHub Issues + CI schema check |
-| **Fail-closed gate runner** (audit + invariant checks, exit≠0 blocks ship) | `manage.py hubaudit` + deploy gates | CI required checks, pre-receive hooks, pipeline gates |
+| **Schema-validated entity store with false-claim-unsatisfiable rules** (done⇒verified_by+evidence, etc.) | hub entities + `schema/*.json` + `seedhub` | Jira/Linear required-field rules, GitHub Issues + API constraints |
+| **Transient critical-boundary proof** (optional, one-shot) | protected real operation or disposable probe + durable Hub receipt | an out-of-process actor performing the scoped operation and filing its receipt |
 
 Rebinding rules:
 1. **Every path outside this folder is a BINDING, not a dependency.** The global-doctrine docs in
@@ -144,7 +158,8 @@ Rebinding rules:
 2. **The protocol's channel mechanics are substrate-independent** (`pm/PROTOCOL.md` §13): append-only
    files + monitors are the proven floor; any addressable bus with per-seat ACLs may replace them
    by ADR without changing the event vocabulary or duties.
-3. **What may never be rebound away:** identity separation at declared independent gates,
-   fail-closed behavior at those gates, re-derivation over trust, append-only history, and one
-   canonical store per fact class. An environment that can't provide these isn't a binding target
-   for the protected boundary—it is a gap.
+3. **What may never be rebound away:** actual-operation proof by default; no validation for
+   copy/style/non-critical changes; no permanent test, fixture, or verification workflow;
+   identity separation for a declared critical one-shot boundary; compositional receipts;
+   append-only history; and one canonical store per fact class. An environment that cannot provide
+   these is a gap.

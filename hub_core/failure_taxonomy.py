@@ -61,10 +61,8 @@ GATE_RULES = {
     ("complete", "evidence_unrelated"): "3.2 no or incomplete verification",
     ("complete", "receipt_command_mismatch"): "3.3 incorrect verification",
     ("complete", "verification_vacuous"): "3.3 incorrect verification",
-    ("complete", "need_verification_command"): "3.2 no or incomplete verification",
     # Stopping while the system is still unsound, or while a declared dep is unmet, is calling it
     # finished before the termination condition holds.
-    ("complete", "audit_unsound"): "3.1 premature termination",
     ("complete", "deps_unmet"): "3.1 premature termination",
     ("complete", "poison_blocked"): "1.5 unaware of termination conditions",
     # The seat rules: one active per agent, your own lease, your own identity.

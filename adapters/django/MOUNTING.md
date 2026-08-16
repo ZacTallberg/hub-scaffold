@@ -49,7 +49,7 @@ MIDDLEWARE = [
 HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "acme"
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 7)
-HUB_DONE_STRICTNESS = "tracked"       # the flow-vs-proof dial — see "The strictness dial" below
+HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
 
@@ -63,27 +63,39 @@ HUB_WORKER_PROTOCOL = "hub-{{PROJECT_KEY}}"
 # HUB_WORKER_GRANT_TTL_S = 120
 ```
 
-### The strictness dial (`HUB_DONE_STRICTNESS`)
+### The evidence-resolution dial (`HUB_DONE_STRICTNESS`)
 
-The hub is designed to TRACK by default and PROVE on demand. Completing a task always records
-who (claim lease), what (accept note), and evidence (≥1 URI) — that is the tracking floor, and
-it is deliberately cheap: one claim, one complete, no ceremony.
+The hub is designed to track work without manufacturing test work. Completing a task always records
+who (claim lease), what (accept note), and evidence (≥1 URI). The real operation—rendering the page,
+using the changed control, running the migration, or shipping the artifact—is the default proof.
+That floor is deliberately cheap: one claim, one completion, no validation ceremony.
 
 - `"tracked"` (default) — flow-first. Evidence can be anything non-empty (auth-walled ticket
   links, doc URLs, file paths); a `verification_command` on the task is optional. When present,
   the worker must submit its matching typed exit-0 receipt; the Hub never runs the command.
-- `"strict"` — proof-first. Every evidence URI must dereference (URL <400 / commit in this
-  repo / existing path resolved from `BASE_DIR`) and every task needs a `verification_command` before it can be
-  completed. Use this where completion claims cannot be taken on trust—for example an autonomous
-  agent whose operating principal is trusted with Hub-server authority but whose “done” assertion
-  still needs mechanical proof. Strict mode does not sandbox an untrusted token holder.
+- `"strict"` — dereferenceable evidence. Every evidence URI must resolve (URL <400 / commit in
+  this repo / existing path resolved from `BASE_DIR`). A `verification_command` remains optional;
+  strict mode never creates a requirement to test ordinary work. If a command is explicitly present,
+  its matching typed exit-0 receipt is required in either mode. Strict mode does not sandbox an
+  untrusted token holder.
 
-Ratcheting up later is a one-line settings change and applies only to future completions —
-start tracked, go strict for the projects (or the agents) that earn it.
+Changing the setting later is a one-line change and applies only to future completions. Start
+tracked; use strict only when evidence itself must be mechanically reachable.
+
+Tests are exceptional and transient. Do not create one for copy, wording, spacing, color, minor
+layout, animation polish, or routine fixes. Only a critical security, destructive-data, migration,
+protocol-compatibility, or concurrency boundary can justify a temporary task-specific probe. Create
+that probe outside the permanent suite, run it once, store the receipt, and remove the probe artifact
+before commit. Once the actual changed behavior succeeds and no critical boundary remains, stop.
+
+Receipts compose. A task inherits the completed receipts of its dependencies; a release or parent
+task examines only a genuinely new critical integration seam. It does not rerun child proof or
+create nested verifier fan-out.
 
 Security consequence: strict URL evidence is fetched from the server's network.
 `HUB_WRITE_TOKEN` grants terminal board authority (done, deploys, ADRs), but not shell execution:
-the worker runs a task's `verification_command` out-of-band and submits a receipt. Only trusted
+when a task carries the optional `verification_command`, the worker runs it out-of-band and submits
+a receipt. Only trusted
 operators/agents may hold it because terminal governance authority is still privileged.
 
 Notes:
@@ -117,7 +129,7 @@ above. `app_host` is the public app origin, `app_name` names the app for discove
 MCP server discovery, the root agent discovery card, and receipt predicate types.
 The runtime store (`PROJECT/.hub/`) is created on first store access; add `PROJECT/.hub/` to `.gitignore`
 if you do not want runtime events in version control. The `HUB_DIR` environment variable
-overrides the event-log location (useful for tests).
+overrides the event-log location (useful for isolated or temporary runs).
 
 ## 4. URLs
 
@@ -153,22 +165,20 @@ python manage.py seedhub            # idempotent genesis import (re-running skip
 ```
 
 `seedhub` is the ONE sanctioned hand-authored entry point. After genesis, the board changes
-only through the typed write API (discover -> claim -> implement -> record -> verify).
+only through the typed write API (discover -> claim -> implement -> record).
 
-## 6. The audit as a CI/deploy gate
+## 6. The audit as a board-integrity gate
 
 ```bash
 python manage.py hubaudit           # exit 0 = PASS/WARN-only, 2 = violations, 1 = internal error
-python manage.py hubaudit --json    # machine-readable, for CI annotations
+python manage.py hubaudit --json    # machine-readable, for operator/deploy tooling
 ```
 
-Wire it so a red audit BLOCKS the ship, out of process from the agent doing the work:
-
-- CI: run `python manage.py hubaudit` as a required check.
-- Deploy: call it in your deploy script BEFORE building the artifact, and abort on nonzero.
-- Server-side: `patterns/pre-receive-gate.sh` is the same out-of-process layer for repository
-  law (it rejects credential-shaped pushes); extend it to also run the audit on push if your
-  git host supports server hooks.
+Use it at the boundary where canonical board integrity matters—for example immediately before a
+production deployment or after a structural schema/event-store change—and abort on a critical
+violation. It is not a per-task test and should not be invoked for copy, styling, or other ordinary
+page changes. `patterns/pre-receive-gate.sh` remains the separate repository-law boundary for
+credential-shaped pushes.
 
 The audit is computed-not-attested: schema validity of every entity, referential integrity
 (no dangling idrefs), ADR numbering, event-log hash-chain tamper check, build coherence
@@ -225,31 +235,31 @@ general `@writer` routes and the narrow origin-gated mint route.
 4. In `strict` mode, every evidence string must dereference (URL answering <400, a commit sha
    present in the repo, or an existing path resolved from `BASE_DIR`) or completion returns
    **422 evidence_unresolvable**. This is a resolvability check, not a path/network sandbox.
-5. In `strict` mode, the task must carry a `verification_command`; absence is
-   **422 need_verification_command**. In either mode, if the task carries a command, the server
-   requires a typed exit-0 `verification_run` receipt the WORKER produced (the Hub never runs the
-   command). A missing receipt is **422 need_verification_run**; a receipt for another command or
-   a nonzero exit is **422 bad_verification_run**.
-6. The audit is recomputed server-side at completion time; CRITICAL violations (tampered chain,
-   schema corruption) block with **422 audit_unsound**.
+5. A `verification_command` is optional in both modes. If the task explicitly carries one, the
+   server requires a typed exit-0 `verification_run` receipt the WORKER produced (the Hub never
+   runs the command). A missing receipt is **422 need_verification_run**; a receipt for another
+   command or a nonzero exit is **422 bad_verification_run**.
+6. Completion does not launch a repository-wide audit; run structural maintenance deliberately
+   only when its own boundary warrants it.
 7. Immediately before append, the fencing token is rechecked and the transition is bound to the
    exact task version whose command was verified. Lease expiry/reclaim or a concurrent task edit
    returns **409**. Success releases the lease; abandoned `in_progress` work is reoffered after
    lease expiry.
 
-Strict-mode example loop:
+Default completion loop (valid in both modes; strict additionally dereferences the evidence):
 
 ```bash
 T="$HUB_WRITE_TOKEN"; H="X-Write-Token: $T"; U=http://localhost:8000/hub/api
-curl -s $U/task -H "$H" -d '{"title":"Ship X","verification_command":"python tools/ship_x.py --dry-run","agent":"a1"}'
+curl -s $U/task -H "$H" -d '{"title":"Ship X","acceptance":"the changed operation succeeds","agent":"a1"}'
 curl -s $U/claim -H "$H" -d '{"id":"acme:task:0001","agent":"a1"}'            # -> lease token
 curl -s $U/complete -H "$H" -d '{"id":"acme:task:0001","token":"<lease>","agent":"a1",
-  "accept_note":"dry-run exercised the changed artifact; output receipt attached","evidence_uri":["<commit-sha>"]}'
+  "accept_note":"the changed operation succeeded","evidence_uri":["<commit-sha>"]}'
 ```
 
-The `verification_command` must exercise the task's own artifact — the write API refuses a bare
-suite runner (`python -m pytest`, `python -m unittest`) because a suite is green whenever the repo
-is healthy, whether or not this task's work happened.
+For a rare critical boundary, the optional `verification_command` must describe the temporary probe
+for that task's own artifact. Run it out-of-band, attach the matching receipt, and delete the probe
+before commit. The write API refuses a broad suite runner because generic suite health does not prove
+that task's work happened and permanent test accumulation damages throughput.
 
 ## 9. Optional local-worker launch
 

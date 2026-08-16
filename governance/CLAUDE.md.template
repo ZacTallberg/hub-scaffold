@@ -8,23 +8,33 @@ PRECEDENCE rule §7 overrides any generic stop-and-ask instruction) · `SECURITY
 (how a deploy is proven live).
 
 Hard laws:
-- Work off the hub board: DISCOVER → CLAIM → IMPLEMENT → RECORD (with evidence) → VERIFY.
+- Work off the hub board: DISCOVER → CLAIM → IMPLEMENT → RECORD (with evidence) → DONE.
   Nothing off-list — new work becomes a board task before it is touched.
 - Non-trivial decisions are ADRs in `PROJECT/ADR/` (append-only; supersede, never rewrite).
 - Drive to done; never ask permission to continue. Pause only for irreversible/outward-facing
   forks, owner-only decisions, or hard blocks — queue a pending-decision entry and keep moving
   on everything else. The newest owner directive wins.
-- done carries truthful, risk-proportional evidence. Minor low-risk work does not automatically need
-  a second agent or full battery. Releases, privileged/data/public-contract boundaries, regressions,
-  and occasional samples use a fresh independent closer that returns one verdict and exits. A
-  deploy-dependent task still needs the live SHA/canary per `patterns/deploy-contract.md`.
+- Optimize for completed, useful work. The real operation is the default proof: exercise the changed
+  behavior in its actual surface and record the result. Copy, wording, style, animation tuning, and
+  other non-critical changes get no test or validation ritual. Stop when the requested behavior works.
+- Tests are exceptional and disposable. Only a security, destructive/data-integrity, migration,
+  protocol-compatibility, or concurrency boundary may justify a focused transient probe. Create it in
+  temporary space, run it once, record its receipt, and delete it before commit. Never add a standing
+  test, checker, or automatic pipeline for ordinary task completion.
+- `verification_command` is optional in both tracked and strict modes. If one is deliberately supplied,
+  the worker runs it out-of-band and records its typed receipt; the Hub never executes it. Completed
+  child-task receipts compose upward, so parent and release tasks prove only a newly created integration
+  seam rather than repeating child work. An observed failure becomes a new repair-lane board task; it
+  does not justify slowing every agent pre-emptively. A deploy-dependent task still needs the live
+  SHA/canary per `patterns/deploy-contract.md`.
 - Research precedes build: capture sources, options, and the chosen path in `PROJECT/research/`
   before architectural work starts. A named technology is a hypothesis, not a mandate.
 - Hub reads are unauthenticated by default: publish no topology, credentials, PII, or confidential
-  evidence there; add a tested authentication boundary when the board is private. General writes
+  evidence there; add an explicit authentication boundary when the board is private. General writes
   stay token-gated, and that token is terminal board authority — NOT a shell. The hub never
-  executes a task's verification_command; the worker runs it out-of-band and submits a typed
-  exit-0 receipt, which is what grants done.
+  executes a task's optional verification_command; when one exists, the worker runs it out-of-band
+  and submits a typed exit-0 receipt. Strict mode strengthens evidence handling, not the number of
+  checks required.
 - The board updates at the moment of the event, never batched afterwards. Rendered views of the
   board (the `/hub` dashboard, any generated `TASKS.md`) are projections — change tasks by
   emitting hub events, never by hand-editing a view.

@@ -3,17 +3,16 @@
     {"ref":"0001","number":1,"status":"accepted",
      "title":"All trackable work lives in the event-sourced hub",
      "context_md":"Task state scattered across chat logs and READMEs goes stale, cannot be audited, and cannot gate a deploy.",
-     "decision_md":"Every trackable entity (task/adr/feat/gap/cap/deploy/note) lives in the hub event log under PROJECT/.hub; 'done' is granted only by the complete endpoint, against evidence plus an exit-0 verification_run receipt the worker ran out-of-band, plus a recomputed audit. The hub never executes the command itself.",
-     "consequences_md":"One source of truth; CI and deploys gate on the recomputed hubaudit, never on self-attested status."}
+     "decision_md":"Every trackable entity (task/adr/feat/gap/cap/deploy/note) lives in the hub event log under PROJECT/.hub; 'done' is granted only by the lease-owned complete endpoint against a result note and evidence. Real execution is the default proof. Only a rare critical-boundary task declares a transient out-of-band probe; its receipt persists, its test artifact does not, and the hub never executes the command itself.",
+     "consequences_md":"One source of truth; completed receipts compose upward, and observed failures return as fresh repair work instead of imposing speculative checks on every task."}
   ],
   "tasks": [
     {"ref":"0001","phase":"0 Genesis","status":"todo","priority":"P1","decided_by":["0001"],
-     "title":"Wire the hub into the project and run the first audit",
-     "acceptance":"manage.py hubaudit exits 0 (PASS or amber-only) from a clean checkout.",
-     "verification_command":"python manage.py hubaudit"},
+     "title":"Wire the hub into the project and open the live board",
+     "acceptance":"The mounted Hub opens and accepts the first real project task through its normal workflow."},
     {"ref":"0002","phase":"0 Genesis","status":"todo","priority":"P2","deps":["0001"],
-     "title":"Record the first real feature task with acceptance criteria and a verification_command",
-     "acceptance":"A new task exists carrying a verification_command a worker can run out-of-band to an exit-0 receipt."}
+     "title":"Record the first real feature task with concrete acceptance",
+     "acceptance":"A new task names the real outcome to ship and creates no test work unless it crosses a rare critical boundary."}
   ],
   "notes": []
 }

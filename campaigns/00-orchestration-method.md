@@ -4,63 +4,75 @@ How to run any campaign in this directory well — whether you have a multi-agen
 a hand-rolled fan-out, or just one agent working sequentially. This is the engine; the other files
 are the payloads.
 
-## 1. Shape: fan-out → consolidate → boundary-verify when warranted → roll up
+## 1. Shape: fan out → consolidate → attempt → record → roll up
 
 ```
 DISCOVER the work-list (inline: list the files/repos/entities in scope)
   → FAN OUT one worker per item / per expert        (parallel where independent)
     → each worker returns STRUCTURED findings      (never prose to be re-parsed)
   → CONSOLIDATE: dedupe and ground findings in the raw artifacts
-  → VERIFY: at a meaningful boundary, one fresh disposable closer tests the risky claims
-  → RECORD: the authorized writer persists only the intended artifact
-  → ROLL UP: one synthesizer produces the cross-cutting view
+  → ATTEMPT: use the changed operation on the real target
+  → RECORD: the authorized writer persists the intended artifact and receipt
+  → ROLL UP: one synthesizer composes child receipts into the cross-cutting view
 ```
 
 Default to a **pipeline** (each item flows through all stages independently — no barrier) so a slow
-item never blocks a fast one. Use a barrier only when a stage genuinely needs *all* prior results at
-once (dedup across the whole set, an early-exit on zero findings).
+item never blocks a fast one. Use a barrier only when a stage genuinely needs all prior results at
+once, such as whole-set deduplication.
 
-**If you have only one agent / a tight budget:** run the same shape sequentially, one item at a time,
-and **commit each item's record as you finish it** so a stopped run leaves durable partial progress.
-Scale the fan-out to the budget — a huge parallel fleet is a cost decision the operator makes, not a
-default. When usage is constrained, prefer sequential-with-checkpoints over a large fan-out.
+With one agent or a tight budget, run the same shape sequentially and commit each item's record as it
+finishes. Scale fan-out to real independent breadth; more agents are not proof and should not consume
+the budget needed to build.
 
-## 2. Proportional independent verification
+## 2. Proof budget: actual use first
 
-Do not spawn a checker for every item. Ground routine findings by reopening the cited artifact and
-label uncertainty honestly. Invoke `verification-closer.md` once for a coherent batch when it reaches
-a release, security/auth, migration/destructive, public-contract, concurrency/process, regression,
-or sampled-audit boundary. Prompt that fresh closer to refute the claims and look for existing
-mitigations. Escalate to N=3 only for irreversible or genuinely high-stakes conclusions, giving each
-verifier a different failure angle. The closer returns one verdict and exits; it does not fix.
+The default proof is the real attempt. If the changed operation works, retain that receipt. If it
+breaks, the observed failure is sufficient notice and becomes fresh task input. The delivery worker
+records the failure and stops; it does not speculate, silently expand scope, or preemptively turn
+itself into a repair worker. The operator may route the task to a dedicated repair/error-fixing lane.
+
+Do not create tests or verification tasks for copy, wording, formatting, color, spacing, ordinary UI
+style/animation work, or another non-critical fix. Do not validate page copy. Do not spawn a checker
+for each item.
+
+Only a rare critical boundary — security/authorization, destructive data integrity, migration,
+public protocol compatibility, or concurrency/fencing — can justify a test. Make it a one-shot probe
+in temporary storage, run it only against the named risk, retain the result as a receipt, and delete
+the probe before commit. It must never become a permanent test, workflow, or suite.
+
+Child receipts compose upward. A parent or release inherits completed task receipts and does not
+rerun their proof. At release, exercise only the new integration seam introduced by composition. A
+verification closer cannot invoke another closer or nest a verifier/suite ladder.
+
+**Stop rule:** when the actual changed path succeeds and no critical boundary was crossed, record it
+and stop. Do not manufacture another check because one could be written.
 
 ## 3. Structured output, not prose
 
-Every worker returns a typed object (findings[], each with `title, severity, file, line,
+Every worker returns a typed object (`findings[]`, each with `title, severity, file, line,
 failure_scenario, evidence, fix_sketch`). The orchestrator merges data, never re-parses paragraphs.
-Force the schema at the tool layer if your harness supports it; otherwise demand strict JSON.
+Force the schema at the tool layer if the harness supports it; otherwise demand strict JSON.
 
 ## 4. Persist as you go
 
-Write each item's result to disk (or commit it) the moment it's done. A campaign that only reports at
-the end loses everything if it's killed. If a run *is* stopped, the partial results are the salvage —
-read them before re-running, and resume only the unfinished items.
+Write each item's result to disk or commit it the moment it is done. A campaign that only reports at
+the end loses everything if it is killed. If a run is stopped, read the durable partial results and
+resume only unfinished items.
 
 ## 5. The record writer commits only its own file
 
-The authorized agent that writes a durable record commits **only that file** with a targeted `git add <file>`.
-NEVER `git add -A`, `stash`, or `checkout`: repos routinely hold another session's uncommitted work
-that must be read but never staged or disturbed. If a repo is a "separate world" (someone else's, or
-holding a live session), write the record *outside* it and don't touch it at all.
+The authorized agent that writes a durable record commits only that file with a targeted stage.
+Never stage everything, stash, or discard: repositories routinely hold another session's work that
+must be read but not disturbed. If a repository is a separate world, write the record outside it.
 
 ## 6. Completeness critic
 
-End a large campaign with one agent asking: *what did we miss?* — a scope not swept, a claim left
-unverified, a source unread. What it finds is the next round, not an afterthought.
+For a large discovery campaign, one final critic may ask what scope was missed or what claim is still
+unsupported. Its findings become normal board tasks. It is not a verifier, does not rerun completed
+work, and cannot spawn another critic.
 
 ## 7. Scale to the ask
 
-"Quick check" → one worker or a focused read. "Thoroughly audit / be comprehensive" → a larger
-roster, synthesis, and one boundary closer. Use three independent votes only when consequence
-justifies the coordination cost. Announce sampling or omitted coverage—silent truncation reads as
-"covered everything" when it was not.
+“Quick check” means one worker or a focused read. “Thoroughly audit” can justify a broader roster and
+synthesis. Use independent review only for a named critical boundary, never as a default finishing
+ceremony. Announce sampling or omitted coverage so the record remains honest.
