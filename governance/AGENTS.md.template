@@ -1,5 +1,7 @@
 # AGENTS.md — {{BRAND}}
 
+`PROJECT/HUB-QUALITY.md` governs every new or materially upgraded Hub surface.
+
 Instructions for any coding agent working in this repository. This file follows the tool-neutral
 AGENTS.md convention; it carries the same rules as `CLAUDE.md` and applies to every agent
 harness.

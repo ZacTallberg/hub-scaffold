@@ -1,5 +1,9 @@
 # AGENTS.md — orientation for an agent that just pulled this repo
 
+For any new or materially upgraded Hub, `PROJECT/HUB-QUALITY.md` is the canonical product,
+realtime, accessibility, visual, and throughput contract; execute it through
+`campaigns/elevate-hub.md`.
+
 **This repo IS the canonical hub template — the single source every new project spins up from.**
 (Until 2026-08-09 it was a generated export of a private upstream; that upstream is retired and
 this repo now stands alone.) Improvements are committed HERE, under two laws. First, the

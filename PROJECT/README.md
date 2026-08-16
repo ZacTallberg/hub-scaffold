@@ -2,6 +2,8 @@
 
 > canonical · owner: whoever leads the project · update: only by ADR (this file is the framework spec)
 
+`HUB-QUALITY.md` is the canonical construction contract for every new or materially upgraded Hub.
+
 Every app owns its code; **this folder owns everything about how the project is run**: decisions,
 research, doctrine, gaps, verification, audit history, agent coordination. It is **content-agnostic**
 — nothing in the framework refers to any particular app. It was crystallized from live-fire

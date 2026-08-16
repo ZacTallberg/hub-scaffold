@@ -1,5 +1,8 @@
 # Architecture and guarantees
 
+`PROJECT/HUB-QUALITY.md` is the architectural product contract for canonical-data rendering,
+truthful realtime recovery, accessible interaction, performance, flow, and coordination.
+
 This document describes the system that is shipped in this repository. The files under
 `PROJECT/`, `campaigns/`, and `patterns/` also contain normative operating practices; those
 practices become mechanical guarantees only after an adopter wires the named gate, monitor, or

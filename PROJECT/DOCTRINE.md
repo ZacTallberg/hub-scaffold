@@ -2,6 +2,9 @@
 
 > canonical · owner: leader · update: append §6 laws as they are crystallized (each cites its ADR); §§1–5 change only with the framework
 
+The Hub product itself is governed by `HUB-QUALITY.md`: visual hierarchy, motion meaning,
+accessibility, realtime freshness, and throughput truth are one quality bar.
+
 These are the laws every agent on this project operates under, regardless of content. They are the
 distillation of every hard lesson to date. Violating one is a defect even when the output "works".
 They are normative policy; `README.md` identifies which reference-Hub controls are shipped and which

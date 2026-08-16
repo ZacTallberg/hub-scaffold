@@ -2,6 +2,9 @@
 
 > template → becomes canonical once filled · owner: leader · update: by ADR only (scope changes are decisions)
 
+Any Hub named by this charter also satisfies `HUB-QUALITY.md`; beauty, realtime truth, and task
+throughput are completion criteria, not optional polish.
+
 The charter is the contract for WHAT this project is and WHEN it is done. It changes rarely and
 only by ADR. If work in flight contradicts the charter, the work is wrong or the charter needs an
 ADR — never both silently.

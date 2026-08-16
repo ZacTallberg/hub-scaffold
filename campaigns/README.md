@@ -1,5 +1,7 @@
 # Campaigns — the robust agent prompts that maintain, improve & augment the hub
 
+Use `elevate-hub.md` whenever constructing or materially upgrading a Hub experience.
+
 The hub and the plane are the *nouns* of this system; **campaigns are the verbs**. This directory
 holds the battle-tested agent-prompt playbooks for running multi-agent (or single-agent) work over a
 project's hub without losing state or shipping false-green. They were distilled from real campaigns

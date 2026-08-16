@@ -1,5 +1,8 @@
 # Mounting the hub into an EXISTING Django project
 
+Mounting is complete only when the rendered Hub satisfies `PROJECT/HUB-QUALITY.md`; preserve local
+identity while proving its width, preference, transport, accessibility, and flow states.
+
 The hub is two pieces:
 
 - `hub_core/` — pure-Python engine (event store, schema validator, audit, projections, frontend

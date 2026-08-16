@@ -1,5 +1,8 @@
 # BUILD — drive real work off the board (the hub loop + roles)
 
+When work changes the Hub itself, execute `elevate-hub.md` against `PROJECT/HUB-QUALITY.md` inside
+the same claimed task.
+
 Turn tasks into shipped, proven work. This is the day-to-day execution loop, plus the leader / worker /
 verifier roles for long multi-session campaigns where state can't be held in one context.
 
