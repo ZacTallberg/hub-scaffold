@@ -14,6 +14,15 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Hub Excellence Contract and live throughput cockpit
+
+- Made `PROJECT/HUB-QUALITY.md` canonical for extraordinary visual design, purposeful motion,
+  realtime truth, accessible interaction, performance, flow metrics, and durable agent coordination.
+- Added `campaigns/elevate-hub.md` and a focused contract verifier, propagated through orientation,
+  governance, mounting, construction, and bootstrap paths.
+- Reconciled cockpit theme, responsive, keyboard, print, palette, and live-update contracts; strengthened
+  event-time history, heartbeat presence, WIP enforcement, atomic pickup, and proof truth.
+
 ### Interop truth, portable identity, and bounded realtime correctness
 
 - `start_task` now delegates the entire lease + `todo -> in_progress` transition to the claim

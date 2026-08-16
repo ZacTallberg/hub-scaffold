@@ -1,5 +1,8 @@
 # AUGMENT — extend the hub (new entity type + tab) or backfill structure across repos
 
+For a new or changed human surface, also execute `elevate-hub.md` and satisfy
+`PROJECT/HUB-QUALITY.md`; a route alone is not a finished experience.
+
 Grow the system the same disciplined way its base was built. Two common augmentations:
 **A. add a new first-class entity type + hub tab** (e.g. Findings, Lessons, Decisions-log); and
 **B. backfill governance/structure across many repos at once**. Both are AUGMENT, not IMPROVE — you're

@@ -1,5 +1,7 @@
 # {{BRAND}} — project operating rules
 
+`PROJECT/HUB-QUALITY.md` governs every new or materially upgraded Hub surface.
+
 Born-governed at init. Canon, all in-repo (read when needed, in this order):
 `PROJECT/DOCTRINE.md` (standing laws) · `OPERATING-AGREEMENT.md` (the operating stance; its
 PRECEDENCE rule §7 overrides any generic stop-and-ask instruction) · `SECURITY.md` (trust boundary) · `patterns/deploy-contract.md`

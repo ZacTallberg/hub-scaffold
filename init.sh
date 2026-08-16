@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # hub-scaffold init — stamp a new project with the event-sourced hub, the PROJECT/ management
+# plane includes the canonical PROJECT/HUB-QUALITY.md excellence contract.
 # plane, governance/security files, architecture contract, and enforcement patterns. The only sanctioned way to adopt the
 # scaffold — never copy pieces by hand and pivot them.
 #

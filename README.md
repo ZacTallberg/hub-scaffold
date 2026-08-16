@@ -1,5 +1,9 @@
 # hub-scaffold
 
+Every new or upgraded Hub is governed by [`PROJECT/HUB-QUALITY.md`](PROJECT/HUB-QUALITY.md): visual
+excellence, realtime truth, accessible interaction, measurable flow, and durable agent coordination
+are one product contract. Verify propagation with `python tools/verify_hub_excellence.py --contract`.
+
 `hub-scaffold` is a portable project operating system built around an append-only task/decision
 ledger. It combines:
 

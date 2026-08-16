@@ -1,5 +1,8 @@
 # THE OPERATING AGREEMENT — hub-driven discipline
 
+`PROJECT/HUB-QUALITY.md` is the required construction and upgrade bar for the Hub itself. A visual,
+realtime, or coordination defect is product work and follows the same claimed-task discipline.
+
 **Scope.** This agreement governs how every project in this organization is *operated* — by humans
 and by agents alike. It is self-contained: everything needed to comply is stated here. It makes the
 hub task board the **single, always-current source of truth** and commits every worker to working
