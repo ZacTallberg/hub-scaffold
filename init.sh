@@ -12,7 +12,7 @@
 #   live-url      optional; becomes {{LIVE_URL}} (default: https://<project-key>.example.com)
 #
 # What it does: copies PROJECT/ (including its explicit project.json identity), hub_core/,
-# adapters/, patterns/, OPERATING-AGREEMENT.md,
+# adapters/, patterns/, campaigns/, OPERATING-AGREEMENT.md,
 # SECURITY.md, and docs/ARCHITECTURE.md into
 # the target, renames governance templates into place (CLAUDE.md, AGENTS.md), substitutes the
 # three placeholders across all text files (fail-closed if any survive), then git init -b main
@@ -49,7 +49,7 @@ TARGET="$(cd "$TARGET_ARG" && pwd)"
 
 # --- copy the scaffold content -------------------------------------------------------------
 missing=0
-for t in PROJECT hub_core adapters patterns; do
+for t in PROJECT hub_core adapters patterns campaigns; do
   [ -d "$ROOT/$t" ] || { echo "ERROR: scaffold is incomplete, missing $t/" >&2; missing=1; }
 done
 for f in OPERATING-AGREEMENT.md SECURITY.md docs/ARCHITECTURE.md governance/CLAUDE.md.template governance/AGENTS.md.template; do
@@ -60,7 +60,7 @@ done
 (cd "$ROOT" && tar \
   --exclude=.git --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='.hub' --exclude='*.sqlite3*' \
-  -cf - PROJECT hub_core adapters patterns) | (cd "$TARGET" && tar -xf -)
+  -cf - PROJECT hub_core adapters patterns campaigns) | (cd "$TARGET" && tar -xf -)
 
 cp "$ROOT/OPERATING-AGREEMENT.md" "$TARGET/OPERATING-AGREEMENT.md"
 cp "$ROOT/SECURITY.md" "$TARGET/SECURITY.md"
@@ -93,12 +93,12 @@ if LEFT="$(grep -rIln -e '{{PROJECT_KEY}}' -e '{{BRAND}}' -e '{{LIVE_URL}}' "$TA
 fi
 
 # --- git genesis ------------------------------------------------------------------------------
-GIT_ID=()
+GIT_ID=(-c commit.gpgsign=false)
 git -C "$TARGET" init -q -b main
 # Identity check must run against the TARGET repo (a local-only user.email in the caller's cwd
 # repo would otherwise pass the check here yet be absent when committing in $TARGET).
 if ! git -C "$TARGET" config user.email >/dev/null 2>&1; then
-  GIT_ID=(-c user.name="hub-scaffold-init" -c user.email="init@localhost.invalid")
+  GIT_ID+=(-c user.name="hub-scaffold-init" -c user.email="init@localhost.invalid")
 fi
 git -C "$TARGET" add -A
 git -C "$TARGET" "${GIT_ID[@]}" commit -qm "genesis: $KEY project plane + hub from hub-scaffold"
