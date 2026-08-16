@@ -52,6 +52,8 @@
     s.setAttribute("stroke-linecap", "round");
     s.setAttribute("stroke-linejoin", "round");
     if (cls) s.setAttribute("class", cls);
+    s.setAttribute("aria-hidden", "true");
+    s.setAttribute("focusable", "false");
     s.innerHTML = P[name] || P.info; // static trusted markup only — never snapshot text
     return s;
   }
@@ -187,17 +189,26 @@
   function COLS_TASK() {
     return [
       { label: "ID", k: "legacy_ref", cls: "col-id", cell: function (r) { return txt(r.legacy_ref || localId(r.id), "col-id"); } },
-      { label: "Status", k: "status", cell: function (r) { return el("td", null, [taskStatusBadge(r)]); } },
-      { label: "Live", k: "id", sortVal: function (r) { return leaseOf(r.id) ? 0 : 1; }, cell: function (r) {
+      { label: "Status", k: "status", cls: "col-status", cell: function (r) { return el("td", { class: "col-status" }, [taskStatusBadge(r)]); } },
+      { label: "Held by", k: "id", cls: "col-pickup", sortVal: function (r) { return leaseOf(r.id) ? 0 : 1; }, cell: function (r) {
           var lease = leaseOf(r.id);
-          if (!lease) return txt("", "cell-sub");
-          return el("td", null, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : ""),
+          if (!lease) return txt("—", "cell-sub col-pickup");
+          return el("td", { class: "col-pickup" }, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : ""),
             title: lease.agent + " has held this " + fmtAge(lease.age_s) }, [
             el("span", { class: "lease-dot", "aria-hidden": "true" }),
             doc.createTextNode(lease.agent || "worker")
           ])]);
         } },
-      { label: "Phase", k: "phase", cell: function (r) { return txt(r.phase, "cell-sub"); } },
+      { label: "Phase", k: "phase", cls: "col-phase", cell: function (r) { return txt(r.phase, "cell-sub col-phase"); } },
+      { label: "Priority", k: "priority", cls: "col-priority", cell: function (r) { return el("td", { class: "col-priority" }, [
+          el("span", { class: "priority priority-" + (r.priority || "P3"), text: r.priority || "—" })]); } },
+      { label: "Plan", k: "plan", cls: "col-progress", sortVal: function (r) { var p = taskProgress(r); return p ? p.pct : -1; }, cell: function (r) {
+          var p = taskProgress(r);
+          if (!p) return txt("unplanned", "cell-sub col-progress");
+          return el("td", { class: "col-progress task-progress-cell" }, [
+            el("span", { class: "mini-progress", "aria-hidden": "true" }, [el("span", { style: "width:" + p.pct + "%" })]),
+            el("span", { class: "mini-progress-label", text: p.done + "/" + p.total })]);
+        } },
       { label: "Title", k: "title", cls: "col-title", cell: function (r) { return txt(r.title, "col-title"); } }
     ];
   }
@@ -286,6 +297,7 @@
     var counts = facetCounts(tab, field);
     tab._facetBar.textContent = "";
     var keys = Object.keys(counts).sort();
+    tab._facetBar.classList.toggle("is-empty", keys.length < 2);
     if (keys.length < 2) return;                      // a single-value facet narrows nothing
     tab._facetBar.appendChild(el("span", { class: "facet-label", text: field }));
     keys.forEach(function (v) {
@@ -312,9 +324,10 @@
 
   /* ============================ TABLE RENDER ============================ */
   function buildTableTab(tab) {
-    var pane = el("div", { class: "tab-content", id: "tab-" + tab.key, role: "tabpanel" });
+    var pane = el("div", { class: "tab-content", id: "tab-" + tab.key, role: "tabpanel",
+      "aria-labelledby": "tab-btn-" + tab.key, tabindex: "0" });
     var search = el("input", { type: "search", placeholder: "Filter " + tab.label.toLowerCase() + "…", "aria-label": "Filter " + tab.label });
-    var countEl = el("span", { class: "stat-value", text: String(tab.rows.length) });
+    var countEl = el("span", { class: "stat-value", role: "status", "aria-live": "polite", text: String(tab.rows.length) });
     var toolbar = el("div", { class: "toolbar" }, [
       el("div", { class: "search-box" }, [icon("search", "s-icon"), search]),
       el("div", { class: "toolbar-spacer" }),
@@ -323,15 +336,19 @@
     var facetBar = el("div", { class: "facet-bar" });
     var thead = el("tr");
     tab.cols.forEach(function (c, i) {
-      var th = el("th", { class: (c.cls && c.cls.indexOf("num") >= 0 ? "num sortable" : "sortable") }, [
+      var sortButton = el("button", { class: "sort-btn", type: "button" }, [
         doc.createTextNode(c.label + " "), el("span", { class: "sort-ind", "aria-hidden": "true", text: "↕" })
       ]);
-      th.addEventListener("click", function () { sortBy(tab, i); });
+      var th = el("th", { scope: "col", "aria-sort": "none",
+        class: ((c.cls || "") + (c.cls && c.cls.indexOf("num") >= 0 ? " num" : "") + " sortable").trim() }, [sortButton]);
+      sortButton.addEventListener("click", function () { sortBy(tab, i); });
       thead.appendChild(th);
     });
     var tbody = el("tbody");
-    var table = el("table", { class: "data-table" }, [el("thead", null, [thead]), tbody]);
-    var wrap = el("div", { class: "table-wrapper" }, [table]);
+    var table = el("table", { class: "data-table" + (tab.key === "tasks" ? " task-table" : "") }, [
+      el("caption", { class: "sr-only", text: tab.label + " on the canonical Hub board" }),
+      el("thead", null, [thead]), tbody]);
+    var wrap = el("div", { class: "table-wrapper" + (tab.key === "tasks" ? " task-table-wrapper" : "") }, [table]);
     var stage = tab.key === "tasks" ? el("div", { class: "task-stage" }) : null;
     pane.append(toolbar, facetBar,
       el("div", { class: "content-area" }, [el("div", { class: "full-table-view" }, [stage, wrap].filter(Boolean))]));
@@ -426,7 +443,12 @@
       shown++;
       var tr = el("tr", { id: tab.type + "-" + localId(r.id), tabindex: "0", "data-hub-row": "",
         "data-entity-id": r.id, role: "button", "aria-label": (r.title || r.name || localId(r.id)) });
-      tab.cols.forEach(function (c) { tr.appendChild(c.cell(r)); });
+      tab.cols.forEach(function (c) {
+        var cell = c.cell(r);
+        cell.setAttribute("data-label", c.label);
+        if (c.cls) c.cls.split(/\s+/).forEach(function (name) { if (name) cell.classList.add(name); });
+        tr.appendChild(cell);
+      });
       tr.addEventListener("click", function () { openEntity(tab.type, r); });
       tr.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEntity(tab.type, r); } });
       tr.addEventListener("focus", function () { activate(tab.key); });
@@ -448,6 +470,7 @@
       th.classList.toggle("sort-desc", on && tab._sortDir === "desc");
       var ind = th.querySelector(".sort-ind");
       if (ind) ind.textContent = on ? (tab._sortDir === "asc" ? "↑" : "↓") : "↕";
+      th.setAttribute("aria-sort", on ? (tab._sortDir === "asc" ? "ascending" : "descending") : "none");
     });
   }
   function sortBy(tab, idx) {
@@ -476,16 +499,21 @@
     "board-drained": "Board drained", "stalled-lease": "Stalled worker",
     "dangling-dep": "Unsatisfiable dep", "governance-amber": "Needs a ruling",
     "blocked": "Blocked", "needs-spec": "Needs spec", "circuit-open": "Circuit open",
-    "adherence-drift": "Board drifting"
+    "adherence-drift": "Board drifting", "unlanded": "Not landed",
+    "delivery-unmeasured-landing": "Landing unknown",
+    "delivery-unmeasured-release": "Release unknown",
+    "delivery-unmeasured-live": "Live state unknown"
   };
   var ATTN_TONE = {
     "board-drained": "fail", "stalled-lease": "warn", "dangling-dep": "warn",
     "governance-amber": "warn", "blocked": "info", "needs-spec": "info",
-    "circuit-open": "fail", "adherence-drift": "warn"
+    "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
+    "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
+    "delivery-unmeasured-live": "warn"
   };
   function attentionItem(it) {
     var tone = ATTN_TONE[it.kind] || "info";
-    var node = el("button", { class: "attn-item t-" + tone, type: "button",
+    var node = el("button", { class: "attn-item t-" + tone, type: "button", "data-focus-key": "attention:" + (it.id || it.kind),
       "aria-label": (ATTN_LABEL[it.kind] || it.kind) + ": " + (it.title || it.reason) }, [
       el("span", { class: "attn-kind b-" + tone, text: ATTN_LABEL[it.kind] || it.kind }),
       el("span", { class: "attn-body" }, [
@@ -499,6 +527,8 @@
       node.addEventListener("click", function () { openAuditViolation(it.route.violation); });
     } else if (it.route && it.route.focus === "adherence") {
       node.addEventListener("click", function () { focusCard("adherenceCard"); });
+    } else if (it.route && it.route.focus === "delivery") {
+      node.addEventListener("click", function () { focusCard("deliveryCard"); });
     } else {
       node.disabled = true;
       node.title = "nothing to open for this item";
@@ -632,6 +662,7 @@
       var d = (a.dimensions || {})[name] || {};
       var tone = d.pct == null ? "ghost" : d.pct >= 90 ? "pass" : d.pct >= 70 ? "warn" : "fail";
       var row = el("button", { class: "adh-row t-" + tone, type: "button",
+        "data-focus-key": "adherence:" + name,
         title: (a.meaning || {})[name] || name,
         "aria-label": name + " " + (d.pct == null ? "unmeasured" : d.pct + "%") }, [
         el("span", { class: "adh-key" }, [el("span", { class: "adh-swatch", "aria-hidden": "true" }),
@@ -812,15 +843,71 @@
     return el("div", { class: "progress-velocity progress-telemetry", text: text });
   }
 
+  function commandStrip(L) {
+    L = L || {};
+    var fleet = L.fleet || [], attention = L.attention || [], readiness = L.readiness || {};
+    var productive = fleet.filter(function (c) { return c.status === "working"; }).length;
+    var stalled = fleet.filter(function (c) { return c.status === "stalled"; }).length;
+    var primary = productive ? (productive + (productive === 1 ? " worker is moving work" : " workers are moving work"))
+      : readiness.ready ? (readiness.ready + " ready for pickup") : "The ready queue is drained";
+    return el("section", { class: "overview-signal-strip", "aria-label": "Command deck status" }, [
+      el("div", { class: "signal-primary" }, [
+        el("span", { class: "live-orb", "aria-hidden": "true" }),
+        el("strong", { text: "Command deck" }),
+        el("span", { text: primary })
+      ]),
+      el("div", { class: "signal-meta" }, [
+        el("span", { text: (readiness.ready || 0) + " ready" }),
+        el("span", { text: productive + " productive" }),
+        stalled ? el("span", { class: "signal-warn", text: stalled + " stalled" }) : null,
+        el("span", { text: attention.length + " need attention" })
+      ].filter(Boolean))
+    ]);
+  }
+
+  function deliveryCard(deliv) {
+    if (!deliv || !deliv.counts) return null;
+    var c = deliv.counts, measured = deliv.measured || {}, notes = deliv.notes || {};
+    var legs = [
+      { key: "verified", label: "Verified", value: c.verified, measured: measured.verified !== false },
+      { key: "landing", label: "Landed", value: c.landed, measured: measured.landing !== false },
+      { key: "release", label: "Released", value: c.deployed, measured: measured.release !== false },
+      { key: "live", label: "Live", value: c.live, measured: measured.live !== false }
+    ];
+    var flow = el("div", { class: "delivery-flow" });
+    legs.forEach(function (leg, i) {
+      var complete = leg.measured && c.done > 0 && leg.value === c.done;
+      flow.appendChild(el("div", { class: "delivery-leg " + (!leg.measured ? "is-unknown" : complete ? "is-complete" : "is-partial"),
+        title: leg.measured ? (leg.value + " of " + c.done) : (notes[leg.key] || "unmeasured") }, [
+        el("span", { class: "delivery-n", text: leg.measured ? String(leg.value == null ? 0 : leg.value) : "?" }),
+        el("span", { class: "delivery-l", text: leg.label }),
+        el("span", { class: "delivery-of", text: "of " + c.done })
+      ]));
+      if (i < legs.length - 1) flow.appendChild(el("span", { class: "delivery-arrow", "aria-hidden": "true", text: "→" }));
+    });
+    var notesList = legs.filter(function (leg) { return !leg.measured && notes[leg.key]; }).map(function (leg) {
+      return el("li", { text: leg.label + ": " + notes[leg.key] });
+    });
+    return el("section", { class: "card delivery-card", id: "deliveryCard", "aria-labelledby": "deliveryTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "deliveryTitle" }, [icon("route"), doc.createTextNode("Delivery truth")]),
+        el("span", { class: "badge b-" + (c.live === c.done && c.done ? "pass" : "warn"), text: c.done ? (c.live + "/" + c.done + " live") : "nothing done yet" })
+      ]),
+      el("div", { class: "card-body" }, [flow, notesList.length ? el("ul", { class: "delivery-notes" }, notesList) : null].filter(Boolean))
+    ]);
+  }
+
   function progressHero(P, rd, fleet, tel, cost, wipSt) {
     P = P || {};
     var pct = P.pct || 0;
     var perHr = P.last_1h || 0;
     var ready = (rd && rd.ready) || 0;
-    var working = (fleet || []).filter(function (c) { return c.status === "working" || c.status === "stalled"; }).length;
+    var working = (fleet || []).filter(function (c) { return c.status === "working"; }).length;
+    var stalled = (fleet || []).filter(function (c) { return c.status === "stalled"; }).length;
     var etaMin = (perHr > 0 && ready > 0) ? Math.round(ready / (perHr / 60)) : null;
     var vel = "≈ " + perHr + " tasks/hr"
       + (working ? "  ·  " + working + (working === 1 ? " worker working" : " workers working") : "")
+      + (stalled ? "  ·  " + stalled + " stalled" : "")
       + (ready ? "  ·  " + ready + " ready" + (etaMin != null ? " (≈ " + fmtAge(etaMin * 60) + " to drain)" : "") : "  ·  ready queue drained");
     if (wipSt && wipSt.ceiling) {
       vel += "  ·  WIP " + wipSt.active + "/" + wipSt.ceiling + (wipSt.saturated ? " (saturated)" : "");
@@ -901,11 +988,13 @@
         el("time", { class: "trail-time rel-time", datetime: t.ts || "", "data-ts": t.ts || "", text: relativeTime(t.ts) })
       ]);
     })));
-    var card = el("button", { class: "agent-card s-" + c.status, type: "button",
+    var interactive = c.task_id && BY_ID[c.task_id];
+    var card = el(interactive ? "button" : "article", { class: "agent-card s-" + c.status,
+      type: interactive ? "button" : null,
       "data-seq": String((c.trail && c.trail[0] && c.trail[0].seq) || ""),
       "data-agent": c.agent,
       "aria-label": c.agent + " " + c.status + (c.task ? " on " + c.task : "") }, kids);
-    if (c.task_id && BY_ID[c.task_id]) card.addEventListener("click", function () { openEntity("task", BY_ID[c.task_id]); });
+    if (interactive) card.addEventListener("click", function () { openEntity("task", BY_ID[c.task_id]); });
     return card;
   }
 
@@ -953,7 +1042,8 @@
 
   function fleetView(fleet, health) {
     fleet = fleet || [];
-    var working = fleet.filter(function (c) { return c.status === "working" || c.status === "stalled"; }).length;
+    var working = fleet.filter(function (c) { return c.status === "working"; }).length;
+    var stalled = fleet.filter(function (c) { return c.status === "stalled"; }).length;
     var body = el("div", { class: "fleet-grid" });
     if (fleet.length) fleet.forEach(function (c) { body.appendChild(agentCard(c)); });
     else body.appendChild(el("div", { class: "fleet-empty", text: "No workers active. Launch one to start the fleet." }));
@@ -962,7 +1052,7 @@
     return el("section", { class: "card fleet-card", id: "fleetCard", "aria-labelledby": "fleetTitle" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title", id: "fleetTitle" }, [icon("users"),
-          doc.createTextNode("Fleet" + (working ? "  ·  " + working + " working now" : ""))]),
+          doc.createTextNode("Fleet" + (working ? "  ·  " + working + " working now" : "") + (stalled ? "  ·  " + stalled + " stalled" : ""))]),
         launch
       ]),
       el("div", { class: "card-body fleet-body" }, [workerHealthRow(health), body].filter(Boolean))
@@ -977,6 +1067,7 @@
       var list = el("div", { class: "ready-items" });
       (items || []).forEach(function (it) {
         var b = el("button", { class: "ready-item", type: "button", text: it.title || localId(it.id),
+                               "data-entity-id": it.id,
                                title: it.id + (it.not_before ? (" · waits until " + it.not_before) : "") });
         if (BY_ID[it.id]) b.addEventListener("click", function () { openEntity("task", BY_ID[it.id]); });
         else b.disabled = true;
@@ -1026,17 +1117,23 @@
   }
 
   function buildOverview() {
-    var pane = el("div", { class: "tab-content", id: "tab-overview", role: "tabpanel" });
+    var pane = el("div", { class: "tab-content", id: "tab-overview", role: "tabpanel",
+      "aria-labelledby": "tab-btn-overview", tabindex: "0" });
     var scroll = el("div", { class: "overview-scroll" });
     var au = D.audit || {}, b = D.build || {}, L = live();
     var activity = L.activity || [];
 
+    scroll.appendChild(commandStrip(L));
     scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip));
-    scroll.appendChild(attentionRail(L.attention));
-    scroll.appendChild(fleetView(L.fleet, L.worker_health));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [
+      fleetView(L.fleet, L.worker_health), attentionRail(L.attention)
+    ]));
 
     var mid = el("div", { class: "ov-grid" }, [adherenceCard(L.adherence), readinessRail(L.readiness)]);
     scroll.appendChild(mid);
+
+    var delivery = deliveryCard(L.delivery);
+    if (delivery) scroll.appendChild(delivery);
 
     var dc = dagCard(L.dag);
     if (dc) scroll.appendChild(dc);
@@ -1306,6 +1403,10 @@
     state: "connecting",
     connected: false,
     failures: 0,
+    dataHealthy: true,
+    lastAppliedAt: Date.now(),
+    etag: null,
+    snapshotJSON: JSON.stringify(D),
     syncing: false,
     queued: false,
     fallbackTimer: null,
@@ -1328,7 +1429,15 @@
   function tickLiveMeta() {
     var meta = doc.getElementById("statusMeta");
     if (!meta) return;
-    meta.textContent = "seq " + LIVE.cursor + " · " + (LIVE.lastEventAt ? relativeTime(LIVE.lastEventAt) : "awaiting event");
+    meta.textContent = "seq " + LIVE.cursor + " · " + (LIVE.lastEventAt ? relativeTime(LIVE.lastEventAt) : "awaiting event")
+      + (!LIVE.dataHealthy ? " · data stale" : "");
+  }
+  function renderConnectionStatus(fallback) {
+    if (doc.hidden) return setStatus("paused", "Paused");
+    if (!LIVE.dataHealthy) return setStatus("degraded", LIVE.connected ? "Board stale" : "Offline");
+    if (LIVE.connected) return setStatus("live", "Current");
+    if (fallback === "polling") return setStatus("degraded", "Polling");
+    return setStatus("reconnecting", LIVE.failures ? "Reconnecting" : "Connecting");
   }
   function paintBackdrop() {
     // The ambient field is a READOUT, not decoration: its brightness and tempo come from how many
@@ -1336,7 +1445,7 @@
     // board nobody is working on is nearly still — which is the honest thing for it to look like.
     var L = live();
     var working = (L.fleet || []).filter(function (c) {
-      return c.status === "working" || c.status === "stalled";
+      return c.status === "working";
     }).length;
     var band = working >= 3 ? "many" : String(Math.min(2, working));
     var attn = L.attention || [];
@@ -1378,15 +1487,35 @@
     var scroll = old.querySelector(".overview-scroll");
     var top = scroll ? scroll.scrollTop : 0;
     var active = old.classList.contains("active");
+    function keyOf(node) {
+      if (!node || !old.contains(node)) return null;
+      if (node.id) return "id:" + node.id;
+      var attrs = ["data-focus-key", "data-entity-id", "data-task-id", "data-agent", "data-seq"];
+      for (var i = 0; i < attrs.length; i++) {
+        if (node.getAttribute && node.getAttribute(attrs[i])) return attrs[i] + ":" + node.getAttribute(attrs[i]);
+      }
+      return null;
+    }
+    function findKey(root, key) {
+      if (!key) return null;
+      if (key.slice(0, 3) === "id:") return doc.getElementById(key.slice(3));
+      var cut = key.indexOf(":"), attr = key.slice(0, cut), value = key.slice(cut + 1);
+      var nodes = root.querySelectorAll("[" + attr + "]");
+      for (var i = 0; i < nodes.length; i++) if (nodes[i].getAttribute(attr) === value) return nodes[i];
+      return null;
+    }
+    var focusKey = keyOf(doc.activeElement);
+    var openerKey = keyOf(_modalOpener);
     var fresh = buildOverview();
     if (active) fresh.classList.add("active");
+    fresh.classList.add("live-refresh");
     old.parentNode.replaceChild(fresh, old);
     _panes.overview = fresh;
     var freshScroll = fresh.querySelector(".overview-scroll");
     if (freshScroll) freshScroll.scrollTop = top;
-    // A live patch must not replay the arrival animation — the page would flinch every time a
-    // worker heartbeated. The cards animate on mount only.
-    [].forEach.call(fresh.querySelectorAll(".card, .ov-grid"), function (n) { n.style.animation = "none"; });
+    var restored = findKey(fresh, focusKey);
+    if (restored) { try { restored.focus({ preventScroll: true }); } catch (e) { restored.focus(); } }
+    if (openerKey) _modalOpener = findKey(fresh, openerKey) || _modalOpener;
     primeLaunchControls();
     paintBackdrop();
   }
@@ -1484,6 +1613,30 @@
     });
   }
 
+  function derivePhases() {
+    var map = {};
+    (D.tasks || []).forEach(function (task) {
+      var name = task.phase || "Unphased";
+      var row = map[name] || (map[name] = { name: name, done: 0, total: 0 });
+      row.total += 1;
+      if (task.status === "done") row.done += 1;
+    });
+    D.phases = Object.keys(map).sort(function (a, b) {
+      return a.localeCompare(b, undefined, { numeric: true });
+    }).map(function (name) {
+      var row = map[name];
+      row.pct = row.total ? Math.round(100 * row.done / row.total) : 0;
+      return row;
+    });
+  }
+  function publishClientState() {
+    var json = JSON.stringify(D);
+    var island = doc.getElementById("hub-data");
+    if (island) island.textContent = json;
+    LIVE.snapshotJSON = json;
+    if (global.HubPalette && global.HubPalette.refresh) global.HubPalette.refresh(D);
+  }
+
   function applySnapshot(next, reason) {
     if (!next || !next.tasks) throw new Error("incomplete Hub snapshot");
     var changes = taskDelta(D.tasks || [], next.tasks || []);
@@ -1495,8 +1648,7 @@
     rerenderTabs(changes);
     refreshOverview();
     reactCockpit(prevProg, prevFleet);
-    var island = doc.getElementById("hub-data");
-    if (island) island.textContent = JSON.stringify(D);
+    publishClientState();
     reactToChanges(changes);
 
     var cursor = live().cursor || {};
@@ -1505,8 +1657,9 @@
     var n = Object.keys(changes).length;
     if (n) announce(n + (n === 1 ? " task changed." : " tasks changed."));
     else if (((live().activity || [])[0] || {}).seq > oldActivity) announce("New canonical Hub activity received.");
-    if (LIVE.connected) setStatus("live", "Live");
-    else if (reason === "fallback") setStatus("degraded", "Polling");
+    LIVE.dataHealthy = true;
+    LIVE.lastAppliedAt = Date.now();
+    renderConnectionStatus(reason === "fallback" ? "polling" : null);
     tickLiveMeta();
   }
 
@@ -1535,16 +1688,33 @@
         if (payload.live[k] != null) D.live[k] = payload.live[k];
       });
     }
+    if (payload.audit) D.audit = Object.assign({}, D.audit || {}, payload.audit);
+    derivePhases();
     var changes = taskDelta(prevTasks, D.tasks || []);
     rebuildIndex();
     rerenderTabs(changes);
     refreshOverview();
     reactCockpit(prevProg, prevFleet);
     reactToChanges(changes);
+    publishClientState();
     var cursor = payload.cursor || {};
     LIVE.cursor = Math.max(LIVE.cursor, cursor.seq || 0);
-    if (LIVE.connected) setStatus("live", "Live");
+    LIVE.dataHealthy = true;
+    LIVE.lastAppliedAt = Date.now();
+    renderConnectionStatus();
     tickLiveMeta();
+  }
+
+  function timedFetch(url, options) {
+    if (!global.AbortController) return fetch(url, options);
+    var controller = new global.AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 9000);
+    options = Object.assign({}, options || {}, { signal: controller.signal });
+    return fetch(url, options).then(function (response) {
+      clearTimeout(timer); return response;
+    }, function (error) {
+      clearTimeout(timer); throw error;
+    });
   }
 
   function syncDelta(reason) {
@@ -1554,7 +1724,7 @@
     var since = LIVE.cursor || 0;
     if (!since) return syncSnapshot(reason);
     LIVE.syncing = true;
-    return fetch("delta.json?since=" + encodeURIComponent(since), {
+    return timedFetch("delta.json?since=" + encodeURIComponent(since), {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
@@ -1578,17 +1748,30 @@
     LIVE.syncing = true;
     var button = doc.getElementById("refreshBtn");
     if (button) button.classList.add("is-syncing");
-    return fetch("?format=json", {
-      credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
+    var headers = { Accept: "application/json" };
+    if (LIVE.etag) headers["If-None-Match"] = LIVE.etag;
+    return timedFetch("?format=json", {
+      credentials: "same-origin", cache: "no-store", headers: headers
     }).then(function (response) {
+      if (response.status === 304) return { notModified: true };
       if (!response.ok) throw new Error("HTTP " + response.status);
-      return response.json();
-    }).then(function (snapshot) {
-      applySnapshot(snapshot, reason || "sync");
+      LIVE.etag = response.headers.get("ETag") || LIVE.etag;
+      return response.json().then(function (snapshot) { return { snapshot: snapshot }; });
+    }).then(function (result) {
+      var snapshot = result && result.snapshot;
+      if (snapshot && JSON.stringify(snapshot) !== LIVE.snapshotJSON) {
+        applySnapshot(snapshot, reason || "sync");
+      } else {
+        LIVE.dataHealthy = true;
+        LIVE.lastAppliedAt = Date.now();
+        renderConnectionStatus(reason === "fallback" ? "polling" : null);
+        tickLiveMeta();
+      }
       LIVE.failures = 0;
     }).catch(function (error) {
       LIVE.failures += 1;
-      setStatus("degraded", "Degraded");
+      LIVE.dataHealthy = false;
+      renderConnectionStatus();
       announce("Live Hub synchronization is degraded. Retrying automatically.");
       if (reason === "manual") toast("Sync failed; automatic recovery is active.", "error");
     }).then(function () {
@@ -1624,13 +1807,13 @@
   function connectLive() {
     disconnectLive();
     if (doc.hidden) return;
-    if (!global.EventSource) { setStatus("degraded", "Polling"); startFallback(); return; }
+    if (!global.EventSource) { renderConnectionStatus("polling"); startFallback(); return; }
     setStatus("connecting", LIVE.failures ? "Reconnecting" : "Connecting");
     var source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor));
     LIVE.source = source;
     source.onopen = function () {
       LIVE.connected = true; LIVE.failures = 0;
-      stopFallback(); setStatus("live", "Live"); tickLiveMeta();
+      stopFallback(); renderConnectionStatus(); tickLiveMeta();
     };
     source.addEventListener("ready", function (event) {
       // Never bump the cursor past unconsumed events: if the stream starts ahead of our state,
@@ -1642,7 +1825,7 @@
       tickLiveMeta();
     });
     source.addEventListener("heartbeat", function () {
-      if (LIVE.state !== "live") setStatus("live", "Live");
+      renderConnectionStatus();
       tickLiveMeta();
     });
     source.addEventListener("hub", function (event) {
@@ -1657,7 +1840,7 @@
     source.onerror = function () {
       disconnectLive();
       LIVE.failures += 1;
-      setStatus("reconnecting", "Reconnecting");
+      renderConnectionStatus();
       startFallback();
       LIVE.reconnectTimer = setTimeout(connectLive, Math.min(10000, 900 + LIVE.failures * 700));
     };
@@ -1786,7 +1969,6 @@
       ["pointerenter", "focusin", "touchstart"].forEach(function (name) {
         anchor.addEventListener(name, function () { prepareLaunch(anchor); }, { passive: true });
       });
-      prepareLaunch(anchor);
     });
   }
   function initLaunchControls() {
@@ -1802,10 +1984,27 @@
   function activate(key) {
     TABS.forEach(function (t) {
       var on = t.key === key;
-      if (t._btn) { t._btn.classList.toggle("active", on); t._btn.setAttribute("aria-selected", on ? "true" : "false"); }
+      if (t._btn) {
+        t._btn.classList.toggle("active", on);
+        t._btn.setAttribute("aria-selected", on ? "true" : "false");
+        t._btn.setAttribute("tabindex", on ? "0" : "-1");
+      }
       if (_panes[t.key]) _panes[t.key].classList.toggle("active", on);
     });
     try { var u = new URL(location.href); u.searchParams.set("tab", key); history.replaceState(null, "", u.pathname + u.search + location.hash); } catch (e) {}
+  }
+
+  function tabKeydown(event, key) {
+    var index = TABS.findIndex(function (tab) { return tab.key === key; });
+    var next = index;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % TABS.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = TABS.length - 1;
+    else return;
+    event.preventDefault();
+    activate(TABS[next].key);
+    TABS[next]._btn.focus();
   }
 
   function build() {
@@ -1815,9 +2014,12 @@
     var tabsBar = doc.getElementById("tabsBar"), panes = doc.getElementById("tabPanes");
     if (!tabsBar || !panes) return;
     TABS.forEach(function (t) {
-      var btn = el("button", { class: "tab-btn", role: "tab", "data-tab": t.key, "aria-selected": "false" }, [icon(t.icon), doc.createTextNode(" " + t.label)]);
+      var btn = el("button", { class: "tab-btn", id: "tab-btn-" + t.key, type: "button", role: "tab",
+        "data-tab": t.key, "aria-controls": "tab-" + t.key, "aria-selected": "false", tabindex: "-1" },
+        [icon(t.icon), doc.createTextNode(" " + t.label)]);
       if (t.rows) { t._badge = el("span", { class: "tab-badge", text: String(t.rows.length) }); btn.appendChild(t._badge); }
       btn.addEventListener("click", function () { activate(t.key); });
+      btn.addEventListener("keydown", function (event) { tabKeydown(event, t.key); });
       t._btn = btn; tabsBar.appendChild(btn);
       var pane = t.build ? t.build(t) : buildTableTab(t);
       _panes[t.key] = pane; panes.appendChild(pane);
