@@ -12,7 +12,7 @@ import time
 from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
 
-from hub_core import adherence, cost, dag, failure_taxonomy, flow, project, projections, telemetry, upcast
+from hub_core import adherence, cost, dag, failure_taxonomy, flow, project, projections, telemetry, upcast, wip
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app

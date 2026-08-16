@@ -168,29 +168,30 @@ reclaim = rung("expired-reclaim-200", post(
 if reclaim.get("version") != 2 or reclaim.get("token") == qtoken:
     failures.append("expired-reclaim-fencing")
 
-# rung 2: a task WITHOUT verification_command cannot be completed even with real evidence
+# rung 2: strict-mode discovery and direct claim agree that an unspecced task is not executable
 r = rung("create-no-vc-200", post("/hub/api/task", {"title": "ladder: no verification_command", "agent": "ladder"}), 200)
 tid1 = r["data"]["id"]
-lease1 = rung("claim1-200", post("/hub/api/claim", {"id": tid1, "agent": "ladder"}), 200)["token"]
-empty = rung("empty-evidence-422", post("/hub/api/complete", {
-    "id": tid1, "token": lease1, "agent": "ladder", "accept_note": "not enough",
-    "evidence_uri": [""]
-}), 422)
-if ((empty.get("errors") or [{}])[0].get("code")) != "need_evidence":
-    failures.append("empty-evidence-error-code")
-rung("no-vc-422", post("/hub/api/complete", {"id": tid1, "token": lease1, "agent": "ladder",
-                                             "accept_note": "trying without vc", "evidence_uri": ["manage.py"]}), 422)
+needs_spec = rung("claim-needs-spec-409", post(
+    "/hub/api/claim", {"id": tid1, "agent": "ladder-needs-spec"}), 409)
+if ((needs_spec.get("errors") or [{}])[0].get("code")) != "needs_spec":
+    failures.append("claim-needs-spec-error-code")
 
 # rung 3: evidence must dereference (URL <400 / repo commit / existing repo path)
 r = rung("create-real-200", post("/hub/api/task", {"title": "ladder: real completion", "agent": "ladder",
                                                    "verification_command": "python -c \"print('verified')\""}), 200)
 tid2 = r["data"]["id"]
-lease2 = rung("claim2-200", post("/hub/api/claim", {"id": tid2, "agent": "ladder"}), 200)["token"]
-rung("fake-evidence-422", post("/hub/api/complete", {"id": tid2, "token": lease2, "agent": "ladder",
+lease2 = rung("claim2-200", post("/hub/api/claim", {"id": tid2, "agent": "ladder-real"}), 200)["token"]
+empty = rung("empty-evidence-422", post("/hub/api/complete", {
+    "id": tid2, "token": lease2, "agent": "ladder-real", "accept_note": "not enough",
+    "evidence_uri": [""]
+}), 422)
+if ((empty.get("errors") or [{}])[0].get("code")) != "need_evidence":
+    failures.append("empty-evidence-error-code")
+rung("fake-evidence-422", post("/hub/api/complete", {"id": tid2, "token": lease2, "agent": "ladder-real",
                                                      "accept_note": "fake", "evidence_uri": ["no-such-file-xyz.txt"]}), 422)
 
 
-def receipt(cmd, exit_code=0, ran_by="ladder"):
+def receipt(cmd, exit_code=0, ran_by="ladder-real"):
     """A typed verification_run receipt. The WORKER runs the command and reports what happened;
     the hub validates the receipt and never executes the string itself (RCE ruling)."""
     import hashlib
@@ -203,11 +204,11 @@ r = rung("create-failing-vc-200", post("/hub/api/task", {
     "verification_command": "python -c \"import sys; sys.exit(7)\""
 }), 200)
 tid3 = r["data"]["id"]
-lease3 = rung("claim3-200", post("/hub/api/claim", {"id": tid3, "agent": "ladder"}), 200)["token"]
+lease3 = rung("claim3-200", post("/hub/api/claim", {"id": tid3, "agent": "ladder-fail"}), 200)["token"]
 failed = rung("failing-vc-422", post("/hub/api/complete", {
-    "id": tid3, "token": lease3, "agent": "ladder", "accept_note": "must fail",
+    "id": tid3, "token": lease3, "agent": "ladder-fail", "accept_note": "must fail",
     "evidence_uri": ["manage.py"],
-    "verification_run": receipt("python -c \"import sys; sys.exit(7)\"", exit_code=7)
+    "verification_run": receipt("python -c \"import sys; sys.exit(7)\"", exit_code=7, ran_by="ladder-fail")
 }), 422)
 if ((failed.get("errors") or [{}])[0].get("code")) != "bad_verification_run":
     failures.append("failing-vc-error-code")
@@ -215,16 +216,16 @@ if ((failed.get("errors") or [{}])[0].get("code")) != "bad_verification_run":
 # rung 4b: NO receipt at all is refused — the hub will not run the command on your behalf, so a
 # completion with nothing to validate is a claim, not a proof.
 noproof = rung("no-receipt-422", post("/hub/api/complete", {
-    "id": tid3, "token": lease3, "agent": "ladder", "accept_note": "no proof",
+    "id": tid3, "token": lease3, "agent": "ladder-fail", "accept_note": "no proof",
     "evidence_uri": ["manage.py"]}), 422)
 if ((noproof.get("errors") or [{}])[0].get("code")) != "need_verification_run":
     failures.append("no-receipt-error-code")
 
 # rung 4c: a receipt for a DIFFERENT command cannot be borrowed into place.
 borrowed = rung("borrowed-receipt-422", post("/hub/api/complete", {
-    "id": tid3, "token": lease3, "agent": "ladder", "accept_note": "borrowed",
+    "id": tid3, "token": lease3, "agent": "ladder-fail", "accept_note": "borrowed",
     "evidence_uri": ["manage.py"],
-    "verification_run": receipt("python -c \"print('something else entirely')\"")}), 422)
+    "verification_run": receipt("python -c \"print('something else entirely')\"", ran_by="ladder-fail")}), 422)
 if ((borrowed.get("errors") or [{}])[0].get("code")) != "bad_verification_run":
     failures.append("borrowed-receipt-error-code")
 
@@ -234,16 +235,16 @@ r = rung("create-audit-blocked-200", post("/hub/api/task", {
     "verification_command": "python -c \"print('verified')\""
 }), 200)
 tid4 = r["data"]["id"]
-lease4 = rung("claim4-200", post("/hub/api/claim", {"id": tid4, "agent": "ladder"}), 200)["token"]
+lease4 = rung("claim4-200", post("/hub/api/claim", {"id": tid4, "agent": "ladder-audit"}), 200)["token"]
 critical = {"violations": [{"id": "synthetic:critical", "severity": "critical",
                              "observed": "seeded self-test violation"}]}
 with mock.patch("hub.hub_app.run_audit", return_value=critical):
     blocked = rung("critical-audit-422", post("/hub/api/complete", {
-        "id": tid4, "token": lease4, "agent": "ladder", "accept_note": "must block",
+        "id": tid4, "token": lease4, "agent": "ladder-audit", "accept_note": "must block",
         "evidence_uri": ["manage.py"],
         # A VALID receipt, so this rung reaches the AUDIT gate rather than stopping at the
         # receipt gate: an unsound hub must refuse even a completion whose proof is perfect.
-        "verification_run": receipt("python -c \"print('verified')\"")
+        "verification_run": receipt("python -c \"print('verified')\"", ran_by="ladder-audit")
     }), 422)
 if ((blocked.get("errors") or [{}])[0].get("code")) != "audit_unsound":
     failures.append("critical-audit-error-code")
@@ -255,7 +256,7 @@ r = rung("create-version-race-200", post("/hub/api/task", {
 }), 200)
 tid5 = r["data"]["id"]
 lease5 = rung("claim-version-race-200", post(
-    "/hub/api/claim", {"id": tid5, "agent": "ladder"}), 200)["token"]
+    "/hub/api/claim", {"id": tid5, "agent": "ladder-version"}), 200)["token"]
 
 
 def mutate_during_completion():
@@ -271,8 +272,8 @@ def mutate_during_completion():
 
 with mock.patch("hub.hub_app.run_audit", side_effect=mutate_during_completion):
     raced = rung("completion-version-race-409", post("/hub/api/complete", {
-        "verification_run": receipt("python -c \"print('verified')\""),
-        "id": tid5, "token": lease5, "agent": "ladder", "accept_note": "must conflict",
+        "verification_run": receipt("python -c \"print('verified')\"", ran_by="ladder-version"),
+        "id": tid5, "token": lease5, "agent": "ladder-version", "accept_note": "must conflict",
         "evidence_uri": ["manage.py"]
     }), 409)
 if ((raced.get("errors") or [{}])[0].get("code")) != "conflict":
@@ -284,7 +285,7 @@ r = rung("create-lease-race-200", post("/hub/api/task", {
 }), 200)
 tid6 = r["data"]["id"]
 lease6 = rung("claim-lease-race-200", post(
-    "/hub/api/claim", {"id": tid6, "agent": "ladder"}), 200)["token"]
+    "/hub/api/claim", {"id": tid6, "agent": "ladder-lease"}), 200)["token"]
 
 
 def expire_during_completion():
@@ -296,18 +297,18 @@ def expire_during_completion():
 
 with mock.patch("hub.hub_app.run_audit", side_effect=expire_during_completion):
     expired_complete = rung("completion-lease-race-409", post("/hub/api/complete", {
-        "verification_run": receipt("python -c \"print('verified')\""),
-        "id": tid6, "token": lease6, "agent": "ladder", "accept_note": "must lose ownership",
+        "verification_run": receipt("python -c \"print('verified')\"", ran_by="ladder-lease"),
+        "id": tid6, "token": lease6, "agent": "ladder-lease", "accept_note": "must lose ownership",
         "evidence_uri": ["manage.py"]
     }), 409)
 if ((expired_complete.get("errors") or [{}])[0].get("code")) != "lease":
     failures.append("completion-lease-race-code")
 
 # rung 7: claimed + dereferencing evidence + worker-produced exit-0 receipt + sound audit -> done
-rung("real-complete-200", post("/hub/api/complete", {"id": tid2, "token": lease2, "agent": "ladder",
+rung("real-complete-200", post("/hub/api/complete", {"id": tid2, "token": lease2, "agent": "ladder-real",
                                                      "accept_note": "worker ran it out-of-band and submitted the receipt",
                                                      "evidence_uri": ["manage.py"],
-                                                     "verification_run": receipt("python -c \"print('verified')\"")}), 200)
+                                                     "verification_run": receipt("python -c \"print('verified')\"", ran_by="ladder-real")}), 200)
 if hub_app._read_lease(tid2) is not None:
     failures.append("successful-completion-left-lease")
 rung("done-task-not-claimable-409", post(
