@@ -482,7 +482,12 @@ def take(request, b):
                 candidates.append(task)
         if not candidates:
             return JsonResponse({"errors": [{"code": "no_ready_task"}]}, status=409)
-        task = schedule.order_ready(candidates, busy_touches=set())[0]
+        busy_touches = set()
+        entities = state.get("entities", {})
+        for lease in live:
+            busy_touches.update(schedule.normalized_touches(
+                entities.get(lease.get("task"), {})))
+        task = schedule.order_ready(candidates, busy_touches=busy_touches)[0]
         eid = task["id"]
         res = hub_app.claim(eid, agent, ttl_s=ttl)
         if not res["ok"]:

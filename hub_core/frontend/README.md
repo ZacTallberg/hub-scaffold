@@ -11,7 +11,12 @@ exception. Tabs and dialogs follow the keyboard/focus contracts in the canonical
 changes use appropriate live regions. Reduced motion, forced colors, narrow reflow, transport
 degradation, and false-green delivery states are first-class renderer states, not cleanup work.
 
-Any change to this directory is reviewed against the contract's 320/768/1440 rendered-state proof
-matrix. Automated checks establish wiring and objective invariants; a human design review decides
-whether hierarchy, rhythm, identity, density, and delight meet the bar.
+`done` means the real operation completed. Do not weaken that success because a task correctly has
+no `verification_run`: a receipt is expected only when the task explicitly declared a rare,
+transient critical-boundary `verification_command`. Keep those exceptional receipts detailed and
+actionable without turning them into a universal completion gate.
 
+Judge copy, style, motion, hierarchy, rhythm, identity, density, and delight on the real rendered
+surface—never through permanent copy snapshots or non-critical tests. If a structural critical
+boundary truly needs a probe, make it transient, run it once, retain only its receipt, and remove
+the probe before commit.
