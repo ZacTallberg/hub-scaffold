@@ -1083,7 +1083,7 @@
       ]));
     }
     group("ready to pull", rd.ready, rd.ready_top, "pass", "unblocked and specced — a worker can take these now");
-    group("need spec", rd.needs_spec, rd.needs_spec_top, "warn", "unblocked but no verification_command — a worker would stall");
+    group("need spec", rd.needs_spec, rd.needs_spec_top, "warn", "unblocked executable work needs concrete acceptance");
     group("waiting on a timer", rd.snoozed, rd.snoozed_top, "info", "deferred, not drained — they return on their own");
     if (!rows.length) rows.push(el("p", { class: "cell-sub", text: "No todo work on the board." }));
     return el("section", { class: "card ready-card", id: "readyCard", "aria-labelledby": "readyTitle" }, [

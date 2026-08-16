@@ -1,72 +1,58 @@
-# verify/ — the boundary-triggered independent verification lane contract
+# verify/ — transient critical-boundary proof contract
 
-> canonical contract · owner: THIS FILE + manifest contract = producer (worker); everything else under verify/ = verifier · update: green rule changes are versioned amendments here
+> canonical contract · owner: leader · update: only when the critical-boundary policy changes
 
-This scaffold supplies the contract and target layout, not a generic verifier implementation. An
-adopting project must build the manifest generator, verifier tools, gate consumer, deployment hook,
-and failure fixtures for its own claims. Until those exist and have failed in test, this directory
-is a design—not an active gate.
+This directory defines an exceptional lane, not a standing test system. The successful real
+operation is the default proof for every task. Copy, wording, style, spacing, color, animation
+polish, routine fixes, and other non-critical changes never activate this lane and receive no
+automated validation.
 
-For releases, high-consequence product claims, and sampled audits, the out-of-process answer to
-false-green is a **verifier whose identity differs from the builder's** and a **fail-closed gate**
-that blocks the protected action until green. This lane is not required for every minor task. Its
-scope and trigger must be explicit; a transient verifier exits when its verdict lands. This file is
-the whole contract; the campaign wiring is `../pm/PROTOCOL.md` §8.
+Permanent tests, fixtures, verifier scripts, calibration sets, generated manifests, scheduled
+runs, and CI verification workflows are prohibited. A release is not automatically a reason to
+verify completed work again.
 
-## 1. Layout & write scope
-```
-verify/
-  MANIFEST-CONTRACT.md   producer-owned: exact manifest row shape + how to regenerate
-  manifest.jsonl         producer-generated: one row per (record, field) with rendered value + evidence
-  verdicts.jsonl         verifier-written: one verdict row per (record, field) checked
-  gate/<run_id>.json     verifier-written gate artifacts (immutable)
-  livecap/<doc_id>.txt   saved snapshots of live-web checks (URL + timestamp header)
-  tmp/                   verifier scratch (incl. its read-only DB copy)
-  tools/                 the harness: selfcheck (grounding validator), gate writer — fail-closed, exit≠0 on any error
-  _archive/              superseded + voided-<ts>/ material
-```
-One writer per file. The producer NEVER writes verdicts/gates; the verifier NEVER writes the
-manifest or contract, app code, or data — findings escalate, they don't self-heal.
+## 1. Activation boundary
 
-## 2. The manifest (producer side)
-- One row per verifiable claim: `{record_id, field, rendered_value, evidence:[{doc_id, text}], …}`
-  — exact shape defined in `MANIFEST-CONTRACT.md`. ALL evidence the system holds for the claim goes
-  in (an omitted evidence type systematically manufactures "insufficient" verdicts).
-- **Every generation is content-hashed and stamped** (`manifest_sha`) — sweeps and verdicts key on
-  `(record_id, field)` + `manifest_sha`, NEVER on line offsets. Regenerating mid-sweep is allowed;
-  the verifier re-keys, carried-forward verdicts stay valid only where the row content is unchanged.
+Activate a transient verifier only when the leader names a concrete risk at one of these critical
+boundaries:
 
-## 3. Verdicts (verifier side)
-- Row: `{record_id, field, lane, verdict, doc_id, quote, confidence, manifest_sha}` with
-  `verdict ∈ supported | refuted | insufficient` and `lane ∈ derivation | evidence | world`:
-  - **derivation** — rendered value vs the system-of-record;
-  - **evidence** — vs gathered documents;
-  - **world** — vs live reality (fetch it; save the snapshot to `livecap/` or the check doesn't count).
-- **Grounding law:** every `supported` quote must be verbatim string-contained in its cited source.
-  A failing quote is INVALID → counts as refuted + a `grounding_failure`. `tools/selfcheck` enforces
-  this mechanically and is run before any gate artifact is written.
-- Write verdicts BEFORE reporting them. Anti-stall: cap per-record effort; close `insufficient` and move on.
+- security or privilege;
+- destructive writes or data integrity;
+- schema or data migration;
+- public protocol compatibility;
+- concurrency, leases, or fencing.
 
-## 4. The gate
-- Artifact: `gate/<run_id>.json` =
-  `{run_id, scope: delta|full|calibration, started, finished, manifest_sha, records_checked,
-    verdicts:{supported, refuted, insufficient, insufficient_disclosed}, grounding_failures,
-    red_ids, live_checks:{performed, confirmed, contradicted, unreachable}, rule, green}`.
-- **The green rule lives HERE, versioned** (never redefined in channel prose — the v1 campaign
-  redefined it five times in directives and voided artifacts each time):
+If the changed behavior can be safely exercised through its real operation, do that and stop. A
+temporary probe is justified only when the real operation cannot expose an unacceptable failure
+clearly enough.
 
-  > **GREEN-RULE v1:** `green = (refuted == 0 AND grounding_failures == 0 AND undisclosed
-  > insufficient == 0)`. Zero means zero — no judgment layer. "Disclosed" is keyed on what the
-  > USER SEES (the rendered badge/state), not an internal status field: honest disclosure of
-  > uncertainty never blocks; OVERCLAIM always blocks.
+## 2. One-shot procedure
 
-  Changing the rule = a versioned amendment block here + an ADR; artifacts carry the `rule` id they
-  were computed under; in-flight artifacts under the old rule are voided or re-derived, explicitly.
-- **Re-derivation law (DOCTRINE §2.5):** the ship gate recomputes green FROM THE VERDICT ROWS
-  (join to manifest, re-check containment, recount, latest-verdict-per-(record,field) within scope).
-  An artifact whose `green` disagrees with its rows is **FABRICATED-GREEN** and blocks hard.
-- **Fail-closed:** the deploy path requires the latest gate artifact to be green, fresh (covers
-  what's shipping), and re-derived. Missing, stale, or red ⇒ ship BLOCKED.
-- **The gate is itself gated:** self-test fixtures (a seeded refuted row, a seeded ungrounded quote,
-  a seeded fabricated-green artifact) must FAIL the gate in test; a calibration anchor set is
-  re-run on every full sweep to catch verifier drift.
+1. Inherit the accepted receipts of every completed dependency. Never rerun child proof.
+2. Name only the newly created critical integration seam, if one exists.
+3. Prefer the real protected operation. If necessary, create one probe in system temporary space
+   or explicitly disposable task scratch—never as a tracked project file.
+4. Run it once against the final change and record a durable receipt containing the task, boundary,
+   action or exact command, target SHA/state, verifier identity, observed outcome, and timestamp.
+5. Delete the probe, fixture data, copied database, and all scratch before commit. Confirm only the
+   receipt remains, then fold the verifier seat.
+
+Receipts compose upward. A parent task or release accepts completed child receipts and, at most,
+observes the one new critical seam created by composition. A verifier must never launch another
+verifier or create checker fan-out.
+
+## 3. Failure routing
+
+An observed real failure is all the notice the project needs. Open a fresh repair task with the
+failed action and observed outcome. Route it to a dedicated error-fixing agent when the project has
+one so delivery agents continue unrelated work. After the repair, retry the failed real operation;
+its successful result closes the task. Do not preserve the diagnostic as a regression test.
+
+## 4. Stop rule
+
+When the changed real behavior succeeds, no critical boundary remains unobserved, the durable
+receipt is filed if one was required, and all temporary proof artifacts are gone, stop. More checks
+reduce throughput and are a process defect.
+
+`MANIFEST-CONTRACT.md` is dormant reference material unless a leader explicitly scopes it for a
+single critical boundary. It does not authorize a standing generator, sweep, harness, or gate.

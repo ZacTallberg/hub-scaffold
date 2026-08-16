@@ -15,7 +15,8 @@ solely off it.
 **Policy versus enforcement.** This agreement states the operating standard. The shipped Hub's
 default `tracked` mode mechanically requires a claim, acceptance note, and evidence value, but it
 does not dereference that evidence or require a verification command. Set
-`HUB_DONE_STRICTNESS=strict` to make those two proof checks mechanical. Independent reviewer/canary
+`HUB_DONE_STRICTNESS=strict` to make evidence dereferenceability mechanical. Strict mode still does
+not require a command merely because a task exists. Independent reviewer/canary
 identity, deploy verification, alerting, and research discipline remain process or adopter-wired
 controls unless the project supplies the named external gate. See `docs/ARCHITECTURE.md` for the
 enforcement matrix and `SECURITY.md` before issuing a write token.
@@ -42,17 +43,20 @@ Strict completion strengthens proof of a claim; it does not reduce the authority
    priority. Work is never picked by gut; you take the top of the queue.
 2. **CLAIM** — mark it `in_progress` *before* touching anything. One task in progress per worker.
 3. **IMPLEMENT** — do only that task. New work discovered mid-task is **added as a new task first**
-   (§3); scope is never silently expanded.
-4. **RECORD** — mark it `done` **with evidence**: a commit SHA, a passing-test transcript, a live
-   URL, a screenshot. Evidence must be *dereferenceable* — a reviewer who was not present can
-   follow it and re-check. Evidence must postdate the final edit; a run from before the last
-   change is void. Run the Hub in `strict` mode when the server itself must enforce
-   dereferenceability and a matching typed exit-0 receipt for the task's verification command.
-5. **VERIFY proportionally** — use the smallest check that can catch the plausible failure. Routine
-   low-risk work may need only a diff/evidence review or no executable test. Invoke a fresh,
-   independent closer for releases, security/auth, migrations/destructive work, public contracts,
-   concurrency/process launch, regressions, or occasional sampling. If a declared gate is red, the
-   transition is refused and the task stays open.
+   (§3); scope is never silently expanded. A failed real operation becomes fresh task input that may
+   route to a repair/error-fixing lane. A delivery agent does not speculate about unrelated causes
+   or preemptively take on the repair role.
+4. **RECORD** — mark it `done` **with evidence** from the real operation: a commit SHA, live URL,
+   screenshot, command result, or resulting Hub event. Evidence must truthfully identify what
+   happened after the final edit. Run the Hub in `strict` mode when the server itself must enforce
+   dereferenceability; when a task explicitly carries a verification command, completion also
+   carries its matching typed exit-0 receipt.
+5. **VERIFY only at a critical boundary** — the actual operation is the default proof. Do not create
+   or run tests for copy, wording, style, animation polish, or another non-critical fix. Only
+   security/authorization, destructive behavior, data integrity, migrations, public protocol
+   compatibility, or concurrency may justify a focused test. That test is created in temporary
+   space, run once, recorded as a receipt, and deleted before commit. If a declared critical gate is
+   red, the transition is refused and the task stays open.
 
 The board is updated **at the moment of the event** — claim when claiming, done when proven —
 never batched or reconstructed afterwards. A board that lags the work is itself a defect.
@@ -61,6 +65,9 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
 
 - Found a bug, a missing step, a new idea? **It becomes a task on the board first**, then it gets
   claimed. There is no "quick fix" lane; an off-board change is a discipline violation.
+- A failure observed while delivering another task is captured with its concrete operation and
+  output, then left for an explicit repair/error-fixing lane to claim. Delivery workers do not
+  silently widen their role into speculative diagnosis or repair.
 - Scope changes are tasks. Decisions are ADRs (§4). Research lands in the research log (§6).
   There is no fourth place for work to live.
 
@@ -78,16 +85,21 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
 - **FALSE-GREEN is the meta-failure** this agreement exists to kill: work that *reports* green
   without *being* green. Gates fail not by being absent but by being self-attested, bypassed,
   textual-only, or committed-but-not-deployed.
-- Therefore, `done` always carries a truthful evidence pointer, but the evidence burden is
-  **risk-proportional**. A small copy or formatting change does not require the full selftest
-  ladder or a second agent. The implementer may provide routine evidence; never call that independent.
-- **Identity separation is mandatory at declared independent gates, not on every task.** A release,
-  deploy, privileged boundary, migration, public compatibility change, regression, or sampled audit
-  uses a fresh verifier that did not build the work. The verifier reports once and exits; it does not
-  linger as another worker or repair its own findings.
-- Tests earn critical-path placement by defending a concrete failure mode. Broad batteries live off
-  the ordinary edit loop and run at meaningful boundaries. Cheap impact-aware checks may remain on
-  the default path.
+- Therefore, `done` always carries a truthful evidence pointer, but the default proof is simply the
+  real operation succeeding. Copy, style, animation, and other non-critical fixes receive no test
+  and no automated copy validation.
+- **All tests are transient and exceptional.** Only security/authorization,
+  destructive/data-integrity behavior, migrations, protocol compatibility, or concurrency may
+  justify one. The smallest temporary probe is run once; its exact result is retained as the
+  receipt; the probe and fixtures are deleted before commit. No permanent suite, verifier, fixture,
+  CI job, or scheduled test is created.
+- **Proof composes upward.** A completed task's receipt is inherited by its parent, milestone, and
+  release. A release proves only a newly created integration seam, and only if that seam crosses a
+  critical boundary. It does not replay child proof or fan out into nested verifiers.
+- **Stop rule:** when the real changed behavior succeeds, the receipt is recorded, and no critical
+  boundary remains unproven, stop. Another check that exercises no new risk is waste, not rigor.
+- Identity separation is reserved for a declared critical gate. A fresh verifier reports once and
+  exits; it does not linger, repair its own findings, or recursively dispatch more verifiers.
 - **Done ≠ merged, and done ≠ committed.** If a task's value requires a deploy, it is not done
   until the deployed artifact is verified live and the record names the live version (SHA).
 - Any consumer of a gate artifact re-derives the verdict from the underlying data. A green flag
@@ -123,23 +135,24 @@ never batched or reconstructed afterwards. A board that lags the work is itself 
   - a **server-side push gate** (pre-receive) that rejects pushes violating repository law
     (e.g. credential-shaped files) where no client can skip it;
   - a **server-granted `done` transition** that requires a lease, acceptance note, and attached
-    evidence; in strict mode it additionally requires dereferenceable evidence and a passing
-    typed exit-0 verification receipt the worker produced;
+    evidence; in strict mode it additionally requires dereferenceable evidence and, only when the
+    task declares a verification command, a passing typed exit-0 receipt the worker produced;
   - an **audit** that recomputes invariants per request (served version matches HEAD, no
     mutations on read routes, no private data on public surfaces) and blocks `done` and deploy
     when red;
   - a **deployed-artifact canary** that proves the running system is built from the claimed
     version, out-of-band from the process that deployed it.
-- **Every declared gate must have been SEEN to fire.** At the time the gate is written: seed a
-  real positive, watch it refuse, confirm it stays quiet on a true negative, and record both runs
-  as the receipt — leave no fixture file behind (this repo ships no battery for one to live in).
-  The gate is invoked when its protected boundary is crossed. Gates are never weakened to make a
-  task pass; weakening one is an ADR-level decision.
+- **A new critical gate must have been SEEN to fire.** At the time the gate is written, use a
+  transient probe to seed the precise violation, watch it refuse, confirm the protected operation
+  succeeds without the violation, and record both results. Delete the probe and every fixture before
+  commit. Invoke the gate only when its protected boundary is crossed. Gates are never weakened to
+  make a task pass; weakening one is an ADR-level decision.
 
 ---
 
 **In short:** the board is always true; every unit of work runs DISCOVER → CLAIM → IMPLEMENT →
 RECORD → VERIFY; decisions are append-only ADRs; research precedes build; evidence and verification
-are proportional to consequence; independent disposable closers protect meaningful boundaries;
+are proportional to consequence; actual operations are the default proof; critical tests are
+transient; receipts compose upward without nested verifier fan-out;
 workers decide-and-go except at genuinely irreversible forks; and declared gates are enforced by
 something the worker cannot self-attest.

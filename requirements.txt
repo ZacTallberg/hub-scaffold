@@ -1,16 +1,16 @@
 # hub-scaffold runtime dependencies.
 #
-# hub_core/ is PURE STDLIB — zero dependencies — and its tests run under any Python 3.10+.
+# hub_core/ is PURE STDLIB — zero dependencies — and runs under Python 3.10+.
 # Only the Django ADAPTER (adapters/django/) and the example/ site need Django.
 #
 # Django 5.2 is the supported LTS floor (Python 3.10+); Django 6.0 is supported on Python 3.12+.
-# The upper bound prevents an untested future feature series from silently redefining the scaffold
-# gate. Pin and promptly patch your chosen series once you mount the adapter into an application.
+# The upper bound prevents a future feature series from silently redefining the scaffold contract.
+# Pin and promptly patch your chosen series once you mount the adapter into an application.
 Django>=5.2,<6.1
 
-# The write API's evidence-dereference check (strict mode) uses only urllib from the stdlib — no
-# `requests`. The Hub page inlines its small frontend kit, so the adapter adds no static-file
-# serving dependency.
+# Strict-mode dereferencing of submitted evidence relies only on urllib from the stdlib — no
+# `requests`. The Hub page inlines its small frontend kit, so the adapter adds no static-file serving
+# dependency. Neither tracked nor strict mode requires a `verification_command`.
 
 # OPTIONAL — deliberately NOT installed by default, so uncomment it if you want a signed card:
 #

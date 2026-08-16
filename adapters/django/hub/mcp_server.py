@@ -5,14 +5,13 @@ revision with the io.modelcontextprotocol/tasks extension, so any MCP client can
 board, pull ready work, spec a stub, and finish with a receipt. The adapter NEVER touches the
 ledger directly: every mutation goes through the same /hub/api/* write seam every worker uses
 (the caller's X-Write-Token is forwarded verbatim), so the receipt gate, lease fencing, OCC,
-schema validation, and the WIP ceiling all apply unchanged — an MCP finish without a passing
-exit-0 verification_run is rejected by complete() exactly like any other. Reads are the same
+schema validation, and the WIP ceiling all apply unchanged. A verification receipt is required
+only when the task explicitly carries a rare one-shot critical-boundary command. Reads are the same
 ledger fold the rail serves. The server never executes a verification_command (RCE ruling):
 finish_task takes the client's typed receipt, it does not produce one.
 
 tasks/get maps the ledger-folded task onto the tasks-extension states: done->completed,
-dropped->cancelled, a todo/blocked task without a verification command -> input_required —
-the board asking the client for executable proof — else working.
+dropped->cancelled, executable work without concrete acceptance -> input_required, else working.
 """
 import json
 
@@ -39,7 +38,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "n": {"type": "integer", "description": "how many rows (default 3)"}}}},
     {"name": "spec_task",
-     "description": "Give a needs-spec task its concrete acceptance and/or verification_command (a command that exits 0 iff the work is truly done).",
+     "description": "Give a needs-spec task concrete acceptance; add verification_command only for a rare transient critical-boundary probe.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "agent": {"type": "string"},
          "acceptance": {"type": "string"}, "verification_command": {"type": "string"}},
@@ -50,13 +49,13 @@ TOOLS = [
          "id": {"type": "string"}, "agent": {"type": "string"}},
          "required": ["id", "agent"]}},
     {"name": "finish_task",
-     "description": "Submit completion: the receipt gate requires a typed exit-0 verification_run the CLIENT ran out-of-band (the server never executes commands).",
+     "description": "Submit completion; include an exit-0 verification_run only when this task explicitly carries a transient critical-boundary command.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "agent": {"type": "string"},
          "lease_token": {"type": "string"}, "note": {"type": "string"},
          "evidence": {"type": "array", "items": {"type": "string"}},
          "verification_run": {"type": "object"}},
-         "required": ["id", "agent", "lease_token", "note", "evidence", "verification_run"]}},
+         "required": ["id", "agent", "lease_token", "note", "evidence"]}},
 ]
 
 
@@ -118,11 +117,12 @@ def _tasks_get(params):
     if not ent or ent.get("type") != "task":
         return None
     board_status = ent.get("status")
-    # Keep this aligned with the readiness rail: a worker cannot finish a task that has no command
-    # to run out-of-band. This used to import a removed private helper and 500 every tasks/get.
-    needs = ("missing verification_command"
+    # Keep this aligned with the readiness rail: executable work needs a concrete outcome, not a
+    # standing test. Optional critical-boundary probes never determine pullability.
+    needs = ("missing acceptance"
              if board_status in ("todo", "blocked")
-             and not str(ent.get("verification_command") or "").strip() else None)
+             and ent.get("work_kind") in ("product", "verification")
+             and not str(ent.get("acceptance") or "").strip() else None)
     if board_status == "done":
         status = "completed"
     elif board_status == "dropped":

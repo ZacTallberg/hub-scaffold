@@ -76,9 +76,10 @@ process merely because a `hub-worker://` URL was opened.
   server-side `verification_command` execution silently turns the write token into arbitrary
   shell at the service account (the exact RCE removed above).
 - Leave `HUB_WORKER_LAUNCH_ENABLED=False` unless the workstation workflow is intentionally deployed.
-- Put `hubaudit` in CI/pre-deploy, but do not mistake its focused checks for a complete security
-  scanner or penetration test.
-- Back up `events.jsonl` and test restoration. Hash chaining is tamper evidence, not backup.
+- Invoke `hubaudit` deliberately for structural governance maintenance, never as an automatic
+  per-task or copy/style gate.
+- Back up `events.jsonl`; when restore integrity is a critical concern, perform a transient restore
+  drill and discard its temporary environment. Hash chaining is tamper evidence, not backup.
 
 ## Security limitations worth preserving in reviews
 

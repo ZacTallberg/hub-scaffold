@@ -3,15 +3,16 @@
 Every other measurement here answers "how much work is done". None of them answer the question an
 operator actually has when they walk away from a running fleet: *is the board still telling me the
 truth?* A board drifts out of usefulness long before it goes wrong — a task claimed six hours ago
-with no heartbeat, a done row with no receipt behind it, a todo nobody can pull because it never
-got a verification_command. Each is individually survivable and collectively fatal: the board still
+with no heartbeat, a done row with no evidence behind it, a todo nobody can pull because it never
+got concrete acceptance. Each is individually survivable and collectively fatal: the board still
 renders green while it stops describing the work.
 
 So this folds six dimensions, each a ratio over a set the fold can actually SEE:
 
-  SPECCED    open tasks a worker could pull — concrete acceptance AND a verification_command.
+  SPECCED    open tasks a worker could pull — concrete acceptance.
              An unspecced todo is not work, it is a note about work.
-  PROVEN     done tasks whose done was granted by an exit-0 verification_run receipt, not asserted.
+  PROVEN     done tasks whose real result was recorded; if a critical probe was declared, its
+             exit-0 verification_run receipt is present.
   EVIDENCED  done tasks carrying evidence (a uri, a commit, a named verifier).
   FRESH      live leases heartbeated inside the stall window — a worker still holding its claim.
   CURRENT    open tasks touched by any event inside the staleness window. Work that has not moved
@@ -43,8 +44,8 @@ DIMENSIONS = ("specced", "proven", "evidenced", "fresh", "current", "moving")
 # What a failing dimension actually costs the operator, so the cockpit can say why a number
 # matters instead of only that it is low.
 MEANING = {
-    "specced": "todo work no worker can pull until someone writes its acceptance and check",
-    "proven": "done granted by assertion rather than an exit-0 receipt",
+    "specced": "todo work no worker can pull until someone writes concrete acceptance",
+    "proven": "a declared critical probe has no matching exit-0 receipt",
     "evidenced": "done with nothing recorded that a reader could go and look at",
     "fresh": "a claimed task whose worker has stopped heartbeating",
     "current": "open work that has not moved — blocked and unsaid, or abandoned and unsaid",
@@ -75,7 +76,9 @@ def _acceptance_ok(task):
 
 
 def _receipt_ok(task):
-    """done was GRANTED, not claimed: at least one verification_run recorded exit 0."""
+    """Ordinary completion needs no test; an explicitly declared critical probe needs a receipt."""
+    if not str(task.get("verification_command") or "").strip():
+        return True
     runs = task.get("verification_run") or []
     if isinstance(runs, dict):
         runs = [runs]
@@ -126,8 +129,7 @@ def score(events, state, leases=(), now=None, stall_s=STALL_S, stale_s=STALE_S):
         if bad_rows:
             offenders[name] = [{"id": t.get("id"), "title": t.get("title")} for t in bad_rows[:8]]
 
-    unspecced = [t for t in open_tasks
-                 if not (_acceptance_ok(t) and str(t.get("verification_command") or "").strip())]
+    unspecced = [t for t in open_tasks if not _acceptance_ok(t)]
     dims["specced"] = _ratio(len(open_tasks) - len(unspecced), len(open_tasks))
     record("specced", unspecced)
 

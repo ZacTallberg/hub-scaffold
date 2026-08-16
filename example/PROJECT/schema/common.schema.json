@@ -34,7 +34,7 @@
       "type": "string",
       "minLength": 1,
       "pattern": ".*\\S.*",
-      "description": "A pointer to recomputed proof: a test exit, a headless screenshot path, a /debug scorecard url, an audit violation id."
+      "description": "A pointer to the real result: a commit, live operation, artifact, task receipt, or an explicitly invoked structural audit."
     }
   }
 }

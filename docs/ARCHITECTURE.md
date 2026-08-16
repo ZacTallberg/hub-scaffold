@@ -94,10 +94,10 @@ General HTTP writes pass through one gate:
 5. validate the merged entity against its schema;
 6. append with aggregate-scoped idempotency and optimistic concurrency.
 
-Task completion has additional steps: a live lease, an acceptance note, evidence, optional or
-required proof checks according to `HUB_DONE_STRICTNESS`, validation of the worker-produced typed
-receipt for any stored `verification_command`, and a recomputed audit that refuses completion on
-critical violations. The Hub never executes the command.
+Task completion has additional steps: a live lease, an acceptance note, evidence, strict-mode
+evidence dereferencing, and validation of a worker-produced typed receipt only when the task
+explicitly stores a rare transient critical-boundary `verification_command`. Completion never
+fans out into a repository audit, and the Hub never executes the command.
 The final append rechecks the fencing token under the cross-process claim lock and uses the version
 whose command was verified, preventing an expired worker or concurrently changed task from landing
 an obsolete completion.

@@ -128,12 +128,12 @@ def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
 def task(request, b):
     agent = b.get("agent", "agent")
     is_create = not b.get("id")
-    # FALSE-GREEN GUARD: 'done' is a terminal transition granted ONLY by complete()
-    # (evidence + verification_command + recomputed-audit gated). The generic upsert must
+    # 'done' is a terminal transition granted ONLY by complete() so it always has a lease-owned
+    # result and evidence. The generic upsert must
     # never mint a 'done' — that was the bypass an adversarial audit found.
     if (b.get("status") or "").lower() == "done":
         return JsonResponse({"errors": [{"code": "use_complete",
-            "msg": "status 'done' must go through POST /hub/api/complete (evidence + verify + audit gated)"}]},
+            "msg": "status 'done' must go through POST /hub/api/complete (lease + result + evidence)"}]},
             status=409)
     twins = []
     if is_create:
@@ -182,13 +182,12 @@ def complete(request, b):
             not evidence or any(not isinstance(item, str) or not item.strip() for item in evidence)):
         return JsonResponse({"errors": [{"code": "need_evidence",
             "msg": "non-empty accept_note + >=1 non-empty string evidence_uri required"}]}, status=422)
-    # HUB_DONE_STRICTNESS is the flow-vs-proof dial (settings; default "tracked"):
+    # HUB_DONE_STRICTNESS is only an evidence-resolution dial (settings; default "tracked"):
     #   "tracked" — done always carries WHO/WHAT/EVIDENCE (lease + accept_note + evidence), but
     #               evidence may be anything non-empty (auth-walled ticket links are fine) and a
     #               verification_command is optional; when present, the worker must submit its
     #               typed exit-0 receipt (the Hub never runs it).
-    #   "strict"  — evidence must dereference and a verification_command is required. For
-    #               environments where completions cannot be taken on trust.
+    #   "strict"  — evidence must dereference. It never manufactures a test requirement.
     strict = str(hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")).lower() == "strict"
     if strict:
         # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.
@@ -222,15 +221,11 @@ def complete(request, b):
     # verification_command, `exit_code` must be 0, and `ran_by` must be the completing agent.
     verification_receipt = []
     vc = ent.get("verification_command")
-    if strict and not vc:
-        return JsonResponse({"errors": [{"code": "need_verification_command",
-            "msg": "done requires a verification_command on the task; set it (POST /hub/api/task) before completing"}]},
-            status=422)
     # A bare suite runner is not a proof of THIS task: a suite is green whenever the repo is
     # healthy, whether or not the work happened, and accepting one teaches every completion to
     # pay the whole battery's price. The command must name the artifact this task changed.
-    if vc and re.match(r"^(?:\S*python[\w.]*\s+)?(?:-m\s+)?(?:pytest|unittest(?:\s+discover)?)\b[^&|;]*$"
-                       r"|^(?:bash\s+)?tools/(?:selftest|check)\.sh\b[^&|;]*$", vc.strip(), re.I):
+    if vc and re.match(r"^(?:\S*python[\w.]*\s+)?(?:-m\s+)?(?:pytest|unittest(?:\s+discover)?)\b[^&|;]*$",
+                       vc.strip(), re.I):
         return JsonResponse({"errors": [{"code": "verification_command_is_a_suite",
             "msg": "a bare suite runner proves the repo, not this task — name a command whose "
                    "subject is the artifact this task changed"}]}, status=422)
@@ -256,14 +251,6 @@ def complete(request, b):
             return JsonResponse({"errors": [{"code": "bad_verification_run",
                                              "problems": problems}]}, status=422)
         verification_receipt = [run]
-    # FALSE-GREEN GUARD: recompute the audit server-side at completion time and refuse to grant
-    # 'done' while the hub itself is in an unsound state (critical violations: broken chain, schema
-    # corruption). coherence:repo (pre-deploy) is excluded — it is resolved by deploying, not by a task.
-    audit = hub_app.run_audit()
-    blocking = [v for v in audit.get("violations", []) if v.get("severity") == "critical"]
-    if blocking:
-        return JsonResponse({"errors": [{"code": "audit_unsound", "msg": "hub audit has CRITICAL violations; resolve before completing",
-            "violations": [{"id": v.get("id"), "observed": v.get("observed")} for v in blocking[:5]]}]}, status=422)
     payload = {"type": "task", "status": "done", "verified_by": b.get("verified_by") or [accept],
                "evidence_uri": evidence}
     # The receipt is what makes this completion falsifiable later — it rides the appended event.
@@ -430,8 +417,7 @@ def claim(request, b):
         if not same_lease and hub_app.wip_status(len(live))["saturated"]:
             return JsonResponse({"errors": [{"code": "board_saturated",
                                              "msg": "configured WIP ceiling reached"}]}, status=429)
-        verdict = flow.classify(ent, flags, existing,
-                                strictness=hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked"))
+        verdict = flow.classify(ent, flags, existing)
         if not same_lease and not verdict["available"]:
             return JsonResponse({"errors": [{"code": verdict["state"],
                                              "msg": verdict["reason"]}]}, status=409)
@@ -488,12 +474,10 @@ def take(request, b):
             return JsonResponse({"errors": [{"code": "board_saturated"}]}, status=429)
         lease_ids = {row.get("task") for row in live}
         candidates = []
-        strictness = hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")
         for task in state.get("entities", {}).values():
             if task.get("type") != "task" or task.get("id") in lease_ids:
                 continue
-            verdict = flow.classify(task, state.get("flags", {}).get(task.get("id"), {}), None,
-                                    strictness=strictness)
+            verdict = flow.classify(task, state.get("flags", {}).get(task.get("id"), {}), None)
             if verdict["available"]:
                 candidates.append(task)
         if not candidates:

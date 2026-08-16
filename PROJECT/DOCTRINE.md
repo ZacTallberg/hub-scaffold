@@ -17,43 +17,51 @@ require project-specific wiring.
    destructive act, a privileged/undefined-secret operation, or a true operator-only decision —
    and even then, queue it in `registers/DECISIONS-PENDING.md` and route around it.
 3. **No device-test gates.** Never frame a milestone as "waiting on the operator to test".
-   Implement full scope; real-device checks come at the end.
+   Implement full scope; when a feature inherently requires a device, use it through the real
+   operation and record the outcome.
 4. **Best way, no thrashing.** Research best-of-breed first; a named technology is a hypothesis,
    not a mandate; when an approach keeps failing, re-architect — don't polish.
-5. **Verify proportionally.** Routine low-risk work needs truthful evidence, not automatic ceremony.
-   Use a fresh independent closer for releases, privileged boundaries, migrations, public contracts,
-   regressions, and occasional samples; the closer returns one verdict and exits.
+5. **Finish first; prove only what is at risk.** The successful real operation is the default proof.
+   Copy, wording, style, animation polish, and other non-critical changes get no test or validation
+   ritual. Permanent tests, fixtures, verifier scripts, and always-on verification workflows are
+   forbidden. A security, destructive-data, migration, protocol, or concurrency boundary may earn
+   one temporary probe: create it outside the durable product tree, run it once, retain its receipt,
+   and delete it before commit. Completed receipts compose upward; a release checks only a newly
+   created critical integration seam and never reruns accepted child work.
 6. **Track and document, always.** Every directed change gets a hub task AND a decision record.
    Note every downstream artifact a shared-state change invalidates.
 
 ## §2 Truth discipline (anti-false-green)
-1. **FALSE-GREEN is the meta-failure.** Gates fail by being self-attested, bypassed, textual, or
-   committed-not-deployed — not by being absent. The four enforcement primitives (authorization-
-   boundary hook · behavioral-not-textual audit · out-of-band deployed-artifact canary ·
-   tamper-evident never-weaken invariants) are defined in the global charter. At any declared
-   independent gate, **the verifier identity must differ from the builder identity**; ordinary
-   low-risk tasks do not automatically create such a gate.
-2. **ASSERTED ≠ DERIVED = BROKEN.** Every rendered assertion (every label, badge, ordering, count)
-   must derive from gathered evidence via a deterministic path. One mismatch anywhere means the
-   product is broken. `registers/TRUTH-MATRIX.md` maps every field to its derivation and detector.
+1. **FALSE-GREEN is the meta-failure at a declared critical boundary.** A boundary receipt must
+   describe what actually ran and what happened. When independent proof is explicitly warranted,
+   **the verifier identity must differ from the builder identity**. Ordinary work creates no gate,
+   standing verifier, or scheduled proof burden.
+2. **ASSERTED ≠ DERIVED = BROKEN.** Machine-derived factual claims such as status, ordering, and
+   counts must trace to their source of truth. Editorial copy, visual style, and motion are not
+   verification targets. `registers/TRUTH-MATRIX.md` records only factual derivations that matter.
 3. **Done ≠ live.** A task whose value requires a deploy is NOT done until the deploy-owner is
-   notified (a `deploy_request` event naming code/data + SHA) and the deploy is verified live.
-4. **Evidence must postdate the final edit.** A verification run from before the last change is void.
-5. **Gates re-derive, never trust.** Any consumer of a gate artifact recomputes the verdict from
-   the underlying rows; a green flag contradicted by its rows is FABRICATED-GREEN and blocks.
-6. **Every declared gate must have been SEEN to fire.** Seed a real positive at write time, watch
-   it refuse, confirm quiet on a true negative, record both runs as the receipt — and leave no
-   fixture file behind (proven-at-write doctrine; there is no battery for a fixture to live in).
+   notified (a `deploy_request` event naming code/data + SHA) and the real deploy outcome is
+   observed live.
+4. **Evidence is the completed operation.** Record the attempted action and observed result after
+   the final edit. If a rare critical probe is used, its durable receipt must postdate the edit;
+   the probe itself must not survive the commit.
+5. **Receipts compose.** Consumers inherit accepted dependency receipts. They do not replay them;
+   a release examines only a new critical integration seam introduced by composition.
+6. **Stop when the changed behavior works.** Once the real operation succeeds and no critical
+   boundary remains unobserved, completion is earned. Adding another check is process bloat.
 
 ## §3 Defect discipline (Instance → Invariant)
-1. **Classify before fixing.** Every defect gets a `registers/FAILURE-MODES.md` class row FIRST
-   (grow the taxonomy if none fits), and an `INC-` instance entry.
-2. **The fix is a class-wide detector, never a point patch.** An instance-targeted fix without a
-   class detector is forbidden. A named instance may become a CHECK (regression probe/canary) — never a FIX.
-3. **The found instance is never the only one.** Every class fix ships with the class query and its count.
-4. **Dual mandate, co-equal:** fix the stock (existing bad data/state) AND gate the flow (new writes).
-   An invariant arriving after its data gates the flow and reports the stock as a drainable metric.
-5. **Bank the probe.** Every resolved defect adds a never-again test or eval probe.
+1. **Observed failure becomes work.** Record the concrete failure as an `INC-` instance and open a
+   fresh repair task; classify it in `registers/FAILURE-MODES.md` when the class is useful for routing.
+2. **Restore the real operation.** Fix the causal path and retry the action that failed. The
+   successful retry is the ordinary completion receipt.
+3. **Do not bank tests.** A failure does not automatically create a regression suite, fixture, or
+   permanent checker. A rare critical recurring boundary may use a one-shot temporary diagnostic
+   probe under §1.5, deleted before commit.
+4. **Repair can be its own lane.** Projects may route observed failures to a dedicated error-fixing
+   agent so delivery agents keep completing planned work; the Hub keeps both lanes visible.
+5. **Stop after recovery.** Once the failed operation succeeds, close the repair task and return
+   throughput to the delivery queue.
 
 ## §4 Change discipline
 1. **Research precedes build.** No architectural work starts before its research is captured in
@@ -61,14 +69,15 @@ require project-specific wiring.
 2. **Decisions are ADRs** — append-only, gap-free, rejected-alternatives on record, supersede-never-rewrite.
 3. **Registers are append-only**; amendments follow `README.md` §5. Published identifiers are immutable.
 4. **The ledger is LIVE:** the hub is updated AT THE MOMENT of the event — task claimed →
-   `in_progress`; decision made → ADR recorded; work verified → `done` with `verified_by`;
+   `in_progress`; decision made → ADR recorded; real operation completed → `done` with `verified_by`;
    deploy finished → deploy entity. Transitions are never batched or reconstructed afterwards;
    same-session is the outer bound for prose docs only. A governance layer that lags the work
    layer is itself a defect (a real campaign once created 221 tasks and transitioned 14 — the
    board was fiction). In campaigns the LEADER carries this duty personally (PROTOCOL §11).
 5. **Shared-kit changes** (anything vendored across projects) get a CHANGELOG entry in the kit.
 6. **Contracts never impersonate controls.** A documented gate, verifier, backup, canary, scanner,
-   or alert is reported as active only after its runner, schedule, failure test, and owner are wired.
+   or alert is reported as active only while its real critical boundary, trigger, and owner exist.
+   Documentation never creates a standing test obligation.
 
 ## §5 Autonomy discipline
 1. **Two attempts, then escalate** with what you tried. Timebox unfamiliar rabbit holes (~20 min).

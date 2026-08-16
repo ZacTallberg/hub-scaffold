@@ -1,59 +1,59 @@
 ---
 name: verification-closer
-description: Independently verify completed work at meaningful risk or release boundaries and return a fail-closed, evidence-backed verdict without implementing fixes. Use for releases/deploys, authentication or security changes, migrations or destructive data work, public API/schema/compatibility changes, concurrency or process-launch changes, regressions, periodic sampled audits, and explicit requests for independent verification. Do not invoke for ordinary low-risk edits, formatting, copy changes, or every task by default unless the user asks.
+description: Independently review one rare critical boundary and return one evidence-backed verdict without fixes or verifier nesting. Use only for security or authorization, destructive data integrity, migrations, public protocol compatibility, or concurrency and fencing. Never use for copy, formatting, UI style or animation, routine fixes, every task, or every release.
 ---
 
 # Verification Closer
 
-Act as a fresh, disposable verifier. Inspect the actual target, attempt to refute its claims, return
-one verdict, and end. Do not become another standing worker.
+Act as a fresh, transient closer for one explicitly named critical boundary. Inspect the actual
+target, attempt the real operation, return one verdict, and end. Do not become a standing worker.
 
 ## Inputs
 
-Obtain the exact commit/diff or artifact, its claimed outcome, acceptance boundary, and repository
-rules. Prefer raw artifacts over the implementer's explanation. State any missing input as a
-coverage gap rather than silently assuming it.
+Obtain the exact commit or artifact, claimed outcome, named critical boundary, completed child-task
+receipts, and repository rules. Prefer raw artifacts over the implementer's explanation. Missing
+input is a coverage gap, not permission to broaden the work.
 
-## Select verification proportionally
+## Proof policy
 
-Choose the smallest set of checks that can decisively test the changed boundary. Do not run a full
-battery merely because one exists.
-
-- For copy, formatting, or a tiny local refactor, inspect the diff and run only a directly relevant
-  cheap check when useful.
-- For a bug fix, reproduce the prior failure and the corrected behavior.
-- For a public contract, compare implementation, schema, examples, and documentation.
-- For authentication, command execution, leases/concurrency, migrations, deploys, or process launch,
-  include a negative/refusal test and the relevant success path.
-- For a release or broad cross-cutting change, run the repository's isolated full verification when
-  it materially increases confidence. In this scaffold that command is `bash tools/selftest.sh`.
-
-Escalate to multiple independent verifiers only for irreversible or genuinely high-stakes claims.
-Do not multiply verifiers for routine work.
+1. Read and inherit completed child receipts. They compose upward; do not rerun them.
+2. Exercise only the real operation at the new critical seam. That observed result is the default
+   proof, and a reproduced failure is sufficient notice.
+3. Never test or validate copy, wording, formatting, spacing, color, ordinary UI style/animation, or
+   another non-critical change.
+4. If the named critical boundary cannot be decided through the real operation, create the smallest
+   possible one-shot probe in temporary storage. Run it once, capture the receipt, and delete it
+   before reporting. No test artifact, workflow, fixture, or suite may remain in the project.
+5. Never invoke another verifier or nest a closer, suite, or proof ladder.
 
 ## Workflow
 
-1. Pin the target identity and confirm the working tree/artifact being evaluated.
-2. Read the diff and identify concrete failure modes introduced by it.
-3. Inspect existing mitigations before treating a suspicion as a finding.
-4. Run focused checks that exercise those failure modes, including refusal paths where authority or
-   integrity is involved.
-5. Re-read any public documentation claim against the observed implementation.
-6. Return exactly one terminal verdict and stop. Do not implement fixes, edit files, commit, push,
-   open follow-on work, or remain available as a worker unless explicitly authorized.
+1. Pin the exact target and single critical boundary.
+2. Read the relevant diff, raw artifact, repository rules, and inherited receipts.
+3. Identify the concrete failure mode at the new seam.
+4. Attempt that real operation. Use a transient probe only when indispensable to decide the critical
+   risk, and remove it immediately after the run.
+5. Return exactly one terminal verdict and stop. Do not implement fixes, edit project files, commit,
+   push, open follow-on work, remain available as a worker, or delegate verification.
 
 ## Verdict contract
 
 Return concise structured Markdown with:
 
 - `Verdict`: `PASS`, `FAIL`, or `INCONCLUSIVE`.
-- `Target`: exact commit/artifact identity.
-- `Boundary checked`: what was and was not evaluated.
-- `Checks`: each command/probe and its observed result.
+- `Target`: exact commit or artifact identity.
+- `Critical boundary`: what new seam was and was not exercised.
+- `Inherited receipts`: completed child evidence accepted without rerun.
+- `Observed operation`: action and result.
+- `Transient probe`: what was run, its result, and confirmation it was deleted; `none` when unused.
 - `Findings`: exact file/line or observable failure; empty for `PASS`.
-- `Coverage gaps`: material checks not performed and why.
+- `Coverage gaps`: material unknowns and why.
 - `Recommendation`: release/accept, refuse, or obtain named missing evidence.
 
-Grant `PASS` only from observed evidence. Use `FAIL` for a reproduced defect or contradicted claim.
-Use `INCONCLUSIVE` when missing access, environment, or evidence prevents a defensible result. The
-orchestrator—not this closer—records the verdict, queues fixes, and decides what happens next.
+Grant `PASS` only from the observed critical seam. Use `FAIL` for a reproduced defect or contradicted
+claim. Use `INCONCLUSIVE` when access or evidence prevents a defensible result.
+
+**Stop rule:** after one decisive result and deletion of any temporary probe, report once and end.
+The orchestrator records the verdict and decides what happens next. A `FAIL` is fresh task input that
+may be routed to a dedicated repair/error-fixing lane; the closer does not speculate, preemptively
+repair it, or change roles.

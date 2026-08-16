@@ -8,13 +8,12 @@ realtime, accessibility, visual, and throughput contract; execute it through
 (Until 2026-08-09 it was a generated export of a private upstream; that upstream is retired and
 this repo now stands alone.) Improvements are committed HERE, under two laws. First, the
 agnosticism gate is non-negotiable: nothing project-, host-, or person-specific may land —
-`tools/scrub_check.sh` enforces it, and its `--selftest` proves it catches a seeded violation AND
-stays quiet on boundary-safe text. Second, improvements discovered inside a working instance
+`tools/scrub_check.sh` enforces it when that publishing boundary is intentionally exercised.
+Second, improvements discovered inside a working instance
 arrive as **curated upserts**: the instance proves the change in production first, then the
 generic form of it is carried here through the scrub gate — never a bulk merge, never a clone.
 The proving grounds are the instances; the template is where the lesson is kept. The rest of the
-layer: the five-step `tools/selftest.sh` (scrub · compile floor · docs · bootstrap · the real
-example app), `init.sh`, `example/`, and the bootstrap embedding.
+layer is `init.sh`, `example/`, and the bootstrap embedding.
 
 Read this first. It is the machine-first map of the whole system: what's here, how to prove it works,
 how to use it, how to operate it, and — importantly — **what is deliberately NOT here** so you don't
@@ -41,9 +40,12 @@ from a working multi-project system. Nothing here names any specific person, hos
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook
-1. **Get fast signal first:** `bash tools/check.sh --all-fast` runs the cheap scaffold checks. The
-   isolated `bash tools/selftest.sh` is a boundary/release verifier, not an ordinary per-task ritual.
-   Use `docs/TESTING.md` and `skills/verification-closer/` to choose proportionally.
+1. **Use the real thing first:** perform the operation the task changes. A successful real operation
+   is the default proof; if it breaks, that failure is the notice to capture. Do not create tests for
+   copy, style, animation polish, or another non-critical fix. Read `docs/TESTING.md` before adding
+   any proof machinery.
+   Record an observed failure as fresh Hub task input for a repair/error-fixing lane. Stay in the
+   claimed delivery role; do not speculate or preemptively turn into the repair agent.
 2. **Read, in order:** this file → `README.md` → `campaigns/00-orchestration-method.md` (how to run
    work well) → `OPERATING-AGREEMENT.md` (the working laws) → `SECURITY.md` (the actual trust boundary)
    → `adapters/django/MOUNTING.md` (how the hub
@@ -54,7 +56,8 @@ from a working multi-project system. Nothing here names any specific person, hos
 ## How to USE it (stamp a new project)
 `bash init.sh <target-dir> <project-key> "<Brand>" [live-url]` → a governed, git-initialized project with
 the plane + hub + governance files, placeholders substituted. Then: mount the adapter per
-`MOUNTING.md`, `seedhub` the genesis board, wire `hubaudit` as a CI/pre-deploy gate, and adopt the
+`MOUNTING.md`, `seedhub` the genesis board, invoke `hubaudit` only when its protected deploy boundary
+is crossed, and adopt the
 deploy contract (`patterns/deploy-contract.md`). `init.sh` refuses a non-empty target and never
 clone-and-pivots — it's the only sanctioned way to start.
 
@@ -66,12 +69,12 @@ Everything runs through `campaigns/`. Match the campaign to the verb:
 - drive feature work off the board → `feature-buildout.md` (DISCOVER→CLAIM→IMPLEMENT→RECORD→VERIFY)
 The engine behind all of them—proportionate fan-out, persist-as-you-go, and boundary-triggered
 verification—is `campaigns/00-orchestration-method.md`. Scale coordination to the work, and use the
-disposable `verification-closer` only when consequence or sampling warrants it.
+disposable `verification-closer` only for a rare critical boundary.
 
 ## The two dials you should know
-- **`HUB_DONE_STRICTNESS`** (`tracked` default | `strict`) — flow-first vs proof-first completion. A
-  command is optional in tracked; when present, completion requires the worker's matching typed
-  exit-0 receipt. Strict also requires a command and resolvable evidence. See
+- **`HUB_DONE_STRICTNESS`** (`tracked` default | `strict`) — recorded vs dereferenceable evidence.
+  A command is optional in both modes; when present, completion requires the worker's matching
+  typed exit-0 receipt. Strict resolves evidence but never makes an ordinary task invent a test. See
   `adapters/django/MOUNTING.md` → "The strictness dial". Start `tracked`; go `strict` when completion
   claims need mechanical proof. Strict does not make an untrusted token holder safe.
 - **Entity extensibility** — a new hub type is a schema + write path + tab. `campaigns/augment-hub.md`
@@ -91,7 +94,8 @@ disposable `verification-closer` only when consequence or sampling warrants it.
   authoritative for this threat model.
 - **Normative docs are not automatic controls.** `PROJECT/verify/`, campaigns, and patterns describe
   roles and contracts. A canary, alert, backup, verifier, or conformance scan exists only after it is
-  wired and tested in the adopting environment. `docs/ARCHITECTURE.md` lists shipped guarantees.
+  wired and exercised through its real operation in the adopting environment.
+  `docs/ARCHITECTURE.md` lists shipped guarantees.
 
 ## What is deliberately NOT here (design, not omission)
 - **The memory layer** — session-recall/persistence tooling is home-environment-specific and excluded
@@ -113,18 +117,25 @@ disposable `verification-closer` only when consequence or sampling warrants it.
   license only if a teammate needs to legally reuse it).
 
 ## The three non-negotiables (the point of the whole thing)
-1. **Evidence is truthful and proportional.** Do not call implementer evidence independent, but do
-   not burden minor work with the full ladder or a second agent. There is no unit battery here at
-   all: a guard is proven by watching it fire, a feature against the real example app.
-2. **Independent verification is boundary-triggered.** A fresh closer handles releases, privileged
-   boundaries, migrations, public contracts, regressions, and occasional samples, then exits.
+1. **The actual operation is the default proof.** Do not create tests for copy, style, or routine
+   non-critical fixes. Stop once the changed behavior works and its truthful receipt is recorded.
+2. **Every test is transient and rare.** Only security, destructive/data-integrity, migration,
+   protocol-compatibility, or concurrency boundaries justify one. Create the smallest temporary
+   probe, run it once, record the receipt, and delete every artifact before committing.
 3. **Never lose or clobber concurrent work.** Targeted commits only; another session's uncommitted files
    are read, never staged; persist as you go so a killed run loses nothing.
+
+Proof composes upward: a parent or release inherits completed child-task receipts. It may prove only
+the newly created integration seam, and only when that seam is a critical boundary. Nested verifier
+fan-out and replaying every child's proof are forbidden by default.
+
+An observed failure is new task input, not permission for a delivery worker to expand scope. Record
+it precisely and leave it available for a dedicated repair/error-fixing lane to claim.
 
 ## Provenance
 Extracted 2026-07-07 from a working multi-project estate and updated 2026-08-03 with the portable
 worker-launch trust boundary and repository-wide documentation contract; every file is scrub-verified
 agnostic. If you change `PROJECT/`
 templates, re-run `python tools/build_bootstrap.py`
-so the bootstrap doc stays byte-exact. Use `bash tools/check.sh` for pending changes and reserve the
-full isolated self-test for a justified verification boundary.
+so the bootstrap doc is regenerated. That generation is the real operation; do not add a separate
+validation ladder around it.
