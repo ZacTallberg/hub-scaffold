@@ -38,13 +38,19 @@ command for each, keep it beside the runbook, and every step below becomes liter
 
 1. **Stand on the revision you mean to ship.** Record its sha. A dirty working tree ships nothing
    you can see: what deploys is a commit. Print the dirty files rather than only noting they exist.
-2. **Advisories.** Run your dependency/supply-chain and fast checks and READ them. Under this
-   template they surface, they do not block — but an advisory you skip is one you own, so name it
-   in the deploy record.
+2. **No standing validation ceremony.** The committed task receipt is inherited; do not replay a
+   suite, audit ladder, copy check, screenshot ritual, or generic "fast checks" bundle because a
+   release is happening. Only when this release crosses an explicitly identified critical
+   integration seam, exercise that one seam with a transient probe, retain its receipt, and delete
+   the probe artifact before continuing.
 3. **Stamp the build identity, then read it back** (only if your platform needs `SET_BUILD_ID`).
    Expected: the read-back names YOUR sha. A build that fails closed on a missing stamp is correct
    behaviour — it is refusing to produce an artifact that cannot say what it is.
-4. **Ship the EXACT SHA, never a branch name.** You stamped a specific revision in step 3;
+4. **Acquire one real per-target release lease, then ship the EXACT SHA, never a branch name.**
+   Builds for different artifacts may overlap, but the swap-through-canary boundary for one front
+   door is serialized. Give every artifact its own remote script, log, and verdict identity; a
+   shared per-app log lets an older release overwrite or satisfy a newer observer. You stamped a
+   specific revision in step 3;
    pushing a branch ships whatever that branch points at now, which on a detached checkout or a
    worker branch is something else entirely — an artifact whose identity names bytes it was not
    built from, the one lie this whole contract exists to prevent.
@@ -53,6 +59,10 @@ command for each, keep it beside the runbook, and every step below becomes liter
    **A dead transport is an OBSERVATION, not the outcome** — the platform may have finished
    building and swapped in the new release before the connection dropped. Do not conclude
    anything here; let step 5 tell you what is actually live.
+   If the platform reports "no changes" because its generated release source already names this
+   image while the front door still serves another SHA, immediately invoke the platform's
+   rebuild/release-from-current-source operation. Waiting on the canary cannot perform a missing
+   swap.
 5. **Canary: POLL, and judge by CONTAINMENT.** A cold start can outlast one request's patience, so
    a single check reports a false red on a healthy release. Poll a few times with a short pause.
    Read the identity the artifact reports about ITSELF — never a label your own deploy record
@@ -94,7 +104,8 @@ command for each, keep it beside the runbook, and every step below becomes liter
    the running artifact identity makes every named task immediately `live` without Git or a
    polling cycle. A deploy nobody recorded did not happen as far as the board is concerned.
 8. **Check your unauthenticated surface** — one request per invariant your project declares.
-9. **Done means named:** the recorded event carries the live sha.
+9. **Done means named:** the recorded event carries the live sha. Release the per-target lease only
+   after the canary and immutable deploy record succeed (or the attempt has failed closed).
 
 ## Rollback
 
@@ -105,7 +116,8 @@ deliberate. If the last-good sha IS the failed sha, stop: re-shipping it cannot 
 
 ## Concurrency — the honest limit
 
-If your platform's build identity lives in a mutable, app-scoped setting, two agents deploying at
-once can overwrite each other's stamp between steps 3 and 6, and prose cannot prevent that. Either
-adopt a platform that carries identity in the revision, or pair this runbook with a real lease
-that a deploying agent must hold. Do not pretend a documented convention is mutual exclusion.
+Two agents releasing one front door can overwrite each other even when identity travels inside the
+artifact: the older, slower swap may land last. A real per-target lease must span swap, canary,
+blessing, and deploy-record append; per-artifact logs prevent cross-talk between observers. If a
+mutable app-scoped build setting also exists, acquire the lease before setting it and release it
+only after clearing your own value. Do not pretend a documented convention is mutual exclusion.

@@ -122,9 +122,10 @@ Corollaries:
 preconditions   git repo?  warn-if-dirty  SHA := short HEAD          (Law 1)
 worktree        git worktree add --detach <tmp> HEAD                 (Law 1)
 stamp           write SHA into the worktree pre-build                (Law 2)
-gate            optional org test/audit command; non-zero aborts
+critical seam   only when declared: run its transient one-shot probe and retain the receipt
 build           $BUILD_CMD inside the worktree
-ship            $SHIP_CMD  (the only org-specific part)
+serialize       acquire a real per-target release lease; one front door has one release owner
+ship            $SHIP_CMD  (the only org-specific part; unique artifact log/identity)
 canary          poll $LIVE_URL for "build-$SHA"; fail closed         (Law 3)
 bless           write "<sha> <url>" to the blessed-records dir       (Law 4; failure blocks)
 record          POST immutable {sha, served_sha:sha, tasks_closed:[done ids], at}; write runtime state
@@ -140,3 +141,8 @@ Anti-patterns this contract explicitly bans:
   the old build contains it too. Assert the SHA.
 - **Optional-by-default verification** — verification you can forget is verification that will be
   forgotten. Fail closed; make opt-out loud and explicit.
+- **Concurrent same-target release tails** — two builds may run in parallel, but two swaps and
+  canaries for one front door can make an older artifact overwrite a newer one after both ship
+  commands succeed. Hold one real per-target lease from swap through canary and deploy record.
+- **Shared per-app release logs** — every artifact gets its own log/verdict identity. Reusing one
+  pathname lets an older release satisfy or overwrite a newer release's observer.
