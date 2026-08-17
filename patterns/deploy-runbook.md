@@ -67,6 +67,11 @@ command for each, keep it beside the runbook, and every step below becomes liter
    short platform-capacity slot immediately around that operation. Release it as soon as the swap
    command exits; do not serialize builds or another app's independent canary behind a capacity
    constraint they do not consume.
+   An indirect release is still a release. Any configuration command that automatically restarts,
+   rebuilds, imports, or swaps an app must use that same capacity slot; otherwise the platform's
+   background event listener can race a correctly leased release. Prefer a no-restart configuration
+   mutation, then acquire the capacity slot and invoke the required restart or rebuild explicitly.
+   Configuration proven not to trigger a release does not consume the slot.
 5. **Canary: wait boundedly for the artifact, and judge by CONTAINMENT.** A cold start can outlast
    one request's patience, so repeat the observation a bounded number of times with a short pause.
    This transient release wait is not application synchronization; the live Hub remains push-only.
