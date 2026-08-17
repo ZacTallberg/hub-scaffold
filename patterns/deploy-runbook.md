@@ -63,10 +63,14 @@ command for each, keep it beside the runbook, and every step below becomes liter
    image while the front door still serves another SHA, immediately invoke the platform's
    rebuild/release-from-current-source operation. Waiting on the canary cannot perform a missing
    swap.
-5. **Canary: POLL, and judge by CONTAINMENT.** A cold start can outlast one request's patience, so
-   a single check reports a false red on a healthy release. Poll a few times with a short pause.
+5. **Canary: wait boundedly for the artifact, and judge by CONTAINMENT.** A cold start can outlast
+   one request's patience, so repeat the observation a bounded number of times with a short pause.
+   This transient release wait is not application synchronization; the live Hub remains push-only.
    Read the identity the artifact reports about ITSELF — never a label your own deploy record
    supplied, which would let the release confirm itself.
+   Capture each response body completely before comparing it. Under `pipefail`, piping `curl`
+   directly into an early-exit matcher such as `grep -q` can close the pipe after a successful
+   match and misclassify curl's resulting broken pipe as a failed canary.
    Three verdicts, not two:
    - **OK** — the live identity is, or contains, your sha. Containment matters because a
      teammate's deploy can land between your push and your read, and a canary that reports red
