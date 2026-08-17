@@ -1,9 +1,9 @@
-"""Stable opaque id allocation. Numeric types (task/adr/gap/deploy) get zero-padded monotonic
+"""Stable opaque id allocation. Numeric types (task/run/adr/gap/deploy) get zero-padded monotonic
 locals from a high-water mark; dotted types (feat/cap) use caller-supplied validated slugs.
 IDs are allocated once and never reused/renumbered."""
 import re
 
-_NUMERIC = {"task", "adr", "gap", "deploy"}
+_NUMERIC = {"task", "run", "adr", "gap", "deploy"}
 _PAD = 4
 # The type set is CLOSED on purpose: an id whose type this regex does not know cannot be minted,
 # so adding an entity type means registering it in FIVE places: the entity schema, _KNOWN
@@ -11,7 +11,7 @@ _PAD = 4
 # PROJECT/schema/common.schema.json. Adding four of the five leaves a route and a schema that
 # both exist while every write 422s. Counted the hard way — the first version of this comment
 # said FOUR and was wrong within a minute.
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$")
 
 
 def valid_id(s) -> bool:

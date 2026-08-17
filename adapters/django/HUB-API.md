@@ -42,15 +42,15 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | Endpoint | Returns |
 |---|---|
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`. The running identity comes from the artifact's pre-build `HUB_BUILD_STAMP`; optional `?served=<sha>` adds an external comparison and a mismatch is explicit. |
-| `GET /hub/hub.json` | Full snapshot: `tasks, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. |
+| `GET /hub/hub.json` | Full snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. |
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
 | `GET /hub/audit.json` | the computed audit: `{ok, exit_code, counts, violations[]}`. exit_code 0=pass, 3=warn, 2=violation. |
 | `GET /hub/graph.json` | dependency edges + dangling references. |
-| `GET /hub/<type>.json` | a whole collection — type ∈ `task, adr, feat, gap, cap, deploy, note`. |
+| `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note`. |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
-| `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Tools: `board_next`, `spec_task`, `take_task`, `start_task`, `heartbeat_task`, `release_task`, `fail_task`, `finish_task`. `take_task` is the atomic pull path; `fail_task` atomically returns failed work to bounded backoff and creates/reuses specialist repair work. Every mutation goes back through the write seam above. |
+| `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
 | `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
 | `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
@@ -87,7 +87,7 @@ source of truth, and every ratio carries its denominator.
 Issue credentials with root compatibility or an existing `credential:manage` credential:
 
 ```json
-{"action":"issue","subject":"worker-7","scopes":["task:*","mcp:call"],"ttl_s":3600}
+{"action":"issue","subject":"worker-7","scopes":["task:*","run:*","mcp:call"],"ttl_s":3600}
 ```
 
 The `/hub/api/agent-credential` response returns the bearer token once. Revoke it with
@@ -109,12 +109,41 @@ returns structured exclusion reasons; `422 bad_worker_profile` identifies a malf
 Missing worker facts never satisfy explicit requirements, while `/hub/next.json` remains the
 unfiltered canonical ready rail.
 
+### Durable AgentRun lifecycle
+
+`POST /hub/api/run` (`run:write`) creates a first-class run only for a task whose current fenced
+lease belongs to the caller. Send `task`, `lease_token`, and optional `title`, `goal`, `parent_run`,
+`trace_id`, `ttl_ms`, and `idem_key`. The response includes the folded run; it is durable and
+resolvable before a task-augmented MCP call can return its handle.
+
+`POST /hub/api/run/update` (`run:write`) applies one operation to that run: `message`, `command`,
+`checkpoint`, `input_request`, `input_response`, `handoff`, `resume`, `request_cancel`,
+`ack_cancel`, `complete`, or `fail`. Send `id`, `lease_token`, `action`, operation fields, and
+optionally `expected_version`/`idem_key`. Every operation rechecks the task fence at commit,
+appends one canonical event, and immediately wakes the live SSE rail. A process-local run cache is
+never authoritative.
+
+Checkpoints carry resumable state plus completed step IDs. Handoff names the target and latest
+checkpoint. Resume transfers ownership only to the current task-lease holder and returns a
+recovery envelope with the latest checkpoint, unfinished commands, recent messages, and inherited
+child receipts. Completed child runs compose into the parent's receipt chain, so replacement
+workers do not replay finished work merely to reconstruct proof. Cancellation is cooperative:
+request first, checkpoint at a safe boundary, then acknowledge; completion may win the race.
+
+For MCP Tasks calls, declare `io.modelcontextprotocol/tasks` in that individual request's client
+capabilities. Set `Mcp-Name` to the AgentRun `taskId` for `tasks/get`, `tasks/update`, and
+`tasks/cancel`. Mutating methods also carry the task fencing token in
+`params._meta["io.zacoberg.hub/leaseToken"]`. The optional protocol `pollIntervalMs` hint is
+intentionally omitted: canonical Hub coordination is committed-event push, not periodic sync.
+
 | Endpoint | Key body fields | Success | Notable refusals |
 |---|---|---|---|
 | `/hub/api/task` (`task:write`) | Create: `title`; update: `id` + `expected_version` plus changed fields. Updating active/leased work also requires its fencing `token`. Optional `priority` (P0–P3), `status` (not `done`/`in_progress`), `verification_command`, `deps`, `acceptance`, `phase`, `touches`, `plan`, `implements`, `decided_by`, `surfaced_by`, `source` | `200 {data:{id,version,event}}` | `409 use_complete` / `use_claim`; wrong/stale lease; `428 precondition_required`; `409 conflict`; `422 schema` |
 | `/hub/api/agent-credential` (`credential:manage`) | `action:issue` + `subject`, `scopes[]`, `ttl_s`; `action:revoke` + `credential_id`; or `action:list` | One-time bearer token on issue; sanitized metadata otherwise | `403 insufficient_scope`; `422 credential` |
 | `/hub/api/claim` | Existing task `id`, non-empty string `agent`, optional `ttl_s` (default 900; 1–86400) | Atomically acquires/renews the lease and transitions `todo` to `in_progress`; `200 {ok:true,token,expires,version,…}`. A same-agent retry renews without rotating the token. **Keep `token`.** | `404 not_found`; `409 deps_blocked`, `not_claimable`, or `{ok:false,reason:"held"}`; `422 bad_ttl` |
 | `/hub/api/heartbeat` | `id`, `token`, optional `ttl_s` (default 900; 1–86400) | `200 {ok:true,expires}` | `400 need_id_token`; `409 {ok:false,reason:"no/stale lease"}`; `422 bad_ttl` |
+| `/hub/api/run` (`run:write`) | `task`, `lease_token`; optional `title`, `goal`, `parent_run`, `trace_id`, `ttl_ms`, `idem_key` | Durable folded AgentRun plus `id`, version, event | `404 not_found`; `409 lease`; `422 parent_run` / schema |
+| `/hub/api/run/update` (`run:write`) | `id`, `lease_token`, lifecycle `action` plus its typed fields; optional `expected_version`, `idem_key` | Updated folded run, operation result, and no-replay recovery envelope | `404 not_found`; `409 lease` / `owner` / `transition` / `conflict`; `422 schema` |
 | `/hub/api/fail` (`task:fail`) | `id`, fenced `token`, stable `signature`, concrete `note`; optional `kind`, `evidence_uri[]`, `consequential` (default false) | Atomically records the attempt, returns the exact lease, applies bounded backoff/circuit state, and creates or reuses a `hub.repair`-routed task | `400 need_failure`; `409 must_claim`/`lease`/`identity`/`not_in_progress`; `422 bad_failure_evidence`/`bad_consequential` |
 | `/hub/api/complete` | `id`, `token` (from claim), `accept_note`, `evidence_uri` (string or array), `verification_run` (required when the task carries a `verification_command`); optional `agent`, `verified_by` (array), `expected_version`, `idem_key` | `200 {data:{id,version,event}}` | See the completion gate below |
 | `/hub/api/adr` | Create: `title`, `status`, optional `agent`; `number` and `id` auto-assign. Accepted/superseded/deprecated rows require `context_md`, `decision_md`, and `consequences_md`; superseded also requires `superseded_by[]`. Update: `id` + `expected_version`. | `200 {data}` | `422 schema`, `428 precondition_required`, `409 adr_immutable` for frozen context/decision |

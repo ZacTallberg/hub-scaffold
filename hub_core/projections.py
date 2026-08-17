@@ -27,6 +27,7 @@ def hub_snapshot(st, *, build, audit, generated_at=None, live=None) -> dict:
         "phases": st["phases"],
         "coverage": st["coverage"],
         "tasks": tasks_view,
+        "runs": _sorted(st, "run"),
         "adrs": _sorted(st, "adr"),
         "feats": _sorted(st, "feat"),
         "gaps": _sorted(st, "gap"),

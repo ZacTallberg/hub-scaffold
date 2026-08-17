@@ -18,7 +18,7 @@ from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
 
-_COLLECTION = {"task": "tasks", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
+_COLLECTION = {"task": "tasks", "run": "runs", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
                "deploy": "deploys", "note": "notes"}
 
 # How long a live lease may go without finishing before the board calls the worker stuck.

@@ -136,7 +136,7 @@ The hub's canonical state lives under `PROJECT/` at the repo root:
 ```
 PROJECT/
   project.json       # required portable identity (key/brand/app/host/worker scheme)
-  schema/            # required: the JSON-Schema registry (task/adr/feat/gap/cap/deploy/note/common)
+  schema/            # required registry (task/run/adr/feat/gap/cap/deploy/note/common)
   seed.json          # required for genesis: {"adrs":[...], "tasks":[...], "notes":[...]}
   state.json         # written by your deploy script: {"last_deploy_sha": "...", ...}
   .hub/              # RUNTIME, machine-written: events.jsonl + events.db + claims/ (gitignore .hub/)
@@ -168,6 +168,12 @@ urlpatterns = [
 The root card is discovery-only because this adapter does not implement an A2A task transport. It
 advertises no A2A interface or streaming capability; its callable-protocol extension points to the
 real token-gated MCP JSON-RPC endpoint at `/hub/api/mcp`.
+
+MCP exposes durable AgentRun control plus the current Tasks extension `tasks/get`, `tasks/update`,
+and `tasks/cancel` methods. It does not advertise task-notification subscriptions because this
+stateless view does not implement that stream. The Hub's `/hub/live/events` SSE connection is the
+shipped immediate-push rail for the cockpit and worker coordination; MCP point reads never become
+a background refresh cycle. Every run append wakes SSE as part of the normal committed-event path.
 
 Read surface (unauthenticated; safe to expose only when all board data is publishable):
 
@@ -308,13 +314,13 @@ is amber so it cannot block the very deploy that creates it.
 
 - Normal workers send `X-Agent-Token: <token>`. Issue one with
   `POST /hub/api/agent-credential` and
-  `{"action":"issue","subject":"worker-id","scopes":["task:*"],"ttl_s":3600}`.
+  `{"action":"issue","subject":"worker-id","scopes":["task:*","run:*","mcp:call"],"ttl_s":3600}`.
   The bearer token is returned once; the durable registry stores only its SHA-256 digest.
 - `action:"revoke"` plus `credential_id` invalidates a credential immediately;
   `action:"list"` returns identity/scope/lifetime metadata but never a token or digest.
 - Operation scopes include `task:claim`, `task:write`, `task:heartbeat`, `task:complete`,
-  `task:release`, `task:fail`, entity-specific `*:write` scopes, `launch:consume`, `mcp:call`, and
-  `credential:manage`. A namespace wildcard such as `task:*` is accepted.
+  `task:release`, `task:fail`, entity-specific `*:write` scopes, `run:write`, `launch:consume`,
+  `mcp:call`, and `credential:manage`. A namespace wildcard such as `task:*` or `run:*` is accepted.
 
 - Compatibility transport also remains header-only: `X-Write-Token` is never accepted from a
   query string, where credentials leak into access logs and referrers. Digests compare constant-time.
@@ -324,8 +330,8 @@ is amber so it cannot block the very deploy that creates it.
 - Fail-closed: a missing, invalid, expired, revoked, or insufficiently scoped credential returns 403.
   Reads stay public; the optional CSRF-gated mint capability is described below.
 - Endpoints (all POST, JSON body): `/hub/api/task`, `/hub/api/complete`, `/hub/api/adr`,
-  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, `/hub/api/fail`, and
-  `/hub/api/launch-grant/consume`.
+  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, `/hub/api/fail`,
+  `/hub/api/run`, `/hub/api/run/update`, and `/hub/api/launch-grant/consume`.
 
 Each agent token authorizes only its named operations. The compatibility write token authorizes
 every operation and therefore terminal board/governance state. Neither authorizes operating-system
