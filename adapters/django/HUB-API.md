@@ -95,6 +95,20 @@ The `/hub/api/agent-credential` response returns the bearer token once. Revoke i
 Endpoint operation scopes are enforced before the request body reaches business logic. A scoped
 credential's body `agent` must be absent or equal its immutable subject.
 
+### Capability-aware atomic take
+
+`POST /hub/api/take` (`task:claim`) accepts `agent`, optional `ttl_s`, and an optional `worker`
+placement profile: `capabilities[]`, `risk_clearance`, current `availability`, `localities[]`, and
+observed `outcomes`. Tasks may declare a `routing` contract with required capabilities, risk,
+resource budget, required/preferred locality, hard outcome constraints, and soft outcome weights.
+
+The endpoint derives the ordinary dependency/lease/WIP ready frontier first, filters incompatible
+tasks, then uses locality and quality/latency/cost fit only inside an equal urgency/critical-path
+cohort. Success returns the task, lease token, and a routing summary. `409 no_compatible_task`
+returns structured exclusion reasons; `422 bad_worker_profile` identifies a malformed declaration.
+Missing worker facts never satisfy explicit requirements, while `/hub/next.json` remains the
+unfiltered canonical ready rail.
+
 | Endpoint | Key body fields | Success | Notable refusals |
 |---|---|---|---|
 | `/hub/api/task` (`task:write`) | Create: `title`; update: `id` + `expected_version` plus changed fields. Updating active/leased work also requires its fencing `token`. Optional `priority` (P0–P3), `status` (not `done`/`in_progress`), `verification_command`, `deps`, `acceptance`, `phase`, `touches`, `plan`, `implements`, `decided_by`, `surfaced_by`, `source` | `200 {data:{id,version,event}}` | `409 use_complete` / `use_claim`; wrong/stale lease; `428 precondition_required`; `409 conflict`; `422 schema` |

@@ -689,7 +689,21 @@ def take(request, b):
         for lease in live:
             busy_touches.update(schedule.normalized_touches(
                 entities.get(lease.get("task"), {})))
-        task = schedule.order_ready(candidates, busy_touches=busy_touches)[0]
+        try:
+            routed, routing = schedule.route_ready(
+                candidates,
+                flags=state.get("flags", {}),
+                busy_touches=busy_touches,
+                worker_profile=b.get("worker"),
+            )
+        except ValueError as exc:
+            return JsonResponse({"errors": [{"code": "bad_worker_profile", "msg": str(exc)}]},
+                                status=422)
+        if not routed:
+            return JsonResponse({"errors": [{"code": "no_compatible_task",
+                                              "msg": "ready work exists but none matches this worker"}],
+                                 "routing": routing}, status=409)
+        task = routed[0]
         eid = task["id"]
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
@@ -706,6 +720,7 @@ def take(request, b):
                 return JsonResponse(transition, status=code)
             res["version"] = transition["data"]["version"]
         res["task"] = task
+        res["routing"] = routing
     return JsonResponse(res)
 
 
