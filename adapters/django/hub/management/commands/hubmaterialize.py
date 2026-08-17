@@ -21,8 +21,12 @@ class Command(BaseCommand):
         s = hub_app.store()
         ents = dict(hub_app.current_state(s)["entities"])
         reg = hub_app.registry(); head = hub_app._git_head(); text = doc.read_text(encoding="utf-8")
+        before = s.latest_cursor().get("seq", 0)
         g = materialize_gaps(s, reg, ents, hub_app.PROJECT_KEY, head, text, dry_run=dry_run)
         a = materialize_proposed_adrs(s, reg, ents, hub_app.PROJECT_KEY, head, text, dry_run=dry_run)
+        if not dry_run:
+            for event in s.events_after(before, limit=500):
+                hub_app.publish_event(event)
         for rej in g["rejects"] + a["rejects"]:
             self.stderr.write("  [REJECT] " + rej)
         self.stdout.write("hubmaterialize %s: gaps=%d proposed_adrs=%d skipped=%d rejected=%d" % (

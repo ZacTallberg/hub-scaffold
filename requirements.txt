@@ -8,6 +8,18 @@
 # Pin and promptly patch your chosen series once you mount the adapter into an application.
 Django>=5.2,<6.1
 
+# OPTIONAL ASGI process server -- install one in the deployment environment that serves the Hub's
+# long-lived realtime event stream. Uvicorn is the simplest reference path; Hypercorn and Daphne
+# are equally valid ASGI choices. The scaffold does not force a process-server dependency on every
+# adopter because the production host should own and pin that operational choice:
+#
+#   python -m pip install uvicorn
+#   # or: python -m pip install hypercorn
+#   # or: python -m pip install daphne
+#
+# From the directory containing manage.py, point it at <project>.asgi:application. Django's WSGI
+# development runserver remains a compatibility preview, not the operating shape for long-lived SSE.
+
 # Strict-mode dereferencing of submitted evidence relies only on urllib from the stdlib — no
 # `requests`. The Hub page inlines its small frontend kit, so the adapter adds no static-file serving
 # dependency. Neither tracked nor strict mode requires a `verification_command`.

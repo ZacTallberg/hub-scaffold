@@ -28,6 +28,7 @@ a rare critical boundary.
 - A focused computed audit for schemas, references, ADR numbering, event integrity, build
   coherence, selected Django safety settings, and mutation-route guards.
 - A minimal mounted Django example in which real Hub operations can be exercised.
+- A production-shaped ASGI entrypoint for immediate, long-lived Hub event delivery.
 - An optional Windows one-click worker launcher that keeps the general write token out of the
   browser and closes its host window when the configured wrapper finishes.
 
@@ -105,6 +106,24 @@ Completed task receipts compose upward. A release inherits them and may prove on
 created integration seam when that seam is itself critical; it never reruns every child task or
 fans out through nested verifiers. There is intentionally no automatic test workflow.
 
+### Run the literal-realtime example
+
+The example includes both Django entrypoints. `runserver` is a convenient WSGI compatibility
+preview; the live Hub is meant to run through ASGI so its event connection stays open without a
+polling cycle. Install the process server you prefer separately, then start the reference Uvicorn
+path from `example/` with `DEBUG=1` and `HUB_WRITE_TOKEN` set in the environment:
+
+```bash
+python -m pip install uvicorn
+cd example
+python -m uvicorn example_site.asgi:application --host 127.0.0.1 --port 8000
+```
+
+Add `--reload` only for local code editing. Hypercorn or Daphne can serve the same ASGI callable.
+For production, pin the chosen server in the adopting app, terminate TLS at the deployment edge,
+and disable reverse-proxy buffering/caching for `text/event-stream`; see the
+[ASGI mounting contract](adapters/django/MOUNTING.md#5-serve-the-live-hub-through-asgi).
+
 ## Stamp a new project
 
 `init.sh` requires a new or empty target directory and creates a Git repository with a genesis
@@ -168,7 +187,8 @@ without installing and exercising the workstation half through its real operatio
 ## What adopters must supply
 
 - The actual build and ship commands.
-- A production process server, TLS/reverse-proxy configuration, and any read authentication.
+- An ASGI production process server, TLS/reverse-proxy configuration that preserves unbuffered
+  event streams, and any read authentication.
 - Durable storage and a demonstrated backup/restore operation for `HUB_DIR`.
 - A secret manager and write-token rotation process.
 - The build stamp and live front-door canary.

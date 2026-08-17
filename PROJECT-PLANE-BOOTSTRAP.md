@@ -1910,11 +1910,16 @@ This is product work, not a demand for a permanent visual test suite.
 
 ### 2.2 Realtime truth
 
-- Realtime starts with a complete snapshot and monotonic cursor. SSE carries event identity, honors
-  `Last-Event-ID`, and triggers an exact delta/snapshot read; reconnects are ordered and deduplicated.
-- The UI names its current mode: **live**, **degraded polling**, or **manual refresh**. Silence is not
-  proof of freshness. A local reference integration should visibly converge within two seconds unless
-  the project records another SLO.
+- Realtime starts with a complete snapshot and monotonic cursor. Every canonical mutation publishes
+  once after commit into a persistent push stream; the connected client reconciles immediately to the
+  highest announced cursor. Normal operation has no interval polling and no manual sync control.
+- The UI names one transport truth: **Connected** or **Disconnected**. A disconnect never masquerades
+  as freshness; reconnect performs one ordered, deduplicated cursor catch-up and then returns to push.
+  Recovery reads are recovery only, not an alternate steady-state synchronization loop.
+- Serve long-lived streams through ASGI and a shared pub/sub source wherever multiple server processes
+  can write. An in-process signal bus is valid only for an explicitly single-process reference Hub.
+- The live mutation path does not replay avoidable history, spawn Git, or rerun repository audit.
+  Maintain a cursor-keyed materialized fold; compute heavyweight integrity views outside delivery.
 - Heartbeats, replays, and no-op deltas do not animate as work. Motion follows a real state transition.
 
 ### 2.3 Accessible, responsive interaction

@@ -43,9 +43,12 @@ class Command(BaseCommand):
                 self.stderr.write(f"  REJECT {eid}: {errs}")
                 return
             if not dry_run:
-                s.append(aggregate=eid, type=f"{type_}.created",
-                         payload={**payload, "type": type_}, expected_version=None,
-                         agent_id="seed", git_sha=head, idem_key=f"seed:{eid}")
+                before = s.latest_cursor().get("seq", 0)
+                event = s.append(aggregate=eid, type=f"{type_}.created",
+                                 payload={**payload, "type": type_}, expected_version=None,
+                                 agent_id="seed", git_sha=head, idem_key=f"seed:{eid}")
+                if event.get("seq", 0) > before:
+                    hub_app.publish_event(event)
             existing.add(eid)
             n[type_] += 1
 

@@ -70,9 +70,8 @@ def _type_of(entity_id: str) -> str:
     return parts[1] if len(parts) >= 2 else "?"
 
 
-def fold(events) -> dict:
-    """Replay events (seq-ordered) into {id: entity}. Payloads merge last-write-wins per key."""
-    entities = {}
+def _advance(entities, events):
+    """Apply only ``events`` onto an existing materialized entity map."""
     for ev in events:
         agg = ev.get("aggregate")
         if not agg or _type_of(agg) not in _KNOWN:
@@ -80,7 +79,9 @@ def fold(events) -> dict:
         # Upcast BEFORE folding (read-side ledger evolution): stored bytes stay immutable, the
         # projection always sees the current payload shape (hub_core.upcast).
         payload = _upcast.apply(ev.get("type", ""), ev.get("payload") or {})
-        ent = entities.get(agg, {"id": agg, "type": _type_of(agg)})
+        # Copy the one touched aggregate. Incremental readers can therefore advance a cached
+        # projection without mutating the version still visible to another request.
+        ent = dict(entities.get(agg, {"id": agg, "type": _type_of(agg)}))
         for k, v in payload.items():
             ent[k] = v
         ent["version"] = ev.get("result_version", ent.get("version", 0))
@@ -111,6 +112,20 @@ def fold(events) -> dict:
         ent.setdefault("type", _type_of(agg))
         entities[agg] = ent
     return entities
+
+
+def fold(events) -> dict:
+    """Replay events (seq-ordered) into {id: entity}. Payloads merge last-write-wins per key."""
+    return _advance({}, events)
+
+
+def advance(entities, events) -> dict:
+    """Advance a materialized fold from only its new, contiguous events.
+
+    The top-level map and each touched aggregate are copied; untouched entities are safely shared.
+    This is the live read model's hot path, so an ordinary mutation never replays prior history.
+    """
+    return _advance(dict(entities or {}), events)
 
 
 def _iter_refs(ent):

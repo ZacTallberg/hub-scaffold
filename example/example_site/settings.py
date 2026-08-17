@@ -50,6 +50,7 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = "example_site.urls"
 TEMPLATES = []
+ASGI_APPLICATION = "example_site.asgi.application"
 WSGI_APPLICATION = "example_site.wsgi.application"
 
 # The hub itself has no relational models; this DB exists so `migrate` and any host apps work.

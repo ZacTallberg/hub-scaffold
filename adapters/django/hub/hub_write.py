@@ -107,10 +107,13 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     if errs:
         return ({"errors": [{"code": "schema", "msg": e} for e in errs]}, 422)
     try:
+        before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
                       agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
+    if ev.get("seq", 0) > before:
+        hub_app.publish_event(ev)
     return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)
 
 
@@ -374,11 +377,14 @@ def decision(request, b):
     idem = "decision:" + hashlib.sha256((topic + choice).encode("utf-8")).hexdigest()[:16]
     s = hub_app.store()
     try:
+        before = s.latest_cursor().get("seq", 0)
         ev = s.append(
             aggregate=f"{hub_app.PROJECT_KEY}:decision:{idem[-12:]}", type="decision.logged",
             payload={"topic": topic, "choice": choice, "rationale": b.get("rationale"),
                      "invalidates": b.get("invalidates", []), "refs": b.get("refs", [])},
             expected_version=None, agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
+        if ev.get("seq", 0) > before:
+            hub_app.publish_event(ev)
     finally:
         s.close()
     return JsonResponse({"data": {"event": ev["event_id"]}})

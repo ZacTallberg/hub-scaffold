@@ -27,12 +27,11 @@
 <nav class="navbar-main">
   <div class="navbar-brand"><span class="brand-mark" id="brandMark" aria-hidden="true"></span> {{brand}}</div>
   <div class="navbar-right">
-    <div class="status-pill connecting" id="statusPill" role="status" aria-live="polite" data-state="connecting">
-      <span class="status-dot" aria-hidden="true"></span><span id="statusText">Connecting</span><span class="status-meta" id="statusMeta"></span><span class="clock" id="clock" aria-hidden="true"></span>
+    <div class="status-pill error" id="statusPill" role="status" aria-live="polite" data-state="disconnected">
+      <span class="status-dot" aria-hidden="true"></span><span id="statusText">Disconnected</span><span class="status-meta" id="statusMeta"></span><span class="clock" id="clock" aria-hidden="true"></span>
     </div>
     <a class="btn-white" id="launchWorkerBtn" href="#" data-launch="1" data-count="1" hidden title="Launch one local worker that pulls the next ready task and completes it with a receipt.">▶ Launch Worker</a>
     <a class="btn-white" id="launch4Btn" href="#" data-launch="1" data-count="4" hidden title="Launch four independent workers against the shared readiness queue.">▶▶ Launch 4</a>
-    <button class="btn-white" id="refreshBtn" type="button"><span class="btn-ico" id="refreshIco" aria-hidden="true"></span><span class="btn-label">Sync now</span></button>
     <button class="btn-white" id="paletteBtn" type="button" data-hub-palette-trigger title="Search — Ctrl/Cmd-K" aria-label="Open command palette">⌘K</button>
     <label class="sr-only" for="hub-theme-select">Theme</label>
     <select id="hub-theme-select" class="hub-theme-select btn-white" autocomplete="off" aria-label="Theme">

@@ -45,10 +45,17 @@ MIDDLEWARE = [
     "hub.middleware.NoStoreHTMLMiddleware",   # optional: no-store on dynamic HTML after deploys
 ]
 
+# The literal-realtime transport is served by an ASGI process server.
+ASGI_APPLICATION = "your_project.asgi.application"
+
+# Required when more than one server process serves the Hub. The factory returns an object with
+# publish(channel, signal) and blocking listen(channel) methods (Redis/NATS/Postgres, etc.).
+# HUB_REALTIME_BROKER = "your_project.realtime.RedisBroker"
+
 # --- hub configuration (all keys optional; defaults shown) ---
 HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "acme"
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
-HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 7)
+HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
@@ -156,7 +163,71 @@ Read surface (unauthenticated; safe to expose only when all board data is publis
 - `GET /hub/audit.json`, `graph.json`, `next.json`, `task.json`, `task/<local>.json`,
   `schema/<type>.schema.json`
 
-## 5. Genesis: seed the board
+## 5. Serve the live Hub through ASGI
+
+The Hub's live event connection is a long-lived streaming response. Serve the Django site through
+its ASGI application in every environment where realtime behavior matters. Django's built-in
+`runserver` is a WSGI development server: it is still useful as a compatibility preview, but it is
+not the production shape and it should not be used to judge or operate long-lived event delivery.
+Under ASGI, Django can hold many slow streaming connections without dedicating one WSGI thread to
+each connection. Keep the middleware chain async-capable end to end as well: a synchronous
+middleware between the ASGI server and an async stream forces Django to adapt that request back
+through a worker thread and gives up the concurrency benefit.
+
+Keep both entrypoints if the host needs them, but add the standard ASGI callable and prefer it for
+the Hub:
+
+```python
+# your_project/asgi.py
+import os
+from django.core.asgi import get_asgi_application
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "your_project.settings")
+application = get_asgi_application()
+```
+
+If the Hub code is vendored outside the project root, apply the same `sys.path` bootstrap in
+`asgi.py` that you use in `manage.py`; `example/example_site/asgi.py` is the runnable reference.
+Install and pin one ASGI server in the adopting deployment, then launch it from the directory that
+contains `manage.py`. Uvicorn is the shortest reference command:
+
+```bash
+python -m pip install uvicorn
+python -m uvicorn your_project.asgi:application --host 127.0.0.1 --port 8000
+```
+
+For local code reloads only, append `--reload`. Hypercorn
+(`hypercorn your_project.asgi:application --bind 127.0.0.1:8000`) and Daphne
+(`daphne -b 127.0.0.1 -p 8000 your_project.asgi:application`) are valid alternatives. In
+production, put the chosen ASGI process server behind the deployment's TLS/reverse proxy and make
+sure that proxy does not buffer `text/event-stream`, does not cache or transform it, and gives the
+connection a suitable idle timeout. Those proxy settings are part of the realtime path: buffering
+turns immediate server events back into delayed batches even when Django is correct.
+
+The built-in wake bus is literal push with process scope, which is complete for one ASGI worker.
+If the deployment runs multiple server processes or hosts, configure `HUB_REALTIME_BROKER` with a
+shared broker factory. It must return an object exposing `publish(channel, signal)` and
+`listen(channel)` (a blocking iterator of signal dictionaries). The adapter runs one listener per
+process and relays into its native async waiters. Without that setting, a write handled by process A
+cannot wake an SSE connection owned by process B; the stream reports `realtime.scope:"process"`
+rather than pretending otherwise. Broker failure reports `shared-degraded`; durable mutations are
+never rolled back, and reconnect cursor recovery remains authoritative.
+
+This is the transport contract:
+
+- normal Hub writes and reads remain ordinary HTTP requests;
+- the browser holds one persistent live event connection while the page is open;
+- each mutation wakes that connection and carries a cumulative canonical `patch` directly—there
+  is no identity-event/follow-up-fetch window;
+- UI state reports that connection as connected or disconnected, never as periodically synced;
+- reconnect is recovery from a transport interruption, not an expected polling cycle.
+
+See Django's official [ASGI deployment guide](https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/),
+[Uvicorn guide](https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/uvicorn/), and
+[async support notes](https://docs.djangoproject.com/en/6.0/topics/async/) for the current server
+and long-lived-request model.
+
+## 6. Genesis: seed the board
 
 ```bash
 python manage.py migrate            # hub has no models; migrate your own apps as usual
@@ -167,7 +238,7 @@ python manage.py seedhub            # idempotent genesis import (re-running skip
 `seedhub` is the ONE sanctioned hand-authored entry point. After genesis, the board changes
 only through the typed write API (discover -> claim -> implement -> record).
 
-## 6. The audit as a board-integrity gate
+## 7. The audit as a board-integrity gate
 
 ```bash
 python manage.py hubaudit           # exit 0 = PASS/WARN-only, 2 = violations, 1 = internal error
@@ -186,7 +257,7 @@ The audit is computed-not-attested: schema validity of every entity, referential
 (every `/hub/api/` route must carry either the general `@writer` token gate or the explicitly narrow
 origin-gated launch mint marker). It never trusts a stored boolean.
 
-## 7. Build coherence (the false-green killer)
+## 8. Build coherence (the false-green killer)
 
 The audit wants to know WHICH build is running:
 
@@ -200,7 +271,7 @@ Unknowable coherence is REPORTED, never silently skipped: missing build identity
 violation in prod and an amber warning under `DEBUG`; a missing deploy record (pre-first-deploy)
 is amber so it cannot block the very deploy that creates it.
 
-## 8. Write-API token contract
+## 9. Write-API token contract
 
 - Transport: general writes use `POST` with header `X-Write-Token: <token>` (never `?token=` —
   query strings leak into access logs and referers). Compared constant-time.
@@ -261,7 +332,7 @@ for that task's own artifact. Run it out-of-band, attach the matching receipt, a
 before commit. The write API refuses a broad suite runner because generic suite health does not prove
 that task's work happened and permanent test accumulation damages throughput.
 
-## 9. Optional local-worker launch
+## 10. Optional local-worker launch
 
 This feature is off by default. When enabled, the page shows **Launch Worker** and pre-arms it before
 the click so the final `hub-worker://` navigation remains synchronous and retains browser user
@@ -274,7 +345,7 @@ wrapper. The handler validates the configured issuer exactly, refuses non-HTTPS 
 starts no process until the issuing Hub authorizes and burns the grant. Worker windows are tied to
 the wrapper lifecycle and close when it exits.
 
-## 10. Optional ingests
+## 11. Optional ingests
 
 - `python manage.py hubimport` — `CAPABILITY-LEDGER.md` table rows -> `cap` entities.
 - `python manage.py hubmaterialize` — `PROJECT/REVIEW-AND-REIMPL-PLAN.md` gap ledger -> `gap`
