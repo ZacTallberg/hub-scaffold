@@ -63,6 +63,10 @@ command for each, keep it beside the runbook, and every step below becomes liter
    image while the front door still serves another SHA, immediately invoke the platform's
    rebuild/release-from-current-source operation. Waiting on the canary cannot perform a missing
    swap.
+   If the platform itself accepts only one import/swap operation across all apps, acquire a second,
+   short platform-capacity slot immediately around that operation. Release it as soon as the swap
+   command exits; do not serialize builds or another app's independent canary behind a capacity
+   constraint they do not consume.
 5. **Canary: wait boundedly for the artifact, and judge by CONTAINMENT.** A cold start can outlast
    one request's patience, so repeat the observation a bounded number of times with a short pause.
    This transient release wait is not application synchronization; the live Hub remains push-only.
