@@ -118,7 +118,7 @@ See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
 | Mutating Hub routes have an explicit guard | URL resolver audit recognizes `@writer` or the narrow origin-gated mint | Reads are deliberately unauthenticated and expose whatever entities contain. |
 | Running build matches deploy record | Git or normalized `HUB_BUILD_SHA` / `SOURCE_VERSION` / build stamp and `PROJECT/state.json`; optional external `served` comparison | The Hub does not deploy or continuously probe production by itself. Adopt the deploy/canary patterns. |
 | Done work is deployed/live | Immutable deploy entity with exact `sha == served_sha`, explicit `tasks_closed[]`, and the running artifact SHA | Git ancestry is optional source/legacy enrichment; the canary and deploy writer must be wired by the adopter. |
-| Portable identity is coherent | Audit emits a high finding when Django `HUB_PROJECT_KEY` differs from `PROJECT/project.json` | Correct the mismatch before further mutations so discovery and entity ids share one namespace. |
+| Portable identity is coherent | Audit emits a high finding when Django `HUB_PROJECT_KEY` differs from `PROJECT/project.json`; `public_origin()` and `host_name()` give URL and allowlist consumers one normalized view | Correct the mismatch before further mutations so discovery and entity ids share one namespace. Bare legacy hosts remain readable, but new identity files should store a full HTTP(S) origin. |
 | Browser launch cannot mint general write authority | CSRF mint; signed bounded grant; token-gated single-use consume | Enabling process launch is a privileged local capability and requires workstation installation. |
 
 ## What is not automatic
