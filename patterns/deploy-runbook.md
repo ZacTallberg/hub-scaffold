@@ -92,10 +92,19 @@ command for each, keep it beside the runbook, and every step below becomes liter
    out-of-band rebuild bakes a now-stale identity with no canary behind it. Clear ONLY the stamp
    you set: read it first and leave it alone if it names someone else's sha, or you will disarm a
    concurrent deploy and their build will fail on the missing stamp.
-7. **Record the deploy through the typed writer**, with the sha and the identity the canary
+7. **Resolve the one release-closure dependency without lying about it.** Run the authenticated
+   audit after the exact front-door canary. Before the immutable deploy entity exists, a freshly
+   swapped artifact may have exactly one high finding: `coherence:repo`, naming the prior recorded
+   SHA and the new running head. Treat that as `closure_pending` only when the canary observed the
+   exact new head and there are zero other critical/high findings. Any other finding blocks.
+   Complete only the explicitly carried task(s) from their real-operation evidence. This makes
+   them eligible for `tasks_closed`; it does not itself claim a release exists.
+8. **Record the deploy through the typed writer**, with the sha and the identity the canary
    actually observed. `tasks_closed` is the explicit set of already-done tasks carried by this
    release, not merely the tasks completed during this deploy. Send this only after the front-door
-   canary has observed the exact SHA:
+   canary observed the exact SHA and step 7 found either a normal passing audit or solely the exact
+   `closure_pending` condition. In the latter case `audit_ok: true` names the deterministic
+   postcondition of appending this matching closure; it is not permission to excuse another red:
 
    ```http
    POST /hub/api/deploy
@@ -108,6 +117,7 @@ command for each, keep it beside the runbook, and every step below becomes liter
      "tasks_closed": ["<project>:task:0001", "<project>:task:0002"],
      "at": "<ISO-8601 timestamp>",
      "method": "<platform/deploy path>",
+     "audit_ok": true,
      "agent": "<operator id>"
    }
    ```
@@ -116,14 +126,19 @@ command for each, keep it beside the runbook, and every step below becomes liter
    to rewrite an existing SHA's proof. An exact retry is idempotent. This immutable closure plus
    the running artifact identity makes every named task immediately `live` without Git or a
    polling cycle. A deploy nobody recorded did not happen as far as the board is concerned.
-8. **Check your unauthenticated surface** — one request per invariant your project declares.
-9. **Done means named:** the recorded event carries the live sha. Release the per-target lease only
-   after the canary and immutable deploy record succeed (or the attempt has failed closed).
+9. **Read the authenticated audit once more.** The closure must have removed `closure_pending` and
+   the result must contain zero critical/high findings. If it does not, the immutable record remains
+   truthful history with its exact inputs, the release stays visibly unhealthy, and repair begins
+   from that observed finding rather than rewriting the record.
+10. **Check your unauthenticated surface** — one request per invariant your project declares.
+11. **Done means named:** the recorded event carries the live sha. Release the per-target lease only
+    after the canary, immutable deploy record, and post-record audit succeed (or the attempt has
+    failed closed).
 
 ## Rollback
 
 Find the last deploy the canary confirmed, and prefer a shared source (the board) over a local
-file, so it does not matter which clone is rolling back. Then repeat steps 3–7 with that sha.
+file, so it does not matter which clone is rolling back. Then repeat steps 3–9 with that sha.
 A rollback moves the target backwards, which an ordinary push refuses — force is required and
 deliberate. If the last-good sha IS the failed sha, stop: re-shipping it cannot help.
 
