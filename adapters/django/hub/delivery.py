@@ -24,7 +24,7 @@ _ABSENT_DEFAULT = {
 def _git(*args):
     """Run a Git command in the repo root, returning ``None`` when it cannot answer."""
     try:
-        out = subprocess.run(("git",) + args, cwd=str(hub_app.BASE_DIR), capture_output=True,
+        out = subprocess.run(("git",) + args, cwd=str(hub_app.WORK_ROOT), capture_output=True,
                              text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -37,7 +37,7 @@ def _repo_present():
 
 def repository_available():
     """Cheap hot-path hint for whether optional ancestry enrichment is worth dispatching."""
-    return (hub_app.BASE_DIR / ".git").exists()
+    return (hub_app.WORK_ROOT / ".git").exists()
 
 
 def _integration_ref():
@@ -90,7 +90,7 @@ def _is_ancestor(commit, ref):
         return None
     try:
         out = subprocess.run(("git", "merge-base", "--is-ancestor", commit, ref),
-                             cwd=str(hub_app.BASE_DIR), capture_output=True, text=True, timeout=15)
+                             cwd=str(hub_app.WORK_ROOT), capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode == 0:

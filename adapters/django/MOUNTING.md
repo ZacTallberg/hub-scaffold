@@ -56,6 +56,7 @@ ASGI_APPLICATION = "your_project.asgi.application"
 HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "acme"
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
 # HUB_PROJECT_DIR = BASE_DIR / "PROJECT"  # override for monorepos; env form is also accepted
+# HUB_WORK_ROOT = BASE_DIR                 # repo/evidence root; defaults to HUB_PROJECT_DIR.parent
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
@@ -110,10 +111,11 @@ operators/agents may hold it because terminal governance authority is still priv
 Notes:
 
 - `BASE_DIR` must exist in settings (Django's default template provides it). The adapter resolves
-  the build stamp and evidence paths relative to it. The project plane defaults to
+  the build stamp relative to it. The project plane defaults to
   `BASE_DIR/PROJECT`; set `HUB_PROJECT_DIR` (Django setting or environment) when a monorepo keeps
   the canonical plane elsewhere. A relative override is resolved from `BASE_DIR`, and identity,
-  schemas, ledger, claims, and grants all follow that one plane.
+  schemas, ledger, claims, and grants all follow that one plane. Git and relative evidence paths
+  resolve from `HUB_WORK_ROOT`, which defaults to that Project Plane's parent.
 - `HUB_PROJECT_KEY` must match `^[a-z0-9][a-z0-9-]*$` — it prefixes every entity id
   (`acme:task:0001`). Pick it once; ids are allocated once and never renumbered.
 - The AST security audit (part of `hubaudit`) scans your settings file and FAILS on:

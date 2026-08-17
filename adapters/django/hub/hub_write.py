@@ -56,7 +56,7 @@ def writer(fn):
 def _evidence_problem(ev):
     """Return None if the evidence string dereferences to something real, else the reason it
     doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
-    file path resolved from BASE_DIR. This proves existence, not confinement: strict URL evidence
+    file path resolved from WORK_ROOT. This proves existence, not confinement: strict URL evidence
     is fetched from the Hub service account's network. 'done' evidence that cannot resolve is
     decoration."""
     import re
@@ -78,17 +78,17 @@ def _evidence_problem(ev):
         return f"URL did not resolve (<400): {err}"
     if re.fullmatch(r"[0-9a-f]{7,40}", ev):
         try:
-            r = subprocess.run(["git", "-C", str(hub_app.BASE_DIR), "cat-file", "-e", ev + "^{commit}"],
+            r = subprocess.run(["git", "-C", str(hub_app.WORK_ROOT), "cat-file", "-e", ev + "^{commit}"],
                                capture_output=True, timeout=10)
             return None if r.returncode == 0 else "not a commit in this repo"
         except Exception as e:
             return str(e)[:120]
     try:
-        if (hub_app.BASE_DIR / ev).exists():
+        if (hub_app.WORK_ROOT / ev).exists():
             return None
     except OSError:
         pass
-    return "not a resolvable URL, commit sha, or existing path from BASE_DIR"
+    return "not a resolvable URL, commit sha, or existing path from WORK_ROOT"
 
 
 def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype):
@@ -201,7 +201,7 @@ def complete(request, b):
                 bad[str(e)[:200]] = problem
         if bad:
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from BASE_DIR)",
+                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from WORK_ROOT)",
                 "bad": bad}]}, status=422)
     ent = hub_app.current_state().get("entities", {}).get(eid)
     if not ent:
