@@ -64,6 +64,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - Crystallized the immutable release handshake: an exact canary may classify only the sole
   self-referential pre-record `coherence:repo` finding as closure-pending, then the task-bearing
   release must immediately produce a zero-critical/high post-record audit. Every other red blocks.
+- Legacy signature capture now folds the exact shared-cutoff snapshot, so a later touch on a
+  divergent repository branch cannot hide debt that the production branch still carries unchanged;
+  runtime post-cutoff touches remain strict.
 
 ### Hub Excellence Contract and live throughput cockpit
 

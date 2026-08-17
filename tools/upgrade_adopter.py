@@ -355,9 +355,14 @@ def capture_legacy_entity_schema(
             "legacy_done_receipts is not anchored to this ledger; refusing entity-schema capture"
         )
 
+    # Project the immutable state AT the cutoff, not today's repository branch. Two ledgers may
+    # share this prefix and then touch different entities afterward. Runtime strictness already
+    # rejects every post-cutoff touch on whichever branch is live; letting later repository events
+    # alter signature capture would incorrectly omit debt that production still carries unchanged.
+    cutoff_events = [event for event in events if event.get("seq", 0) <= seq]
     registry = Registry.from_dir(SCAFFOLD_ROOT / "PROJECT" / "schema")
-    entities = fold(events)
-    last_events = last_event_seq(events)
+    entities = fold(cutoff_events)
+    last_events = last_event_seq(cutoff_events)
     signatures: dict[str, set[str]] = {}
     for entity_id in sorted(entities):
         entity = entities[entity_id]
