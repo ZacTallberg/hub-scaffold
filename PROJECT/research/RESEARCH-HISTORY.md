@@ -13,6 +13,16 @@ lives in the per-effort files in this folder; this file is the index a cold agen
 <2–5 sentences of what was learned and what it changed.>
 -->
 
+## 2026-08-16 — Durable AgentRuns and current MCP Tasks
+**Source:** `2026-08-16-durable-agent-runs-and-mcp-tasks.md` · **Fed:** ADR-0005, `example:task:0014`
+⚑ Backlog tasks define owed work; AgentRuns define resumable execution attempts.
+⚑ MCP Task handles are created by declaring task-augmented calls and return the official top-level shapes.
+⚑ Checkpoints plus composed child receipts let replacement workers resume without replaying completed work.
+
+The design adds one event-sourced run aggregate containing typed commands, messages, checkpoints,
+handoffs, cancellation/input state, and outcome. It remains lease- and subject-bound, maps directly
+to current MCP Tasks, and leaves A2A discovery empty until a callable A2A transport exists.
+
 ## 2026-08-16 — Capability-aware atomic pull routing
 **Source:** `2026-08-16-capability-aware-pull-routing.md` · **Fed:** ADR-0003, `example:task:0015`
 ⚑ Feasibility filtering precedes preference scoring; neither may replace the dependency-derived ready frontier.
