@@ -61,6 +61,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - The adopter upgrader can now anchor compatibility against a read-only production-ledger snapshot.
   It uses only the exact shared immutable prefix and requires an explicit flag to repair a
   local-only cutoff; repair is backward-only and never mutates either ledger.
+- Crystallized the immutable release handshake: an exact canary may classify only the sole
+  self-referential pre-record `coherence:repo` finding as closure-pending, then the task-bearing
+  release must immediately produce a zero-critical/high post-record audit. Every other red blocks.
 
 ### Hub Excellence Contract and live throughput cockpit
 

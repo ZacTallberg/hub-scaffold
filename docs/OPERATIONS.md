@@ -112,6 +112,14 @@ Before the first deploy, a missing deploy record is warn-only. A production proc
 Git metadata nor a build stamp is blocking because its running identity is unknowable. The deploy
 pattern shows how to stamp and probe an artifact; wire the real ship and alert mechanisms yourself.
 
+A newly swapped exact artifact and its immutable task-bearing deploy record have one intentional
+ordering edge: the task must be done before `tasks_closed` may name it, while `coherence:repo`
+cannot clear until that record exists. After an exact independent canary, the release driver may
+classify **only** that single prior-SHA/new-head finding as `closure_pending`, complete the named
+task, append the exact closure, and then require one post-record audit with zero critical/high
+findings. Any additional finding blocks, and no immutable record is rewritten. The full sequence is
+in `patterns/deploy-runbook.md`.
+
 ## Token rotation
 
 1. Generate a new high-entropy token in the secret manager.
