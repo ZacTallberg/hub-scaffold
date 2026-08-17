@@ -63,7 +63,9 @@ The upgrader then anchors only at the last exact event shared by both histories.
 manifest was accidentally anchored beyond that production prefix, review the reported divergence
 and rerun with `--reanchor-compatibility`. That explicit operation may move both compatibility
 records strictly **backward** to the shared prefix; it can never move them forward, and it changes
-neither ledger. Subjects touched after the smaller cutoff become fully strict.
+neither ledger. Signatures are computed from the entity projection at that exact cutoff—not from
+either branch's later head—while subjects touched afterward on the running branch become fully
+strict.
 
 That same first boundary records `compatibility.legacy_entity_schema` at the **original** receipt
 cutoff. It contains exact SHA-256 signatures, grouped by entity type, of canonical portable-schema
