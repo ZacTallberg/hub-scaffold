@@ -665,6 +665,21 @@ def _bounded_setting(name, default, low, high):
     return max(low, min(high, value))
 
 
+def _schedule_failure_retry(task_id, not_before):
+    """Wake connected readers at the exact durable-backoff boundary, without polling."""
+    try:
+        from . import realtime
+        when = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        realtime.schedule(hub_app.HUB_DIR, "task-ready:" + task_id, when.timestamp(),
+                          {"kind": "task.ready", "task": task_id},
+                          channel=hub_app.PROJECT_KEY)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Hub task-ready timer could not be scheduled")
+
+
 @writer(scope="task:fail")
 def fail(request, b):
     """Atomically turn one real failed attempt into bounded, specialist-routable repair work."""
@@ -807,7 +822,7 @@ def fail(request, b):
         # One wake after the full batch is durable; the cumulative patch contains every event.
         if events:
             hub_app.publish_event(events[-1])
-        hub_app.schedule_task_ready(eid, not_before)
+        _schedule_failure_retry(eid, not_before)
         return JsonResponse({"ok": True, "task": eid, "repair_task": repair_id,
                              "repair_created": repair_created, "failure_count": total,
                              "failure_repeats": repeats, "backoff_s": backoff,
