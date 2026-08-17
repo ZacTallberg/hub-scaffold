@@ -60,6 +60,9 @@ HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
+# HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
+# HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
+# HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
 
@@ -310,7 +313,7 @@ is amber so it cannot block the very deploy that creates it.
 - `action:"revoke"` plus `credential_id` invalidates a credential immediately;
   `action:"list"` returns identity/scope/lifetime metadata but never a token or digest.
 - Operation scopes include `task:claim`, `task:write`, `task:heartbeat`, `task:complete`,
-  `task:release`, entity-specific `*:write` scopes, `launch:consume`, `mcp:call`, and
+  `task:release`, `task:fail`, entity-specific `*:write` scopes, `launch:consume`, `mcp:call`, and
   `credential:manage`. A namespace wildcard such as `task:*` is accepted.
 
 - Compatibility transport also remains header-only: `X-Write-Token` is never accepted from a
@@ -321,7 +324,7 @@ is amber so it cannot block the very deploy that creates it.
 - Fail-closed: a missing, invalid, expired, revoked, or insufficiently scoped credential returns 403.
   Reads stay public; the optional CSRF-gated mint capability is described below.
 - Endpoints (all POST, JSON body): `/hub/api/task`, `/hub/api/complete`, `/hub/api/adr`,
-  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, and
+  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, `/hub/api/fail`, and
   `/hub/api/launch-grant/consume`.
 
 Each agent token authorizes only its named operations. The compatibility write token authorizes

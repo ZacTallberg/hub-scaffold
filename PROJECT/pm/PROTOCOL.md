@@ -170,7 +170,12 @@ cure is structural, not disciplinary).
    those completed parts. Verifier-of-verifier fan-out is forbidden.
 5. **Real failure is sufficient notice.** When the actual operation breaks, create a fresh repair
    task, route it to a dedicated error-fixing lane when available, and let delivery agents continue
-   unrelated work. The successful retry closes the repair task.
+   unrelated work. A leased worker uses the single fenced `/hub/api/fail` operation with its stable
+   cause signature and concrete failure note: that operation records the attempt, returns the lease,
+   applies bounded backoff/circuit state, and creates or reuses the `hub.repair`-routed task as one
+   durable transition. Set `consequential:true` only when human authority or material impact truly
+   requires the operator; routine circuit-open work stays in the specialist lane. The successful
+   retry closes the repair task.
 6. **Done ≠ live** (DOCTRINE §2.3): work that needs a deploy stays open until its `deploy_done`
    records the observed live outcome.
 

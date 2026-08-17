@@ -102,6 +102,27 @@
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
     "poison_blocked": { "type": "boolean", "description": "The circuit breaker opened after repeated failing receipts; the task is withheld from the queue until an exit-0 receipt clears it, so a broken task cannot consume the whole fleet in a retry storm." },
     "poison_reason": { "type": "string", "description": "Why the circuit breaker opened, surfaced verbatim on the attention rail." },
+    "failure_count": { "type": "integer", "minimum": 0, "description": "Total failed attempts durably reported for this task." },
+    "failure_repeats": { "type": "integer", "minimum": 0, "description": "Consecutive repeats of the current stable failure signature; drives bounded backoff and circuit state." },
+    "failure_signature": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*" },
+    "last_failure": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "signature": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "note": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": ".*\\S.*" },
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "consequential": { "type": "boolean" },
+        "evidence_uri": { "type": "array", "maxItems": 32, "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 256 }
+      },
+      "required": ["signature", "note", "at", "consequential", "agent"]
+    },
+    "retry_backoff_s": { "type": "integer", "minimum": 0, "maximum": 86400 },
+    "repair_task": { "$ref": "hub:common#/$defs/idref", "description": "Deterministically addressed specialist repair task for the current failure signature." },
+    "repair_for": { "$ref": "hub:common#/$defs/idref", "description": "Source task whose failure this specialist repair resolves." },
+    "repair_role": { "enum": ["repair-specialist", "operator-repair"] },
+    "operator_attention": { "type": "boolean", "description": "Explicit consequence boundary; routine repair failures remain autonomous when false." },
     "deps": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Blocked iff any dep is not done." },
     "implements": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/cap this realizes." },
     "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },

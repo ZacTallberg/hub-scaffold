@@ -190,9 +190,13 @@ def _attention(state, audit, inflight, adher=None, deliv=None):
                       "title": title or (tid.rsplit(":", 1)[-1] if tid else None)})
 
     for t in tasks:
-        if t.get("poison_blocked"):
+        if t.get("poison_blocked") and t.get("operator_attention", True):
             add(1, "circuit-open",
                 t.get("poison_reason") or "verification keeps failing — the circuit breaker is open",
+                t["id"], t.get("title"))
+        elif t.get("operator_attention") and t.get("last_failure"):
+            add(1, "consequential-failure",
+                (t.get("last_failure") or {}).get("note") or "failure requires operator authority",
                 t["id"], t.get("title"))
 
     for r in (inflight or []):

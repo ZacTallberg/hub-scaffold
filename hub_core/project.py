@@ -50,6 +50,8 @@ _EDGES = {
         "decided_by": "decided_by",
         "surfaced_by": "surfaced_by",
         "canonical_task": "canonical_task",
+        "repair_task": "repaired_by",
+        "repair_for": "repairs",
     },
     "adr": {"supersedes": "supersedes", "superseded_by": "superseded_by"},
     "feat": {
