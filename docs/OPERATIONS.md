@@ -24,7 +24,7 @@ a fresh repair task and may route to a dedicated error-fixing agent.
 | `HUB_SETTINGS_FILE` | resolved Django settings module | File scanned by the focused AST safety audit |
 | `HUB_WRITE_TOKEN` | empty | General writes disabled when empty; grants terminal board authority (done/deploy/ADR) when configured |
 | `HUB_DONE_STRICTNESS` | `tracked` | `tracked` or `strict`; unknown values behave as `tracked` |
-| `HUB_DIR` environment variable | `BASE_DIR/PROJECT/.hub` | Canonical runtime ledger, index, leases, and grant sidecars |
+| `HUB_DIR` setting/environment | `BASE_DIR/PROJECT/.hub` locally | Canonical runtime ledger, index, leases, credentials, and grants; explicitly set to a writable durable mount in production |
 | `HUB_ATTEST_SECRET` environment variable | generated `HUB_DIR/.attest-secret` | Optional stable launch-grant HMAC secret override; protect like a credential |
 | `HUB_WORKER_LAUNCH_ENABLED` | `False` | Expose the optional launch mint and page control |
 | `HUB_WORKER_PROTOCOL` | `hub-worker` | Validated custom URL scheme; invalid values fall back to `hub-worker` |

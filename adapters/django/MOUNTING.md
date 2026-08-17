@@ -57,6 +57,8 @@ HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
 # HUB_PROJECT_DIR = BASE_DIR / "PROJECT"  # override for monorepos; env form is also accepted
 # HUB_WORK_ROOT = BASE_DIR                 # repo/evidence root; defaults to HUB_PROJECT_DIR.parent
+# HUB_DIR = "/mounted/durable/path/hub"   # REQUIRED in production; never leave the live ledger
+#                                          # inside an ephemeral application image
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
@@ -77,6 +79,13 @@ HUB_WORKER_PROTOCOL = "hub-{{PROJECT_KEY}}"
 # HUB_WORKER_LAUNCH_ISSUER_URL = "{{LIVE_URL}}/hub/api/launch-grant/consume"
 # HUB_WORKER_GRANT_TTL_S = 120
 ```
+
+`HUB_DIR` is optional only for local development. In production, point it explicitly at storage
+that survives process and artifact replacement and is writable by the service account. The Hub
+publishes topology-free `realtime.storage` truth and opens a high audit finding when production
+falls back to implicit storage or cannot write the configured ledger. A release task must still be
+present after the real process/artifact swap before its deploy closure is recorded; that observed
+survival is the durability receipt, not a permanent test.
 
 ### The evidence-resolution dial (`HUB_DONE_STRICTNESS`)
 

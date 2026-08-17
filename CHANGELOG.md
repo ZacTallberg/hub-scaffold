@@ -24,6 +24,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - Crystallized the active-ledger invariant across agent, operating, mounting, quality, and recovery
   contracts: direct EventStore/JSONL/SQLite mutation is offline recovery only because it bypasses
   the push publisher and can leave a Connected cockpit behind canonical state.
+- Production snapshots now expose topology-free ledger storage truth. The Django audit opens a high
+  finding when `HUB_DIR` is implicit or unwritable, preventing an ephemeral application image from
+  masquerading as a durable live task plane.
 
 ### Proof without test accumulation
 

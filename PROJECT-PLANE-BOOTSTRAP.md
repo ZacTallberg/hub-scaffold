@@ -2228,6 +2228,9 @@ This is product work, not a demand for a permanent visual test suite.
 - An active ledger has one mutation entrance: the served authenticated write API. Agent scripts and
   operator tooling must use it so append and push publication are indivisible. Direct EventStore,
   JSONL, or SQLite mutation is offline recovery only and must occur with live writers drained.
+- Production ledger storage is explicitly configured, writable by the service identity, and mounted
+  outside the replaceable application artifact. A task created before a real process/artifact swap
+  must remain present afterward; disappearing work is a blocking durability defect, never a release.
 - The UI names one transport truth: **Connected** or **Disconnected**. A disconnect never masquerades
   as freshness; reconnect performs one ordered, deduplicated cursor catch-up and then returns to push.
   Recovery reads are recovery only, not an alternate steady-state synchronization loop.
