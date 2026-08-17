@@ -23,7 +23,7 @@ class Command(BaseCommand):
         p.add_argument("--dry-run", action="store_true")
 
     def handle(self, *a, dry_run=False, **o):
-        ledger = hub_app.BASE_DIR / "CAPABILITY-LEDGER.md"
+        ledger = hub_app.WORK_ROOT / "CAPABILITY-LEDGER.md"
         if not ledger.exists():
             self.stderr.write("no CAPABILITY-LEDGER.md found")
             return

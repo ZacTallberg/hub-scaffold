@@ -9,6 +9,7 @@ substitutes at scaffold time):
     HUB_PROJECT_KEY   entity-id prefix (lowercase slug), e.g. "acme".  Default "{{PROJECT_KEY}}".
     HUB_BRAND         human brand for titles, e.g. "Acme".             Default "{{BRAND}}".
     HUB_PROJECT_DIR   canonical project-plane directory.               Default BASE_DIR/PROJECT.
+    HUB_WORK_ROOT     repository/evidence root for Git and local paths. Default PROJECT.parent.
     HUB_BUILD_STAMP   BASE_DIR-relative path of the build-sha stamp the deploy pipeline bakes
                       into the artifact.                               Default "build_sha.txt".
     HUB_BUILD_SHA     explicit immutable revision injected by the artifact platform; overrides stamp.
@@ -22,7 +23,8 @@ substitutes at scaffold time):
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
     HUB_WORKER_GRANT_TTL_S      short grant lifetime, clamped by hub_core. Default 120 seconds.
 The project plane defaults to Django ``BASE_DIR/PROJECT``; ``HUB_PROJECT_DIR`` relocates that whole
-canonical plane and ``HUB_DIR`` can separately relocate runtime ledger state.
+canonical plane, ``HUB_WORK_ROOT`` can identify a nested adopter's repository/evidence root, and
+``HUB_DIR`` can separately relocate runtime ledger state.
 """
 import ast
 import functools
@@ -60,6 +62,10 @@ if _PROJECT_SETTING:
     os.environ["HUB_PROJECT_DIR"] = str(PROJECT)
 else:
     os.environ.setdefault("HUB_PROJECT_DIR", str(PROJECT))
+_WORK_ROOT_OVERRIDE = _dj_setting("HUB_WORK_ROOT") or os.environ.get("HUB_WORK_ROOT")
+WORK_ROOT = Path(_WORK_ROOT_OVERRIDE) if _WORK_ROOT_OVERRIDE else PROJECT.parent
+if not WORK_ROOT.is_absolute():
+    WORK_ROOT = BASE_DIR / WORK_ROOT
 HUB_DIR = Path(os.environ.get("HUB_DIR") or (PROJECT / ".hub"))
 SCHEMA_DIR = PROJECT / "schema"
 _IDENTITY = _identity.load()
@@ -175,7 +181,7 @@ def _git_head():
     Hub mutations and discovery metadata.
     """
     try:
-        r = subprocess.run(["git", "-C", str(BASE_DIR), "rev-parse", "--short", "HEAD"],
+        r = subprocess.run(["git", "-C", str(WORK_ROOT), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=4)
         head = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
@@ -390,7 +396,7 @@ def _range_touched_paths(base, head):
     if key in _RANGE_TOUCH_CACHE:
         return _RANGE_TOUCH_CACHE[key]
     try:
-        r = subprocess.run(["git", "-C", str(BASE_DIR), "diff", "--name-only", f"{base}..{head}"],
+        r = subprocess.run(["git", "-C", str(WORK_ROOT), "diff", "--name-only", f"{base}..{head}"],
                            capture_output=True, text=True, timeout=15)
         val = None if r.returncode != 0 else tuple(sorted(
             p.strip().replace("\\", "/") for p in (r.stdout or "").splitlines() if p.strip()))
