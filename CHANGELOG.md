@@ -14,6 +14,14 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### One live write entrance
+
+- Added the dependency-free `python -m hub_core.client` create/claim/heartbeat/complete client so
+  agents can use the authenticated HTTP mutation seam without custom scripts or framework imports.
+- Crystallized the active-ledger invariant across agent, operating, mounting, quality, and recovery
+  contracts: direct EventStore/JSONL/SQLite mutation is offline recovery only because it bypasses
+  the push publisher and can leave a Connected cockpit behind canonical state.
+
 ### Proof without test accumulation
 
 - Made the real operation the default proof and removed permanent selftests, verifier scripts, and

@@ -47,5 +47,7 @@ Read when needed, in this order:
   checks required.
 - The board updates at the moment of the event, never batched afterwards. Rendered views of the
   board (the `/hub` dashboard, any generated `TASKS.md`) are projections — change tasks by
-  emitting hub events, never by hand-editing a view.
+  using the served `/hub/api/*` write seam (or `python -m hub_core.client`), never by hand-editing a
+  view or opening `EventStore`, `events.jsonl`, or `events.db` from a side process. Direct ledger
+  access is offline recovery only because it cannot wake the process serving a Connected cockpit.
 - No process-narration comments in code (no directive IDs, no before/after commentary).

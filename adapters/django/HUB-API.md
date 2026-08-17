@@ -5,6 +5,12 @@ token-gated. An unauthenticated read returns the complete projected board, so it
 only when entity contents are intentionally publishable. You do not need to read the source—this is
 the contract.
 
+This served API is the only mutation entrance for an active board. Using it makes durable append,
+authorization, fencing, and realtime publication one operation. Never mutate an active ledger via
+`EventStore`, `hub_app.store()`, `events.jsonl`, or `events.db`; direct access is reserved for an
+explicitly drained offline recovery boundary. `python -m hub_core.client` is the dependency-free
+agent/operator wrapper for the core create, claim, heartbeat, and complete loop.
+
 - **Base path:** wherever the app is mounted, e.g. `{{LIVE_URL}}/hub` (locally `http://127.0.0.1:8000/hub`).
 - **Write auth:** normal agents send a scoped, expiring, revocable `X-Agent-Token`. Missing,
   invalid, expired, revoked, or insufficiently scoped credentials fail closed. The legacy

@@ -78,6 +78,9 @@ require project-specific wiring.
    same-session is the outer bound for prose docs only. A governance layer that lags the work
    layer is itself a defect (a real campaign once created 221 tasks and transitioned 14 — the
    board was fiction). In campaigns the LEADER carries this duty personally (PROTOCOL §11).
+   While the Hub is serving, every mutation crosses its authenticated HTTP write seam; direct
+   `EventStore`, JSONL, or SQLite writes are offline recovery operations only. A side-process append
+   that bypasses realtime publication makes “Connected” untrue and is therefore a product defect.
 5. **Shared-kit changes** (anything vendored across projects) get a CHANGELOG entry in the kit.
 6. **Contracts never impersonate controls.** A documented gate, verifier, backup, canary, scanner,
    or alert is reported as active only while its real critical boundary, trigger, and owner exist.

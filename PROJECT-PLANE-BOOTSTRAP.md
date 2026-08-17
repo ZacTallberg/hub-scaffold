@@ -1088,6 +1088,9 @@ require project-specific wiring.
    same-session is the outer bound for prose docs only. A governance layer that lags the work
    layer is itself a defect (a real campaign once created 221 tasks and transitioned 14 — the
    board was fiction). In campaigns the LEADER carries this duty personally (PROTOCOL §11).
+   While the Hub is serving, every mutation crosses its authenticated HTTP write seam; direct
+   `EventStore`, JSONL, or SQLite writes are offline recovery operations only. A side-process append
+   that bypasses realtime publication makes “Connected” untrue and is therefore a product defect.
 5. **Shared-kit changes** (anything vendored across projects) get a CHANGELOG entry in the kit.
 6. **Contracts never impersonate controls.** A documented gate, verifier, backup, canary, scanner,
    or alert is reported as active only while its real critical boundary, trigger, and owner exist.
@@ -1944,6 +1947,10 @@ keeping it — and every ADR and document — updated LIVE, with full perfection
 pm channels are operational traffic only; the ledger is the record.
 
 The cadence is per-event, never batched:
+- **One live write entrance** — every active-board mutation uses the served authenticated Hub API
+  (or its `hub_core.client` wrapper). Direct EventStore/JSONL/SQLite mutation is allowed only during
+  an explicitly drained offline recovery operation; it bypasses push publication and makes a
+  Connected cockpit false.
 - **No directive without a task** — issuing a directive creates/claims its hub task (`in_progress`) in the same act.
 - **No decision without an ADR** — recorded when the decision is made, with real prose (a stub entity is a defect).
 - **No `done` without completion evidence** — the real operation and observed outcome (§6) land
@@ -2218,6 +2225,9 @@ This is product work, not a demand for a permanent visual test suite.
 - Realtime starts with a complete snapshot and monotonic cursor. Every canonical mutation publishes
   once after commit into a persistent push stream; the connected client reconciles immediately to the
   highest announced cursor. Normal operation has no interval polling and no manual sync control.
+- An active ledger has one mutation entrance: the served authenticated write API. Agent scripts and
+  operator tooling must use it so append and push publication are indivisible. Direct EventStore,
+  JSONL, or SQLite mutation is offline recovery only and must occur with live writers drained.
 - The UI names one transport truth: **Connected** or **Disconnected**. A disconnect never masquerades
   as freshness; reconnect performs one ordered, deduplicated cursor catch-up and then returns to push.
   Recovery reads are recovery only, not an alternate steady-state synchronization loop.

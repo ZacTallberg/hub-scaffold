@@ -60,6 +60,9 @@ Strict completion strengthens proof of a claim; it does not reduce the authority
 
 The board is updated **at the moment of the event** — claim when claiming, done when proven —
 never batched or reconstructed afterwards. A board that lags the work is itself a defect.
+All mutations of a running board cross its served authenticated `/hub/api/*` seam (or the
+`hub_core.client` wrapper), so the append and push wake are the same operation. Direct EventStore,
+JSONL, or SQLite access is reserved for a drained offline recovery boundary.
 
 ## §3 — Nothing off-list, ever
 

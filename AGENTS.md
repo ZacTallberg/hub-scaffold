@@ -46,6 +46,10 @@ from a working multi-project system. Nothing here names any specific person, hos
    any proof machinery.
    Record an observed failure as fresh Hub task input for a repair/error-fixing lane. Stay in the
    claimed delivery role; do not speculate or preemptively turn into the repair agent.
+   Mutate a running board only through its served `/hub/api/*` seam (or
+   `python -m hub_core.client`). Never use `EventStore`, `hub_app.store()`, `events.jsonl`, or
+   `events.db` as a live write shortcut: a side-process append bypasses the push publisher and can
+   leave a cockpit labeled Connected behind the ledger. Direct access is offline recovery only.
 2. **Read, in order:** this file → `README.md` → `campaigns/00-orchestration-method.md` (how to run
    work well) → `OPERATING-AGREEMENT.md` (the working laws) → `SECURITY.md` (the actual trust boundary)
    → `adapters/django/MOUNTING.md` (how the hub

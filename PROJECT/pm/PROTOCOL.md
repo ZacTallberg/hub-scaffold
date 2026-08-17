@@ -296,6 +296,10 @@ keeping it — and every ADR and document — updated LIVE, with full perfection
 pm channels are operational traffic only; the ledger is the record.
 
 The cadence is per-event, never batched:
+- **One live write entrance** — every active-board mutation uses the served authenticated Hub API
+  (or its `hub_core.client` wrapper). Direct EventStore/JSONL/SQLite mutation is allowed only during
+  an explicitly drained offline recovery operation; it bypasses push publication and makes a
+  Connected cockpit false.
 - **No directive without a task** — issuing a directive creates/claims its hub task (`in_progress`) in the same act.
 - **No decision without an ADR** — recorded when the decision is made, with real prose (a stub entity is a defect).
 - **No `done` without completion evidence** — the real operation and observed outcome (§6) land
