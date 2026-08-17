@@ -67,6 +67,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   pre-build stamp supplies running identity when `.git` is absent. Immutable deploy records require
   exact `sha == served_sha` plus explicit done `tasks_closed[]`, so named work can be proven live
   directly; Git ancestry remains optional legacy/source enrichment.
+- Build coherence now prefers a valid immutable post-canary deploy closure matching the running
+  artifact over stale mutable `PROJECT/state.json`, while retaining an already-matching state
+  shortcut. Pre-build bytes can no longer mask the release fact written after they ship.
 - Production mutations and agent discovery inherit the baked revision through `_git_head()`'s
   artifact fallback, and the audit now emits a high finding when Django `HUB_PROJECT_KEY` disagrees
   with the portable identity key.
