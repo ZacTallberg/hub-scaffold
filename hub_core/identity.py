@@ -1,8 +1,9 @@
 """Portable project identity for every standards-speaking edge.
 
 The board, MCP discovery, public agent discovery, receipt predicates, and local worker scheme all
-need to say WHICH instance they belong to. They read the same five fields here so two hubs running
-side by side never present the same identity or route a launch click into the wrong fleet.
+need to say WHICH instance they belong to. They read the same portable identity here so two hubs
+running side by side never present the same identity or route a launch click into the wrong fleet.
+The optional ``visual`` block is also normalized here: it is art direction, never arbitrary CSS.
 
 Resolution order, most specific first:
 
@@ -16,6 +17,7 @@ that exists but is malformed raises rather than silently presenting another iden
 adapters at their shared Project Plane while keeping this module independent of Django settings.
 """
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -27,7 +29,57 @@ _NAME_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # A scheme must survive being pasted into a URL and an OS protocol registration, so it is limited
 # to what RFC 3986 allows in a scheme name.
 _SCHEME_SAFE = re.compile(r"^[a-z][a-z0-9+.-]*$")
+_MARKS = frozenset({"cube", "bolt", "pulse", "route", "target", "rocket", "branch", "stack", "package", "gauge"})
+_DISPLAY_VOICES = frozenset({"precision", "editorial", "kinetic", "humanist", "monumental"})
+_SURFACES = frozenset({"glass", "paper", "luminous", "technical", "soft"})
+_MOTIFS = frozenset({"grid", "constellation", "orbit", "waves", "embers", "threads", "petals", "monolith", "rings", "stage", "none"})
+_VISUAL_DEFAULT = {
+    "mark": "cube",
+    "accent_h": 255,
+    "accent_pair_h": 305,
+    "display_voice": "precision",
+    "surface": "glass",
+    "motif": "grid",
+}
 _CACHE = {"key": None, "value": None}
+
+
+def _choice(value, allowed, fallback, p, field):
+    value = str(value or fallback).strip().lower()
+    if value.startswith("{{"):
+        return fallback
+    if value not in allowed:
+        raise ValueError(f"{p}: visual.{field} must be one of {sorted(allowed)!r}")
+    return value
+
+
+def _hue(value, fallback, p, field):
+    if value is None or str(value).strip().startswith("{{"):
+        return fallback
+    try:
+        hue = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{p}: visual.{field} must be a hue from 0 through 360") from exc
+    if not math.isfinite(hue) or hue < 0 or hue > 360:
+        raise ValueError(f"{p}: visual.{field} must be a hue from 0 through 360")
+    return int(hue) if hue.is_integer() else hue
+
+
+def _visual(raw, p):
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{p}: visual must contain a JSON object")
+    unknown = sorted(set(raw) - set(_VISUAL_DEFAULT))
+    if unknown:
+        raise ValueError(f"{p}: unknown visual fields: {', '.join(unknown)}")
+    return {
+        "mark": _choice(raw.get("mark"), _MARKS, _VISUAL_DEFAULT["mark"], p, "mark"),
+        "accent_h": _hue(raw.get("accent_h"), _VISUAL_DEFAULT["accent_h"], p, "accent_h"),
+        "accent_pair_h": _hue(raw.get("accent_pair_h"), _VISUAL_DEFAULT["accent_pair_h"], p, "accent_pair_h"),
+        "display_voice": _choice(raw.get("display_voice"), _DISPLAY_VOICES, _VISUAL_DEFAULT["display_voice"], p, "display_voice"),
+        "surface": _choice(raw.get("surface"), _SURFACES, _VISUAL_DEFAULT["surface"], p, "surface"),
+        "motif": _choice(raw.get("motif"), _MOTIFS, _VISUAL_DEFAULT["motif"], p, "motif"),
+    }
 
 
 def path() -> Path:
@@ -102,7 +154,9 @@ def load() -> dict:
                  or fallback_scheme).strip().lower()
     ident["worker_scheme"] = scheme if _SCHEME_SAFE.fullmatch(scheme) else fallback_scheme
 
-    # Preserve extension fields but guarantee the portable five are always present.
+    ident["visual"] = _visual(ident.get("visual"), p)
+
+    # Preserve top-level extension fields but guarantee every portable identity field is present.
     _CACHE["key"], _CACHE["value"] = cache_key, ident
     return ident
 
@@ -126,3 +180,8 @@ def app_name() -> str:
 
 def app_host() -> str:
     return load()["app_host"]
+
+
+def visual() -> dict:
+    """Return a copy of the bounded project art-direction tokens."""
+    return dict(load()["visual"])

@@ -36,6 +36,10 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ### Hub Excellence Contract and live throughput cockpit
 
+- Made project art direction a portable scaffold input: a validated mark, paired accent field,
+  display voice, surface character, and optional ambient motif now flow through the shared shell.
+  The initializer creates a distinct, overridable starter for every project while semantic status,
+  accessibility, responsive structure, and state-derived motion remain one upgradeable system.
 - Made `PROJECT/HUB-QUALITY.md` canonical for extraordinary visual design, purposeful motion,
   realtime truth, accessible interaction, performance, flow metrics, and durable agent coordination.
 - Added `campaigns/elevate-hub.md` and propagated the contract through orientation,

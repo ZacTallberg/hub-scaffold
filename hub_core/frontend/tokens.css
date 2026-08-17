@@ -48,6 +48,7 @@
 :root {
   /* ---- The single hue knob. Change this one value to re-skin the system. ---- */
   --accent-h: 255;          /* indigo-blue. e.g. 145 = green, 25 = red, 290 = violet */
+  --accent-pair-h: 305;     /* authored companion used for fields and gradients, never status */
   --accent-c: 0.16;         /* accent chroma (lightness fixed in semantic tier) */
 
   /* ---- Status hues (fixed; chosen for max mutual hue separation + a11y).
@@ -132,6 +133,9 @@
   --accent: light-dark(
           oklch(0.52 var(--accent-c) var(--accent-h)),
           oklch(0.72 var(--accent-c) var(--accent-h)));
+  --accent-pair: light-dark(
+          oklch(0.50 calc(var(--accent-c) * .92) var(--accent-pair-h)),
+          oklch(0.70 calc(var(--accent-c) * .92) var(--accent-pair-h)));
   /* Foreground that sits ON the accent (button labels): max contrast either way. */
   --accent-fg: light-dark(
           oklch(0.99 0 var(--accent-h)),
@@ -794,11 +798,11 @@ dl.kv dd { margin: 0; }
   --z-tabs: 999;
   --z-modal: 2000;
   --z-toast: 10000;
-  /* Navbar gradient: accent -> a darker accent (relative-color keeps the hue). */
+  /* Navbar gradient: authored accent pairing. Semantic status hues stay fixed above. */
   --accent-gradient-from: var(--accent);
   --accent-gradient-to: light-dark(
-        oklch(from var(--accent) calc(l - 0.12) c h),
-        oklch(from var(--accent) calc(l - 0.10) c h));
+        oklch(0.40 var(--accent-c) var(--accent-pair-h)),
+        oklch(0.62 var(--accent-c) var(--accent-pair-h)));
   /* Accent focus glow used by shell inputs (accent at low alpha). */
   --accent-ring: oklch(from var(--accent) l c h / 0.18);
 }

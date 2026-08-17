@@ -2190,7 +2190,11 @@
 
   function build() {
     doc.body.classList.add("hub-app");
-    var bm = doc.getElementById("brandMark"); if (bm) bm.appendChild(icon("cube"));
+    var bm = doc.getElementById("brandMark");
+    if (bm) {
+      var authoredMark = doc.documentElement.getAttribute("data-mark") || "cube";
+      bm.appendChild(icon(P[authoredMark] ? authoredMark : "cube"));
+    }
     var tabsBar = doc.getElementById("tabsBar"), panes = doc.getElementById("tabPanes");
     if (!tabsBar || !panes) return;
     TABS.forEach(function (t) {

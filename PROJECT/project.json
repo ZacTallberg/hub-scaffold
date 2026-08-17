@@ -3,5 +3,13 @@
   "brand": "{{BRAND}}",
   "app_name": "{{PROJECT_KEY}}",
   "app_host": "{{LIVE_URL}}",
-  "worker_scheme": "hub-{{PROJECT_KEY}}"
+  "worker_scheme": "hub-{{PROJECT_KEY}}",
+  "visual": {
+    "mark": "{{VISUAL_MARK}}",
+    "accent_h": "{{ACCENT_H}}",
+    "accent_pair_h": "{{ACCENT_PAIR_H}}",
+    "display_voice": "{{DISPLAY_VOICE}}",
+    "surface": "{{SURFACE_CHARACTER}}",
+    "motif": "{{AMBIENT_MOTIF}}"
+  }
 }
