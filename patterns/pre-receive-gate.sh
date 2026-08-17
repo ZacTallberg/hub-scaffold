@@ -19,9 +19,9 @@
 #   GitLab (self-managed): drop into the repo's custom_hooks/pre-receive.d/ (or the global
 #     server hooks dir) — GitLab runs every executable in the .d directory and any non-zero
 #     exit rejects the push.
-#   GitHub / cloud-hosted: you cannot install server hooks; enforce the same patterns with
-#     push protection / secret scanning plus a required CI check that runs this script against
-#     the pushed range (weaker: post-receive-time, but still out-of-process).
+#   GitHub / cloud-hosted: you cannot install server hooks; use the host's native pre-receive push
+#     protection for secrets. Do not turn this tiny authorization boundary into a generic required
+#     CI suite or a post-receive validation ladder.
 set -u
 EMPTY=4b825dc642cb6eb9a060e54bf8d69288fbee4904   # git's well-known empty-tree object
 block=0
