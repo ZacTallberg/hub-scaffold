@@ -13,10 +13,12 @@ from . import identity as _identity
 
 FRONTEND = Path(__file__).resolve().parent / "frontend"
 
-# no-FOUC theme bootstrap — must run before styles paint (reads localStorage "hub-theme").
+# no-FOUC theme/density bootstrap — must run before styles paint.
 _THEME_INIT = ('<script>(function(){try{var c=localStorage.getItem("hub-theme"),r=document.documentElement;'
                'if(c==="light"||c==="dark"){r.setAttribute("data-theme",c);r.style.colorScheme=c}'
-               'else{r.removeAttribute("data-theme");r.style.colorScheme="light dark"}}catch(e){}})();</script>')
+               'else{r.removeAttribute("data-theme");r.style.colorScheme="light dark"}'
+               'var d=localStorage.getItem("hub-density");if(d==="compact"||d==="comfortable")'
+               '{r.setAttribute("data-density",d)}}catch(e){}})();</script>')
 
 
 @lru_cache(maxsize=16)
