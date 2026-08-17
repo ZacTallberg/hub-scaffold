@@ -27,9 +27,9 @@ byte-exact.
    the origin environment's REFERENCE implementations (Windows · PowerShell 5.1 · Git Bash).
    Satisfy the stated invariants with your platform's own idioms and conventions, and record the
    binding in ADR-0002 alongside the substrate mapping. The invariants are law; the commands are not.
-4. Prove the setup with §7 (the setup self-test). **The Plane is not "set up" until the seeded
-   violations FAIL the gate and the clean state PASSES it.** A gate that has never failed in test
-   is presumed broken.
+4. Prove the setup with §7 by moving the first valuable task through the real typed lifecycle on
+   one open push connection. The operation and its receipt are the proof; do not manufacture a
+   synthetic validation suite before beginning product work.
 5. Everything in this spec is project policy unless your environment truly cannot provide it—in
    which case
    record the deviation as your project's ADR-0002 (ADR-0001 is the adoption itself), with the
@@ -79,12 +79,12 @@ provides — the roles, not the tools, are the requirement:
 | Role | Requirement | Example bindings |
 |---|---|---|
 | **R1 Tamper-evident append-only ledger** | every entity transition is an event; hash-chained; verifiable end-to-end | the reference ledger (§2.3) · a signed git log · an event store |
-| **R2 Schema-validated entity store** | entities validate on WRITE against schemas whose conditional rules make false claims unsatisfiable (§3) | reference fold+validate (§2.3) · Jira/Linear with required-field rules · GitHub Issues + CI schema check |
-| **R3 Fail-closed gate runner** | one command re-derives all invariants; exit≠0 blocks merge/ship; wired as a REQUIRED check, not advisory | `plane_audit` (§2.4) as CI required check / pre-receive hook / pipeline gate |
+| **R2 Schema-validated entity store** | entities validate on WRITE against schemas whose conditional rules make false claims unsatisfiable (§3) | reference fold+validate (§2.3) · Jira/Linear with required-field rules · GitHub Issues behind one typed write seam |
+| **R3 Atomic mutation + push truth** | the write path rejects impossible transitions, commits once, and immediately publishes the new cursor; no checker pipeline stands between ordinary work and completion | reference typed API + event stream (§2.4) · a tracker webhook/event bus with atomic workflow rules |
 
-**Never rebindable:** verifier ≠ builder · fail-closed · re-derive-over-trust · append-only
-history · one-canonical-store-per-fact-class. An environment that cannot provide these is not a
-binding target; it's a gap.
+**Never rebindable:** atomic write truth · push-after-commit · append-only history ·
+one-canonical-store-per-fact-class. An environment that cannot provide these is not a binding
+target; it's a gap.
 
 ### 2.3 Reference substrate (the shipped filesystem Hub)
 
@@ -121,10 +121,18 @@ carries a "generated — canonical: ledger" header and is regenerated, never edi
 `{"task": id, "agent": seat, "token": nonce, "claimed": epoch, "expires": epoch}`; a completion
 without a live claim is rejected; expired claims auto-release.
 
-### 2.4 The gate runner (`manage.py hubaudit` in the reference binding)
+### 2.4 The write seam and on-demand integrity view
 
-One command; runs everywhere (CI required check + pre-ship + on demand); **fail-closed** (an
-internal error is a RED, never a skip). Invariants, in order:
+Ordinary work does not wait behind a generic audit, test suite, copy check, screenshot ritual, or
+pre-ship validation ladder. The typed write seam enforces the small set of invariants required to
+make a mutation meaningful: schema validity, optimistic concurrency, idempotency, a live fenced
+lease for completion, and append-before-publish ordering. Once a write commits, its cursor is
+published immediately.
+
+`manage.py hubaudit` remains an operator-invoked diagnostic view. It can re-derive these structural
+facts when an incident, migration, suspected corruption, or explicitly identified critical seam
+makes that useful; it is not a required CI check, commit hook, completion gate, or standing release
+step. Its reported invariants are:
 
 1. **Schema validity** — every folded entity validates, including the false-claim rules (§3). HIGH.
 2. **Referential integrity** — every idref resolves; no dangling references. HIGH.
@@ -135,19 +143,18 @@ internal error is a RED, never a skip). Invariants, in order:
    AMBER, mismatch ⇒ HIGH. The base audit does not actively probe the live URL.
 6. **Behavioral adapters** (environment-specific, added over time) — the Django binding checks a
    focused set of settings defaults and explicit guards on mutation routes.
-7. **Project-specific controls** — live-ledger parity, stale leases, live probes, verifier gates,
-   backups, and alert delivery are valuable but are not generic `hubaudit` checks; wire and test them
-   when the project's threat/failure model requires them.
+7. **Project-specific controls** — live-ledger parity, stale leases, live probes, backups, and
+   alert delivery may matter to a project's threat model, but they do not become a generic standing
+   suite. Exercise a truly critical boundary with one transient operation and retain its receipt.
 
 An audit adapter that raises becomes a CRITICAL violation rather than a silent skip.
 
 The structured audit uses `exit_code`: `0` PASS · `2` blocking (critical/high) · `3` warn-only
-amber. The Django management command returns process exit `0` for PASS or amber, `2` for blocking,
-and `1` for an internal error (treat as RED). The write path adds its own guards: `done` cannot be minted directly. Completion
-always requires a live claim, acceptance note, evidence, and a sound critical audit. In the default
-`tracked` mode a verification command is optional; when present, the Hub requires the worker's
-matching typed exit-0 receipt. `strict` additionally requires a command and dereferenceable
-evidence. The Hub never executes task commands; the write token grants terminal board authority.
+amber. Those severities inform the operator who deliberately invoked it; they do not silently
+install a pipeline. The write path itself keeps `done` from being minted directly: completion
+requires a live claim, acceptance note, and evidence from the real operation. If a task explicitly
+declares a critical probe, its transient exit-0 receipt is also required. The Hub never executes
+task commands; the write token grants terminal board authority.
 
 ## §3 The entity model
 
@@ -1419,24 +1426,18 @@ The INVARIANTS below are law; the code snippets are the origin environment's ref
 implementation (Windows · PowerShell 5.1 · Git Bash). Implement the same invariants with your
 platform's native idioms, and record the binding in an ADR.
 
-1. **Appends are atomic, lock-retrying, and never rewrite the file** — an editor-style rewrite
-   changes the inode and silently kills every watcher, so editor tools are banned on channel
-   files. Reference append (lock-retrying — shared files are lock-contended):
+1. **Appends are atomic, lock-retrying, and never rewrite the file** — a rewrite invalidates
+   cursor continuity and the durable transcript, so editor tools are banned on channel files.
+   Reference append (lock-retrying — shared files are lock-contended):
    ```powershell
    $f='<absolute path>'; $s="<content>`n"
    for($i=0;$i -lt 5;$i++){ try { [System.IO.File]::AppendAllText($f,$s); break } catch { Start-Sleep -m 400 } }
    ```
-2. **Monitors must detect appends AND flag rewrites.** Naive tailing (`tail -f`/`-F`) misses
-   in-place rewrites on some platforms — use whatever your environment provides that satisfies
-   both (native file watchers, inotify, polling). Reference stat-polling watcher (emits new bytes
-   on growth, flags shrink for a full re-read):
-   ```
-   F="<path>"; last=$(stat -c %s "$F" 2>/dev/null || echo 0); while true; do
-     cur=$(stat -c %s "$F" 2>/dev/null || echo 0)
-     if [ "$cur" -gt "$last" ]; then tail -c +$((last+1)) "$F"; last=$cur
-     elif [ "$cur" -lt "$last" ]; then echo "[REWRITTEN - reread]"; last=$cur; fi; sleep 2; done
-   ```
-   Each seat arms its monitor on its INBOUND channel at spin-up, before any work.
+2. **Delivery is pushed, cursor-ordered, and rewrite-aware.** The addressable bus publishes every
+   committed append to the inbound seat immediately. A seat subscribes before work begins, folds
+   from its last durable cursor on reconnect, rejects duplicates, and flags a hash/cursor rewrite.
+   Files may retain the transcript, but interval polling, periodic tailing, and manual sync are not
+   live coordination. Transport truth is always **Connected** or **Disconnected**.
 3. **Numbering:** re-read the channel tail immediately before appending; next id = last+1. A
    collision/skip gets a `CORRECTION` block — ids are never reused or renumbered. Sub-numbers
    (`W1-014.1`) for patches to an in-flight directive.
@@ -1450,7 +1451,7 @@ false leader callout in v1), `who` (seat id), `type`, `task`, `detail`. Event ty
 
 | type | Required extras | Semantics |
 |---|---|---|
-| `ready` | — | seat online, monitor armed (once per session start) |
+| `ready` | — | seat online, push subscription connected (once per session start) |
 | `start` | — | task begun |
 | `progress` | — | meaningful forward motion (not filler) |
 | `done` | `evidence` (real operation + observed outcome; critical probe receipt only when used) | completion record — credited by the leader under §6 |
@@ -1501,7 +1502,7 @@ cure is structural, not disciplinary).
 | `🔴🔴` DROP-EVERYTHING | comply immediately, mid-task | reserved for live user-facing harm, data-loss risk, security, or deploy collision; checkpoint after complying |
 | `🛑 HALT` | all-stop (seat- or campaign-scoped) | checkpoint, post `preempted`, post/watch `halt`, do NOTHING in scope until the issuer lifts it by numbered directive |
 
-- **Interruptible points:** seats re-check their inbound monitor between atomic units and at
+- **Interruptible points:** seats consume pushed inbound directives between atomic units and at
   least every ~10 minutes inside long units. A single tool operation is never interrupted
   mid-flight (atomicity) — which is why kills must be SHA/PID-scoped (§7.3).
 - **Operator interrupts outrank everything** (§1 authority chain): an `OP-` post in any channel
@@ -1563,7 +1564,7 @@ sampling, or release ceremony:
 ## §9 Steering & discipline (how the leader keeps seats in line)
 
 ### §9.1 Leader cadence
-- **Continuously:** monitor armed; `blocked`/`question`/`proposal` answered within minutes (an
+- **Continuously:** push subscription connected; `blocked`/`question`/`proposal` answered within minutes (an
   unanswered blocker is a leader defect); evidence recorded as work lands (§6); ledger live (§11).
 - **Per ship:** perform the actual ship and record the observed live outcome; invoke §8 only for a
   newly created critical integration seam.
@@ -1650,8 +1651,8 @@ failing the seat's core duty, whatever else is getting done.
 
 - **Spin-up:** leader writes `seats/<SEAT>/CHARTER.md` (role, boundaries, write scope, deploy
   ownership, current assignment) → creates the seat's `DIRECTIVES.md` with directive -001 →
-  seat session starts: reads PROTOCOL + charter + DIRECTIVES tail + `../HANDOFF.md`, arms its
-  monitor, posts `ready`, begins.
+  seat session starts: reads PROTOCOL + charter + DIRECTIVES tail + `../HANDOFF.md`, connects its
+  push subscription, posts `ready`, begins.
 - **Extra seats:** copy the WORKER charter shape; unique seat id (`WORKER-2`, `SPECIALIST-DESIGN`);
   disjoint write scopes ALWAYS.
 - **Replacement / supersession:** a seat that must be re-chartered gets a WHOLE new charter
@@ -1659,14 +1660,15 @@ failing the seat's core duty, whatever else is getting done.
 - **Fold-back (spin-down):** the seat's final `STATE.md` + a closing directive record what it
   owned; unabsorbed work returns to the backlog explicitly; its scope reverts by charter note.
 - **Leader handoff:** outgoing leader updates `../HANDOFF.md`, posts a deploy-HOLD directive to
-  every seat, ends. Incoming leader reads HANDOFF + all channel tails, arms monitors, posts the
+  every seat, ends. Incoming leader reads HANDOFF + all channel tails, connects subscriptions, posts the
   hold-lift. Numbering and doctrine continue unbroken — the campaign survives any single session.
 
 ## §13 Bus evolution
 
-This file-based bus (append-only files + stat-poll monitors + lock-retry appends) is the proven
-floor, chosen because sessions cannot message each other directly. If a real addressable bus with
-per-seat ACLs becomes available, adopt it by ADR — the event vocabulary (§4) and duties transfer unchanged.
+The required live transport is an addressable push bus with per-seat identity, ordered cursors,
+and reconnect catch-up. Append-only files may remain its durable history when useful, but are never
+polled as the normal coordination loop. If the bus is unavailable, coordination is explicitly
+**Disconnected** until it recovers; the event vocabulary (§4) and duties remain unchanged.
 ````
 <!-- /TPL -->
 
@@ -1722,8 +1724,8 @@ You are WORKER-1 (`../../PROTOCOL.md` §1): you implement code, migrations, data
 improvements—driving the directive queue and backlog to done with maximum useful throughput.
 
 ## Duties (non-negotiable)
-1. **Monitor your `DIRECTIVES.md`** (stat-poll, armed at spin-up); read it before starting AND
-   after finishing every task; never write to it.
+1. **Connect to your pushed directive stream** at spin-up; consume it before starting and after
+   finishing every task, with ordered cursor catch-up only after reconnect. Never write to it.
 2. **Report on the bus** (PROTOCOL §4): start/progress/done-with-evidence/blocked-with-tried/
    question-then-move-on/15-min heartbeats with real counts.
 3. **Completion discipline:** perform the real operation, record its observed result, and stop.
@@ -1742,7 +1744,7 @@ improvements—driving the directive queue and backlog to done with maximum usef
 7. **Update `STATE.md`** after every batch — any interruption must be free.
 8. **Consume repair tasks or auto-routed critical `alert`s** for established classes directly
    (PROTOCOL §8.4), without turning them into a standing validation lane.
-9. **Honor the interrupt contract** (PROTOCOL §5): re-check your monitor between atomic units and
+9. **Honor the interrupt contract** (PROTOCOL §5): consume pushed directives between atomic units and
    ≥ every ~10 min inside long ones; on `🔴`/`🛑` — checkpoint `STATE.md`, post `preempted`,
    comply, resume. Operator posts outrank everything.
 10. **Propose before deviating** (PROTOCOL §9.5): any departure from a directive — including
@@ -1805,11 +1807,11 @@ seats' files, deploys, ssh. Read the DB only from your own copy under `verify/tm
 
 ## §5 Notes on the campaign protocol
 
-`pm/` stays dormant in SOLO mode — the Plane is complete for a single agent (hub + HANDOFF +
-registers + gates). Activate seats per `pm/PROTOCOL.md` §0 only when a lane saturates. The
-protocol's file-based bus (append-only + lock-retry appends + stat-poll monitors) is the proven
-floor for agents that cannot message each other; if the target environment has a real addressable
-bus with per-seat ACLs, adopt it by ADR — the event vocabulary and duties transfer unchanged.
+`pm/` stays dormant in SOLO mode — the Plane is complete for a single agent (Hub + HANDOFF +
+registers). Activate seats per `pm/PROTOCOL.md` §0 only when a lane saturates. Multi-agent mode uses
+an addressable push bus with per-seat identity and durable event history. Files may retain the
+canonical transcript, but interval polling is never the live coordination transport. If push is
+unavailable, show the lane as **Disconnected** and repair the transport instead of normalizing lag.
 
 ## §6 Bootstrap procedure (fresh environment, step by step)
 
@@ -1819,50 +1821,41 @@ bus with per-seat ACLs, adopt it by ADR — the event vocabulary and duties tran
    `hub_core` and Django adapter. In another environment, map the entity model onto a suitable
    tracker/event system or implement the roles in §2.3. Record the mapping and all deviations as
    ADR-0002; do not represent a planned binding as operational.
-4. **Activate the gate** (§2.4): run the reference `hubaudit` or implement an equivalent and wire it
-   as a REQUIRED check (CI required status / pre-receive / pipeline gate). Advisory wiring is a
-   bootstrap failure.
+4. **Activate the mutation and realtime seams** (§2.4): prove the typed write path commits once,
+   publishes its cursor immediately, and reconnects by ordered catch-up without an interval loop.
 5. **Genesis, live-ledger style:** record ADR-0001 "This project adopts the Project Plane"
    (accepted, full prose) + the first real tasks — through the write path, never by editing
    projections.
 6. **Fill `CHARTER.md` and cut the first `HANDOFF.md`.** Declare ID namespaces in
    `registers/GLOSSARY.md` if any beyond the standard set.
-7. **Run §7.** Fix until green-with-proven-red. Only then start feature work.
+7. **Perform the first real task through §7.** Its actual result is the bootstrap receipt; then keep
+   shipping product work.
 
-## §7 Setup self-test (the Plane must fail correctly before it may pass)
+## §7 First real operation (the Plane proves itself by moving work)
 
-This is the mutation-testing / fault-injection principle applied to governance — the same practice
-as restore-testing a backup or trigger-testing a detection rule: **a control that has never been
-observed to fail is presumed non-functional.** The rule is one seed per gate invariant; the seeds
-below cover the reference gate (§2.4) one-for-one — if your binding adds invariants, add seeds.
+Do not bootstrap a project by building a permanent verifier suite or manufacturing one synthetic
+failure per invariant. Use the first valuable task as the operation:
 
-Seed each violation, run `plane_audit`, and require the stated result; then remove the seeds and
-require PASS. Record the whole run as the project's first `runs/` artifact.
+1. create it through the typed seam with concrete acceptance;
+2. claim it atomically and observe the same open push connection receive `in_progress`;
+3. do the work;
+4. complete it with its result and real evidence, observing `done` on that same connection; and
+5. when it needs release, publish the exact served artifact and explicit task closure.
 
-| # | Seed | Required result |
-|---|---|---|
-| 1 | a task written `status: done` with no `verified_by` | write REJECTED (schema) — or audit HIGH if forced into the store |
-| 2 | an entity with a dangling `idref` | audit HIGH |
-| 3 | an ADR numbered with a gap (e.g. 1 then 3) | audit WARN |
-| 4 | one byte modified in a mid-file ledger event | audit CRITICAL (chain) |
-| 5 | a gate artifact hand-edited to `green: true` over refuted rows | when the independent verification lane is implemented, its consumer re-derivation flags FABRICATED-GREEN and blocks |
-| 6 | a completion attempted without a live claim (multi-agent binding) | write REJECTED |
-| 7 | clean state (all seeds removed) | audit exit 0 |
-
-Behavioral spot-checks: projections regenerate identically from the ledger after deletion. If the
-file-channel protocol is activated, an editor-style rewrite is detectable by its monitor. If the
-project run recorder is implemented, the audit run appears in `runs/`. Mark unimplemented optional
-lanes as such; absence may be an accepted bootstrap scope, fabricated green may not.
+The changed operation is the proof. If this adoption crosses a genuinely critical storage,
+security, money, identity, or destructive boundary, add one disposable probe for only that seam,
+retain its receipt, and delete the probe before commit. Copy, layout, animation, and ordinary fixes
+never justify permanent tests or a validation ladder.
 
 ## §8 Rebinding quick-reference (work environments)
 
 | Plane concept | GitHub-centric | Jira/Linear-centric |
 |---|---|---|
-| Hub entities | Issues + labels + required templates; CI job validates against §3 schemas on every mutation via export | native items + required fields; scheduled export → schema validation |
+| Hub entities | Issues + labels behind one typed mutation service enforcing §3 on write | native items + required fields and atomic workflow rules |
 | Ledger (R1) | signed commits on a `plane-ledger` branch (append-only JSONL) | same JSONL ledger in-repo (the tracker is a projection) |
-| Gate (R3) | required status check running `plane_audit` | pipeline gate; merge blocked on exit≠0 |
+| Mutation + push truth (R3) | webhook-backed write service publishes committed cursors | tracker event bus publishes committed workflow transitions |
 | Deploy entities | written by the deploy workflow, never by hand | same, from the CD system |
-| pm channels | in-repo `PROJECT/pm/` files exactly as specified | same (the bus is files regardless of tracker) |
+| pm channels | durable transcript plus addressable pushed signals | same; files are history, never the live transport |
 
 The tracker may be the *entity store* (R2) only if it can enforce the unsatisfiability rules at
 write time; otherwise the ledger stays canonical and the tracker is a synced projection — declare

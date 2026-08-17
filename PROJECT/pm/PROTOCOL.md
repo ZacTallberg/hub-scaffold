@@ -68,24 +68,18 @@ The INVARIANTS below are law; the code snippets are the origin environment's ref
 implementation (Windows · PowerShell 5.1 · Git Bash). Implement the same invariants with your
 platform's native idioms, and record the binding in an ADR.
 
-1. **Appends are atomic, lock-retrying, and never rewrite the file** — an editor-style rewrite
-   changes the inode and silently kills every watcher, so editor tools are banned on channel
-   files. Reference append (lock-retrying — shared files are lock-contended):
+1. **Appends are atomic, lock-retrying, and never rewrite the file** — a rewrite invalidates
+   cursor continuity and the durable transcript, so editor tools are banned on channel files.
+   Reference append (lock-retrying — shared files are lock-contended):
    ```powershell
    $f='<absolute path>'; $s="<content>`n"
    for($i=0;$i -lt 5;$i++){ try { [System.IO.File]::AppendAllText($f,$s); break } catch { Start-Sleep -m 400 } }
    ```
-2. **Monitors must detect appends AND flag rewrites.** Naive tailing (`tail -f`/`-F`) misses
-   in-place rewrites on some platforms — use whatever your environment provides that satisfies
-   both (native file watchers, inotify, polling). Reference stat-polling watcher (emits new bytes
-   on growth, flags shrink for a full re-read):
-   ```
-   F="<path>"; last=$(stat -c %s "$F" 2>/dev/null || echo 0); while true; do
-     cur=$(stat -c %s "$F" 2>/dev/null || echo 0)
-     if [ "$cur" -gt "$last" ]; then tail -c +$((last+1)) "$F"; last=$cur
-     elif [ "$cur" -lt "$last" ]; then echo "[REWRITTEN - reread]"; last=$cur; fi; sleep 2; done
-   ```
-   Each seat arms its monitor on its INBOUND channel at spin-up, before any work.
+2. **Delivery is pushed, cursor-ordered, and rewrite-aware.** The addressable bus publishes every
+   committed append to the inbound seat immediately. A seat subscribes before work begins, folds
+   from its last durable cursor on reconnect, rejects duplicates, and flags a hash/cursor rewrite.
+   Files may retain the transcript, but interval polling, periodic tailing, and manual sync are not
+   live coordination. Transport truth is always **Connected** or **Disconnected**.
 3. **Numbering:** re-read the channel tail immediately before appending; next id = last+1. A
    collision/skip gets a `CORRECTION` block — ids are never reused or renumbered. Sub-numbers
    (`W1-014.1`) for patches to an in-flight directive.
@@ -99,7 +93,7 @@ false leader callout in v1), `who` (seat id), `type`, `task`, `detail`. Event ty
 
 | type | Required extras | Semantics |
 |---|---|---|
-| `ready` | — | seat online, monitor armed (once per session start) |
+| `ready` | — | seat online, push subscription connected (once per session start) |
 | `start` | — | task begun |
 | `progress` | — | meaningful forward motion (not filler) |
 | `done` | `evidence` (real operation + observed outcome; critical probe receipt only when used) | completion record — credited by the leader under §6 |
@@ -150,7 +144,7 @@ cure is structural, not disciplinary).
 | `🔴🔴` DROP-EVERYTHING | comply immediately, mid-task | reserved for live user-facing harm, data-loss risk, security, or deploy collision; checkpoint after complying |
 | `🛑 HALT` | all-stop (seat- or campaign-scoped) | checkpoint, post `preempted`, post/watch `halt`, do NOTHING in scope until the issuer lifts it by numbered directive |
 
-- **Interruptible points:** seats re-check their inbound monitor between atomic units and at
+- **Interruptible points:** seats consume pushed inbound directives between atomic units and at
   least every ~10 minutes inside long units. A single tool operation is never interrupted
   mid-flight (atomicity) — which is why kills must be SHA/PID-scoped (§7.3).
 - **Operator interrupts outrank everything** (§1 authority chain): an `OP-` post in any channel
@@ -212,7 +206,7 @@ sampling, or release ceremony:
 ## §9 Steering & discipline (how the leader keeps seats in line)
 
 ### §9.1 Leader cadence
-- **Continuously:** monitor armed; `blocked`/`question`/`proposal` answered within minutes (an
+- **Continuously:** push subscription connected; `blocked`/`question`/`proposal` answered within minutes (an
   unanswered blocker is a leader defect); evidence recorded as work lands (§6); ledger live (§11).
 - **Per ship:** perform the actual ship and record the observed live outcome; invoke §8 only for a
   newly created critical integration seam.
@@ -299,8 +293,8 @@ failing the seat's core duty, whatever else is getting done.
 
 - **Spin-up:** leader writes `seats/<SEAT>/CHARTER.md` (role, boundaries, write scope, deploy
   ownership, current assignment) → creates the seat's `DIRECTIVES.md` with directive -001 →
-  seat session starts: reads PROTOCOL + charter + DIRECTIVES tail + `../HANDOFF.md`, arms its
-  monitor, posts `ready`, begins.
+  seat session starts: reads PROTOCOL + charter + DIRECTIVES tail + `../HANDOFF.md`, connects its
+  push subscription, posts `ready`, begins.
 - **Extra seats:** copy the WORKER charter shape; unique seat id (`WORKER-2`, `SPECIALIST-DESIGN`);
   disjoint write scopes ALWAYS.
 - **Replacement / supersession:** a seat that must be re-chartered gets a WHOLE new charter
@@ -308,11 +302,12 @@ failing the seat's core duty, whatever else is getting done.
 - **Fold-back (spin-down):** the seat's final `STATE.md` + a closing directive record what it
   owned; unabsorbed work returns to the backlog explicitly; its scope reverts by charter note.
 - **Leader handoff:** outgoing leader updates `../HANDOFF.md`, posts a deploy-HOLD directive to
-  every seat, ends. Incoming leader reads HANDOFF + all channel tails, arms monitors, posts the
+  every seat, ends. Incoming leader reads HANDOFF + all channel tails, connects subscriptions, posts the
   hold-lift. Numbering and doctrine continue unbroken — the campaign survives any single session.
 
 ## §13 Bus evolution
 
-This file-based bus (append-only files + stat-poll monitors + lock-retry appends) is the proven
-floor, chosen because sessions cannot message each other directly. If a real addressable bus with
-per-seat ACLs becomes available, adopt it by ADR — the event vocabulary (§4) and duties transfer unchanged.
+The required live transport is an addressable push bus with per-seat identity, ordered cursors,
+and reconnect catch-up. Append-only files may remain its durable history when useful, but are never
+polled as the normal coordination loop. If the bus is unavailable, coordination is explicitly
+**Disconnected** until it recovers; the event vocabulary (§4) and duties remain unchanged.
