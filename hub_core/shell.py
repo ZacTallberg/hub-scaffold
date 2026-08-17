@@ -6,6 +6,7 @@ client-side from the island (UI == API by construction; each active view owns a 
 scrollport). Stdlib only."""
 import json
 import html as _html
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -34,6 +35,11 @@ def render(snap, brand, csrf_token=""):
     snap_json = json.dumps(snap, separators=(",", ":")).replace("<", "\\u003c")
     ident = _identity.load()
     visual = ident["visual"]
+    build = snap.get("build") or {}
+    safe_sha = lambda value: value if re.fullmatch(r"[0-9a-f]{7,64}", str(value or "").lower()) else ""
+    running_sha = safe_sha(build.get("head"))
+    release_sha = safe_sha(build.get("sha"))
+    coherent = "true" if build.get("coherent") is True else "false" if build.get("coherent") is False else "unknown"
     repl = {
         "brand": _html.escape(str(brand)),
         "csrf_token": _html.escape(str(csrf_token or ""), quote=True),
@@ -44,6 +50,9 @@ def render(snap, brand, csrf_token=""):
         "display_voice": visual["display_voice"],
         "surface_character": visual["surface"],
         "ambient_motif": visual["motif"],
+        "build_identity": running_sha,
+        "release_identity": release_sha,
+        "build_coherent": coherent,
         "theme_init": _THEME_INIT,
         "tokens_css": _asset("tokens.css"),
         "shell_css": _asset("shell.css"),
