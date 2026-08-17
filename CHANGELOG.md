@@ -47,6 +47,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   display voice, surface character, and optional ambient motif now flow through the shared shell.
   The initializer creates a distinct, overridable starter for every project while semantic status,
   accessibility, responsive structure, and state-derived motion remain one upgradeable system.
+- Added one canonical `public_origin()` / `host_name()` projection for portable identity. Legacy
+  bare hosts remain compatible while network and allowlist consumers can no longer double-prefix a
+  correct URL; adopter-owned top-level operations fields remain available through a bounded helper.
 - Made `PROJECT/HUB-QUALITY.md` canonical for extraordinary visual design, purposeful motion,
   realtime truth, accessible interaction, performance, flow metrics, and durable agent coordination.
 - Added `campaigns/elevate-hub.md` and propagated the contract through orientation,

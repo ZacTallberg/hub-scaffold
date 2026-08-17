@@ -21,6 +21,7 @@ import math
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 _ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_KEY = "hub"
@@ -180,6 +181,56 @@ def app_name() -> str:
 
 def app_host() -> str:
     return load()["app_host"]
+
+
+def public_origin() -> str:
+    """Return one canonical HTTP(S) origin while accepting legacy scheme-less hosts.
+
+    ``app_host`` began life as a hostname in some adopters and as a public URL in others. Consumers
+    repeatedly prepending ``https://`` made a correct URL render as ``https://https://…``. Keep the
+    stored identity lossless, but give every network edge one strict normalized interpretation.
+    Packaged ``urn:hub:*`` development identities remain URNs because inventing a reachable origin
+    would be a false claim.
+    """
+    raw = str(app_host() or "").strip().rstrip("/")
+    if raw.startswith("urn:"):
+        return raw
+    candidate = raw if "://" in raw else f"https://{raw}"
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(f"{path()}: app_host must be an HTTP(S) origin or bare hostname")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def host_name() -> str:
+    """Hostname-only projection for Django allowlists, TLS resolution, and SSH/deploy seams."""
+    origin = public_origin()
+    if origin.startswith("urn:"):
+        return origin
+    return urlsplit(origin).hostname or origin
+
+
+def extension(name, env=None, default=None):
+    """Read an adopter-owned top-level identity extension with an optional env override."""
+    if env:
+        override = os.environ.get(env)
+        if override not in (None, ""):
+            return override
+    value = load().get(name)
+    return default if value in (None, "") else value
+
+
+def ops(name, env=None, default=None):
+    """Compatibility spelling for older adopter tools; new code should call ``extension``."""
+    return extension(name, env=env, default=default)
 
 
 def visual() -> dict:

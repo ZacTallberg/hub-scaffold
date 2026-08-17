@@ -55,7 +55,7 @@ actually active in `HANDOFF.md` and the Hub.
 | `CHARTER.md` | mission · scope · quality bar · definition of done | canonical |
 | `DOCTRINE.md` | standing laws (operator contract + crystallized project laws) | canonical |
 | `HANDOFF.md` | living continuity file — the single resume entry point | canonical, always current |
-| `project.json` | portable identity: key · brand · app name/host · worker scheme | canonical identity for Hub/MCP/discovery |
+| `project.json` | portable identity: key · brand · app origin · worker scheme · bounded visual art direction | canonical identity for Hub/MCP/discovery and project-authored presentation |
 | `seed.json` · `schema/` · `.hub/` | reference-Hub genesis · entity schemas · runtime hash-chained event ledger | `.hub/events.jsonl` = the entity ledger after the reference Hub is activated |
 | `ADR/` | numbered decision records (full prose of record) | canonical prose; hub `adr` entity canonical for status/links |
 | `research/` | deep research: dossiers, MoE panels, improvement-surface memos + `RESEARCH-HISTORY.md` chronicle | canonical |
