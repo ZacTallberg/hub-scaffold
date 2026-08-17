@@ -663,9 +663,9 @@ class EventStore:
     def events_after(self, seq: int, limit: int = 100):
         """Return canonical events after ``seq`` without replaying the full ledger.
 
-        The live Hub transport polls this derived index while the JSONL remains canonical.
-        A bounded query prevents a reconnecting browser from monopolizing a worker; callers
-        advance the cursor and ask again when more events are available.
+        The push stream reads this derived index only after a mutation signal or reconnect; it
+        never samples it on an interval. A bounded query keeps recovery work finite while callers
+        advance the cursor through the exact canonical head.
         """
         import json
 
