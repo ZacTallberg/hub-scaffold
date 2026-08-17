@@ -5,7 +5,7 @@ ledger before N. The worker who could have acted is gone, the event is immutable
 nobody can clear is exactly how an operator learns to ignore the whole rail — the failure mode
 that buries the ONE warn that matters. This module silences that class and only that class.
 
-Three fences keep the silencing from becoming a vacuous green:
+Three fences keep ordinary guard silencing from becoming a vacuous green:
 
   * SEVERITY — only `warn` is ever grandfathered. A critical or high is a claim about the PRESENT
     (the chain is broken, master lacks the work); no baseline may touch one.
@@ -20,6 +20,13 @@ what a baseline must be compared against. A pre-gate `done` is anchored at the c
 granted it, while a task reverted out of `done` last hour anchors at that recent reversion, so a
 legacy completion goes quiet and a fresh anomaly stays loud. The baseline seq itself belongs to
 the guard: a condition established AT it happened with the guard already present.
+
+There is one deliberately narrower migration lane beside those ordinary warn baselines: an adopter
+may anchor the ledger head at which strict done-task receipts arrived. Only a task already `done` at
+or before that exact hash-anchored cutoff, and invalid *solely* because `verified_by` or
+`evidence_uri` is absent/empty, is accounted as legacy receipt debt. The historical entity is never
+rewritten and no evidence is invented. Anything completed later, any mismatched anchor, or any
+additional schema defect remains a blocking high finding.
 """
 
 
@@ -46,6 +53,25 @@ def anchors_at(events, seqs):
     want = set(seqs)
     return {ev["seq"]: ev.get("hash") for ev in events
             if ev.get("seq") in want}
+
+
+def legacy_receipt_context(events, baseline):
+    """Return the anchored cutoff and current-condition seqs, or None fail-closed.
+
+    This is intentionally not a general high-severity suppressor. The audit owns the sole allowed
+    shape (legacy done receipts) and uses this helper only to prove that the cutoff belongs to this
+    exact immutable ledger.
+    """
+    if not isinstance(baseline, dict):
+        return None
+    seq = baseline.get("seq")
+    anchor = baseline.get("anchor_hash")
+    if not isinstance(seq, int) or seq <= 0 or not isinstance(anchor, str) or not anchor:
+        return None
+    events = list(events)
+    if anchors_at(events, [seq]).get(seq) != anchor:
+        return None
+    return {"seq": seq, "anchor_hash": anchor, "conditions": condition_seq(events)}
 
 
 def baseline_index(guards, baselines, anchors=None):

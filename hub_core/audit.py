@@ -103,7 +103,7 @@ DEPLOY_BOOKKEEPING_PATHS = frozenset({"PROJECT/state.json"})
 
 
 def audit(state, registry, *, store: EventStore = None, coherence: dict = None, adapters=None,
-          suppress=None) -> dict:
+          suppress=None, legacy_receipt_baseline=None) -> dict:
     """Compute the audit. `state` from project.state(); `coherence` is {repo,deploy,sha,head,served,...}
     computed by the caller (git HEAD vs state.sha vs live served_sha)."""
     violations = []
@@ -112,12 +112,47 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     # 1. every entity validates against its schema (the if/then rules make false claims fail here:
     #    done->verified_by, blocked->deps, shipped-feat->tasks, superseded-adr->successor)
     from .validate import validate as _validate
+    legacy_receipts = []
+    legacy_context = None
+    if store is not None and legacy_receipt_baseline:
+        from .grandfather import legacy_receipt_context
+        legacy_context = legacy_receipt_context(store.events(), legacy_receipt_baseline)
     for eid, ent in entities.items():
         et = ent.get("type")
-        for err in _validate(ent, et, registry):
+        errors = _validate(ent, et, registry)
+        # One explicit, hash-anchored migration exception: an adopter may have immutable tasks that
+        # were completed before receipts became mandatory. Validate an in-memory compatibility view
+        # with only those two receipt fields present. If *anything* remains invalid, grandfather
+        # nothing. The sentinels never enter state or evidence; they distinguish the error class.
+        if errors and legacy_context and et == "task" and ent.get("status") == "done":
+            missing = [name for name in ("verified_by", "evidence_uri") if not ent.get(name)]
+            condition = legacy_context["conditions"].get(eid)
+            if missing and isinstance(condition, int) and condition <= legacy_context["seq"]:
+                compatibility_view = dict(ent)
+                compatibility_view["verified_by"] = compatibility_view.get("verified_by") or [
+                    "legacy-receipt-classification-only"
+                ]
+                compatibility_view["evidence_uri"] = compatibility_view.get("evidence_uri") or [
+                    "legacy-receipt-classification-only"
+                ]
+                if not _validate(compatibility_view, et, registry):
+                    legacy_receipts.append(dict(
+                        _v(f"schema:{eid}:legacy-done-receipt", "high",
+                           "done tasks carry substantive result receipts",
+                           f"{eid}: legacy completion lacks {', '.join(missing)}",
+                           "verified_by and evidence_uri present", kind="schema",
+                           remediation="retain as explicitly accounted legacy debt; do not invent "
+                                       "retrospective evidence", subject=eid),
+                        grandfathered={"guard": "legacy_done_receipts",
+                                       "baseline_seq": legacy_context["seq"],
+                                       "condition_seq": condition,
+                                       "fields": missing},
+                    ))
+                    continue
+        for err in errors:
             violations.append(_v(f"schema:{eid}", "high", "entity validates against its schema",
                                  f"{eid}: {err}", "valid per hub:%s" % et, kind="schema",
-                                 remediation="fix the entity payload"))
+                                 remediation="fix the entity payload", subject=eid))
 
     # 2. referential integrity: no dangling idref
     for dgl in state.get("dangling", []):
@@ -247,9 +282,10 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     #    frozen into the ledger before the guard that indicts it existed. Applied HERE so counts
     #    and the exit code describe the rail the operator actually reads — and returned, never
     #    discarded, so a shrinking rail is always accounted for.
-    suppressed = []
+    suppressed = list(legacy_receipts)
     if suppress is not None:
-        violations, suppressed = suppress(violations)
+        violations, ordinary_suppressed = suppress(violations)
+        suppressed.extend(ordinary_suppressed)
     ledger = {"count": len(suppressed), "by_guard": {}, "silenced": []}
     for v in suppressed:
         gf = v.get("grandfathered") or {}
@@ -257,7 +293,8 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
         ledger["by_guard"][guard] = ledger["by_guard"].get(guard, 0) + 1
         ledger["silenced"].append({"id": v.get("id"), "guard": guard,
                                    "baseline_seq": gf.get("baseline_seq"),
-                                   "condition_seq": gf.get("condition_seq")})
+                                   "condition_seq": gf.get("condition_seq"),
+                                   "fields": gf.get("fields")})
 
     sev = {v["severity"] for v in violations}
     if "critical" in sev or "high" in sev:

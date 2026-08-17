@@ -414,6 +414,16 @@ def _range_touched_paths(base, head):
     return val
 
 
+def _legacy_receipt_baseline():
+    """Read the adopter's immutable migration cutoff; absent/invalid means no exception."""
+    try:
+        manifest = json.loads((WORK_ROOT / "hub-scaffold-adoption.json").read_text(encoding="utf-8"))
+        record = (manifest.get("compatibility") or {}).get("legacy_done_receipts")
+        return record if isinstance(record, dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _run_audit_with_store(s, served=None) -> dict:
     state = current_state(s)
     bm = build_meta(served, state=state)
@@ -442,6 +452,7 @@ def _run_audit_with_store(s, served=None) -> dict:
                           "a coherent immutable deploy entity is present)")
         coh["unknown_severity"] = "warn"
     return _audit.audit(state, registry(), store=s, coherence=coh,
+                        legacy_receipt_baseline=_legacy_receipt_baseline(),
                         adapters=[settings_ast_adapter, identity_settings_adapter,
                                   route_guard_adapter])
 

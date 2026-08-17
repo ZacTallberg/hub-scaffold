@@ -33,6 +33,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   real-operation result and evidence, rather than only after rare `verification_run` events, while
   `receipt.failed` remains a congestion signal even when no test exit code exists. Throughput no
   longer depends on manufacturing tests.
+- Adopter upgrades now hash-anchor a one-time legacy receipt cutoff. Audits separately account for
+  immutable pre-contract done tasks missing only `verified_by`/`evidence_uri`, never invent evidence,
+  and continue to block every other or post-cutoff schema defect.
 
 ### Hub Excellence Contract and live throughput cockpit
 
