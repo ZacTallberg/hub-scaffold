@@ -9,11 +9,30 @@ to the public.
 | Surface | Authentication | Authority |
 |---|---|---|
 | `GET /hub/*` | None | Read the full projected Hub state, schemas, graph, and audit output |
-| General `POST /hub/api/*` | `X-Write-Token` | Mutate entities, manage leases, and consume launch grants |
+| General `POST /hub/api/*` | Scoped `X-Agent-Token` (preferred) or explicitly enabled `X-Write-Token` compatibility | Mutate only operations named by the credential; claimed-task writes also require its fenced lease |
+| `POST /hub/api/agent-credential` | `credential:manage` scope or shared-root compatibility | Issue/list/revoke short-lived agent credentials; the bearer token is returned once |
 | `POST /hub/api/launch-grant` | Same-origin CSRF, only when enabled | Mint a short-lived, action/task/count/issuer-bound launch capability; cannot mutate board entities |
 | Windows protocol handler | Local user context + configured issuer + local token file | Consume a valid grant and start the configured wrapper |
 
-### The write token is production-grade, but it is NOT code execution
+### Scoped worker authority and the shared-root migration bridge
+
+Normal workers authenticate with `X-Agent-Token`. Each credential freezes one subject, carries an
+explicit operation-scope list and expiry, and can be revoked independently. The host-local registry
+under `HUB_DIR` stores only a SHA-256 token digest. A caller cannot override its authenticated
+subject with the JSON `agent` field.
+
+A live task lease binds its fencing token to that authenticated subject and credential id. Updating
+an in-progress/leased task, completing it, heartbeating it, or releasing it requires the same
+credential plus the current fencing token. A leaked token therefore cannot mutate another
+worker's claimed task, and a stale lease token cannot outlive expiry/reclaim.
+
+`X-Write-Token` remains a migration bridge for existing installations while
+`HUB_SHARED_TOKEN_COMPAT=True`. It has root scope, so restrict it to operators. Its ledger events,
+response headers, and fresh leases identify `shared-root-compat` as the actor even when an old
+request carries a named worker-seat label; that label never masquerades as authentication. Disable
+the bridge after issuing scoped credentials to the fleet.
+
+### Write authority is production-grade, but it is NOT code execution
 
 The hub NEVER executes a task's `verification_command`. It used to — `subprocess.run(vc,
 shell=True)` inside `complete()` — which made the write token equivalent to arbitrary shell on
@@ -25,8 +44,8 @@ be borrowed into place (`command` must equal the task's own frozen `verification
 `exit_code` must be 0, `ran_by` must be the completing agent). The hub validates what it is
 handed; it never becomes the thing that runs untrusted strings.
 
-Treat the write token as production credentials all the same: it grants `done`, deploy records
-and ruling ADRs. It just no longer grants a shell.
+Treat every credential according to its scopes all the same: completion, deploy, ADR, and credential
+management scopes grant consequential authority. They do not grant a shell.
 
 ## Unauthenticated reads
 
@@ -38,15 +57,18 @@ access control in Django or at the reverse proxy and test that boundary.
 
 ## Secret handling
 
-- Generate a distinct high-entropy `HUB_WRITE_TOKEN` for each deployment.
+- Generate a distinct high-entropy `HUB_WRITE_TOKEN` for each deployment while compatibility is
+  enabled, and set `HUB_SHARED_TOKEN_COMPAT=False` once migration is complete.
+- Issue worker credentials with the smallest needed scopes and shortest useful expiry through
+  `POST /hub/api/agent-credential`; revoke a seat immediately when its work or host lifetime ends.
 - Inject it through the deployment secret mechanism. Never commit it, place it in query strings,
   paste it into browser storage, or include it in a grant URL.
 - Keep workstation token files readable only by the intended operating-system user. The registry
   stores the token file path, not the token value.
 - Rotate a token by updating the server and every authorized workstation/client together. Old
   clients fail closed immediately.
-- Protect and back up `HUB_DIR`. It contains the event ledger and the launch signing secret when
-  worker launch has been used.
+- Protect and back up `HUB_DIR`. It contains the event ledger, hashed agent-credential registry,
+  and the launch signing secret when worker launch has been used.
 
 ## Worker-launch boundary
 
@@ -76,6 +98,8 @@ process merely because a `hub-worker://` URL was opened.
   server-side `verification_command` execution silently turns the write token into arbitrary
   shell at the service account (the exact RCE removed above).
 - Leave `HUB_WORKER_LAUNCH_ENABLED=False` unless the workstation workflow is intentionally deployed.
+- Prefer scoped agent credentials; monitor the explicit `shared-root-compat` event actor and disable
+  `HUB_SHARED_TOKEN_COMPAT` when no legacy client remains.
 - Invoke `hubaudit` deliberately for structural governance maintenance, never as an automatic
   per-task or copy/style gate.
 - Back up `events.jsonl`; when restore integrity is a critical concern, perform a transient restore
@@ -83,8 +107,9 @@ process merely because a `hub-worker://` URL was opened.
 
 ## Security limitations worth preserving in reviews
 
-- One shared token grants all general write operations; there is no user identity, role, scope, or
-  revocation list.
+- The Hub provides first-party agent credential scopes, expiry, and revocation, not end-user login,
+  delegated OAuth, tenant isolation, or policy-as-code. Place human access behind the host's real
+  authentication/authorization boundary.
 - Evidence URL dereferencing follows HTTP behavior available to Python's standard library and is
   not an SSRF sandbox.
 - Evidence filesystem paths are resolved from `BASE_DIR` for existence checks but are not a path

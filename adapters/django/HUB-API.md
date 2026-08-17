@@ -6,15 +6,17 @@ only when entity contents are intentionally publishable. You do not need to read
 the contract.
 
 - **Base path:** wherever the app is mounted, e.g. `{{LIVE_URL}}/hub` (locally `http://127.0.0.1:8000/hub`).
-- **Write auth:** general `POST /hub/api/*` operations require the header
-  `X-Write-Token: <HUB_WRITE_TOKEN>` and fail closed when it is absent. Reads need nothing. The
-  optional browser launch-mint endpoint is the one narrow exception: it is same-origin CSRF-gated,
-  cannot mutate board entities, and its separate authoritative consume remains write-token-gated.
-- **Write-token power:** a writer can grant terminal board states and, for a rare critical boundary,
+- **Write auth:** normal agents send a scoped, expiring, revocable `X-Agent-Token`. Missing,
+  invalid, expired, revoked, or insufficiently scoped credentials fail closed. The legacy
+  `X-Write-Token` works only while `HUB_SHARED_TOKEN_COMPAT=True` and is visibly recorded as the
+  `shared-root-compat` actor. Reads need nothing. The optional browser launch-mint endpoint is the
+  one narrow exception: it is same-origin CSRF-gated and cannot mutate board entities.
+- **Authority:** a properly scoped writer can grant terminal board states and, for a rare critical boundary,
   can set an optional `verification_command`. The server never executes that command; the worker
   runs the temporary probe out-of-band and submits its typed receipt. Strict evidence URLs are
   fetched by the server. Treat the token as production credentials and read
-  [SECURITY.md](../../SECURITY.md) before distributing it.
+  [SECURITY.md](../../SECURITY.md) before issuing it. A caller-authored `agent` never overrides the
+  immutable subject in a scoped credential.
 - **Ids** are `{{PROJECT_KEY}}:<type>:<local>`, e.g. `{{PROJECT_KEY}}:task:0001`. Allocated once, never renumbered.
 - **Content type:** send `Content-Type: application/json`; bodies are JSON objects.
 
@@ -80,11 +82,23 @@ source of truth, and every ratio carries its denominator.
 | `wip` | the adaptive concurrency ceiling the claim seam enforces. |
 | `telemetry` / `cost` | OTLP GenAI aggregate and its dollarized fold; absent until a first instrumented run exists. |
 
-## WRITE endpoints (POST, `X-Write-Token` required)
+## WRITE endpoints (POST, scoped `X-Agent-Token` preferred)
+
+Issue credentials with root compatibility or an existing `credential:manage` credential:
+
+```json
+{"action":"issue","subject":"worker-7","scopes":["task:*","mcp:call"],"ttl_s":3600}
+```
+
+The `/hub/api/agent-credential` response returns the bearer token once. Revoke it with
+`{"action":"revoke","credential_id":"..."}`; `{"action":"list"}` exposes metadata only.
+Endpoint operation scopes are enforced before the request body reaches business logic. A scoped
+credential's body `agent` must be absent or equal its immutable subject.
 
 | Endpoint | Key body fields | Success | Notable refusals |
 |---|---|---|---|
-| `/hub/api/task` | Create: `title`, optional `agent`; update: `id` + `expected_version` plus changed fields. Optional `priority` (P0–P3), `status` (not `done`), `verification_command`, `deps`, `acceptance`, `phase`, `touches`, `plan`, `implements`, `decided_by`, `surfaced_by`, `source` | `200 {data:{id,version,event}}` | `409 use_complete` (status=done), `428 precondition_required` (update without expected_version), `409 conflict`, `422 schema` |
+| `/hub/api/task` (`task:write`) | Create: `title`; update: `id` + `expected_version` plus changed fields. Updating active/leased work also requires its fencing `token`. Optional `priority` (P0–P3), `status` (not `done`/`in_progress`), `verification_command`, `deps`, `acceptance`, `phase`, `touches`, `plan`, `implements`, `decided_by`, `surfaced_by`, `source` | `200 {data:{id,version,event}}` | `409 use_complete` / `use_claim`; wrong/stale lease; `428 precondition_required`; `409 conflict`; `422 schema` |
+| `/hub/api/agent-credential` (`credential:manage`) | `action:issue` + `subject`, `scopes[]`, `ttl_s`; `action:revoke` + `credential_id`; or `action:list` | One-time bearer token on issue; sanitized metadata otherwise | `403 insufficient_scope`; `422 credential` |
 | `/hub/api/claim` | Existing task `id`, non-empty string `agent`, optional `ttl_s` (default 900; 1–86400) | Atomically acquires/renews the lease and transitions `todo` to `in_progress`; `200 {ok:true,token,expires,version,…}`. A same-agent retry renews without rotating the token. **Keep `token`.** | `404 not_found`; `409 deps_blocked`, `not_claimable`, or `{ok:false,reason:"held"}`; `422 bad_ttl` |
 | `/hub/api/heartbeat` | `id`, `token`, optional `ttl_s` (default 900; 1–86400) | `200 {ok:true,expires}` | `400 need_id_token`; `409 {ok:false,reason:"no/stale lease"}`; `422 bad_ttl` |
 | `/hub/api/complete` | `id`, `token` (from claim), `accept_note`, `evidence_uri` (string or array), `verification_run` (required when the task carries a `verification_command`); optional `agent`, `verified_by` (array), `expected_version`, `idem_key` | `200 {data:{id,version,event}}` | See the completion gate below |
@@ -99,11 +113,12 @@ source of truth, and every ratio carries its denominator.
 `POST /hub/api/launch-grant` accepts `{action:"start", task:"", count:1}` (`count` 1–8) only when
 `HUB_WORKER_LAUNCH_ENABLED=True`. It requires the CSRF cookie/header pair emitted by the Hub page and
 returns a signed, short-lived single-use grant. This endpoint is for the in-page control, not agents;
-agents should never copy the general write token into browser storage. See `adapters/windows/README.md`
+agents should never copy any agent or root credential into browser storage. See `adapters/windows/README.md`
 for the workstation half of the issuer-bound consume protocol.
 
 ### The completion gate (`/hub/api/complete`) — what it checks, in order
-1. Lease — you must hold a valid claim (`409 must_claim` if unclaimed, `409 lease` if the token is stale/another agent's).
+1. Lease — the authenticated subject and credential id must match the valid fenced claim
+   (`409 must_claim` if unclaimed, `409 lease` if stale, reclaimed, or owned by another credential).
 2. `accept_note` + at least one `evidence_uri` — else `422 need_evidence`.
 3. **strict mode only** (`HUB_DONE_STRICTNESS=strict`): every `evidence_uri` must dereference — a URL returning
    <400, a commit sha in this repo, or an existing path resolved from `BASE_DIR` (absolute paths are
@@ -144,6 +159,11 @@ See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, th
 (dereferenceable-evidence mode).
 
 ## Error responses
+
+Authentication refusals include `forbidden` (missing/invalid/expired/revoked credential),
+`insufficient_scope`, and `identity` (a scoped subject tried to name another agent), all 403.
+Credential administration returns `credential` or `bad_credential_action` (422). Claimed-task
+mutations additionally return `lease`, `lease_subject_mismatch`, or `use_claim` (409).
 
 Most write refusals are `{errors:[{code, msg, …}]}`:
 

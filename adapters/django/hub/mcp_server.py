@@ -4,7 +4,7 @@ One token-gated POST endpoint (/hub/api/mcp) speaking the Model Context Protocol
 revision with the io.modelcontextprotocol/tasks extension, so any MCP client can discover the
 board, pull ready work, spec a stub, and finish with a receipt. The adapter NEVER touches the
 ledger directly: every mutation goes through the same /hub/api/* write seam every worker uses
-(the caller's X-Write-Token is forwarded verbatim), so the receipt gate, lease fencing, OCC,
+(the caller's X-Agent-Token or shared-root compatibility token is forwarded verbatim), so the receipt gate, lease fencing, OCC,
 schema validation, and the WIP ceiling all apply unchanged. A verification receipt is required
 only when the task explicitly carries a rare one-shot critical-boundary command. Reads are the same
 ledger fold the rail serves. The server never executes a verification_command (RCE ruling):
@@ -78,16 +78,21 @@ TOOLS = [
 ]
 
 
-def _seam(path, payload, token, method="post"):
+def _seam(path, payload, auth_headers, method="post"):
     """The ONE door to the board: the same HTTP write seam every worker uses, caller's token
     forwarded verbatim. Returns (status, body)."""
     from django.test import Client
     c = Client()
+    forwarded = {}
+    if auth_headers.get("agent"):
+        forwarded["HTTP_X_AGENT_TOKEN"] = auth_headers["agent"]
+    elif auth_headers.get("root"):
+        forwarded["HTTP_X_WRITE_TOKEN"] = auth_headers["root"]
     if method == "get":
-        r = c.get(path, payload, HTTP_X_WRITE_TOKEN=token)
+        r = c.get(path, payload, **forwarded)
     else:
         r = c.post(path, data=json.dumps(payload), content_type="application/json",
-                   HTTP_X_WRITE_TOKEN=token)
+                   **forwarded)
     try:
         return r.status_code, r.json()
     except ValueError:
@@ -104,9 +109,9 @@ def _entity_version(task_id):
     return ent, (ent or {}).get("version")
 
 
-def _call_tool(name, args, token):
+def _call_tool(name, args, auth_headers):
     if name == "board_next":
-        return _tool_result(*_seam("/hub/next.json", {"n": int(args.get("n", 3))}, token, method="get"))
+        return _tool_result(*_seam("/hub/next.json", {"n": int(args.get("n", 3))}, auth_headers, method="get"))
     if name == "spec_task":
         ent, ver = _entity_version(args["id"])
         if ent is None:
@@ -115,29 +120,29 @@ def _call_tool(name, args, token):
         for k in ("acceptance", "verification_command"):
             if args.get(k):
                 payload[k] = args[k]
-        return _tool_result(*_seam("/hub/api/task", payload, token))
+        return _tool_result(*_seam("/hub/api/task", payload, auth_headers))
     if name == "start_task":
         # Claim owns BOTH lease acquisition and the one durable todo -> in_progress transition.
         # A second task upsert here used to post schema-invalid `active`/`planning_state` fields,
         # report a tool error, and leave the successfully granted lease hidden from the caller.
         return _tool_result(*_seam(
-            "/hub/api/claim", {"id": args["id"], "agent": args["agent"]}, token))
+            "/hub/api/claim", {"id": args["id"], "agent": args["agent"]}, auth_headers))
     if name == "take_task":
         payload = {"agent": args["agent"]}
         if args.get("ttl_s") is not None:
             payload["ttl_s"] = args["ttl_s"]
         if args.get("worker") is not None:
             payload["worker"] = args["worker"]
-        return _tool_result(*_seam("/hub/api/take", payload, token))
+        return _tool_result(*_seam("/hub/api/take", payload, auth_headers))
     if name == "heartbeat_task":
         payload = {"id": args["id"], "token": args["lease_token"]}
         if args.get("ttl_s") is not None:
             payload["ttl_s"] = args["ttl_s"]
-        return _tool_result(*_seam("/hub/api/heartbeat", payload, token))
+        return _tool_result(*_seam("/hub/api/heartbeat", payload, auth_headers))
     if name == "release_task":
         return _tool_result(*_seam("/hub/api/release", {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
-        }, token))
+        }, auth_headers))
     if name == "finish_task":
         payload = {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
@@ -145,7 +150,7 @@ def _call_tool(name, args, token):
         }
         if args.get("verification_run"):
             payload["verification_run"] = args["verification_run"]
-        return _tool_result(*_seam("/hub/api/complete", payload, token))
+        return _tool_result(*_seam("/hub/api/complete", payload, auth_headers))
     return None
 
 
@@ -189,7 +194,7 @@ def _rpc(rid, result=None, error=None):
     return JsonResponse(body)
 
 
-@writer
+@writer(scope="mcp:call")
 def mcp_endpoint(request, b):
     if not isinstance(b, dict):
         return _rpc(None, error={"code": -32600, "message": "not a JSON-RPC 2.0 request"})
@@ -199,7 +204,8 @@ def mcp_endpoint(request, b):
         return _rpc(rid, error={"code": -32600, "message": "not a JSON-RPC 2.0 request"})
     if not isinstance(params, dict):
         return _rpc(rid, error={"code": -32602, "message": "params must be an object"})
-    token = request.headers.get("X-Write-Token", "")
+    auth_headers = {"agent": request.headers.get("X-Agent-Token", ""),
+                    "root": request.headers.get("X-Write-Token", "")}
     if method == "initialize":
         server_info = _server_info()
         return _rpc(rid, {"protocolVersion": PROTOCOL_VERSION,
@@ -226,7 +232,7 @@ def mcp_endpoint(request, b):
             return _rpc(rid, error={"code": -32602,
                                     "message": "missing required argument(s): " + ", ".join(missing)})
         try:
-            out = _call_tool(name, args, token)
+            out = _call_tool(name, args, auth_headers)
         except (KeyError, TypeError, ValueError) as exc:
             return _rpc(rid, error={"code": -32602, "message": f"invalid tool arguments: {exc}"})
         return _rpc(rid, out)

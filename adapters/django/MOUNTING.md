@@ -63,8 +63,10 @@ HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see bel
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
 
-# Write-API token: ALWAYS from the environment, NEVER a committed literal.
+# Shared-root compatibility token: ALWAYS from the environment, NEVER a committed literal.
+# Normal workers use scoped X-Agent-Token credentials issued by the credential API.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
+HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lower() == "true"
 
 # Optional workstation worker bridge (disabled unless explicitly enabled):
 HUB_WORKER_LAUNCH_ENABLED = False
@@ -102,8 +104,9 @@ Receipts compose. A task inherits the completed receipts of its dependencies; a 
 task examines only a genuinely new critical integration seam. It does not rerun child proof or
 create nested verifier fan-out.
 
-Security consequence: strict URL evidence is fetched from the server's network.
-`HUB_WRITE_TOKEN` grants terminal board authority (done, deploys, ADRs), but not shell execution:
+Security consequence: strict URL evidence is fetched from the server's network. Scoped agent
+credentials grant only their named operations; the compatibility `HUB_WRITE_TOKEN` grants root
+board authority (done, deploys, ADRs), but not shell execution:
 when a task carries the optional `verification_command`, the worker runs it out-of-band and submits
 a receipt. Only trusted
 operators/agents may hold it because terminal governance authority is still privileged.
@@ -298,22 +301,32 @@ Unknowable coherence is REPORTED, never silently skipped: missing build identity
 violation in prod and an amber warning under `DEBUG`; a missing deploy record (pre-first-deploy)
 is amber so it cannot block the very deploy that creates it.
 
-## 9. Write-API token contract
+## 9. Scoped write-authority contract
 
-- Transport: general writes use `POST` with header `X-Write-Token: <token>` (never `?token=` —
-  query strings leak into access logs and referers). Compared constant-time.
-- Configuration: set the `HUB_WRITE_TOKEN` environment variable on the server; keep the local
-  copy in an untracked file (e.g. `.hub_write_token.local`, gitignored). The adapter reads
-  `settings.HUB_WRITE_TOKEN` first, then the environment.
-- Fail-closed: when no token is configured, every general write and launch consume returns 403.
+- Normal workers send `X-Agent-Token: <token>`. Issue one with
+  `POST /hub/api/agent-credential` and
+  `{"action":"issue","subject":"worker-id","scopes":["task:*"],"ttl_s":3600}`.
+  The bearer token is returned once; the durable registry stores only its SHA-256 digest.
+- `action:"revoke"` plus `credential_id` invalidates a credential immediately;
+  `action:"list"` returns identity/scope/lifetime metadata but never a token or digest.
+- Operation scopes include `task:claim`, `task:write`, `task:heartbeat`, `task:complete`,
+  `task:release`, entity-specific `*:write` scopes, `launch:consume`, `mcp:call`, and
+  `credential:manage`. A namespace wildcard such as `task:*` is accepted.
+
+- Compatibility transport also remains header-only: `X-Write-Token` is never accepted from a
+  query string, where credentials leak into access logs and referrers. Digests compare constant-time.
+- Compatibility: set `HUB_WRITE_TOKEN` only as the existing-client migration bridge and keep its
+  local copy untracked. While `HUB_SHARED_TOKEN_COMPAT=True`, its requests are visibly recorded as
+  the `shared-root-compat` actor; disable the setting after migration.
+- Fail-closed: a missing, invalid, expired, revoked, or insufficiently scoped credential returns 403.
   Reads stay public; the optional CSRF-gated mint capability is described below.
 - Endpoints (all POST, JSON body): `/hub/api/task`, `/hub/api/complete`, `/hub/api/adr`,
   `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, and
   `/hub/api/launch-grant/consume`.
 
-The write token authorizes all of those endpoints and therefore terminal board/governance state.
-It does not authorize operating-system shell execution. It is never suitable for browser storage
-or an untrusted client.
+Each agent token authorizes only its named operations. The compatibility write token authorizes
+every operation and therefore terminal board/governance state. Neither authorizes operating-system
+shell execution, and neither is suitable for browser storage or an untrusted client.
 
 The sole exception is the optional `POST /hub/api/launch-grant`: it is a same-origin,
 `@csrf_protect` browser capability that can mint only a short-lived grant bound to

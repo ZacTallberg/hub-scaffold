@@ -8,25 +8,47 @@ import json
 import os
 import re
 import subprocess
+import time
+from contextvars import ContextVar
 from functools import wraps
 
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import collision, flow, ids, schedule, validate
+from hub_core import agent_auth, collision, flow, ids, schedule, validate
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
 from . import hub_app
 
 
-def _token_ok(request) -> bool:
+_AUTH = ContextVar("hub_write_auth", default=None)
+
+
+def _as_bool(value, default=True):
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _authenticate(request):
+    """Authenticate one immutable subject. Invalid agent auth never falls through to root."""
+    agent_token = request.headers.get("X-Agent-Token") or ""
+    if agent_token:
+        try:
+            return agent_auth.CredentialRegistry(hub_app.HUB_DIR).authenticate(agent_token), None
+        except agent_auth.CredentialError as exc:
+            return None, str(exc)
+
+    configured_compat = hub_app._dj_setting("HUB_SHARED_TOKEN_COMPAT", None)
+    if configured_compat is None:
+        configured_compat = os.environ.get("HUB_SHARED_TOKEN_COMPAT")
+    compat = _as_bool(configured_compat, True)
     want = hub_app._dj_setting("HUB_WRITE_TOKEN") or os.environ.get("HUB_WRITE_TOKEN")
-    if not want:
-        return False  # fail-closed: writes disabled until a token is configured
-    # header only (NOT ?token= — query params leak into access logs/referers); constant-time compare.
     got = request.headers.get("X-Write-Token") or ""
-    return bool(got) and hmac.compare_digest(got, want)
+    if compat and want and got and hmac.compare_digest(got, want):
+        return agent_auth.shared_root_context(), None
+    return None, "missing/invalid X-Agent-Token (shared-root compatibility unavailable or refused)"
 
 
 def _body(request):
@@ -36,21 +58,57 @@ def _body(request):
         return None
 
 
-def writer(fn):
+def writer(fn=None, *, scope=None):
+    if fn is None:
+        return lambda view: writer(view, scope=scope)
+
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
         if request.method != "POST":
             return HttpResponseNotAllowed(["POST"])
-        if not _token_ok(request):
-            return JsonResponse({"errors": [{"code": "forbidden", "msg": "missing/invalid X-Write-Token"}]}, status=403)
+        auth, problem = _authenticate(request)
+        if not auth:
+            return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
+        if not auth.allows(scope):
+            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+                                              "subject": auth.subject}]}, status=403)
         b = _body(request)
-        if b is None:
+        if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
-        return fn(request, b, *a, **k)
+        requested_agent = b.get("agent")
+        if auth.mode == "scoped-agent":
+            if requested_agent not in (None, "", auth.subject):
+                return JsonResponse({"errors": [{"code": "identity",
+                    "msg": "agent must match the immutable credential subject",
+                    "subject": auth.subject}]}, status=403)
+            b["agent"] = auth.subject
+        else:
+            # Compatibility keeps legacy seat labels only as labels. The event and lease actor is
+            # always the visibly bounded shared-root subject.
+            pass
+        request.hub_auth = auth
+        marker = _AUTH.set(auth)
+        try:
+            response = fn(request, b, *a, **k)
+        finally:
+            _AUTH.reset(marker)
+        response["X-Hub-Auth-Subject"] = auth.subject
+        response["X-Hub-Auth-Mode"] = auth.mode
+        response["X-Hub-Credential-Id"] = auth.credential_id
+        return response
     # Marker asserted on every general mutation route; the launch mint has its own narrow marker.
     w._hub_token_gated = True
+    w._hub_required_scope = scope
     return w
+
+
+def _event_identity(fallback_agent):
+    auth = _AUTH.get()
+    if not auth:
+        return {"agent_id": fallback_agent, "session_id": None, "actor_kind": "agent"}
+    return {"agent_id": auth.subject, "session_id": auth.credential_id,
+            "actor_kind": auth.actor_kind}
 
 
 def _evidence_problem(ev):
@@ -109,7 +167,7 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     try:
         before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
+                      git_sha=hub_app._git_head(), idem_key=idem, **_event_identity(agent))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
     if ev.get("seq", 0) > before:
@@ -127,7 +185,7 @@ def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
         s.close()
 
 
-@writer
+@writer(scope="task:write")
 def task(request, b):
     agent = b.get("agent", "agent")
     is_create = not b.get("id")
@@ -137,6 +195,10 @@ def task(request, b):
     if (b.get("status") or "").lower() == "done":
         return JsonResponse({"errors": [{"code": "use_complete",
             "msg": "status 'done' must go through POST /hub/api/complete (lease + result + evidence)"}]},
+            status=409)
+    if (b.get("status") or "").lower() == "in_progress":
+        return JsonResponse({"errors": [{"code": "use_claim",
+            "msg": "status 'in_progress' is granted only by a successful fenced claim"}]},
             status=409)
     twins = []
     if is_create:
@@ -151,7 +213,17 @@ def task(request, b):
         b.setdefault("status", "todo")
     else:
         eid = b["id"]
-    payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key")}
+        existing = hub_app.current_state().get("entities", {}).get(eid)
+        lease = hub_app._read_lease(eid)
+        claimed = bool(lease and lease.get("expires", 0) > time.time())
+        if existing and (existing.get("status") == "in_progress" or claimed):
+            if not hub_app.lease_authorized(eid, b.get("token"), request.hub_auth.subject,
+                                            request.hub_auth.credential_id):
+                return JsonResponse({"errors": [{"code": "lease",
+                    "msg": "mutating claimed work requires its current fenced lease and subject"}]},
+                    status=409)
+    payload = {k: v for k, v in b.items()
+               if k not in ("agent", "expected_version", "idem_key", "token")}
     payload["type"] = "task"
     resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"), agent=agent,
                            idem=b.get("idem_key"), etype="task.created" if is_create else "task.updated")
@@ -162,7 +234,7 @@ def task(request, b):
     return JsonResponse(resp, status=status)
 
 
-@writer
+@writer(scope="task:complete")
 def complete(request, b):
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
     if not isinstance(eid, str) or not eid.strip():
@@ -172,7 +244,8 @@ def complete(request, b):
     cur = hub_app._read_lease(eid)
     if not cur:
         return JsonResponse({"errors": [{"code": "must_claim", "msg": "claim the task first (POST /hub/api/claim)"}]}, status=409)
-    if not hub_app.lease_valid(eid, token):
+    if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
+                                    request.hub_auth.credential_id):
         return JsonResponse({"errors": [{"code": "lease", "msg": "claimed by another agent / stale token"}]}, status=409)
     if cur.get("agent") != agent:
         return JsonResponse({"errors": [{"code": "identity",
@@ -263,7 +336,8 @@ def complete(request, b):
     # global lease lock is deliberately acquired only for this short commit section. The original
     # entity version binds the result to exactly the task definition that was verified.
     with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
-        if not hub_app.lease_valid(eid, token):
+        if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
+                                        request.hub_auth.credential_id):
             return JsonResponse({"errors": [{"code": "lease", "msg": "lease expired or was reclaimed during verification"}]}, status=409)
         resp, status = _append("task", eid, payload, expected_version=verified_version, agent=agent,
                                idem=b.get("idem_key"), etype="task.transitioned")
@@ -272,7 +346,7 @@ def complete(request, b):
     return JsonResponse(resp, status=status)
 
 
-@writer
+@writer(scope="adr:write")
 def adr(request, b):
     agent = b.get("agent", "agent")
     state = hub_app.current_state()
@@ -298,7 +372,7 @@ def adr(request, b):
     return JsonResponse(resp, status=status)
 
 
-@writer
+@writer(scope="capability:write")
 def capability(request, b):
     agent = b.get("agent", "agent")
     name = b.get("name")
@@ -311,6 +385,36 @@ def capability(request, b):
     resp, status = _append("cap", eid, payload, expected_version=b.get("expected_version"), agent=agent,
                            idem=b.get("idem_key"), etype="capability.registered")
     return JsonResponse(resp, status=status)
+
+
+@writer(scope="credential:manage")
+def agent_credential(request, b):
+    """Issue, inspect, or revoke host-local agent credentials.
+
+    The bearer token appears exactly once in an issue response. Registry reads never expose its
+    digest, and identity is rotated by issuing a new credential rather than editing a subject.
+    """
+    action = str(b.get("action") or "").strip().lower()
+    registry = agent_auth.CredentialRegistry(hub_app.HUB_DIR)
+    try:
+        if action == "issue":
+            token, record = registry.issue(
+                b.get("subject"), b.get("scopes"), b.get("ttl_s"),
+                issued_by=request.hub_auth.subject,
+            )
+            response = JsonResponse({"data": {"credential": record, "token": token}}, status=201)
+            response["Cache-Control"] = "no-store"
+            return response
+        if action == "revoke":
+            record = registry.revoke(b.get("credential_id"),
+                                     revoked_by=request.hub_auth.subject)
+            return JsonResponse({"data": {"credential": record}})
+        if action == "list":
+            return JsonResponse({"data": {"credentials": registry.list_public()}})
+    except agent_auth.CredentialError as exc:
+        return JsonResponse({"errors": [{"code": "credential", "msg": str(exc)}]}, status=422)
+    return JsonResponse({"errors": [{"code": "bad_credential_action",
+                                      "msg": "action must be issue, revoke, or list"}]}, status=422)
 
 
 def _slug(text, fallback):
@@ -332,7 +436,7 @@ def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None)
     here and needs no separate key. Numeric types without a natural key fall back to the
     high-water allocator, and a caller who wants exactly-once there passes `idem_key`.
     """
-    @writer
+    @writer(scope=type_ + ":write")
     def view(request, b):
         agent = b.get("agent", "agent")
         eid = b.get("id")
@@ -367,7 +471,7 @@ feat = _simple_writer("feat", "feat.upserted", name_field="name")
 note = _simple_writer("note", "note.created", name_field="title")
 
 
-@writer
+@writer(scope="deploy:write")
 def deploy(request, b):
     """Record one immutable, post-canary release closure.
 
@@ -449,7 +553,7 @@ def deploy(request, b):
     return JsonResponse(resp, status=status)
 
 
-@writer
+@writer(scope="decision:write")
 def decision(request, b):
     agent = b.get("agent", "agent")
     topic, choice = b.get("topic"), b.get("choice")
@@ -463,7 +567,8 @@ def decision(request, b):
             aggregate=f"{hub_app.PROJECT_KEY}:decision:{idem[-12:]}", type="decision.logged",
             payload={"topic": topic, "choice": choice, "rationale": b.get("rationale"),
                      "invalidates": b.get("invalidates", []), "refs": b.get("refs", [])},
-            expected_version=None, agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
+            expected_version=None, git_sha=hub_app._git_head(), idem_key=idem,
+            **_event_identity(agent))
         if ev.get("seq", 0) > before:
             hub_app.publish_event(ev)
     finally:
@@ -471,7 +576,7 @@ def decision(request, b):
     return JsonResponse({"data": {"event": ev["event_id"]}})
 
 
-@writer
+@writer(scope="task:claim")
 def claim(request, b):
     eid, agent = b.get("id"), b.get("agent")
     if (not isinstance(eid, str) or not eid.strip() or
@@ -495,7 +600,11 @@ def claim(request, b):
         flags = state.get("flags", {}).get(eid, {})
         live = hub_app.leases()
         existing = next((lease for lease in live if lease.get("task") == eid), None)
-        same_lease = existing and existing.get("agent") == agent
+        same_lease = bool(
+            existing and existing.get("agent") == agent and
+            (existing.get("auth_subject") in (None, request.hub_auth.subject)) and
+            (existing.get("credential_id") in (None, request.hub_auth.credential_id))
+        )
         other = next((lease for lease in live
                       if lease.get("agent") == agent and lease.get("task") != eid), None)
         if other:
@@ -508,7 +617,10 @@ def claim(request, b):
         if not same_lease and not verdict["available"]:
             return JsonResponse({"errors": [{"code": verdict["state"],
                                              "msg": verdict["reason"]}]}, status=409)
-        res = hub_app.claim(eid, agent, ttl_s=ttl)
+        res = hub_app.claim(eid, agent, ttl_s=ttl,
+                            auth_subject=request.hub_auth.subject,
+                            credential_id=request.hub_auth.credential_id,
+                            actor_kind=request.hub_auth.actor_kind)
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if status != "in_progress":
@@ -526,7 +638,7 @@ def claim(request, b):
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
-@writer
+@writer(scope="task:release")
 def release(request, b):
     eid, token = b.get("id"), b.get("token")
     if not isinstance(eid, str) or not eid.strip() or not isinstance(token, str) or not token.strip():
@@ -534,6 +646,9 @@ def release(request, b):
     lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
     if not lease or lease.get("token") != token:
         return JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+    if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
+                                    request.hub_auth.credential_id):
+        return JsonResponse({"errors": [{"code": "lease_subject_mismatch"}]}, status=409)
     agent = b.get("agent")
     if agent and agent != lease.get("agent"):
         return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
@@ -541,7 +656,7 @@ def release(request, b):
     return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
 
 
-@writer
+@writer(scope="task:claim")
 def take(request, b):
     agent = b.get("agent")
     if not isinstance(agent, str) or not agent.strip() or len(agent) > 256:
@@ -576,7 +691,10 @@ def take(request, b):
                 entities.get(lease.get("task"), {})))
         task = schedule.order_ready(candidates, busy_touches=busy_touches)[0]
         eid = task["id"]
-        res = hub_app.claim(eid, agent, ttl_s=ttl)
+        res = hub_app.claim(eid, agent, ttl_s=ttl,
+                            auth_subject=request.hub_auth.subject,
+                            credential_id=request.hub_auth.credential_id,
+                            actor_kind=request.hub_auth.actor_kind)
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if task.get("status") != "in_progress":
@@ -591,7 +709,7 @@ def take(request, b):
     return JsonResponse(res)
 
 
-@writer
+@writer(scope="task:heartbeat")
 def heartbeat(request, b):
     if (not isinstance(b.get("id"), str) or not b.get("id").strip() or
             not isinstance(b.get("token"), str) or not b.get("token").strip()):
@@ -602,7 +720,10 @@ def heartbeat(request, b):
         ttl = 0
     if ttl < 1 or ttl > 86400:
         return JsonResponse({"errors": [{"code": "bad_ttl", "msg": "ttl_s must be 1..86400"}]}, status=422)
-    res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=ttl)
+    res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=ttl,
+                            auth_subject=request.hub_auth.subject,
+                            credential_id=request.hub_auth.credential_id,
+                            actor_kind=request.hub_auth.actor_kind)
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
@@ -650,7 +771,7 @@ def launch_grant(request):
 launch_grant._hub_origin_gated = True
 
 
-@writer
+@writer(scope="launch:consume")
 def consume_launch_grant(request, b):
     """Validate and atomically burn a grant at the Hub that issued it."""
     if b.get("consume") is None:
