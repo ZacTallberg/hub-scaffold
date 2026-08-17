@@ -4,8 +4,8 @@ Stack-neutral and pure (no I/O): the ceiling is FOLDED from the ledger, never st
 config, so every consumer (claim gate, next rail, cockpit) derives the same number from the same
 events — single-fold discipline. Classic additive-increase / multiplicative-decrease:
 
-  +1        per event carrying an all-green verification_run receipt, once the fleet has ASKED
-            for more concurrency (a proven completion is evidence it can digest what it has);
+  +1        per canonically completed task, once the fleet has ASKED for more concurrency (the
+            successful real operation and its required evidence are proof it can digest the work);
   halve     (floor FLOOR) per congestion signal — a recorded failed receipt, meaning an event
             whose verification_run carries a non-zero exit_code.
 
@@ -42,6 +42,7 @@ FLOOR = 4    # OPERATOR RULING 2026-08-05: the fleet is never throttled below fo
 WINDOW = 40  # the CONTROL WINDOW: how many recent signals the ceiling is computed from
 SATURATED_TYPE = "wip.saturated"
 RECEIPT_FAILED_TYPE = "receipt.failed"
+TASK_TRANSITIONED_TYPE = "task.transitioned"
 
 
 def _codes(ev):
@@ -50,6 +51,20 @@ def _codes(ev):
     if isinstance(runs, dict):
         runs = [runs]
     return [r.get("exit_code") for r in runs if isinstance(r, dict)]
+
+
+def _completed(ev):
+    """A successful canonical completion, independent of whether a rare probe was declared.
+
+    The write seam only emits this transition after the lease, completion summary, and evidence
+    requirements pass. Ordinary work intentionally has no ``verification_run``; excluding it here
+    would make throughput recovery depend on manufacturing tests.
+    """
+    payload = ev.get("payload") or {}
+    return (ev.get("type") == TASK_TRANSITIONED_TYPE
+            and str(payload.get("status") or "").lower() == "done"
+            and bool(payload.get("verified_by"))
+            and bool(payload.get("evidence_uri")))
 
 
 def _signals(events):
@@ -64,7 +79,9 @@ def _signals(events):
     for ev in events:
         codes = _codes(ev)
         saturated = ev.get("type") == SATURATED_TYPE
-        if not (saturated or codes):
+        failed = ev.get("type") == RECEIPT_FAILED_TYPE or any(code != 0 for code in codes)
+        completed = _completed(ev)
+        if not (saturated or failed or completed):
             continue
         if saturated and out and out[-1].get("type") == SATURATED_TYPE:
             continue                        # same episode of demand, already counted
@@ -99,9 +116,9 @@ def ceiling(events, base=BASE, floor=FLOOR, capacity=None, window=WINDOW):
         codes = _codes(ev)
         if ev.get("type") == SATURATED_TYPE:
             armed = True                    # DEMAND: the probe is now live, the ceiling unmoved
-        elif any(code != 0 for code in codes):
+        elif ev.get("type") == RECEIPT_FAILED_TYPE or any(code != 0 for code in codes):
             c = max(floor, c // 2)          # the fleet handed back work that did not work
-        elif codes and armed:
+        elif _completed(ev) and armed:
             c += 1
             armed = False
     if capacity is not None:

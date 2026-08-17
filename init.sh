@@ -11,7 +11,7 @@
 #   Brand Name    human-facing name; becomes {{BRAND}} everywhere
 #   live-url      optional; becomes {{LIVE_URL}} (default: https://<project-key>.example.com)
 #
-# What it does: copies PROJECT/ (including its explicit project.json identity), hub_core/,
+# What it does: copies .gitignore, PROJECT/ (including its explicit project.json identity), hub_core/,
 # adapters/, patterns/, campaigns/, OPERATING-AGREEMENT.md,
 # SECURITY.md, and docs/ARCHITECTURE.md into
 # the target, renames governance templates into place (CLAUDE.md, AGENTS.md), substitutes the
@@ -52,7 +52,7 @@ missing=0
 for t in PROJECT hub_core adapters patterns campaigns; do
   [ -d "$ROOT/$t" ] || { echo "ERROR: scaffold is incomplete, missing $t/" >&2; missing=1; }
 done
-for f in OPERATING-AGREEMENT.md SECURITY.md docs/ARCHITECTURE.md governance/CLAUDE.md.template governance/AGENTS.md.template; do
+for f in .gitignore OPERATING-AGREEMENT.md SECURITY.md docs/ARCHITECTURE.md governance/CLAUDE.md.template governance/AGENTS.md.template; do
   [ -f "$ROOT/$f" ] || { echo "ERROR: scaffold is incomplete, missing $f" >&2; missing=1; }
 done
 [ "$missing" -eq 0 ] || exit 1
@@ -64,6 +64,7 @@ done
 
 cp "$ROOT/OPERATING-AGREEMENT.md" "$TARGET/OPERATING-AGREEMENT.md"
 cp "$ROOT/SECURITY.md" "$TARGET/SECURITY.md"
+cp "$ROOT/.gitignore" "$TARGET/.gitignore"
 mkdir -p "$TARGET/docs"
 cp "$ROOT/docs/ARCHITECTURE.md" "$TARGET/docs/ARCHITECTURE.md"
 # Governance templates land renamed into place at the project root.

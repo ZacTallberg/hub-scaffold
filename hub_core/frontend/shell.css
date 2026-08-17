@@ -3,8 +3,8 @@
    The APP-SHELL component layer: a tabbed, single-file admin dashboard at the
    app-foundry design bar. Sits ON TOP of tokens.css (color/radius/status/motion)
    and reuses its semantic tokens, so dark mode / forced-colors / reduced-motion
-   come for free. The PAGE NEVER SCROLLS — scrolling lives inside .table-wrapper,
-   .overview-scroll, and .modal-body only.
+   come for free. Each active view owns a bounded native scrollport (.table-wrapper,
+   .overview-scroll, or .modal-body), so every page and dialog remains reachable.
 
    Token map (app-foundry name -> our token):
      bg-page -> --bg | bg-card -> --surface | bg-hover -> --surface-2
@@ -13,7 +13,7 @@
    Density anchor: 13px base (this is a DATA tool, not a document).
    ========================================================================== */
 
-/* ---- App shell takes over the viewport; the page itself does not scroll. ---- */
+/* ---- App shell takes over the viewport; the active view owns native scrolling. ---- */
 html { height: 100%; }
 body.hub-app {
   margin: 0;

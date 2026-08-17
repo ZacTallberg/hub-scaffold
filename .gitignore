@@ -6,4 +6,6 @@ PROJECT/.hub/
 db.sqlite3
 *.sqlite3
 *.sqlite3-*
+build_sha.txt
+.hub_write_token.local
 .selftest-tmp.*

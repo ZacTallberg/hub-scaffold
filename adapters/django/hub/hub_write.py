@@ -365,7 +365,88 @@ def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None)
 gap = _simple_writer("gap", "gap.created", name_field="title", numeric=True)
 feat = _simple_writer("feat", "feat.upserted", name_field="name")
 note = _simple_writer("note", "note.created", name_field="title")
-deploy = _simple_writer("deploy", "deploy.created", name_field="sha", natural_key="sha")
+
+
+@writer
+def deploy(request, b):
+    """Record one immutable, post-canary release closure.
+
+    ``sha`` is what was built, ``served_sha`` is what the independent front-door canary observed,
+    and ``tasks_closed`` is the explicit set this release carries.  Exact equality makes delivery
+    truth computable inside a production image without Git.  A retry of the same proof is a no-op;
+    changing the proof for an existing SHA is forbidden rather than rewritten into history.
+    """
+    accepted_fields = {"sha", "served_sha", "tasks_closed", "at", "build", "method",
+                       "audit_ok", "agent", "idem_key"}
+    unknown_fields = sorted(set(b) - accepted_fields)
+    if unknown_fields:
+        return JsonResponse({"errors": [{"code": "bad_deploy_fields",
+            "msg": "deploy records are create-only and accept only documented release fields",
+            "fields": unknown_fields}]}, status=422)
+
+    sha = str(b.get("sha") or "").strip().lower()
+    served_sha = str(b.get("served_sha") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+        return JsonResponse({"errors": [{"code": "bad_sha",
+            "msg": "sha must be a 7..64 character hexadecimal Git identity"}]}, status=422)
+    if served_sha != sha:
+        return JsonResponse({"errors": [{"code": "release_not_observed",
+            "msg": "served_sha must exactly equal sha after the front-door canary passes",
+            "sha": sha, "served_sha": served_sha or None}]}, status=422)
+
+    tasks_closed = b.get("tasks_closed")
+    if not isinstance(tasks_closed, list) or any(
+            not isinstance(task_id, str) or not task_id.strip() for task_id in tasks_closed):
+        return JsonResponse({"errors": [{"code": "need_tasks_closed",
+            "msg": "tasks_closed must be an explicit array of task ids (empty is allowed)"}]},
+            status=422)
+    normalized_tasks = sorted(task_id.strip() for task_id in tasks_closed)
+    if len(normalized_tasks) != len(set(normalized_tasks)):
+        return JsonResponse({"errors": [{"code": "duplicate_task_closure",
+            "msg": "tasks_closed must not contain duplicate ids"}]}, status=422)
+
+    state = hub_app.current_state()
+    entities = state.get("entities", {})
+    invalid = []
+    for task_id in normalized_tasks:
+        task = entities.get(task_id)
+        if not task or task.get("type") != "task":
+            invalid.append({"id": task_id, "reason": "not a task on this board"})
+        elif task.get("status") != "done":
+            invalid.append({"id": task_id, "reason": "task is not done"})
+    if invalid:
+        return JsonResponse({"errors": [{"code": "invalid_task_closure", "tasks": invalid}]},
+                            status=422)
+
+    # The immutable SHA is already a valid id local. Keep all of it: truncating a SHA-256 identity
+    # would make two distinct releases capable of addressing the same immutable entity.
+    eid = ids.make_id(hub_app.PROJECT_KEY, "deploy", sha)
+    payload = {k: v for k, v in b.items()
+               if k not in ("agent", "expected_version", "idem_key", "local", "id")}
+    payload.update({"type": "deploy", "sha": sha, "served_sha": sha,
+                    "tasks_closed": normalized_tasks})
+    existing = entities.get(eid)
+    if existing:
+        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "at", "build",
+                            "method", "audit_ok")
+        comparable_existing = dict(existing)
+        if isinstance(comparable_existing.get("tasks_closed"), list):
+            comparable_existing["tasks_closed"] = sorted(comparable_existing["tasks_closed"])
+        same_proof = all(comparable_existing.get(field) == payload.get(field)
+                         for field in immutable_fields)
+        if same_proof:
+            return JsonResponse({"data": {"id": eid, "version": existing.get("version"),
+                                           "idempotent": True}})
+        return JsonResponse({"errors": [{"code": "immutable_deploy",
+            "msg": "a deploy record is immutable; publish a different SHA for a different release",
+            "id": eid, "version": existing.get("version")}]}, status=409)
+
+    # expected_version=0 closes the concurrent-create race. A second writer either replays its
+    # idem key or loses with OCC; it can retry and receive the idempotent record above.
+    resp, status = _append("deploy", eid, payload, expected_version=0,
+                           agent=b.get("agent", "agent"), idem=b.get("idem_key"),
+                           etype="deploy.created")
+    return JsonResponse(resp, status=status)
 
 
 @writer

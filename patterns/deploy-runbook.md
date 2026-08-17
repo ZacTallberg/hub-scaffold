@@ -70,8 +70,29 @@ command for each, keep it beside the runbook, and every step below becomes liter
    you set: read it first and leave it alone if it names someone else's sha, or you will disarm a
    concurrent deploy and their build will fail on the missing stamp.
 7. **Record the deploy through the typed writer**, with the sha and the identity the canary
-   actually observed. This is the artifact that makes the release reviewable later; a deploy
-   nobody recorded did not happen as far as the board is concerned.
+   actually observed. `tasks_closed` is the explicit set of already-done tasks carried by this
+   release, not merely the tasks completed during this deploy. Send this only after the front-door
+   canary has observed the exact SHA:
+
+   ```http
+   POST /hub/api/deploy
+   X-Write-Token: <HUB_WRITE_TOKEN>
+   Content-Type: application/json
+
+   {
+     "sha": "<shipped-sha>",
+     "served_sha": "<the-same-sha-observed-by-the-canary>",
+     "tasks_closed": ["<project>:task:0001", "<project>:task:0002"],
+     "at": "<ISO-8601 timestamp>",
+     "method": "<platform/deploy path>",
+     "agent": "<operator id>"
+   }
+   ```
+
+   The writer refuses mismatched SHAs, unknown/non-done task ids, duplicate task ids, and attempts
+   to rewrite an existing SHA's proof. An exact retry is idempotent. This immutable closure plus
+   the running artifact identity makes every named task immediately `live` without Git or a
+   polling cycle. A deploy nobody recorded did not happen as far as the board is concerned.
 8. **Check your unauthenticated surface** — one request per invariant your project declares.
 9. **Done means named:** the recorded event carries the live sha.
 

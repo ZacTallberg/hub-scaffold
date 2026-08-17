@@ -2,7 +2,8 @@
 (tokens.css + shell.css + print.css + hub.js + palette.js) and the snapshot as the #hub-data JSON
 island. Built ONCE here so every stack's human view (Django or single-file WSGI) renders the SAME
 client-rendered tabbed app — no per-stack template duplication. hub.js builds the tabs/tables/modals
-client-side from the island (UI == API by construction; the page never scrolls). Stdlib only."""
+client-side from the island (UI == API by construction; each active view owns a bounded native
+scrollport). Stdlib only."""
 import json
 from functools import lru_cache
 from pathlib import Path
