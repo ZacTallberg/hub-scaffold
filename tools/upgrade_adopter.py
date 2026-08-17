@@ -278,6 +278,41 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
+def ledger_head(path: Path) -> dict[str, Any] | None:
+    """Read the protected adopter ledger head for a one-time compatibility anchor.
+
+    The upgrader never changes the ledger. A malformed non-empty ledger is a refusal, because a
+    cutoff captured from ambiguous history would be capable of hiding current receipt failures.
+    Full hash-chain verification remains the Hub audit's responsibility.
+    """
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise UpgradeError(f"protected Hub ledger is not a regular file: {path}")
+    last = None
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                seq = value.get("seq") if isinstance(value, dict) else None
+                event_hash = value.get("hash") if isinstance(value, dict) else None
+                if (
+                    not isinstance(seq, int)
+                    or seq <= 0
+                    or not isinstance(event_hash, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", event_hash) is None
+                ):
+                    raise ValueError(f"line {number} lacks a valid seq/hash")
+                if last is not None and seq <= last["seq"]:
+                    raise ValueError(f"line {number} does not advance sequence")
+                last = {"seq": seq, "anchor_hash": event_hash}
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise UpgradeError(f"cannot anchor legacy receipt cutoff from {path}: {exc}") from exc
+    return last
+
+
 def protected_project_path(relative: Path) -> bool:
     if relative in PROTECTED_PROJECT_FILES:
         return True
@@ -366,6 +401,20 @@ def main() -> int:
     manifest_path = supplied_manifest.resolve()
     manifest = load_manifest(manifest_path)
     target_root = manifest_path.parent.resolve()
+    compatibility = manifest.get("compatibility")
+    if compatibility is None:
+        compatibility = {}
+        manifest["compatibility"] = compatibility
+    if not isinstance(compatibility, dict):
+        raise UpgradeError("manifest compatibility must be a JSON object")
+    if "legacy_done_receipts" not in compatibility:
+        cutoff = ledger_head(target_root / "PROJECT" / ".hub" / "events.jsonl")
+        if cutoff:
+            compatibility["legacy_done_receipts"] = {
+                **cutoff,
+                "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                "policy": "missing verified_by/evidence_uri only",
+            }
     previous_adoption = manifest.get("adopted_from", {})
     previous_units = (
         previous_adoption.get("units", {}) if isinstance(previous_adoption, dict) else {}

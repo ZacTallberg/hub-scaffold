@@ -49,6 +49,10 @@ require project-specific wiring.
    a release examines only a new critical integration seam introduced by composition.
 6. **Stop when the changed behavior works.** Once the real operation succeeds and no critical
    boundary remains unobserved, completion is earned. Adding another check is process bloat.
+7. **Migrations label history; they never counterfeit it.** When a stricter receipt contract arrives,
+   preserve immutable pre-contract facts behind an exact ledger sequence + hash cutoff and account
+   for their debt explicitly. Never synthesize `verified_by`, evidence, or a passing receipt for work
+   that predates the contract. New writes remain strict from the adoption boundary forward.
 
 ## §3 Defect discipline (Instance → Invariant)
 1. **Observed failure becomes work.** Record the concrete failure as an `INC-` instance and open a

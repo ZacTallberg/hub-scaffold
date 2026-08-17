@@ -43,3 +43,10 @@ On success, `adopted_from` records the scaffold repository, commit, dirty-state 
 tree hash, and source and installed SHA-256 hashes for every managed file. Commit that manifest with
 the adopted units. Then use the adopter's actual mounted Hub operation as the receipt; do not invent
 an upgrade test.
+
+The first upgrade that encounters an existing Hub ledger also records
+`compatibility.legacy_done_receipts`: the exact sequence and event hash at the pre-upgrade ledger
+head. This does not rewrite history or fabricate evidence. It only lets the audit separately account
+for already-done tasks whose sole schema debt is a missing/empty `verified_by` or `evidence_uri`.
+The anchor must still match the immutable ledger; other defects and every post-cutoff completion
+remain blocking. Future upgrades preserve the original cutoff.
