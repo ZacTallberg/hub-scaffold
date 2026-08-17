@@ -133,6 +133,12 @@ Claim and heartbeat TTLs are limited to 1–86400 seconds. Choose a TTL longer t
 between heartbeats, heartbeat well before expiry, and treat `409 no/stale lease` as loss of
 ownership. Do not keep working or attempt completion after losing the lease; rediscover and claim.
 
+`POST /hub/api/take` may include a `worker` placement profile. The Hub first derives the ordinary
+ready frontier, then filters explicit task routing requirements against that profile. A
+`409 no_compatible_task` response includes exclusion counts and reasons; it means ready work exists
+but this worker did not prove the required fit. Correct the worker declaration or let another seat
+pull it; do not weaken the task requirement merely to make the queue non-empty.
+
 ## Worker-launch operations
 
 Follow [the Windows adapter guide](../adapters/windows/README.md) for installation and removal. A
@@ -164,6 +170,7 @@ not use `-NoExit` and closes its own host when the wrapper returns.
 | All writes return `403` | Token unset, header missing, or client/server tokens differ |
 | Update returns `428` | Existing entity update omitted `expected_version` |
 | Claim returns `409 held` | Another worker owns a live lease; choose another discovered task |
+| Atomic take returns `409 no_compatible_task` | Ready work exists, but capability/risk/resource/locality/outcome requirements exclude this worker; inspect `routing.excluded_by_reason` |
 | `in_progress` task appears in `next.json` | Its lease is absent/expired; it is an intentional stale reclaim candidate |
 | Heartbeat returns `409 no/stale lease` | Ownership expired or was reclaimed; stop and rediscover |
 | Completion returns `409 must_claim` | Claim first and retain its fencing token |

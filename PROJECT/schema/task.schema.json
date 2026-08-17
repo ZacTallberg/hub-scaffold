@@ -16,6 +16,67 @@
       "enum": ["product", "content", "corpus", "governance", "verification", "decision", "research", "migration", "duplicate", "legacy"],
       "description": "The kind of work represented, so records that are not executable work stay queryable without masquerading as it. The A2A agent card publishes one skill per kind straight from this enum."
     },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional hard placement requirements and soft outcome preferences for atomic pull. Readiness and queue priority remain authoritative; explicit requirements filter incompatible workers before ranking.",
+      "properties": {
+        "required_capabilities": {
+          "type": "array", "maxItems": 64, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*" },
+          "description": "Every named capability must be declared by the worker."
+        },
+        "risk": {
+          "enum": ["low", "moderate", "high", "critical"],
+          "description": "Minimum worker risk clearance required for this task."
+        },
+        "budget": {
+          "type": "object", "additionalProperties": false,
+          "description": "Estimated resource envelope the worker must currently have available.",
+          "properties": {
+            "tokens": { "type": "integer", "minimum": 0 },
+            "seconds": { "type": "number", "minimum": 0 },
+            "cost_usd": { "type": "number", "minimum": 0 }
+          },
+          "minProperties": 1
+        },
+        "locality": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "required": {
+              "type": "array", "maxItems": 32, "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*" }
+            },
+            "preferred": {
+              "type": "array", "maxItems": 32, "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*" }
+            }
+          },
+          "minProperties": 1
+        },
+        "outcome_constraints": {
+          "type": "object", "additionalProperties": false,
+          "description": "Hard limits evaluated against observed worker outcomes; unknown observations do not satisfy an explicit constraint.",
+          "properties": {
+            "quality_min": { "type": "number", "minimum": 0, "maximum": 1 },
+            "latency_max_s": { "type": "number", "minimum": 0 },
+            "cost_max_usd": { "type": "number", "minimum": 0 }
+          },
+          "minProperties": 1
+        },
+        "outcome_weights": {
+          "type": "object", "additionalProperties": false,
+          "description": "Soft weights used only among equally ready and urgent compatible tasks.",
+          "properties": {
+            "quality": { "type": "number", "minimum": 0, "maximum": 1 },
+            "latency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "cost": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "minProperties": 1
+        }
+      },
+      "minProperties": 1
+    },
     "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Optional one-shot command for a rare critical-risk boundary. The worker runs it OUT-OF-BAND, retains the receipt, and removes every temporary test artifact before completion. Ordinary and copy/style work must omit it." },
     "verification_run": {
       "type": "array",

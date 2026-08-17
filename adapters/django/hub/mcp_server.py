@@ -17,7 +17,7 @@ import json
 
 from django.http import JsonResponse
 
-from hub_core import identity
+from hub_core import identity, schedule
 
 from . import hub_app
 from .hub_write import writer
@@ -49,10 +49,11 @@ TOOLS = [
          "id": {"type": "string"}, "agent": {"type": "string"}},
          "required": ["id", "agent"]}},
     {"name": "take_task",
-     "description": "Atomically select and claim the highest-ranked ready task, avoiding the discover-then-claim race; returns the task and its lease token.",
+     "description": "Atomically filter the ready frontier for this worker, then select and claim its highest-ranked compatible task; returns routing reasons, the task, and its lease token.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"},
-         "ttl_s": {"type": "integer", "minimum": 1, "maximum": 86400}},
+         "ttl_s": {"type": "integer", "minimum": 1, "maximum": 86400},
+         "worker": schedule.WORKER_PROFILE_SCHEMA},
          "required": ["agent"]}},
     {"name": "heartbeat_task",
      "description": "Renew a live task lease before heartbeat_after_s elapses; this proves liveness, not task progress.",
@@ -125,6 +126,8 @@ def _call_tool(name, args, token):
         payload = {"agent": args["agent"]}
         if args.get("ttl_s") is not None:
             payload["ttl_s"] = args["ttl_s"]
+        if args.get("worker") is not None:
+            payload["worker"] = args["worker"]
         return _tool_result(*_seam("/hub/api/take", payload, token))
     if name == "heartbeat_task":
         payload = {"id": args["id"], "token": args["lease_token"]}
