@@ -125,7 +125,7 @@ stamp           write SHA into the worktree pre-build                (Law 2)
 critical seam   only when declared: run its transient one-shot probe and retain the receipt
 build           $BUILD_CMD inside the worktree
 serialize       acquire a real per-target release lease; one front door has one release owner
-ship            $SHIP_CMD  (the only org-specific part; unique artifact log/identity)
+ship            $SHIP_CMD  (the only org-specific part; unique release-attempt log/identity)
 canary          poll $LIVE_URL for "build-$SHA"; fail closed         (Law 3)
 bless           write "<sha> <url>" to the blessed-records dir       (Law 4; failure blocks)
 record          POST immutable {sha, served_sha:sha, tasks_closed:[done ids], at}; write runtime state
@@ -144,5 +144,6 @@ Anti-patterns this contract explicitly bans:
 - **Concurrent same-target release tails** — two builds may run in parallel, but two swaps and
   canaries for one front door can make an older artifact overwrite a newer one after both ship
   commands succeed. Hold one real per-target lease from swap through canary and deploy record.
-- **Shared per-app release logs** — every artifact gets its own log/verdict identity. Reusing one
-  pathname lets an older release satisfy or overwrite a newer release's observer.
+- **Shared per-app or per-tag release logs** — every release attempt gets its own log/verdict
+  identity. Reusing one pathname lets another attempt satisfy, truncate, or overwrite its observer,
+  even when both attempts carry the same artifact tag.
