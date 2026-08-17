@@ -191,6 +191,15 @@ Read surface (unauthenticated; safe to expose only when all board data is publis
 - `GET /hub/audit.json`, `graph.json`, `next.json`, `task.json`, `task/<local>.json`,
   `schema/<type>.schema.json`
 
+If the adopter makes Hub reads private, keep the agent write seam distinct from human read access.
+Private middleware may pre-authenticate `X-Agent-Token` through
+`hub_core.agent_auth.CredentialRegistry` solely to route a valid credential to `/hub/api/*` without
+logging the caller in. Invalid or missing credentials must retain the adopter's identical opaque
+404/login response; header-presence pass-through leaks route existence. The endpoint's `@writer`
+decorator reauthenticates and remains the only scope/authorization decision. Never cache the routing
+check as authority and never extend it to `/hub/`, JSON reads, schemas, audit, or
+`/hub/live/events`. See `SECURITY.md` for the minimal middleware shape.
+
 ## 5. Serve the live Hub through ASGI
 
 The Hub's live event connection is a long-lived streaming response. Serve the Django site through

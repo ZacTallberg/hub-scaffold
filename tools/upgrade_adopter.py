@@ -23,6 +23,13 @@ from typing import Any
 
 
 SCAFFOLD_ROOT = Path(__file__).resolve().parent.parent
+if str(SCAFFOLD_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCAFFOLD_ROOT))
+
+from hub_core.grandfather import LEGACY_ENTITY_SCHEMA_POLICY, last_event_seq
+from hub_core.project import fold
+from hub_core.validate import Registry, validate_portable, validation_signature
+
 UNIT_SPECS: dict[str, dict[str, Any]] = {
     "hub_core": {"tree": Path("hub_core")},
     "django_hub": {"tree": Path("adapters/django/hub")},
@@ -278,18 +285,18 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
-def ledger_head(path: Path) -> dict[str, Any] | None:
-    """Read the protected adopter ledger head for a one-time compatibility anchor.
+def ledger_events(path: Path) -> list[dict[str, Any]]:
+    """Read the protected adopter ledger for one-time compatibility capture.
 
     The upgrader never changes the ledger. A malformed non-empty ledger is a refusal, because a
     cutoff captured from ambiguous history would be capable of hiding current receipt failures.
     Full hash-chain verification remains the Hub audit's responsibility.
     """
     if not path.exists():
-        return None
+        return []
     if path.is_symlink() or not path.is_file():
         raise UpgradeError(f"protected Hub ledger is not a regular file: {path}")
-    last = None
+    events = []
     try:
         with path.open("r", encoding="utf-8") as stream:
             for number, line in enumerate(stream, start=1):
@@ -305,12 +312,66 @@ def ledger_head(path: Path) -> dict[str, Any] | None:
                     or re.fullmatch(r"[0-9a-f]{64}", event_hash) is None
                 ):
                     raise ValueError(f"line {number} lacks a valid seq/hash")
-                if last is not None and seq <= last["seq"]:
+                if events and seq <= events[-1]["seq"]:
                     raise ValueError(f"line {number} does not advance sequence")
-                last = {"seq": seq, "anchor_hash": event_hash}
+                events.append(value)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise UpgradeError(f"cannot anchor legacy receipt cutoff from {path}: {exc}") from exc
-    return last
+    return events
+
+
+def capture_legacy_entity_schema(
+    events: list[dict[str, Any]], receipt_cutoff: dict[str, Any]
+) -> dict[str, Any]:
+    """Capture exact canonical schema-debt signatures at the original immutable cutoff."""
+    seq = receipt_cutoff.get("seq") if isinstance(receipt_cutoff, dict) else None
+    anchor_hash = receipt_cutoff.get("anchor_hash") if isinstance(receipt_cutoff, dict) else None
+    if (
+        not isinstance(seq, int)
+        or seq <= 0
+        or not isinstance(anchor_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", anchor_hash) is None
+        or not any(event.get("seq") == seq and event.get("hash") == anchor_hash for event in events)
+    ):
+        raise UpgradeError(
+            "legacy_done_receipts is not anchored to this ledger; refusing entity-schema capture"
+        )
+
+    registry = Registry.from_dir(SCAFFOLD_ROOT / "PROJECT" / "schema")
+    entities = fold(events)
+    last_events = last_event_seq(events)
+    signatures: dict[str, set[str]] = {}
+    for entity_id in sorted(entities):
+        entity = entities[entity_id]
+        entity_type = entity.get("type")
+        if not isinstance(entity_type, str) or last_events.get(entity_id, seq + 1) > seq:
+            continue
+
+        # Receipt debt remains owned by legacy_done_receipts.  Sentinels classify it in memory so
+        # a second, exact signature can describe only the adopter extension/schema debt.
+        validation_entity = entity
+        if entity_type == "task" and entity.get("status") == "done":
+            missing = [field for field in ("verified_by", "evidence_uri") if not entity.get(field)]
+            if missing:
+                validation_entity = dict(entity)
+                for field in missing:
+                    validation_entity[field] = ["legacy-receipt-classification-only"]
+
+        errors = validate_portable(validation_entity, entity_type, registry)
+        if errors:
+            signatures.setdefault(entity_type, set()).add(
+                validation_signature(entity_type, errors)
+            )
+
+    return {
+        "seq": seq,
+        "anchor_hash": anchor_hash,
+        "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "policy": LEGACY_ENTITY_SCHEMA_POLICY,
+        "signatures": {
+            entity_type: sorted(values) for entity_type, values in sorted(signatures.items())
+        },
+    }
 
 
 def protected_project_path(relative: Path) -> bool:
@@ -407,14 +468,19 @@ def main() -> int:
         manifest["compatibility"] = compatibility
     if not isinstance(compatibility, dict):
         raise UpgradeError("manifest compatibility must be a JSON object")
+    ledger = ledger_events(target_root / "PROJECT" / ".hub" / "events.jsonl")
     if "legacy_done_receipts" not in compatibility:
-        cutoff = ledger_head(target_root / "PROJECT" / ".hub" / "events.jsonl")
-        if cutoff:
+        if ledger:
+            cutoff = {"seq": ledger[-1]["seq"], "anchor_hash": ledger[-1]["hash"]}
             compatibility["legacy_done_receipts"] = {
                 **cutoff,
                 "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                 "policy": "missing verified_by/evidence_uri only",
             }
+    if "legacy_entity_schema" not in compatibility and ledger:
+        compatibility["legacy_entity_schema"] = capture_legacy_entity_schema(
+            ledger, compatibility.get("legacy_done_receipts")
+        )
     previous_adoption = manifest.get("adopted_from", {})
     previous_units = (
         previous_adoption.get("units", {}) if isinstance(previous_adoption, dict) else {}

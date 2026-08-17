@@ -97,7 +97,7 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         payload["touches"] = arguments.touch
     if arguments.plan_item:
         payload["plan"] = [
-            {"step": step, "status": "pending"} for step in arguments.plan_item
+            {"step": step, "done": False} for step in arguments.plan_item
         ]
     return "task", payload
 

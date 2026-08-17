@@ -103,7 +103,8 @@ DEPLOY_BOOKKEEPING_PATHS = frozenset({"PROJECT/state.json"})
 
 
 def audit(state, registry, *, store: EventStore = None, coherence: dict = None, adapters=None,
-          suppress=None, legacy_receipt_baseline=None) -> dict:
+          suppress=None, legacy_receipt_baseline=None,
+          legacy_entity_schema_baseline=None) -> dict:
     """Compute the audit. `state` from project.state(); `coherence` is {repo,deploy,sha,head,served,...}
     computed by the caller (git HEAD vs state.sha vs live served_sha)."""
     violations = []
@@ -111,23 +112,44 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
 
     # 1. every entity validates against its schema (the if/then rules make false claims fail here:
     #    done->verified_by, blocked->deps, shipped-feat->tasks, superseded-adr->successor)
-    from .validate import validate as _validate
+    from .validate import (validate as _validate, validate_portable as _validate_portable,
+                           validation_signature as _validation_signature)
     legacy_receipts = []
+    legacy_entity_schemas = []
     legacy_context = None
+    legacy_entity_context = None
     if store is not None and legacy_receipt_baseline:
-        from .grandfather import legacy_receipt_context
-        legacy_context = legacy_receipt_context(store.events(), legacy_receipt_baseline)
+        from .grandfather import legacy_entity_schema_context, legacy_receipt_context
+        events = store.events()
+        legacy_context = legacy_receipt_context(events, legacy_receipt_baseline)
+        if legacy_entity_schema_baseline is not None:
+            legacy_entity_context = legacy_entity_schema_context(
+                events, legacy_entity_schema_baseline, legacy_receipt_baseline
+            )
+            # Once the stricter entity boundary is declared, a malformed or mismatched record may
+            # not silently fall back to the older status-condition receipt exception.
+            if legacy_entity_context is None:
+                legacy_context = None
     for eid, ent in entities.items():
         et = ent.get("type")
         errors = _validate(ent, et, registry)
-        # One explicit, hash-anchored migration exception: an adopter may have immutable tasks that
-        # were completed before receipts became mandatory. Validate an in-memory compatibility view
-        # with only those two receipt fields present. If *anything* remains invalid, grandfather
-        # nothing. The sentinels never enter state or evidence; they distinguish the error class.
+        if not errors:
+            continue
+
+        # Peel off the dedicated receipt debt first. The in-memory sentinels classify only the two
+        # absent receipt fields; they never enter state or evidence. Remaining extension errors can
+        # then be matched independently by the exact entity-schema lane.
+        validation_entity = ent
         if errors and legacy_context and et == "task" and ent.get("status") == "done":
             missing = [name for name in ("verified_by", "evidence_uri") if not ent.get(name)]
             condition = legacy_context["conditions"].get(eid)
-            if missing and isinstance(condition, int) and condition <= legacy_context["seq"]:
+            last_event = (legacy_entity_context or {}).get("last_events", {}).get(eid)
+            untouched = (
+                legacy_entity_context is None
+                or (isinstance(last_event, int) and last_event <= legacy_entity_context["seq"])
+            )
+            if (missing and untouched and isinstance(condition, int)
+                    and condition <= legacy_context["seq"]):
                 compatibility_view = dict(ent)
                 compatibility_view["verified_by"] = compatibility_view.get("verified_by") or [
                     "legacy-receipt-classification-only"
@@ -135,20 +157,43 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
                 compatibility_view["evidence_uri"] = compatibility_view.get("evidence_uri") or [
                     "legacy-receipt-classification-only"
                 ]
-                if not _validate(compatibility_view, et, registry):
-                    legacy_receipts.append(dict(
-                        _v(f"schema:{eid}:legacy-done-receipt", "high",
-                           "done tasks carry substantive result receipts",
-                           f"{eid}: legacy completion lacks {', '.join(missing)}",
-                           "verified_by and evidence_uri present", kind="schema",
-                           remediation="retain as explicitly accounted legacy debt; do not invent "
-                                       "retrospective evidence", subject=eid),
-                        grandfathered={"guard": "legacy_done_receipts",
-                                       "baseline_seq": legacy_context["seq"],
-                                       "condition_seq": condition,
-                                       "fields": missing},
-                    ))
-                    continue
+                validation_entity = compatibility_view
+                legacy_receipts.append(dict(
+                    _v(f"schema:{eid}:legacy-done-receipt", "high",
+                       "done tasks carry substantive result receipts",
+                       f"{eid}: legacy completion lacks {', '.join(missing)}",
+                       "verified_by and evidence_uri present", kind="schema",
+                       remediation="retain as explicitly accounted legacy debt; do not invent "
+                                   "retrospective evidence", subject=eid),
+                    grandfathered={"guard": "legacy_done_receipts",
+                                   "baseline_seq": legacy_context["seq"],
+                                   "condition_seq": condition,
+                                   "fields": missing},
+                ))
+
+        errors = _validate(validation_entity, et, registry)
+        if errors and legacy_entity_context:
+            last_event = legacy_entity_context["last_events"].get(eid)
+            portable_errors = _validate_portable(validation_entity, et, registry)
+            signature = _validation_signature(et, portable_errors)
+            allowed = legacy_entity_context["signatures"].get(et, frozenset())
+            if (isinstance(last_event, int) and last_event <= legacy_entity_context["seq"]
+                    and portable_errors and signature in allowed):
+                legacy_entity_schemas.append(dict(
+                    _v(f"schema:{eid}:legacy-entity-schema", "high",
+                       "entities validate against the current canonical schema",
+                       f"{eid}: immutable pre-adoption entity has signature {signature}",
+                       "valid per hub:%s" % et, kind="schema",
+                       remediation="retain as explicitly accounted legacy extension debt; a future "
+                                   "entity write must satisfy the current schema", subject=eid),
+                    grandfathered={"guard": "legacy_entity_schema",
+                                   "baseline_seq": legacy_entity_context["seq"],
+                                   "last_event_seq": last_event,
+                                   "entity_type": et,
+                                   "signature": signature},
+                ))
+                errors = []
+
         for err in errors:
             violations.append(_v(f"schema:{eid}", "high", "entity validates against its schema",
                                  f"{eid}: {err}", "valid per hub:%s" % et, kind="schema",
@@ -282,7 +327,7 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     #    frozen into the ledger before the guard that indicts it existed. Applied HERE so counts
     #    and the exit code describe the rail the operator actually reads — and returned, never
     #    discarded, so a shrinking rail is always accounted for.
-    suppressed = list(legacy_receipts)
+    suppressed = list(legacy_receipts) + list(legacy_entity_schemas)
     if suppress is not None:
         violations, ordinary_suppressed = suppress(violations)
         suppressed.extend(ordinary_suppressed)
@@ -294,7 +339,10 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
         ledger["silenced"].append({"id": v.get("id"), "guard": guard,
                                    "baseline_seq": gf.get("baseline_seq"),
                                    "condition_seq": gf.get("condition_seq"),
-                                   "fields": gf.get("fields")})
+                                   "last_event_seq": gf.get("last_event_seq"),
+                                   "fields": gf.get("fields"),
+                                   "entity_type": gf.get("entity_type"),
+                                   "signature": gf.get("signature")})
 
     sev = {v["severity"] for v in violations}
     if "critical" in sev or "high" in sev:

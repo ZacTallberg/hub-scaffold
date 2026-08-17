@@ -1,24 +1,24 @@
 """A dependency-free JSON-Schema 2020-12 *subset* validator + schema registry.
 
 Supports exactly the keywords the hub schemas use: type, const, enum, properties,
-additionalProperties (bool), required, items (single schema), minItems, minLength, minimum,
-maximum, pattern, format ('date-time', lenient), $ref (by $id + JSON-pointer), allOf, anyOf, if/then/else.
+additionalProperties (bool), required, items (single schema), minItems, maxItems, uniqueItems,
+minLength, maxLength, minProperties, minimum, maximum, pattern, format ('date-time', lenient),
+$ref (by $id + JSON-pointer), allOf, anyOf, if/then/else.
 
 Prefers the real `jsonschema` lib (Draft 2020-12) when installed; otherwise uses this fallback so a
 single-file WSGI app needs no dependency. Returns a list of "path: message" error strings;
 empty list = valid.
 """
 import re
+import hashlib
+import json as _json
 from pathlib import Path
 
 try:  # canonical path: real validator when available
-    import json as _json
-
     import jsonschema  # type: ignore
     from jsonschema import Draft202012Validator  # type: ignore
     _HAVE_JSONSCHEMA = True
 except Exception:  # pragma: no cover - fallback path
-    import json as _json
     _HAVE_JSONSCHEMA = False
 
 _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
@@ -117,6 +117,8 @@ def _check(schema, value, path, root_doc, registry, errors):
     if isinstance(value, str):
         if "minLength" in schema and len(value) < schema["minLength"]:
             errors.append(f"{path}: shorter than minLength {schema['minLength']}")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            errors.append(f"{path}: longer than maxLength {schema['maxLength']}")
         if "pattern" in schema:
             pat = schema["pattern"]
             # JSON-Schema/ECMA-262: $ is end-of-INPUT (no trailing-\n exception that Python's re.search
@@ -136,6 +138,12 @@ def _check(schema, value, path, root_doc, registry, errors):
     if isinstance(value, list):
         if "minItems" in schema and len(value) < schema["minItems"]:
             errors.append(f"{path}: fewer than minItems {schema['minItems']}")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            errors.append(f"{path}: more than maxItems {schema['maxItems']}")
+        if schema.get("uniqueItems") is True:
+            for index, item in enumerate(value):
+                if any(item == prior for prior in value[:index]):
+                    errors.append(f"{path}: duplicate item at index {index}")
         item_schema = schema.get("items")
         if item_schema is not None:
             for i, item in enumerate(value):
@@ -143,6 +151,8 @@ def _check(schema, value, path, root_doc, registry, errors):
 
     if isinstance(value, dict):
         props = schema.get("properties", {})
+        if "minProperties" in schema and len(value) < schema["minProperties"]:
+            errors.append(f"{path}: fewer than minProperties {schema['minProperties']}")
         for req in schema.get("required", []):
             if req not in value:
                 errors.append(f"{path}: missing required '{req}'")
@@ -191,3 +201,30 @@ def validate(entity: dict, entity_type: str, registry: "Registry") -> list:
     errors = []
     _check(schema, entity, "$", schema, registry, errors)
     return errors
+
+
+def validate_portable(entity: dict, entity_type: str, registry: "Registry") -> list:
+    """Validate through the canonical stdlib subset and return deterministic errors.
+
+    Compatibility records must survive differences in optional ``jsonschema`` versions and even
+    its absence.  This path therefore never uses that dependency.  Sorting makes a signature
+    independent of JSON object insertion order while retaining duplicate findings when schemas
+    deliberately assert the same invariant more than once.
+    """
+    schema = registry.schema_for(entity_type)
+    if schema is None:
+        return [f"$: no schema for type '{entity_type}'"]
+    errors = []
+    _check(schema, entity, "$", schema, registry, errors)
+    return sorted(errors)
+
+
+def validation_signature(entity_type: str, errors: list) -> str:
+    """Hash one exact portable validation result into a manifest-safe signature."""
+    payload = _json.dumps(
+        {"entity_type": entity_type, "errors": sorted(errors)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
