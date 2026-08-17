@@ -236,34 +236,42 @@ def _state_json() -> dict:
 def build_meta(served=None, state=None) -> dict:
     """The build/coherence block for /hub.json. ``coherent`` is always computed.
 
-    Runtime ``PROJECT/state.json`` remains a useful deploy-side shortcut. If it is absent, the
-    latest immutable post-canary deploy entity is already durable canonical evidence and supplies
-    the same release SHA; production must not report "no deploy" while its ledger names one.
+    Runtime ``PROJECT/state.json`` remains a useful deploy-side shortcut, but it is baked before a
+    release while an immutable deploy entity is written after the public canary. Prefer a valid
+    closure matching the running artifact, then an already-matching state shortcut, then the newest
+    valid closure. A stale mutable file must never mask stronger post-canary evidence.
     """
     sj = _state_json()
     head = _git_head()  # Git checkout or, in a production artifact, the baked build stamp.
-    sha = _normalize_build_sha(sj.get("last_deploy_sha"))
+    state_sha = _normalize_build_sha(sj.get("last_deploy_sha"))
+    served_sha = _normalize_build_sha(served) if served is not None else None
+    sha = state_sha
     release = None
-    if not sha and state is not None:
-        candidates = []
+    candidates = []
+    if state is not None:
         for deploy in state.get("by_type", {}).get("deploy", []):
             shipped = _normalize_build_sha(deploy.get("sha"))
             observed = _normalize_build_sha(deploy.get("served_sha"))
             if (shipped and observed == shipped and
                     isinstance(deploy.get("tasks_closed"), list)):
                 candidates.append(deploy)
-        if candidates:
-            release = max(candidates, key=lambda row: str(row.get("at") or ""))
-            sha = _normalize_build_sha(release.get("sha"))
-    served_sha = _normalize_build_sha(served) if served is not None else None
+    matching = [row for row in candidates if _normalize_build_sha(row.get("sha")) == head]
+    if matching:
+        release = max(matching, key=lambda row: str(row.get("at") or ""))
+        sha = _normalize_build_sha(release.get("sha"))
+    elif state_sha and state_sha == head:
+        sha = state_sha
+    elif candidates:
+        release = max(candidates, key=lambda row: str(row.get("at") or ""))
+        sha = _normalize_build_sha(release.get("sha"))
     coherent = bool(head and sha and head == sha and (served is None or served_sha == head))
+    release_source = "deploy entity" if release else ("state.json" if state_sha else None)
     return {
         "repo": sj.get("repo_build"),
-        "deploy": sj.get("last_deploy_build") or (release or {}).get("build"),
+        "deploy": (release or {}).get("build") or sj.get("last_deploy_build"),
         "tag": sj.get("last_deploy_tag"), "sha": sha, "served_sha": served_sha, "head": head,
         "coherent": coherent, "live_url": sj.get("live_url") or _IDENTITY.get("app_host"),
-        "release_source": "state.json" if _normalize_build_sha(sj.get("last_deploy_sha"))
-                          else ("deploy entity" if release else None),
+        "release_source": release_source,
     }
 
 
