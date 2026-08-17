@@ -59,7 +59,7 @@ def canonical(obj) -> bytes:
 def work_kinds():
     """Read the task ``work_kind`` enum; an adopter may intentionally remove it."""
     try:
-        doc = json.loads((hub_app.BASE_DIR / "PROJECT" / "schema" / "task.schema.json")
+        doc = json.loads((hub_app.PROJECT / "schema" / "task.schema.json")
                          .read_text(encoding="utf-8"))
         return list(doc["properties"]["work_kind"]["enum"])
     except (OSError, ValueError, KeyError, TypeError):
