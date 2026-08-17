@@ -25,7 +25,8 @@ substitutes at scaffold time):
     HUB_WORKER_GRANT_TTL_S      short grant lifetime, clamped by hub_core. Default 120 seconds.
 The project plane defaults to Django ``BASE_DIR/PROJECT``; ``HUB_PROJECT_DIR`` relocates that whole
 canonical plane, ``HUB_WORK_ROOT`` can identify a nested adopter's repository/evidence root, and
-``HUB_DIR`` can separately relocate runtime ledger state.
+``HUB_DIR`` can separately relocate runtime ledger state. Production must configure it explicitly
+to a durable mounted path; the runtime reports and audits implicit or unwritable storage.
 """
 import ast
 import functools
@@ -67,7 +68,11 @@ _WORK_ROOT_OVERRIDE = _dj_setting("HUB_WORK_ROOT") or os.environ.get("HUB_WORK_R
 WORK_ROOT = Path(_WORK_ROOT_OVERRIDE) if _WORK_ROOT_OVERRIDE else PROJECT.parent
 if not WORK_ROOT.is_absolute():
     WORK_ROOT = BASE_DIR / WORK_ROOT
-HUB_DIR = Path(os.environ.get("HUB_DIR") or (PROJECT / ".hub"))
+_HUB_DIR_OVERRIDE = _dj_setting("HUB_DIR") or os.environ.get("HUB_DIR")
+HUB_DIR_CONFIGURED = bool(_HUB_DIR_OVERRIDE)
+HUB_DIR = Path(_HUB_DIR_OVERRIDE or (PROJECT / ".hub"))
+if not HUB_DIR.is_absolute():
+    HUB_DIR = BASE_DIR / HUB_DIR
 SCHEMA_DIR = PROJECT / "schema"
 _IDENTITY = _identity.load()
 PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", _IDENTITY["key"])
@@ -106,7 +111,30 @@ def publish_event(event):
 
 def realtime_info():
     from . import realtime
-    return realtime.info(HUB_DIR, channel=PROJECT_KEY)
+    info = realtime.info(HUB_DIR, channel=PROJECT_KEY)
+    info["storage"] = storage_info()
+    return info
+
+
+def storage_info():
+    """Public, topology-free truth about the active ledger's runtime boundary."""
+    target = HUB_DIR
+    while not target.exists() and target.parent != target:
+        target = target.parent
+    writable = bool(target.exists() and target.is_dir() and os.access(target, os.W_OK))
+    if writable and HUB_DIR.exists():
+        for name in ("events.jsonl", "events.db", "agent-credentials.json"):
+            candidate = HUB_DIR / name
+            if candidate.exists() and not os.access(candidate, os.W_OK):
+                writable = False
+                break
+    return {
+        "configuration": "explicit" if HUB_DIR_CONFIGURED else "implicit",
+        "writable": writable,
+        # Explicit configuration is an operator declaration, not a fabricated claim that Python
+        # can prove a volume will survive its container or host.
+        "durability": "operator-declared" if HUB_DIR_CONFIGURED else "unconfirmed",
+    }
 
 
 def _schedule_lease_truth(lease):
@@ -401,6 +429,31 @@ def identity_settings_adapter(state):
     )]
 
 
+def storage_runtime_adapter(state):
+    """A production board cannot be healthy on implicit or unwritable runtime storage."""
+    if _dj_setting("DEBUG", False):
+        return []
+    info = storage_info()
+    violations = []
+    if not HUB_DIR_CONFIGURED:
+        violations.append(_sv(
+            "storage:implicit-hub-dir",
+            "production HUB_DIR is explicitly configured to the durable runtime mount",
+            "HUB_DIR fell back inside the application tree",
+            "an explicit durable mounted HUB_DIR",
+            "set HUB_DIR to the deployment's persistent volume before accepting live work",
+        ))
+    if not info["writable"]:
+        violations.append(_sv(
+            "storage:hub-dir-unwritable",
+            "the Hub service account can write its configured runtime ledger",
+            "the configured HUB_DIR or an existing ledger file is not writable",
+            "writable runtime storage",
+            "repair the mounted directory ownership/permissions before accepting live work",
+        ))
+    return violations
+
+
 # (base, head) -> paths changed between two commits, memoized: both ends are immutable, so the
 # answer cannot change, and a warm audit must not pay a subprocess. None means the range could not
 # be read (a shallow clone, an unfetched sha) — UNKNOWN, never "empty".
@@ -462,6 +515,7 @@ def _run_audit_with_store(s, served=None) -> dict:
     return _audit.audit(state, registry(), store=s, coherence=coh,
                         legacy_receipt_baseline=_legacy_receipt_baseline(),
                         adapters=[settings_ast_adapter, identity_settings_adapter,
+                                  storage_runtime_adapter,
                                   route_guard_adapter])
 
 
