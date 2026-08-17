@@ -16,8 +16,9 @@ substitutes at scaffold time):
     HUB_DONE_STRICTNESS completion proof dial: tracked or strict.       Default "tracked".
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
-    HUB_WRITE_TOKEN   general write bearer token; grants terminal board authority, not shell
-                      execution. Fail-closed when empty.
+    HUB_WRITE_TOKEN   shared-root compatibility bearer token; grants terminal board authority,
+                      not shell execution. Fail-closed when empty.
+    HUB_SHARED_TOKEN_COMPAT accept the legacy shared-root credential. Default True for migration.
     HUB_WORKER_LAUNCH_ENABLED   expose the optional grant-backed local launcher. Default False.
     HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
@@ -337,7 +338,7 @@ def settings_ast_adapter(state):
 def route_guard_adapter(state):
     """Auth-boundary primitive: assert every mutating route has an explicit gate.
 
-    General writes carry ``@writer`` (the private header token).  The one deliberately narrow
+    General writes carry ``@writer`` with a named operation scope. The one deliberately narrow
     browser capability may instead carry ``@csrf_protect`` plus ``_hub_origin_gated``; it can only
     mint a short-lived launch grant and never receives general write authority.
     """
@@ -363,6 +364,13 @@ def route_guard_adapter(state):
                                      (pat, getattr(cb, "__name__", "?")),
                                      "@writer or narrow @csrf_protect capability",
                                      remediation="wrap general writes with @writer"))
+                elif (getattr(cb, "_hub_token_gated", False) and
+                      not getattr(cb, "_hub_required_scope", None)):
+                    viols.append(_sv("routes:unscoped", "every token-gated /hub/api/ route names a scope",
+                                     "%s -> %s has no operation scope" %
+                                     (pat, getattr(cb, "__name__", "?")),
+                                     "@writer(scope='operation:name')",
+                                     remediation="assign the least-privilege operation scope"))
     try:
         walk(resolver.url_patterns)
     except Exception as e:
@@ -478,15 +486,22 @@ def _write_lease(task_id, lease):
     _os.replace(tmp, p)
 
 
-def claim(task_id, agent, ttl_s=900):
+def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
+          actor_kind=None):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
         if cur and cur.get("expires", 0) > now:
-            if cur.get("agent") != agent:
+            if (cur.get("agent") != agent or
+                    (cur.get("auth_subject") and cur.get("auth_subject") != auth_subject) or
+                    (cur.get("credential_id") and cur.get("credential_id") != credential_id)):
                 return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
+            if not cur.get("auth_subject"):
+                cur["auth_subject"] = auth_subject
+                cur["credential_id"] = credential_id
+                cur["actor_kind"] = actor_kind
             cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
             _write_lease(task_id, cur)
@@ -495,6 +510,8 @@ def claim(task_id, agent, ttl_s=900):
             _schedule_lease_truth(cur)
             return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
+                 "auth_subject": auth_subject, "credential_id": credential_id,
+                 "actor_kind": actor_kind,
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
@@ -547,12 +564,38 @@ def lease_valid(task_id, token):
     return bool(cur and cur.get("token") == token and cur.get("expires", 0) > _time.time())
 
 
-def heartbeat(task_id, token, ttl_s=900):
+def lease_authorized(task_id, token, auth_subject, credential_id=None):
+    """Require both the fencing token and the subject that acquired it.
+
+    A legacy lease has no subject. Only the conspicuous shared-root migration actor may consume
+    such a lease; the next fresh claim is always fully bound.
+    """
+    cur = _read_lease(task_id)
+    if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
+        return False
+    bound = cur.get("auth_subject")
+    if bound and bound != auth_subject:
+        return False
+    if not bound and auth_subject != "shared-root":
+        return False
+    bound_credential = cur.get("credential_id")
+    return not bound_credential or bound_credential == credential_id
+
+
+def heartbeat(task_id, token, ttl_s=900, *, auth_subject=None, credential_id=None,
+              actor_kind=None):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         cur = _read_lease(task_id)
-        if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
+        if (not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time() or
+                (cur.get("auth_subject") and cur.get("auth_subject") != auth_subject) or
+                (cur.get("credential_id") and cur.get("credential_id") != credential_id) or
+                (not cur.get("auth_subject") and auth_subject != "shared-root")):
             return {"ok": False, "reason": "no/stale lease"}
         now = _time.time()
+        if not cur.get("auth_subject"):
+            cur["auth_subject"] = auth_subject
+            cur["credential_id"] = credential_id
+            cur["actor_kind"] = actor_kind
         cur["last_heartbeat"] = now
         cur["expires"] = now + ttl_s
         _write_lease(task_id, cur)

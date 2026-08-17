@@ -27,6 +27,7 @@ urlpatterns = [
     path("api/complete", hub_write.complete),
     path("api/adr", hub_write.adr),
     path("api/capability", hub_write.capability),
+    path("api/agent-credential", hub_write.agent_credential),
     path("api/decision", hub_write.decision),
     # The remaining entity types shipped as schemas with no writer — an agent could read and
     # validate them and had no way to create one through the API.

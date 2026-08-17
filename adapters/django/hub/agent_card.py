@@ -7,8 +7,8 @@ That distinction matters: the board's SSE read lane is not an A2A streaming meth
 ``/hub/`` page is not a JSON-RPC endpoint.
 
 Skills are derived live from ``PROJECT/schema/task.schema.json`` so discovery cannot drift from
-the task ``work_kind`` enum. Authentication metadata describes the ``X-Write-Token`` header; the
-token value never appears.
+the task ``work_kind`` enum. Authentication metadata names scoped ``X-Agent-Token`` credentials
+and the visibly bounded ``X-Write-Token`` migration bridge; token values never appear.
 
 When available, an ES256 JWS signature covers the card without ``signatures``, canonicalized as
 UTF-8 JSON with sorted keys and minimal separators. The private key lives outside the repo
@@ -140,8 +140,13 @@ def build_card(hub_url=None, mcp_url=None) -> dict:
                 "transport": "streamable-http-stateless",
                 "url": mcp_url,
                 "authentication": {
+                    "type": "apiKey", "in": "header", "name": "X-Agent-Token",
+                    "valueIncluded": False, "scoped": True,
+                },
+                "compatibilityAuthentication": {
                     "type": "apiKey", "in": "header", "name": "X-Write-Token",
-                    "valueIncluded": False,
+                    "valueIncluded": False, "actor": "shared-root-compat",
+                    "disableSetting": "HUB_SHARED_TOKEN_COMPAT",
                 },
             }],
         },

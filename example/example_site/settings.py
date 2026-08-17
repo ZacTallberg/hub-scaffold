@@ -79,6 +79,8 @@ HUB_WORKER_PROTOCOL = "hub-example"
 HUB_WORKER_LAUNCH_ISSUER_URL = "https://example.invalid/hub/api/launch-grant/consume"
 HUB_WORKER_GRANT_TTL_S = 120
 
-# Token for general Hub writes (X-Write-Token). Reads are unauthenticated; the narrow launch mint is
-# CSRF-gated. General writes and launch consume fail closed when the token is unset.
+# Shared-root migration credential. Normal workers use short-lived scoped X-Agent-Token
+# credentials issued through /hub/api/agent-credential. Disable this compatibility path after the
+# fleet has migrated; reads remain unauthenticated and the narrow launch mint remains CSRF-gated.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
+HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lower() == "true"
