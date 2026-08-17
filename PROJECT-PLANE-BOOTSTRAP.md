@@ -164,6 +164,7 @@ unsatisfiable at write time.** Field lists are authoritative in the embedded sch
 | Type | Required | Status enum | Unsatisfiability rules |
 |---|---|---|---|
 | `task` | id, type, title, status, version | `todo · in_progress · blocked · done · dropped · shadow` (shadow = wired-but-inert, NOT done) | `done` ⇒ substantive `verified_by` ≥1 + `evidence_uri` ≥1 · `blocked` ⇒ `deps` ≥1 |
+| `run` | id, type, task, title, status, owner, trace_id, version | `working · input_required · handoff_pending · cancel_requested · cancelled · completed · failed` | current fenced task lease for every mutation · completed ⇒ result · failed ⇒ JSON-RPC error |
 | `adr` | id, type, number, title, status, version | `proposed · accepted · superseded · deprecated · rejected` | accepted/superseded/deprecated ⇒ full `context_md`+`decision_md`+`consequences_md` · `superseded` ⇒ `superseded_by` ≥1 |
 | `gap` | id, type, title, status, version | `open · investigating · mitigated · closed · wont-fix` | mitigated/closed ⇒ `addressed_by` ≥1 |
 | `feat` | id, type, name, status, version | `shipped · partial · planned · experimental · removed` | shipped/partial ⇒ `tasks` ≥1 (no orphan feature claims) |
@@ -187,12 +188,12 @@ project key are renameable bindings; the rules are not.
   "$defs": {
     "id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
       "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
     },
     "idref": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
       "description": "A machine-resolvable reference to another entity by id. The audit FAILS on any dangling idref."
     },
     "isoDate": { "type": "string", "format": "date-time" },
@@ -242,6 +243,67 @@ project key are renameable bindings; the rules are not.
       "enum": ["product", "content", "corpus", "governance", "verification", "decision", "research", "migration", "duplicate", "legacy"],
       "description": "The kind of work represented, so records that are not executable work stay queryable without masquerading as it. The A2A agent card publishes one skill per kind straight from this enum."
     },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional hard placement requirements and soft outcome preferences for atomic pull. Readiness and queue priority remain authoritative; explicit requirements filter incompatible workers before ranking.",
+      "properties": {
+        "required_capabilities": {
+          "type": "array", "maxItems": 64, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*" },
+          "description": "Every named capability must be declared by the worker."
+        },
+        "risk": {
+          "enum": ["low", "moderate", "high", "critical"],
+          "description": "Minimum worker risk clearance required for this task."
+        },
+        "budget": {
+          "type": "object", "additionalProperties": false,
+          "description": "Estimated resource envelope the worker must currently have available.",
+          "properties": {
+            "tokens": { "type": "integer", "minimum": 0 },
+            "seconds": { "type": "number", "minimum": 0 },
+            "cost_usd": { "type": "number", "minimum": 0 }
+          },
+          "minProperties": 1
+        },
+        "locality": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "required": {
+              "type": "array", "maxItems": 32, "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*" }
+            },
+            "preferred": {
+              "type": "array", "maxItems": 32, "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*" }
+            }
+          },
+          "minProperties": 1
+        },
+        "outcome_constraints": {
+          "type": "object", "additionalProperties": false,
+          "description": "Hard limits evaluated against observed worker outcomes; unknown observations do not satisfy an explicit constraint.",
+          "properties": {
+            "quality_min": { "type": "number", "minimum": 0, "maximum": 1 },
+            "latency_max_s": { "type": "number", "minimum": 0 },
+            "cost_max_usd": { "type": "number", "minimum": 0 }
+          },
+          "minProperties": 1
+        },
+        "outcome_weights": {
+          "type": "object", "additionalProperties": false,
+          "description": "Soft weights used only among equally ready and urgent compatible tasks.",
+          "properties": {
+            "quality": { "type": "number", "minimum": 0, "maximum": 1 },
+            "latency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "cost": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "minProperties": 1
+        }
+      },
+      "minProperties": 1
+    },
     "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Optional one-shot command for a rare critical-risk boundary. The worker runs it OUT-OF-BAND, retains the receipt, and removes every temporary test artifact before completion. Ordinary and copy/style work must omit it." },
     "verification_run": {
       "type": "array",
@@ -267,6 +329,27 @@ project key are renameable bindings; the rules are not.
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
     "poison_blocked": { "type": "boolean", "description": "The circuit breaker opened after repeated failing receipts; the task is withheld from the queue until an exit-0 receipt clears it, so a broken task cannot consume the whole fleet in a retry storm." },
     "poison_reason": { "type": "string", "description": "Why the circuit breaker opened, surfaced verbatim on the attention rail." },
+    "failure_count": { "type": "integer", "minimum": 0, "description": "Total failed attempts durably reported for this task." },
+    "failure_repeats": { "type": "integer", "minimum": 0, "description": "Consecutive repeats of the current stable failure signature; drives bounded backoff and circuit state." },
+    "failure_signature": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*" },
+    "last_failure": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "signature": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "note": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": ".*\\S.*" },
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "consequential": { "type": "boolean" },
+        "evidence_uri": { "type": "array", "maxItems": 32, "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 256 }
+      },
+      "required": ["signature", "note", "at", "consequential", "agent"]
+    },
+    "retry_backoff_s": { "type": "integer", "minimum": 0, "maximum": 86400 },
+    "repair_task": { "$ref": "hub:common#/$defs/idref", "description": "Deterministically addressed specialist repair task for the current failure signature." },
+    "repair_for": { "$ref": "hub:common#/$defs/idref", "description": "Source task whose failure this specialist repair resolves." },
+    "repair_role": { "enum": ["repair-specialist", "operator-repair"] },
+    "operator_attention": { "type": "boolean", "description": "Explicit consequence boundary; routine repair failures remain autonomous when false." },
     "deps": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Blocked iff any dep is not done." },
     "implements": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/cap this realizes." },
     "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },
@@ -285,6 +368,164 @@ project key are renameable bindings; the rules are not.
     { "if": { "properties": { "work_kind": { "enum": ["product", "verification"] } }, "required": ["work_kind"] }, "then": { "properties": { "acceptance": { "minLength": 1 } }, "required": ["acceptance"] } },
     { "if": { "properties": { "work_kind": { "const": "decision" } }, "required": ["work_kind"] }, "then": { "properties": { "decided_by": { "type": "array", "minItems": 1 } }, "required": ["decided_by"] } },
     { "if": { "properties": { "work_kind": { "const": "research" } }, "required": ["work_kind"] }, "then": { "properties": { "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["evidence_uri"] } }
+  ]
+}
+````
+<!-- /TPL -->
+
+<!-- TPL:PROJECT/schema/run.schema.json -->
+````json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:run",
+  "title": "AgentRun",
+  "description": "One durable, resumable execution attempt for a board task. Commands, messages, checkpoints, handoffs, input state, cancellation, and outcome fold from the canonical event plane.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "recordId": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "arguments": { "type": "object" },
+        "status": { "enum": ["queued", "running", "completed", "failed", "cancelled"] },
+        "created_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "updated_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "result": { "type": "object" },
+        "error": { "type": "object" },
+        "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } }
+      },
+      "required": ["id", "name", "arguments", "status", "created_at", "updated_at"]
+    },
+    "message": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "role": { "enum": ["system", "operator", "worker", "tool"] },
+        "kind": { "enum": ["progress", "context", "instruction", "output", "error"] },
+        "content": {},
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "agent": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "role", "kind", "content", "at", "agent"]
+    },
+    "checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "state": {},
+        "completed_steps": {
+          "type": "array", "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "agent": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "sequence", "summary", "state", "completed_steps", "evidence_uri", "at", "agent"]
+    },
+    "handoff": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "checkpoint": { "$ref": "#/$defs/recordId" },
+        "status": { "enum": ["offered", "accepted", "declined"] },
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "accepted_at": { "$ref": "hub:common#/$defs/isoDate" }
+      },
+      "required": ["id", "from", "to", "summary", "status", "at"]
+    },
+    "inputRequest": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" }
+      },
+      "required": ["method", "params"]
+    },
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "run": { "$ref": "hub:common#/$defs/idref" },
+        "completed_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+        "result": { "type": "object" }
+      },
+      "required": ["run", "completed_at", "evidence_uri", "result"]
+    }
+  },
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "run" },
+    "task": { "$ref": "hub:common#/$defs/idref" },
+    "title": { "type": "string", "minLength": 1 },
+    "goal": { "type": "string" },
+    "status": { "enum": ["working", "input_required", "handoff_pending", "cancel_requested", "cancelled", "completed", "failed"] },
+    "status_message": { "type": "string" },
+    "owner": { "type": "string", "minLength": 1 },
+    "credential_id": { "type": "string", "minLength": 1 },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "parent_run": { "$ref": "hub:common#/$defs/idref" },
+    "commands": { "type": "array", "items": { "$ref": "#/$defs/command" }, "maxItems": 2048 },
+    "messages": { "type": "array", "items": { "$ref": "#/$defs/message" }, "maxItems": 4096 },
+    "checkpoints": { "type": "array", "items": { "$ref": "#/$defs/checkpoint" }, "maxItems": 2048 },
+    "handoffs": { "type": "array", "items": { "$ref": "#/$defs/handoff" }, "maxItems": 512 },
+    "input_requests": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/inputRequest" }
+    },
+    "input_responses": {
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    },
+    "cancel_requested_at": { "$ref": "hub:common#/$defs/isoDate" },
+    "cancel_requested_by": { "type": "string", "minLength": 1 },
+    "cancel_reason": { "type": "string" },
+    "result": { "type": "object" },
+    "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+    "error": {
+      "type": "object", "additionalProperties": true,
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "required": ["code", "message"]
+    },
+    "receipt_chain": { "type": "array", "items": { "$ref": "#/$defs/receipt" } },
+    "ttl_ms": { "type": ["integer", "null"], "minimum": 1 },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": [
+    "id", "type", "task", "title", "status", "owner", "attempt", "trace_id",
+    "commands", "messages", "checkpoints", "handoffs", "input_requests", "input_responses",
+    "receipt_chain", "evidence_uri", "ttl_ms", "version"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "input_required" } }, "required": ["status"] },
+      "then": { "properties": { "input_requests": { "minProperties": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] },
+      "then": { "required": ["result"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": { "required": ["error"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "handoff_pending" } }, "required": ["status"] },
+      "then": { "properties": { "handoffs": { "minItems": 1 } } }
+    }
   ]
 }
 ````
@@ -484,7 +725,15 @@ worker scheme.
   "brand": "{{BRAND}}",
   "app_name": "{{PROJECT_KEY}}",
   "app_host": "{{LIVE_URL}}",
-  "worker_scheme": "hub-{{PROJECT_KEY}}"
+  "worker_scheme": "hub-{{PROJECT_KEY}}",
+  "visual": {
+    "mark": "{{VISUAL_MARK}}",
+    "accent_h": "{{ACCENT_H}}",
+    "accent_pair_h": "{{ACCENT_PAIR_H}}",
+    "display_voice": "{{DISPLAY_VOICE}}",
+    "surface": "{{SURFACE_CHARACTER}}",
+    "motif": "{{AMBIENT_MOTIF}}"
+  }
 }
 ````
 <!-- /TPL -->
@@ -594,7 +843,7 @@ actually active in `HANDOFF.md` and the Hub.
 | `CHARTER.md` | mission · scope · quality bar · definition of done | canonical |
 | `DOCTRINE.md` | standing laws (operator contract + crystallized project laws) | canonical |
 | `HANDOFF.md` | living continuity file — the single resume entry point | canonical, always current |
-| `project.json` | portable identity: key · brand · app name/host · worker scheme | canonical identity for Hub/MCP/discovery |
+| `project.json` | portable identity: key · brand · app origin · worker scheme · bounded visual art direction | canonical identity for Hub/MCP/discovery and project-authored presentation |
 | `seed.json` · `schema/` · `.hub/` | reference-Hub genesis · entity schemas · runtime hash-chained event ledger | `.hub/events.jsonl` = the entity ledger after the reference Hub is activated |
 | `ADR/` | numbered decision records (full prose of record) | canonical prose; hub `adr` entity canonical for status/links |
 | `research/` | deep research: dossiers, MoE panels, improvement-surface memos + `RESEARCH-HISTORY.md` chronicle | canonical |
@@ -810,6 +1059,10 @@ require project-specific wiring.
    a release examines only a new critical integration seam introduced by composition.
 6. **Stop when the changed behavior works.** Once the real operation succeeds and no critical
    boundary remains unobserved, completion is earned. Adding another check is process bloat.
+7. **Migrations label history; they never counterfeit it.** When a stricter receipt contract arrives,
+   preserve immutable pre-contract facts behind an exact ledger sequence + hash cutoff and account
+   for their debt explicitly. Never synthesize `verified_by`, evidence, or a passing receipt for work
+   that predates the contract. New writes remain strict from the adoption boundary forward.
 
 ## §3 Defect discipline (Instance → Invariant)
 1. **Observed failure becomes work.** Record the concrete failure as an `INC-` instance and open a
@@ -1000,6 +1253,43 @@ lives in the per-effort files in this folder; this file is the index a cold agen
 ⚑ <keystone finding, one line each>
 <2–5 sentences of what was learned and what it changed.>
 -->
+
+## 2026-08-16 — Durable AgentRuns and current MCP Tasks
+**Source:** `2026-08-16-durable-agent-runs-and-mcp-tasks.md` · **Fed:** ADR-0005, `example:task:0014`
+⚑ Backlog tasks define owed work; AgentRuns define resumable execution attempts.
+⚑ MCP Task handles are created by declaring task-augmented calls and return the official top-level shapes.
+⚑ Checkpoints plus composed child receipts let replacement workers resume without replaying completed work.
+
+The design adds one event-sourced run aggregate containing typed commands, messages, checkpoints,
+handoffs, cancellation/input state, and outcome. It remains lease- and subject-bound, maps directly
+to current MCP Tasks, and leaves A2A discovery empty until a callable A2A transport exists.
+
+## 2026-08-16 — Capability-aware atomic pull routing
+**Source:** `2026-08-16-capability-aware-pull-routing.md` · **Fed:** ADR-0003, `example:task:0015`
+⚑ Feasibility filtering precedes preference scoring; neither may replace the dependency-derived ready frontier.
+⚑ Unknown worker attributes cannot satisfy explicit task constraints, while unconstrained tasks preserve zero-profile compatibility.
+⚑ Observed quality, latency, and cost rank compatible work only inside the existing pull-order cohort.
+
+The design adopts a typed task routing contract and a bounded per-pull worker profile. It keeps
+readiness, priority, critical-path rank, aging, touch collision, and WIP authoritative, exposes
+structured exclusion reasons, and leaves durable worker identity to the scoped-credential plane.
+
+## 2026-08-16 — authored identity without cockpit forks
+**Source:** `2026-08-16-authored-hub-identity.md` · **Fed:** example:task:0016
+⚑ Project character can be expressed by a small validated token set while structure, semantic
+status, accessibility, and state-derived motion remain canonical.
+The visual brief places mark, accent pairing, display voice, surface character, and motif in the
+portable identity file. The renderer consumes bounded values only, and initialization produces a
+distinct overridable starter rather than another identical blue cube.
+
+## 2026-08-16 — scoped autonomous-agent authority
+**Source:** `2026-08-16-scoped-agent-authority.md` · **Fed:** ADR-0002, `example:task:0012`
+⚑ Authentication subject and worker-seat label must be separate canonical facts.
+⚑ Every claimed-task mutation needs both scoped authentication and the current fenced lease.
+⚑ Shared-token compatibility is safe only when it is visibly recorded as root compatibility.
+The resulting design uses short-lived, revocable, scope-bearing agent credentials; binds their
+immutable subjects into leases and ledger provenance; and keeps the legacy root token as a
+disable-able migration bridge rather than allowing caller-authored identity to masquerade as auth.
 ````
 <!-- /TPL -->
 
@@ -1510,6 +1800,23 @@ cure is structural, not disciplinary).
 - **Steering is cheap by design:** because every seat checkpoints into `STATE.md`, the leader
   (or operator) can redirect any seat at any time and lose at most one atomic unit of work.
 
+### Durable execution state (AgentRun)
+
+- A board task is owed work; an AgentRun is one execution attempt. Never overload the backlog row
+  with volatile command/message/process state or keep the recovery truth only in agent memory.
+- A worker holding the current fenced task lease creates and mutates its run. Commands, structured
+  messages, checkpoints, input requests, handoffs, cancellation intent, and outcomes append to the
+  canonical event plane and are pushed live immediately.
+- Checkpoint before an interrupt, handoff, or safe cancellation boundary. A replacement lease
+  holder resumes from the latest checkpoint, completed step IDs, unfinished commands, recent
+  context, and composed child receipts; it does not replay completed work to rediscover proof.
+- Cancellation is cooperative: request intent, reach a safe checkpoint, then acknowledge. A real
+  completion may win the race. A completed run is immutable.
+- Protocol discovery is literal. MCP task handles represent durable AgentRuns and use the current
+  Tasks-extension shapes; MCP task notification subscriptions and A2A interfaces remain
+  unadvertised until their callable transports exist. Hub SSE remains the authoritative
+  committed-event push rail—never introduce a periodic sync cycle as execution coordination.
+
 ## §6 Completion evidence & credit (the leader's core duty)
 
 1. **The real operation is the default proof.** The worker performs the changed behavior and
@@ -1528,7 +1835,12 @@ cure is structural, not disciplinary).
    those completed parts. Verifier-of-verifier fan-out is forbidden.
 5. **Real failure is sufficient notice.** When the actual operation breaks, create a fresh repair
    task, route it to a dedicated error-fixing lane when available, and let delivery agents continue
-   unrelated work. The successful retry closes the repair task.
+   unrelated work. A leased worker uses the single fenced `/hub/api/fail` operation with its stable
+   cause signature and concrete failure note: that operation records the attempt, returns the lease,
+   applies bounded backoff/circuit state, and creates or reuses the `hub.repair`-routed task as one
+   durable transition. Set `consequential:true` only when human authority or material impact truly
+   requires the operator; routine circuit-open work stays in the specialist lane. The successful
+   retry closes the repair task.
 6. **Done ≠ live** (DOCTRINE §2.3): work that needs a deploy stays open until its `deploy_done`
    records the observed live outcome.
 

@@ -21,14 +21,22 @@ a rare critical boundary.
 
 - Canonical events in `PROJECT/.hub/events.jsonl`, hash-chained and append-only.
 - A rebuildable SQLite index with optimistic concurrency and aggregate-scoped idempotency.
-- JSON-Schema-validated tasks, ADRs, features, gaps, capabilities, deploys, and notes.
+- JSON-Schema-validated tasks, durable AgentRuns, ADRs, features, gaps, capabilities, deploys, and notes.
 - Derived dependency/urgency state, graph, collections, audit, and a browser dashboard.
-- A typed write API with one shared header token, expiring task leases, and a guarded completion
-  transition.
+- A typed write API with scoped revocable agent credentials, expiring fenced task leases, atomic
+  failure-to-repair routing, and a guarded completion transition. Shared-root auth is an explicit
+  migration bridge, not ordinary worker identity.
+- Event-sourced AgentRuns carry commands, messages, checkpoints, input, handoffs, cooperative
+  cancellation, recovery envelopes, and composed child receipts; current MCP Tasks methods expose
+  the real durable lifecycle without advertising phantom A2A or notification transports.
+- Compatibility-first atomic pull: optional task capability/risk/resource/locality/outcome
+  requirements filter workers before quality/latency/cost preference scoring inside the canonical
+  ready frontier.
 - A focused computed audit for schemas, references, ADR numbering, event integrity, build
   coherence, selected Django safety settings, and mutation-route guards.
 - A minimal mounted Django example in which real Hub operations can be exercised.
-- A production-shaped ASGI entrypoint for immediate, long-lived Hub event delivery.
+- A production-shaped ASGI entrypoint for immediate, long-lived push delivery. Mutations publish
+  canonical patches directly; reconnect cursors repair interruption without a polling freshness loop.
 - An optional Windows one-click worker launcher that keeps the general write token out of the
   browser and closes its host window when the configured wrapper finishes.
 
@@ -43,12 +51,14 @@ Hub reads are unauthenticated by default and expose the complete projected board
 not mean automatically redacted: keep sensitive material out of entities or add an authentication
 boundary.
 
-The general `HUB_WRITE_TOKEN` is more powerful than an ordinary tracker token. A write-token holder
-can grant `done`, record deploys, and rule ADRs. It is NOT code execution: the Hub never runs an
+Normal workers use short-lived, revocable, scope-bearing `X-Agent-Token` credentials whose immutable
+subjects are bound into task leases and canonical event provenance. The legacy `HUB_WRITE_TOKEN`
+is an explicitly labeled, disable-able shared-root migration bridge; a holder can grant `done`,
+record deploys, and rule ADRs. Neither mode is code execution: the Hub never runs an
 optional critical-boundary `verification_command` — the worker runs it out-of-band and submits a
 typed exit-0 receipt the Hub validates. Ordinary tasks carry no command. Strict evidence URLs ARE
 still fetched by the server. Treat the token as production credentials,
-give it only to trusted operators/agents, and isolate the service accordingly. The optional browser
+give consequential scopes only to trusted operators/agents, and isolate the service accordingly. The optional browser
 launcher never receives it. Read [SECURITY.md](SECURITY.md) before enabling writes or worker launch.
 
 ## Documentation map
