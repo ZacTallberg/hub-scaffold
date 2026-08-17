@@ -1,12 +1,13 @@
 """Hub machine READ API. Every surface renders FROM the event-log snapshot (single source of
 truth); the HTML embeds the same payload. Doctrine sections 1-2 + the hub API contract.
 
-The LIVE endpoint emits only an authenticated cursor and a safe event envelope; the browser then
-reconciles from the same canonical snapshot the HTML and the JSON API serve. Animation is never
-allowed to become a second source of truth — an event says *something moved*, and the board is
-re-read to find out what.
+The LIVE endpoint carries canonical cumulative patches directly from the same materialized event
+projection the HTML and JSON API serve. Signals are wake-ups, never a second source of truth;
+reconnect cursor reconciliation closes the only interval in which a client could miss one.
 """
+import asyncio
 import json
+import threading
 import time
 
 from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpResponse
@@ -15,7 +16,7 @@ from django.views.decorators.http import require_GET
 from hub_core import adherence, cost, dag, failure_taxonomy, flow, project, projections, telemetry, upcast, wip
 from hub_core.canonical import content_hash
 
-from . import delivery, hub_app
+from . import delivery, hub_app, realtime
 
 _COLLECTION = {"task": "tasks", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
                "deploy": "deploys", "note": "notes"}
@@ -451,16 +452,20 @@ def _dag_block(state, workers):
 
 # Process-level snapshot memo keyed on the append-only head cursor (seq, hash) + the served probe
 # + a fingerprint of the CLAIMS dir. The ledger is append-only, so an unchanged head means an
-# unchanged fold and audit — without this, idle polls (the board's fallback, canaries, supervisors)
-# re-fold and re-verify the whole ledger to recompute a result that could not have changed.
+# unchanged fold and audit — without this, reconnect recovery and supervisors would re-fold and
+# re-verify the whole ledger to recompute a result that could not have changed.
 #
 # The snapshot is NOT a pure function of the head, though: the inflight/fleet blocks read lease
 # FILES, which change with no ledger event at all (claim, heartbeat, reap) — so the key carries a
 # stat fingerprint of claims/, or a fresh claim would stay invisible until the next append.
 # `served` is in the key because it feeds the build/coherence block; one probe must never be
 # handed another probe's cached verdict. Races just recompute, which is benign.
+_STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None}
+_STATE_LOCK = threading.RLock()
 _SNAP_CACHE = {"key": None, "value": None}
 _AUDIT_CACHE = {"key": None, "value": None}
+_DELIVERY_CACHE = {"values": {}, "latest": {}, "building": set()}
+_DELIVERY_LOCK = threading.RLock()
 
 
 def _leases_fp():
@@ -493,23 +498,196 @@ def _telemetry_fp():
         return None  # absorbs: no telemetry file yet — nothing to fingerprint, memo skipped
 
 
+def _events_through(store, after, target):
+    rows, cursor = [], after
+    while cursor < target:
+        batch = [event for event in store.events_after(cursor, limit=500)
+                 if event.get("seq", 0) <= target]
+        if not batch:
+            break
+        rows.extend(batch)
+        cursor = batch[-1]["seq"]
+    return rows
+
+
+def _projected(store, cursor):
+    """Return ``(events, state)`` at cursor from the materialized append-only read model."""
+    seq, head_hash = cursor.get("seq", 0), cursor.get("hash", "")
+    with _STATE_LOCK:
+        cached_seq = _STATE_CACHE["seq"]
+        cached_hash = _STATE_CACHE["hash"]
+        incremental = cached_seq is not None and seq > cached_seq
+        pending = _events_through(store, cached_seq, seq) if incremental else []
+        contiguous = bool(
+            incremental and pending and pending[0].get("seq") == cached_seq + 1
+            and pending[0].get("prev_hash", "") == cached_hash
+            and pending[-1].get("seq") == seq and pending[-1].get("hash", "") == head_hash
+        )
+
+        if cached_seq is None or seq < cached_seq or (seq == cached_seq and head_hash != cached_hash) \
+                or (incremental and not contiguous):
+            events = _events_through(store, 0, seq)
+            state = project.state(events)
+        elif incremental:
+            events = list(_STATE_CACHE["events"] or ()) + pending
+            entities = project.advance(
+                (_STATE_CACHE["state"] or {}).get("entities", {}), pending
+            )
+            state = project.derive(entities)
+            state["entities"] = entities
+        else:
+            # Time may cross a not_before boundary without a write. Re-derive over held entities;
+            # no event history or audit is touched.
+            entities = dict((_STATE_CACHE["state"] or {}).get("entities", {}))
+            state = project.derive(entities)
+            state["entities"] = entities
+            events = _STATE_CACHE["events"] or []
+
+        _STATE_CACHE.update({"seq": seq, "hash": head_hash, "events": events, "state": state})
+        return events, state
+
+
+def _unmeasured_delivery(state, served=None, prior=None):
+    """Current delivery shape without putting repository subprocesses on the push path."""
+    prior = prior or {}
+    prior_records = prior.get("records") or {}
+    records, unlanded, available = {}, [], []
+    for task in state.get("by_type", {}).get("task", []):
+        if task.get("status") != "done":
+            continue
+        task_id = task["id"]
+        commits = [str(c) for c in ((task.get("provenance") or {}).get("commits") or [])
+                   if str(c).strip()]
+        old = prior_records.get(task_id) or {}
+        if old.get("commits") == commits:
+            record = dict(old)
+        else:
+            runs = task.get("verification_run") or []
+            if isinstance(runs, dict):
+                runs = [runs]
+            verified = any(isinstance(run, dict) and run.get("exit_code") == 0 for run in runs)
+            record = {
+                "state": "verified" if verified else "unverified",
+                "state_reason": "delivery ancestry is materializing off the realtime path",
+                "verified": verified, "landed": None, "deployed": None, "live": None,
+                "commits": commits,
+            }
+        records[task_id] = record
+        if record.get("landed") is False:
+            unlanded.append(task_id)
+        if record.get("live") is True:
+            available.append(task_id)
+    landing_complete = bool(records) and all(r.get("landed") is not None for r in records.values())
+    release_complete = bool(records) and all(r.get("deployed") is not None for r in records.values())
+    live_complete = bool(records) and all(r.get("live") is not None for r in records.values())
+    measured = {"verified": True, "landing": landing_complete,
+                "release": release_complete, "live": live_complete}
+    notes = {
+        "verified": None,
+        "landing": None if landing_complete else "delivery ancestry is materializing off the realtime path",
+        "release": None if release_complete else "release ancestry is materializing off the realtime path",
+        "live": None if live_complete else "live ancestry is materializing off the realtime path",
+    }
+    return {
+        "records": records,
+        "counts": {"done": len(records),
+                   "verified": sum(1 for r in records.values() if r.get("verified")),
+                   "landed": sum(1 for r in records.values() if r.get("landed") is True),
+                   "landed_unmeasured": sum(1 for r in records.values() if r.get("landed") is None),
+                   "unlanded": len(unlanded),
+                   "deployed": sum(1 for r in records.values() if r.get("deployed") is True),
+                   "live": len(available)},
+        "measured": measured, "notes": notes, "unlanded": unlanded, "available": available,
+        "live_attested": False,
+        "live_identity": {"source": "caller-supplied ?served" if served else None,
+                          "sha": served or None},
+        "integration_ref": prior.get("integration_ref") or "HEAD",
+    }
+
+
+def _cache_delivery(key, served, value):
+    with _DELIVERY_LOCK:
+        _DELIVERY_CACHE["values"][key] = value
+        _DELIVERY_CACHE["latest"][served] = value
+        if len(_DELIVERY_CACHE["values"]) > 12:
+            _DELIVERY_CACHE["values"].pop(next(iter(_DELIVERY_CACHE["values"])), None)
+
+
+def _delivery_fast(state, cursor, served):
+    key = (cursor.get("seq", 0), cursor.get("hash", ""), served)
+    with _DELIVERY_LOCK:
+        exact = _DELIVERY_CACHE["values"].get(key)
+        if exact is not None:
+            return exact, True
+        prior = _DELIVERY_CACHE["latest"].get(served)
+        should_build = key not in _DELIVERY_CACHE["building"]
+        if should_build:
+            _DELIVERY_CACHE["building"].add(key)
+    provisional = _unmeasured_delivery(state, served=served, prior=prior)
+    if should_build:
+        # Ancestry measurement is useful but can spawn many git commands. Keep it completely off
+        # the delta/SSE response path; its own completion wakes the cockpit with a second patch.
+        def materialize():
+            try:
+                measured = delivery.block(state, served=served)
+                _cache_delivery(key, served, measured)
+                realtime.publish(hub_app.HUB_DIR,
+                                 {"kind": "projection.delivery", "cursor": cursor.get("seq", 0)},
+                                 channel=hub_app.PROJECT_KEY)
+            finally:
+                with _DELIVERY_LOCK:
+                    _DELIVERY_CACHE["building"].discard(key)
+
+        threading.Thread(target=materialize, name="hub-delivery-projection", daemon=True).start()
+    return provisional, False
+
+
+def _live_blocks(events, state, audit, deliv, cursor):
+    last = events[-1] if events else {}
+    inflight = _inflight(state)
+    # Re-arm semantic timers after a process restart. Timers wake exactly at stall/expiry; they do
+    # not sample the claims directory on an interval.
+    for lease in hub_app.leases():
+        hub_app._schedule_lease_truth(lease)
+    adher = adherence.score(events, state, leases=inflight)
+    hub_dir = hub_app.HUB_DIR
+    return {
+        "transport": "event-stream",
+        "realtime": hub_app.realtime_info(),
+        "cursor": {"seq": cursor.get("seq", last.get("seq", 0)),
+                   "hash": cursor.get("hash", last.get("hash", "")), "ts": last.get("ts")},
+        "activity": _activity(events, state),
+        "inflight": inflight,
+        "readiness": _readiness(state, inflight),
+        "progress": _progress(events, state, deliv),
+        "delivery": deliv,
+        "adherence": adher,
+        "dag": _dag_block(state, len(inflight)),
+        "fleet": _fleet(events, state, inflight),
+        "worker_health": _worker_health(state, events, inflight),
+        "failure_modes": _failure_modes(events),
+        "attention": _attention(state, audit, inflight, adher, deliv),
+        "telemetry": telemetry.read_aggregate(hub_dir),
+        "cost": cost.cost_block(hub_dir, state),
+        "wip": hub_app.wip_status(len(inflight)),
+    }
+
+
 def _snapshot(served=None):
     s = hub_app.store()
     try:
         cur = s.latest_cursor()
         # git head rides in the key because the delivery legs (rail + hero) depend on what the
         # integration branch carries, which changes with no board event at all — a landing.
-        # Several projections cross time-only boundaries (lease expiry/stall, not_before and
-        # rolling throughput windows). A static ledger/file key can otherwise cache a worker as
-        # live forever after its lease expires. Five seconds bounds truth lag without per-second
-        # refolds.
+        # Several non-stream callers still cross time-only boundaries (not_before and rolling
+        # throughput windows). The push lane uses exact semantic lease timers; this bucket only
+        # prevents a standalone full-snapshot caller from retaining a stale time-derived view.
         git_head = hub_app._git_head()
         key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
                git_head, int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
-        events = s.events()
-        state = project.state(events)
+        events, state = _projected(s, cur)
         # Realtime lease/telemetry refreshes must not repeatedly pay for a repository audit whose
         # inputs did not change. Structural audit truth changes with the ledger or build identity;
         # cache on exactly those inputs and keep the five-second live cockpit refresh lightweight.
@@ -523,13 +701,14 @@ def _snapshot(served=None):
         last = events[-1] if events else {}
         inflight = _inflight(state)
         adher = adherence.score(events, state, leases=inflight)
-        # WHERE THE WORK ACTUALLY IS, per task, from recorded evidence. Computed ONCE and handed to
-        # both the hero and the rail, so the cockpit cannot grow two answers to "is this landed"
-        # — and so an unmeasurable leg reaches the operator as an honest unknown, not silent green.
-        deliv = delivery.block(state, served=served)
+        # Repository ancestry can require many Git calls. First paint uses the truthful cached or
+        # provisional view; the completed materialization publishes its own live patch.
+        # Until then, an unmeasured leg stays an honest unknown rather than silent green.
+        deliv, _ = _delivery_fast(state, cur, served)
         hub_dir = hub_app.HUB_DIR
         live = {
             "transport": "event-stream",
+            "realtime": hub_app.realtime_info(),
             "cursor": {"seq": last.get("seq", 0), "hash": last.get("hash", ""),
                        "ts": last.get("ts")},
             "activity": _activity(events, state),
@@ -558,7 +737,6 @@ def _snapshot(served=None):
             # The adaptive WIP ceiling the claim seam enforces, so the cockpit shows the fleet's
             # own concurrency budget rather than the operator guessing at it.
             "wip": hub_app.wip_status(len(inflight)),
-            "fallback_poll_ms": 2500,
         }
         snap = projections.hub_snapshot(state, build=build, audit=audit, live=live)
         if hub_app.worker_launch_enabled():
@@ -591,7 +769,7 @@ def _etag(snap):
 def hub_json(request):
     _, snap = _snapshot(request.GET.get("served"))
     etag = _etag(snap)
-    # 304 on a matching If-None-Match: an idle poll or a re-grounding pull gets an empty body
+    # 304 on a matching If-None-Match: a reconnect re-ground or supervisor read gets an empty body
     # when nothing changed, instead of the full snapshot every time.
     resp = HttpResponse(status=304) if request.headers.get("If-None-Match") == etag \
         else JsonResponse(snap)
@@ -599,54 +777,42 @@ def hub_json(request):
     return resp
 
 
-def delta_json(request):
-    """The incremental read: everything that CHANGED since the client's cursor, not the whole
-    board. A client holding a base snapshot patches the changed entities in place and advances its
-    cursor, so a live board moves KBs per event instead of re-sending the entire fold.
-    since >= head yields an empty changed set."""
-    state, snap = _snapshot(request.GET.get("served"))
-    target = ((snap.get("live") or {}).get("cursor") or {"seq": 0, "hash": ""})
-    s = hub_app.store()
+def _delta_payload(since, served=None):
+    """Build the exact canonical push patch without audit or repository work."""
+    store = hub_app.store()
     try:
-        try:
-            since = max(0, int(request.GET.get("since", "0")))
-        except (TypeError, ValueError):
-            since = 0
+        target = store.latest_cursor()
+        events, state = _projected(store, target)
         changed_aggs, seen = [], set()
-        # EventStore deliberately caps one events_after query at 500. Page to the exact cursor
-        # whose state `_snapshot` folded; never advance to a newer head whose entity is absent from
-        # this response, and never omit event 501 while claiming the final cursor.
-        page_cursor = since
-        while page_cursor < target["seq"]:
-            batch = [ev for ev in s.events_after(page_cursor, limit=500)
-                     if ev.get("seq", 0) <= target["seq"]]
-            if not batch:
-                break
-            for ev in batch:
-                agg = ev.get("aggregate")
-                if agg and agg not in seen:
-                    seen.add(agg)
-                    changed_aggs.append(agg)
-            page_cursor = batch[-1]["seq"]
+        for event in _events_through(store, since, target["seq"]):
+            aggregate = event.get("aggregate")
+            if aggregate and aggregate not in seen:
+                seen.add(aggregate)
+                changed_aggs.append(aggregate)
     finally:
-        s.close()
-    entities = state.get("entities", {})
-    flags = state.get("flags", {})
-    changed = [{**entities[a], **flags.get(a, {})} for a in changed_aggs if a in entities]
-    audit = snap.get("audit") or {}
-    live = snap.get("live") or {}
-    return JsonResponse({
+        store.close()
+    entities, flags = state.get("entities", {}), state.get("flags", {})
+    changed = [{**entities[aggregate], **flags.get(aggregate, {})}
+               for aggregate in changed_aggs if aggregate in entities]
+    audit = _AUDIT_CACHE.get("value") or {"ok": None, "violations": []}
+    deliv, delivery_materialized = _delivery_fast(state, target, served)
+    live = _live_blocks(events, state, audit, deliv, target)
+    return {
         "changed": changed, "removed": [],
-        "cursor": {"seq": target["seq"], "hash": target["hash"]},
-        "audit": {"ok": audit.get("ok")},
-        # The cockpit blocks ride the delta too. Without them a live board patched entity rows
-        # while its hero, fleet and attention rail stayed frozen at page-load values until the
-        # next full sync — the most-watched part of the page was the last to move.
-        "live": {k: live.get(k) for k in ("cursor", "progress", "adherence", "fleet", "inflight",
-                                          "attention", "readiness", "activity", "dag",
-                                          "worker_health", "wip", "delivery")},
-        "metadata": {"since": since, "changed": len(changed)},
-    })
+        "cursor": {"seq": int(target.get("seq", 0)), "hash": target.get("hash", "")},
+        "audit": {"ok": audit.get("ok")}, "live": live,
+        "metadata": {"since": since, "changed": len(changed),
+                     "delivery_materialized": delivery_materialized},
+    }
+
+
+def delta_json(request):
+    """Reconnect/recovery read. Steady-state clients receive this payload inside SSE."""
+    try:
+        since = max(0, int(request.GET.get("since", "0")))
+    except (TypeError, ValueError):
+        since = 0
+    return JsonResponse(_delta_payload(since, served=request.GET.get("served")))
 
 
 def type_json(request, type):
@@ -698,76 +864,91 @@ def schema_json(request, type):
     return HttpResponse(p.read_text(encoding="utf-8"), content_type="application/json")
 
 
-def _event_envelope(event):
-    """Expose enough event identity to drive reconciliation, never raw payload content. The
-    browser learns THAT something moved and re-reads the canonical board to learn what."""
-    return {
-        "seq": event.get("seq"),
-        "ts": event.get("ts"),
-        "event": event.get("type"),
-        "aggregate": event.get("aggregate"),
-        "version": event.get("result_version"),
-        "agent": event.get("agent_id"),
-    }
-
-
 @require_GET
 def live_events(request):
-    """Server-Sent Events cursor with a bounded lifetime.
+    """Persistent push stream carrying canonical patches, not polling hints.
 
-    One connection lasts under a minute and emits heartbeats to defeat proxy buffering, then lets
-    EventSource reconnect with ``Last-Event-ID``. The browser always reconciles from a fresh
-    canonical read after an event, which is what makes reconnects, missed deltas and out-of-order
-    delivery safe rather than merely unlikely."""
+    Mutations wake this stream through the realtime bus. The patch is built from the subscriber's
+    last emitted cursor through one exact canonical head and is applied directly by the browser.
+    Cursor catch-up happens once on connection/reconnection; steady state performs no interval
+    query. Heartbeats are transport keepalives only and never trigger a read.
+    """
     raw_since = request.headers.get("Last-Event-ID") or request.GET.get("since") or "0"
     try:
         requested = max(0, int(raw_since))
     except (TypeError, ValueError):
         requested = 0
 
-    def stream():
+    served = request.GET.get("served")
+
+    def initial_cursor():
         store = hub_app.store()
         try:
             head = store.latest_cursor()
-            cursor = min(requested, head["seq"]) if requested else head["seq"]
-            lease_fp = _leases_fp()
-            yield "retry: 1500\n\n"
-            yield (f"id: {cursor}\nevent: ready\n"
-                   f"data: {json.dumps({'seq': cursor, 'ts': head.get('ts')}, separators=(',', ':'))}\n\n")
-            deadline = time.monotonic() + 52
-            heartbeat_at = time.monotonic() + 8
-            while time.monotonic() < deadline:
-                pending = store.events_after(cursor, limit=100)
-                if pending:
-                    for event in pending:
-                        cursor = event["seq"]
-                        payload = json.dumps(_event_envelope(event), separators=(",", ":"))
-                        yield f"id: {cursor}\nevent: hub\ndata: {payload}\n\n"
-                    heartbeat_at = time.monotonic() + 8
-                    continue
-                current_lease_fp = _leases_fp()
-                if current_lease_fp != lease_fp:
-                    lease_fp = current_lease_fp
-                    payload = json.dumps({"seq": cursor, "ts": None, "event": "lease.changed",
-                                          "aggregate": None, "version": None, "agent": None},
-                                         separators=(",", ":"))
-                    # Reuse the client's canonical reconciliation path without pretending this
-                    # sidecar-only presence change advanced the ledger cursor.
-                    yield f"id: {cursor}\nevent: hub\ndata: {payload}\n\n"
-                    heartbeat_at = time.monotonic() + 8
-                    continue
-                if time.monotonic() >= heartbeat_at:
-                    yield (f"id: {cursor}\nevent: heartbeat\n"
-                           f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
-                    heartbeat_at = time.monotonic() + 8
-                time.sleep(0.45)
-            yield f"id: {cursor}\nevent: reconnect\ndata: {{\"seq\":{cursor}}}\n\n"
+            return min(requested, head["seq"]), head
         finally:
             store.close()
 
-    response = StreamingHttpResponse(stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    def ready_frame(cursor, head):
+        payload = {"seq": cursor, "ts": head.get("ts"),
+                   "realtime": hub_app.realtime_info()}
+        return (f"id: {cursor}\nevent: ready\n"
+                f"data: {json.dumps(payload, separators=(',', ':'))}\n\n")
+
+    def patch_frame(payload):
+        cursor = int((payload.get("cursor") or {}).get("seq", 0))
+        return (f"id: {cursor}\nevent: patch\n"
+                f"data: {json.dumps(payload, separators=(',', ':'))}\n\n")
+
+    def stream():
+        subscription = realtime.subscribe(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
+        cursor, head = initial_cursor()
+        try:
+            yield "retry: 1500\n\n"
+            yield ready_frame(cursor, head)
+            # Re-ground lease/telemetry projections even when the ledger cursor did not advance
+            # while disconnected.
+            payload = _delta_payload(cursor, served=served)
+            cursor = payload["cursor"]["seq"]
+            yield patch_frame(payload)
+            while True:
+                signals = subscription.wait(timeout=15)
+                if signals:
+                    payload = _delta_payload(cursor, served=served)
+                    cursor = payload["cursor"]["seq"]
+                    yield patch_frame(payload)
+                else:
+                    yield (f"id: {cursor}\nevent: heartbeat\n"
+                           f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
+        except GeneratorExit:
+            return
+
+    async def async_stream():
+        subscription = realtime.subscribe_async(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
+        cursor, head = await asyncio.to_thread(initial_cursor)
+        try:
+            yield "retry: 1500\n\n"
+            yield ready_frame(cursor, head)
+            payload = await asyncio.to_thread(_delta_payload, cursor, served)
+            cursor = payload["cursor"]["seq"]
+            yield patch_frame(payload)
+            while True:
+                signals = await subscription.wait(timeout=15)
+                if signals:
+                    payload = await asyncio.to_thread(_delta_payload, cursor, served)
+                    cursor = payload["cursor"]["seq"]
+                    yield patch_frame(payload)
+                else:
+                    yield (f"id: {cursor}\nevent: heartbeat\n"
+                           f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
+        finally:
+            subscription.close()
+
+    content = async_stream() if hasattr(request, "scope") else stream()
+    response = StreamingHttpResponse(content, content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache, no-store, no-transform, must-revalidate"
     response["X-Accel-Buffering"] = "no"
+    response["X-Hub-Realtime-Scope"] = hub_app.realtime_info()["scope"]
     return response
 
 

@@ -64,8 +64,12 @@ class Command(BaseCommand):
                 self.stderr.write("  [REJECT] %s: %s" % (name, errs[0]))
                 continue
             if not dry_run:
-                s.append(aggregate=nid, type="capability.registered", payload=payload, expected_version=0,
-                         idem_key="import:" + legacy, agent_id="hubimport", git_sha=head)
+                before = s.latest_cursor().get("seq", 0)
+                event = s.append(aggregate=nid, type="capability.registered", payload=payload,
+                                 expected_version=0, idem_key="import:" + legacy,
+                                 agent_id="hubimport", git_sha=head)
+                if event.get("seq", 0) > before:
+                    hub_app.publish_event(event)
             ents[nid] = payload
             seen.add(legacy)
             made["cap"] += 1

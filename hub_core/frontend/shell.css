@@ -30,6 +30,17 @@ body.hub-app {
   color: var(--text);
 }
 
+/* Modal isolation adds one structural wrapper around the app. It must participate in the same
+   bounded flex chain as the body or every inner scrollport expands to its content height and is
+   then clipped by the viewport. This is the scroll-ownership hinge for every Hub view. */
+#appShell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* Global scrollbar (the default breaks the aesthetic). */
 .hub-app ::-webkit-scrollbar { width: 8px; height: 8px; }
 .hub-app ::-webkit-scrollbar-track { background: var(--bg); }

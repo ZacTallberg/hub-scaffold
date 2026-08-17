@@ -27,6 +27,7 @@ import functools
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import hub_core
@@ -51,6 +52,68 @@ SCHEMA_DIR = PROJECT / "schema"
 _IDENTITY = _identity.load()
 PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", _IDENTITY["key"])
 BRAND = _dj_setting("HUB_BRAND", _IDENTITY["brand"])
+
+
+def _publish_realtime(kind, **identity):
+    """Publish only mutation identity after durability; canonical content stays on the read API.
+
+    Kept lazy so pure/CLI imports of ``hub_app`` do not require Django's streaming surface.  A
+    broker outage is deliberately non-transactional: the ledger/lease is already the truth, and a
+    reconnect cursor repairs notification loss.
+    """
+    try:
+        from . import realtime
+        realtime.publish(HUB_DIR, {"kind": kind, **identity}, channel=PROJECT_KEY)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Hub realtime wake-up failed after durable mutation")
+
+
+def publish_event(event):
+    """Broadcast the safe event envelope used by SSE, never its entity payload."""
+    _publish_realtime(
+        "ledger.appended",
+        event={
+            "seq": event.get("seq"),
+            "ts": event.get("ts"),
+            "event": event.get("type"),
+            "aggregate": event.get("aggregate"),
+            "version": event.get("result_version"),
+            "agent": event.get("agent_id"),
+        },
+    )
+
+
+def realtime_info():
+    from . import realtime
+    return realtime.info(HUB_DIR, channel=PROJECT_KEY)
+
+
+def _schedule_lease_truth(lease):
+    """Wake readers exactly when a lease becomes stalled or expires; no clock polling."""
+    try:
+        from . import realtime
+        task = lease.get("task")
+        agent = lease.get("agent")
+        expires = float(lease.get("expires") or 0)
+        heartbeat = float(lease.get("last_heartbeat") or lease.get("claimed") or 0)
+        now = time.time()
+        stall_at = heartbeat + 900
+        if heartbeat and now < stall_at < expires:
+            realtime.schedule(HUB_DIR, "lease-stall:" + task, stall_at,
+                              {"kind": "lease.stalled", "task": task, "agent": agent},
+                              channel=PROJECT_KEY)
+        else:
+            realtime.cancel_scheduled(HUB_DIR, "lease-stall:" + task)
+        if expires > now:
+            realtime.schedule(HUB_DIR, "lease-expiry:" + task, expires,
+                              {"kind": "lease.expired", "task": task, "agent": agent},
+                              channel=PROJECT_KEY)
+        else:
+            realtime.cancel_scheduled(HUB_DIR, "lease-expiry:" + task)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Hub lease truth timer could not be scheduled")
 
 
 def worker_launch_enabled() -> bool:
@@ -343,10 +406,16 @@ def claim(task_id, agent, ttl_s=900):
             cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
             _write_lease(task_id, cur)
+            _publish_realtime("lease.heartbeat", task=task_id, agent=agent,
+                              expires=cur["expires"])
+            _schedule_lease_truth(cur)
             return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
+        _publish_realtime("lease.claimed", task=task_id, agent=agent,
+                          expires=lease["expires"])
+        _schedule_lease_truth(lease)
         return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **lease}
 
 
@@ -403,6 +472,9 @@ def heartbeat(task_id, token, ttl_s=900):
         cur["last_heartbeat"] = now
         cur["expires"] = now + ttl_s
         _write_lease(task_id, cur)
+        _publish_realtime("lease.heartbeat", task=task_id, agent=cur.get("agent"),
+                          expires=cur["expires"])
+        _schedule_lease_truth(cur)
         return {"ok": True, "expires": cur["expires"], "last_heartbeat": now,
                 "heartbeat_after_s": max(1, ttl_s // 3)}
 
@@ -425,4 +497,11 @@ def release_lease(task_id, token) -> bool:
                 _write_lease(task_id, cur)
             except OSError:
                 return False
+        _publish_realtime("lease.released", task=task_id, agent=cur.get("agent"), expires=0)
+        try:
+            from . import realtime
+            realtime.cancel_scheduled(HUB_DIR, "lease-stall:" + task_id)
+            realtime.cancel_scheduled(HUB_DIR, "lease-expiry:" + task_id)
+        except Exception:
+            pass
         return True

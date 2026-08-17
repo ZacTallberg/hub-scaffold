@@ -2,9 +2,10 @@
  * hub.js — hub client RENDERER (shared kit)
  * --------------------------------------------------
  * Renders the entire hub UI from the canonical <script id="hub-data"> JSON island (the SAME
- * payload /hub.json serves — UI == API by construction), then keeps it LIVE: an SSE cursor tells
- * the page that something moved, and the page re-reads the canonical board to find out what.
- * Animation is never allowed to become a second source of truth.
+ * payload /hub.json serves — UI == API by construction), then keeps it LIVE: SSE carries an
+ * ordered canonical patch straight into the renderer. HTTP delta/snapshot reads exist only to
+ * recover a cursor gap after reconnect. Animation is never allowed to become a second source of
+ * truth.
  *
  * The board is a COCKPIT, not a table dump. What an operator needs to see without asking:
  * who is working right now and on what step, what needs a human, how fast the fleet is draining
@@ -30,7 +31,6 @@
     rocket: '<path d="M5 15c-2 1-2 5-2 5s4 0 5-2"/><path d="M9 15l-3-3c2-7 7-9 12-9 0 5-2 10-9 12z"/><circle cx="14.5" cy="9.5" r="1.5"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
-    refresh: '<path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 4v4h-4"/>',
     check: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>',
     xc: '<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8v.5"/>',
@@ -320,14 +320,15 @@
     keys.forEach(function (v) {
       var on = tab._facet === v;
       var chip = el("button", { class: "facet-chip" + (on ? " is-on" : ""), type: "button",
-        "aria-pressed": on ? "true" : "false" }, [
+        "aria-pressed": on ? "true" : "false", "data-focus-key": "facet:" + tab.key + ":" + v }, [
         doc.createTextNode(v + " "), el("span", { class: "facet-n", text: String(counts[v]) })
       ]);
       chip.addEventListener("click", function () { setFacet(tab.key, v); });
       tab._facetBar.appendChild(chip);
     });
     if (tab._facet) {
-      var clear = el("button", { class: "facet-chip is-clear", type: "button", text: "clear" });
+      var clear = el("button", { class: "facet-chip is-clear", type: "button", text: "clear",
+        "data-focus-key": "facet:" + tab.key + ":clear" });
       clear.addEventListener("click", function () { setFacet(tab.key, tab._facet); });
       tab._facetBar.appendChild(clear);
     }
@@ -1255,7 +1256,8 @@
     return el("div", { class: "chip-row" }, ids.map(function (id) { return chip(type, id); }));
   }
 
-  function openEntity(type, r) {
+  var _openModalEntity = null;
+  function openEntity(type, r, liveRefresh) {
     var role = type === "deploy" ? (r.audit_ok ? "pass" : "fail") : roleOf(type, r.status || r.maturity);
     var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket" }[type] || "info";
     var title = r.title || r.name || (r.number != null ? ("ADR " + r.number) : localId(r.id));
@@ -1344,8 +1346,13 @@
         pv.commits && pv.commits.length ? rowMono("Commits", pv.commits.join(", ")) : null
       ])]));
     }
-    openModal(role, title, r.id, iconName, body);
-    try { history.replaceState(null, "", "#" + type + "-" + localId(r.id)); } catch (e) {}
+    if (liveRefresh) {
+      refreshModal(role, title, r.id, iconName, body);
+    } else {
+      _openModalEntity = { type: type, id: r.id };
+      openModal(role, title, r.id, iconName, body);
+      try { history.replaceState(null, "", "#" + type + "-" + localId(r.id)); } catch (e) {}
+    }
   }
 
   // The element that opened the dialog, so closing can hand focus back where it came from.
@@ -1385,6 +1392,34 @@
     doc.addEventListener("keydown", _trapTab, true);
     var c = doc.getElementById("modalClose"); if (c) c.focus();
   }
+  function refreshModal(role, title, subtitle, iconName, bodyNode) {
+    var m = doc.getElementById("universalModal");
+    if (!m || !m.classList.contains("show")) return;
+    var b = doc.getElementById("modalBody");
+    var top = b ? b.scrollTop : 0, left = b ? b.scrollLeft : 0;
+    var focus = elementKey(doc.activeElement);
+    var box = doc.getElementById("modalIcon");
+    box.className = "modal-icon t-" + role; box.textContent = ""; box.appendChild(icon(iconName));
+    doc.getElementById("modalTitle").textContent = title;
+    doc.getElementById("modalSubtitle").textContent = subtitle || "";
+    if (b) { b.textContent = ""; b.appendChild(bodyNode); b.scrollTop = top; b.scrollLeft = left; }
+    var restored = findElement(focus);
+    if (restored && restored !== doc.activeElement) {
+      try { restored.focus({ preventScroll: true }); } catch (e) { restored.focus(); }
+    }
+  }
+  function refreshOpenEntityModal() {
+    if (!_openModalEntity) return;
+    var m = doc.getElementById("universalModal");
+    if (!m || !m.classList.contains("show")) return;
+    var current = BY_ID[_openModalEntity.id];
+    if (!current) {
+      closeModal();
+      announce("The open Hub entity is no longer available.");
+      return;
+    }
+    openEntity(_openModalEntity.type, current, true);
+  }
   function closeModal() {
     var m = doc.getElementById("universalModal");
     if (m) m.classList.remove("show");
@@ -1393,6 +1428,7 @@
     doc.removeEventListener("keydown", _trapTab, true);
     if (_modalOpener && doc.contains(_modalOpener)) { try { _modalOpener.focus(); } catch (e) {} } // absorbs: element detached
     _modalOpener = null;
+    _openModalEntity = null;
   }
 
   /* ============================ TOAST + STATUS ============================ */
@@ -1439,24 +1475,22 @@
     source: null,
     cursor: ((live().cursor) || {}).seq || 0,
     lastEventAt: ((live().cursor) || {}).ts || null,
-    state: "connecting",
     connected: false,
     failures: 0,
     dataHealthy: true,
     lastAppliedAt: Date.now(),
-    etag: null,
     snapshotJSON: JSON.stringify(D),
     syncing: false,
-    queued: false,
-    fallbackTimer: null,
-    reconnectTimer: null,
-    integrityTimer: null
+    reconcilePending: false,
+    snapshotRequired: false,
+    signaledCursor: ((live().cursor) || {}).seq || 0,
+    patchQueue: []
   };
   function setStatus(state, text, meta) {
     var p = doc.getElementById("statusPill"); if (!p) return;
-    p.className = "status-pill" + (state ? " " + state : "");
-    p.setAttribute("data-state", state || "live");
-    LIVE.state = state || "live";
+    var visual = state === "connected" ? "live" : state === "disconnected" ? "error" : state;
+    p.className = "status-pill" + (visual ? " " + visual : "");
+    p.setAttribute("data-state", state || "disconnected");
     var s = doc.getElementById("statusText"); if (s) s.textContent = text;
     var m = doc.getElementById("statusMeta"); if (m && meta != null) m.textContent = meta;
   }
@@ -1469,14 +1503,10 @@
     var meta = doc.getElementById("statusMeta");
     if (!meta) return;
     meta.textContent = "seq " + LIVE.cursor + " · " + (LIVE.lastEventAt ? relativeTime(LIVE.lastEventAt) : "awaiting event")
-      + (!LIVE.dataHealthy ? " · data stale" : "");
+      + (!LIVE.dataHealthy ? " · recovery active" : "");
   }
-  function renderConnectionStatus(fallback) {
-    if (doc.hidden) return setStatus("paused", "Paused");
-    if (!LIVE.dataHealthy) return setStatus("degraded", LIVE.connected ? "Board stale" : "Offline");
-    if (LIVE.connected) return setStatus("live", "Current");
-    if (fallback === "polling") return setStatus("degraded", "Polling");
-    return setStatus("reconnecting", LIVE.failures ? "Reconnecting" : "Connecting");
+  function renderConnectionStatus() {
+    setStatus(LIVE.connected ? "connected" : "disconnected", LIVE.connected ? "Connected" : "Disconnected");
   }
   function paintBackdrop() {
     // The ambient field is a READOUT, not decoration: its brightness and tempo come from how many
@@ -1519,6 +1549,62 @@
       else if (old.version !== now.version || JSON.stringify(old.plan || []) !== JSON.stringify(now.plan || [])) changed[id] = "progress";
     });
     return changed;
+  }
+  function elementKey(node) {
+    if (!node || node === doc.body || node === doc.documentElement) return null;
+    if (node.id) return { kind: "id", value: node.id };
+    var attrs = ["data-focus-key", "data-entity-id", "data-task-id", "data-agent", "data-seq"];
+    for (var i = 0; i < attrs.length; i++) {
+      if (node.getAttribute && node.getAttribute(attrs[i])) {
+        return { kind: "attr", name: attrs[i], value: node.getAttribute(attrs[i]) };
+      }
+    }
+    return null;
+  }
+  function findElement(key, root) {
+    if (!key) return null;
+    root = root || doc;
+    if (key.kind === "id") {
+      var byIdentity = doc.getElementById(key.value);
+      return byIdentity && (root === doc || root.contains(byIdentity)) ? byIdentity : null;
+    }
+    var nodes = root.querySelectorAll("[" + key.name + "]");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute(key.name) === key.value) return nodes[i];
+    }
+    return null;
+  }
+  function captureViewState() {
+    var panes = {};
+    TABS.forEach(function (tab) {
+      var pane = doc.getElementById("tab-" + tab.key);
+      if (!pane) return;
+      var table = pane.querySelector(".table-wrapper");
+      panes[tab.key] = {
+        top: pane.scrollTop, left: pane.scrollLeft,
+        tableTop: table ? table.scrollTop : 0, tableLeft: table ? table.scrollLeft : 0
+      };
+    });
+    return {
+      pageX: global.scrollX || 0, pageY: global.scrollY || 0,
+      focus: elementKey(doc.activeElement), opener: elementKey(_modalOpener), panes: panes
+    };
+  }
+  function restoreViewState(state) {
+    if (!state) return;
+    TABS.forEach(function (tab) {
+      var saved = state.panes[tab.key], pane = doc.getElementById("tab-" + tab.key);
+      if (!saved || !pane) return;
+      pane.scrollTop = saved.top; pane.scrollLeft = saved.left;
+      var table = pane.querySelector(".table-wrapper");
+      if (table) { table.scrollTop = saved.tableTop; table.scrollLeft = saved.tableLeft; }
+    });
+    var restored = findElement(state.focus);
+    if (restored && restored !== doc.activeElement) {
+      try { restored.focus({ preventScroll: true }); } catch (e) { restored.focus(); }
+    }
+    if (state.opener) _modalOpener = findElement(state.opener) || _modalOpener;
+    try { global.scrollTo(state.pageX, state.pageY); } catch (e) {}
   }
   function refreshOverview() {
     var old = _panes.overview;
@@ -1680,6 +1766,7 @@
 
   function applySnapshot(next, reason) {
     if (!next || !next.tasks) throw new Error("incomplete Hub snapshot");
+    var viewState = captureViewState();
     var changes = taskDelta(D.tasks || [], next.tasks || []);
     var oldActivity = ((live().activity || [])[0] || {}).seq || 0;
     var prevProg = live().progress || {};
@@ -1688,19 +1775,22 @@
     rebuildIndex();
     rerenderTabs(changes);
     refreshOverview();
+    refreshOpenEntityModal();
     reactCockpit(prevProg, prevFleet);
     publishClientState();
+    restoreViewState(viewState);
     reactToChanges(changes);
 
     var cursor = live().cursor || {};
-    LIVE.cursor = cursor.seq || LIVE.cursor;
+    if (typeof cursor.seq === "number") LIVE.cursor = cursor.seq;
     LIVE.lastEventAt = cursor.ts || LIVE.lastEventAt;
     var n = Object.keys(changes).length;
     if (n) announce(n + (n === 1 ? " task changed." : " tasks changed."));
     else if (((live().activity || [])[0] || {}).seq > oldActivity) announce("New canonical Hub activity received.");
     LIVE.dataHealthy = true;
     LIVE.lastAppliedAt = Date.now();
-    renderConnectionStatus(reason === "fallback" ? "polling" : null);
+    resolveWorkerWatches();
+    renderConnectionStatus();
     tickLiveMeta();
   }
 
@@ -1711,7 +1801,9 @@
     // carries the changed rows, never the whole board. The cockpit blocks ride along in
     // payload.live so the hero, fleet and rail move with the entities instead of lagging a full
     // sync behind — the most-watched part of the page must not be the last to update.
+    var viewState = captureViewState();
     var changed = payload.changed || [];
+    var removed = (payload.removed || []).map(function (item) { return typeof item === "string" ? item : item && item.id; }).filter(Boolean);
     var prevTasks = (D.tasks || []).slice();
     var prevProg = live().progress || {};
     var prevFleet = fleetSeqMap(live().fleet);
@@ -1723,6 +1815,12 @@
       for (i = 0; i < rows.length; i++) { if (rows[i].id === ent.id) break; }
       if (i < rows.length) rows[i] = ent; else rows.push(ent);
     });
+    if (removed.length) {
+      Object.keys(TYPE_COLLECTION).forEach(function (type) {
+        var key = TYPE_COLLECTION[type];
+        D[key] = (D[key] || []).filter(function (ent) { return removed.indexOf(ent.id) < 0; });
+      });
+    }
     if (payload.live) {
       D.live = D.live || {};
       Object.keys(payload.live).forEach(function (k) {
@@ -1735,13 +1833,18 @@
     rebuildIndex();
     rerenderTabs(changes);
     refreshOverview();
+    refreshOpenEntityModal();
     reactCockpit(prevProg, prevFleet);
     reactToChanges(changes);
     publishClientState();
+    restoreViewState(viewState);
     var cursor = payload.cursor || {};
     LIVE.cursor = Math.max(LIVE.cursor, cursor.seq || 0);
+    var liveCursor = ((payload.live || {}).cursor) || {};
+    LIVE.lastEventAt = liveCursor.ts || cursor.ts || LIVE.lastEventAt;
     LIVE.dataHealthy = true;
     LIVE.lastAppliedAt = Date.now();
+    resolveWorkerWatches();
     renderConnectionStatus();
     tickLiveMeta();
   }
@@ -1758,13 +1861,7 @@
     });
   }
 
-  function syncDelta(reason) {
-    // FALLBACK to the full snapshot on: no base cursor, HTTP failure, parse error, or a cursor
-    // GAP (the server head regressed below ours — a reset we cannot patch over).
-    if (LIVE.syncing) { LIVE.queued = true; return Promise.resolve(); }
-    var since = LIVE.cursor || 0;
-    if (!since) return syncSnapshot(reason);
-    LIVE.syncing = true;
+  function readDelta(since) {
     return timedFetch("delta.json?since=" + encodeURIComponent(since), {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
@@ -1774,116 +1871,158 @@
       var seq = payload && payload.cursor ? payload.cursor.seq : null;
       if (typeof seq !== "number" || seq < since) throw new Error("cursor gap");
       applyDelta(payload);
-      LIVE.failures = 0;
-    }).catch(function () {
-      LIVE.syncing = false;                       // let the recovery full-sync take the slot
-      return syncSnapshot((reason || "delta") + "-fallback");
-    }).then(function (v) {
-      LIVE.syncing = false;
-      if (LIVE.queued) { LIVE.queued = false; syncDelta("queued"); }
-      return v;
     });
   }
-  function syncSnapshot(reason) {
-    if (LIVE.syncing) { LIVE.queued = true; return Promise.resolve(); }
-    LIVE.syncing = true;
-    var button = doc.getElementById("refreshBtn");
-    if (button) button.classList.add("is-syncing");
-    var headers = { Accept: "application/json" };
-    if (LIVE.etag) headers["If-None-Match"] = LIVE.etag;
+  function recoverSnapshot(reason) {
     return timedFetch("?format=json", {
-      credentials: "same-origin", cache: "no-store", headers: headers
+      credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
-      if (response.status === 304) return { notModified: true };
       if (!response.ok) throw new Error("HTTP " + response.status);
-      LIVE.etag = response.headers.get("ETag") || LIVE.etag;
-      return response.json().then(function (snapshot) { return { snapshot: snapshot }; });
-    }).then(function (result) {
-      var snapshot = result && result.snapshot;
-      if (snapshot && JSON.stringify(snapshot) !== LIVE.snapshotJSON) {
-        applySnapshot(snapshot, reason || "sync");
-      } else {
-        LIVE.dataHealthy = true;
-        LIVE.lastAppliedAt = Date.now();
-        renderConnectionStatus(reason === "fallback" ? "polling" : null);
-        tickLiveMeta();
-      }
+      return response.json();
+    }).then(function (snapshot) {
+      applySnapshot(snapshot, reason || "recovery");
+      LIVE.signaledCursor = Math.max(LIVE.signaledCursor, LIVE.cursor);
+    });
+  }
+  function noteEventSignal(signal) {
+    signal = signal || {};
+    var seq = Number(signal.seq);
+    if (isFinite(seq)) LIVE.signaledCursor = Math.max(LIVE.signaledCursor, seq);
+    if (signal.ts) LIVE.lastEventAt = signal.ts;
+  }
+  function applyStreamPatch(payload) {
+    if (!payload || !payload.cursor || typeof payload.cursor.seq !== "number" || !Array.isArray(payload.changed)) {
+      reconnectForRecovery("A malformed live patch was rejected; reconnecting from the last canonical cursor.");
+      return false;
+    }
+    noteEventSignal(payload.cursor);
+    if (LIVE.syncing) { LIVE.patchQueue.push(payload); return true; }
+    if (payload.cursor.seq < LIVE.cursor) {
+      reconnectForRecovery("The live cursor regressed; reconnecting for a canonical snapshot.");
+      return false;
+    }
+    applyDelta(payload);
+    return true;
+  }
+  function drainPatchQueue() {
+    var queue = LIVE.patchQueue.splice(0);
+    queue.forEach(function (payload) {
+      if (payload.cursor && payload.cursor.seq >= LIVE.cursor) applyDelta(payload);
+    });
+  }
+  function reconcileCanonical(reason) {
+    if (LIVE.syncing) return Promise.resolve();
+    if (!LIVE.snapshotRequired && !LIVE.reconcilePending && LIVE.signaledCursor <= LIVE.cursor) return Promise.resolve();
+    var snapshotFirst = LIVE.snapshotRequired;
+    LIVE.snapshotRequired = false;
+    LIVE.reconcilePending = false;
+    LIVE.syncing = true;
+    var work = snapshotFirst ? recoverSnapshot(reason) : readDelta(LIVE.cursor).catch(function () {
+      return recoverSnapshot((reason || "event") + "-recovery");
+    });
+    var succeeded = false;
+    return work.then(function () {
+      succeeded = true;
       LIVE.failures = 0;
-    }).catch(function (error) {
+      LIVE.dataHealthy = true;
+    }, function () {
       LIVE.failures += 1;
       LIVE.dataHealthy = false;
-      renderConnectionStatus();
-      announce("Live Hub synchronization is degraded. Retrying automatically.");
-      if (reason === "manual") toast("Sync failed; automatic recovery is active.", "error");
+      LIVE.reconcilePending = false;
+      LIVE.snapshotRequired = false;
+      LIVE.signaledCursor = LIVE.cursor;
+      announce("The live event stream is connected, but canonical recovery could not complete yet.");
     }).then(function () {
       LIVE.syncing = false;
-      if (button) button.classList.remove("is-syncing");
-      if (LIVE.queued) { LIVE.queued = false; syncSnapshot("queued"); }
+      drainPatchQueue();
+      renderConnectionStatus();
+      tickLiveMeta();
+      if (succeeded && (LIVE.snapshotRequired || LIVE.reconcilePending)) {
+        reconcileCanonical("coalesced");
+      }
     });
   }
-
-  function stopFallback() {
-    if (LIVE.fallbackTimer) clearTimeout(LIVE.fallbackTimer);
-    LIVE.fallbackTimer = null;
+  function requestRecovery(signal, reason, force, snapshotRequired) {
+    signal = signal || {};
+    var seq = Number(signal.seq);
+    if (snapshotRequired) {
+      LIVE.snapshotRequired = true;
+      if (isFinite(seq)) LIVE.signaledCursor = seq;
+    } else if (isFinite(seq)) {
+      LIVE.signaledCursor = Math.max(LIVE.signaledCursor, seq);
+    }
+    if (signal.ts) LIVE.lastEventAt = signal.ts;
+    LIVE.reconcilePending = LIVE.reconcilePending || !!force || LIVE.signaledCursor > LIVE.cursor;
+    if (LIVE.reconcilePending && !LIVE.syncing) reconcileCanonical(reason || "recovery");
   }
-  function startFallback() {
-    if (LIVE.fallbackTimer) return;
-    var poll = function () {
-      LIVE.fallbackTimer = null;
-      syncSnapshot("fallback").then(function () {
-        // Base cadence comes from the snapshot — the server owns the poll budget.
-        var base = live().fallback_poll_ms || 2500;
-        if (LIVE.state !== "live") LIVE.fallbackTimer = setTimeout(poll, Math.min(12000, base + LIVE.failures * 1250));
-      });
-    };
-    LIVE.fallbackTimer = setTimeout(poll, 600);
+  function reconnectForRecovery(message) {
+    LIVE.dataHealthy = false;
+    if (message) announce(message);
+    disconnectLive();
+    connectLive();
   }
   function disconnectLive() {
-    if (LIVE.source) LIVE.source.close();
+    var source = LIVE.source;
     LIVE.source = null;
+    if (source) source.close();
     LIVE.connected = false;
-    if (LIVE.reconnectTimer) clearTimeout(LIVE.reconnectTimer);
-    LIVE.reconnectTimer = null;
+    renderConnectionStatus();
   }
   function connectLive() {
-    disconnectLive();
-    if (doc.hidden) return;
-    if (!global.EventSource) { renderConnectionStatus("polling"); startFallback(); return; }
-    setStatus("connecting", LIVE.failures ? "Reconnecting" : "Connecting");
-    var source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor));
+    if (LIVE.source || !global.EventSource) { renderConnectionStatus(); return; }
+    var source;
+    try { source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor)); }
+    catch (error) { renderConnectionStatus(); return; }
     LIVE.source = source;
     source.onopen = function () {
+      if (source !== LIVE.source) return;
       LIVE.connected = true; LIVE.failures = 0;
-      stopFallback(); renderConnectionStatus(); tickLiveMeta();
+      renderConnectionStatus(); tickLiveMeta();
     };
     source.addEventListener("ready", function (event) {
-      // Never bump the cursor past unconsumed events: if the stream starts ahead of our state,
-      // pull the gap as a delta (which advances the cursor only after patching).
+      if (source !== LIVE.source) return;
       try {
         var data = JSON.parse(event.data);
-        if ((data.seq || 0) > LIVE.cursor) syncDelta("ready");
+        LIVE.lastEventAt = data.ts || LIVE.lastEventAt;
+        if (Number(data.seq) < LIVE.cursor) requestRecovery(data, "cursor-reset", true, true);
+        else if (Number(data.seq) > LIVE.cursor || !LIVE.dataHealthy) requestRecovery(data, "cursor-catch-up", !LIVE.dataHealthy);
       } catch (error) {}
       tickLiveMeta();
     });
-    source.addEventListener("heartbeat", function () {
+    source.addEventListener("heartbeat", function (event) {
+      if (source !== LIVE.source) return;
       renderConnectionStatus();
       tickLiveMeta();
     });
+    source.addEventListener("patch", function (event) {
+      if (source !== LIVE.source) return;
+      try {
+        var payload = JSON.parse(event.data);
+        if (applyStreamPatch(payload)) pulseBeacon();
+      } catch (error) {
+        reconnectForRecovery("A malformed live patch was rejected; reconnecting from the last canonical cursor.");
+      }
+    });
     source.addEventListener("hub", function (event) {
-      try { LIVE.lastEventAt = (JSON.parse(event.data).ts) || LIVE.lastEventAt; } catch (error) {}
-      pulseBeacon();
-      syncDelta("event");
+      if (source !== LIVE.source) return;
+      var data = {};
+      try { data = JSON.parse(event.data); } catch (error) {}
+      noteEventSignal(data);
+      // Identity-only envelopes are advisory compatibility signals. The canonical `patch` event
+      // carries the state itself; HTTP reads remain confined to reconnect/gap recovery.
     });
     source.addEventListener("reconnect", function () {
+      if (source !== LIVE.source) return;
       disconnectLive();
-      LIVE.reconnectTimer = setTimeout(connectLive, 300);
+      connectLive();
     });
     source.onerror = function () {
-      disconnectLive();
+      if (source !== LIVE.source) return;
+      LIVE.connected = false;
       LIVE.failures += 1;
       renderConnectionStatus();
-      startFallback();
-      LIVE.reconnectTimer = setTimeout(connectLive, Math.min(10000, 900 + LIVE.failures * 700));
+      // EventSource owns transport reconnection and preserves Last-Event-ID. Its next ready event
+      // performs exactly one cursor catch-up when the canonical head is ahead.
     };
   }
   function pulseBeacon() {
@@ -1893,15 +2032,9 @@
   }
   function startLive() {
     tickLiveMeta();
+    renderConnectionStatus();
     connectLive();
-    LIVE.integrityTimer = setInterval(function () {
-      if (!doc.hidden) syncSnapshot("integrity");
-    }, 30000);
     setInterval(tickRelativeTimes, 5000);
-    doc.addEventListener("visibilitychange", function () {
-      if (doc.hidden) { disconnectLive(); stopFallback(); setStatus("paused", "Paused"); }
-      else { syncSnapshot("visible"); connectLive(); }
-    });
     global.addEventListener("beforeunload", disconnectLive);
   }
 
@@ -1977,28 +2110,30 @@
             result.ok ? "info" : "error");
     });
   }
+  var _workerWatches = [];
+  function resolveWorkerWatches() {
+    var now = (live().inflight || []).length;
+    _workerWatches.slice().forEach(function (watch) {
+      if (now <= watch.before) return;
+      clearTimeout(watch.timer);
+      _workerWatches.splice(_workerWatches.indexOf(watch), 1);
+      toast(watch.count > 1 ? "Workers are on the board — leases claimed." : "Worker is on the board — lease claimed.", "success");
+      flashClass(doc.getElementById("fleetCard"), "bumped", 1400);
+    });
+  }
   function watchForWorker(count) {
     // A launch is a HAND-OFF to a process outside the browser, and the board cannot see whether
     // it started. So it watches its own canonical signal — a new live lease appearing — and says
     // so either way rather than leaving the operator staring at an unchanged page.
     var before = (live().inflight || []).length;
-    var deadline = Date.now() + 45000;
-    setStatus("connecting", "Waiting for worker");
-    var timer = setInterval(function () {
-      var now = (live().inflight || []).length;
-      if (now > before) {
-        clearInterval(timer);
-        toast(count > 1 ? "Workers are on the board — leases claimed." : "Worker is on the board — lease claimed.", "success");
-        flashClass(doc.getElementById("fleetCard"), "bumped", 1400);
-        if (LIVE.connected) setStatus("live", "Live");
-        return;
-      }
-      if (Date.now() > deadline) {
-        clearInterval(timer);
-        if (LIVE.connected) setStatus("live", "Live");
-        toast("No lease appeared in 45s. Register the worker protocol handler, or check that the queue has ready work.", "error");
-      }
-    }, 1500);
+    var watch = { before: before, count: count, timer: null };
+    watch.timer = setTimeout(function () {
+      var index = _workerWatches.indexOf(watch);
+      if (index < 0) return;
+      _workerWatches.splice(index, 1);
+      toast("No lease appeared in 45s. Register the worker protocol handler, or check that the queue has ready work.", "error");
+    }, 45000);
+    _workerWatches.push(watch);
   }
   function primeLaunchControls() {
     if (!launchCfg().enabled) return;
@@ -2051,7 +2186,6 @@
   function build() {
     doc.body.classList.add("hub-app");
     var bm = doc.getElementById("brandMark"); if (bm) bm.appendChild(icon("cube"));
-    var rb = doc.getElementById("refreshIco"); if (rb) rb.appendChild(icon("refresh"));
     var tabsBar = doc.getElementById("tabsBar"), panes = doc.getElementById("tabPanes");
     if (!tabsBar || !panes) return;
     TABS.forEach(function (t) {
@@ -2065,8 +2199,6 @@
       var pane = t.build ? t.build(t) : buildTableTab(t);
       _panes[t.key] = pane; panes.appendChild(pane);
     });
-    var refresh = doc.getElementById("refreshBtn");
-    if (refresh) refresh.addEventListener("click", function () { syncSnapshot("manual"); });
     initLaunchControls();
     var mo = doc.getElementById("universalModal");
     if (mo) mo.addEventListener("click", function (e) { if (e.target === mo) closeModal(); });
@@ -2074,7 +2206,7 @@
     doc.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
     tickClock(); setInterval(tickClock, 1000);
     paintBackdrop();
-    setStatus("connecting", "Connecting");
+    renderConnectionStatus();
 
     global.HubCommands = [
       { id: "cmd:overview", title: "Go to Overview", sub: "tab", run: function () { activate("overview"); } },
@@ -2085,8 +2217,7 @@
       { id: "cmd:dag", title: "Dependency frontier", sub: "verb", run: function () { focusCard("dagCard"); } },
       { id: "cmd:theme", title: "Toggle light / dark theme", sub: "verb", run: toggleTheme },
       { id: "cmd:density", title: "Cycle density", sub: "verb", run: cycleDensity },
-      { id: "cmd:copy-link", title: "Copy deep link", sub: "verb", run: function () { try { navigator.clipboard.writeText(location.href); toast("Link copied", "success"); } catch (e) { toast("Copy failed", "error"); } } },
-      { id: "cmd:refresh", title: "Sync now", sub: "verb", run: function () { syncSnapshot("manual"); } }
+      { id: "cmd:copy-link", title: "Copy deep link", sub: "verb", run: function () { try { navigator.clipboard.writeText(location.href); toast("Link copied", "success"); } catch (e) { toast("Copy failed", "error"); } } }
     ];
 
     var initial = "overview";
@@ -2122,7 +2253,7 @@
   }
 
   global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity,
-                 closeModal: closeModal, sync: syncSnapshot, live: function () { return LIVE; } };
+                 closeModal: closeModal, live: function () { return LIVE; } };
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", build);
   else build();

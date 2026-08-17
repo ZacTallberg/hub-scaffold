@@ -1,9 +1,14 @@
 # Hub frontend contract
 
 The renderer implements [`PROJECT/HUB-QUALITY.md`](../../PROJECT/HUB-QUALITY.md). The server-provided
-snapshot/JSON island is canonical; HTML is a progressively enhanced projection, and live event
-identity only prompts an ordered delta or snapshot read. Keep DOM patching idempotent, preserve
-focus and scroll position, and never animate a heartbeat, replay, or no-op.
+snapshot/JSON island is canonical; HTML is a progressively enhanced projection, and the live event
+stream carries ordered canonical patches directly into the renderer. The server coalesces a burst
+to its highest folded cursor, and the client applies it immediately without an HTTP round trip or
+secondary cadence. A delta catch-up or full snapshot read is recovery after reconnect or
+a detected gap, never normal operation and never a timer.
+There is no manual sync affordance because a connected Hub is already current. Keep DOM patching
+idempotent, keep an open entity dialog live, preserve focus and scroll position, and never animate
+a heartbeat, replay, or no-op. Connection status says exactly `Connected` or `Disconnected`.
 
 Semantic tokens—not one-off colors and dimensions—carry project identity, hierarchy, spacing,
 surface depth, state, and motion. Preserve the zero-CDN runtime floor unless an ADR records the
