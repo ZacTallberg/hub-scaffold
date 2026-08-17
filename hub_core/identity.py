@@ -12,7 +12,8 @@ Resolution order, most specific first:
 
 A raw scaffold checkout still boots without a file so development tools remain usable. A file
 that exists but is malformed raises rather than silently presenting another identity.
-``PROJECT_IDENTITY_FILE`` overrides the path (the example and fixtures use it).
+``PROJECT_IDENTITY_FILE`` overrides the exact file. ``HUB_PROJECT_DIR`` points monorepo or nested
+adapters at their shared Project Plane while keeping this module independent of Django settings.
 """
 import json
 import os
@@ -30,7 +31,11 @@ _CACHE = {"key": None, "value": None}
 
 
 def path() -> Path:
-    return Path(os.environ.get("PROJECT_IDENTITY_FILE") or _ROOT / "PROJECT" / "project.json")
+    exact = os.environ.get("PROJECT_IDENTITY_FILE")
+    if exact:
+        return Path(exact)
+    project_dir = os.environ.get("HUB_PROJECT_DIR")
+    return (Path(project_dir) if project_dir else _ROOT / "PROJECT") / "project.json"
 
 
 def _from_file(p):
@@ -73,7 +78,11 @@ def load() -> dict:
         raise ValueError(f"{p}: key must match {_KEY_SAFE.pattern!r}")
     ident["key"] = key
 
-    brand_value = str(ident.get("brand") or os.environ.get("HUB_BRAND") or key.title()).strip()
+    # Keep adoption lossless for projects that already carried the same meaning under an older
+    # field name.  The canonical five are still what every consumer receives and what the next
+    # committed edit should use.
+    brand_value = str(ident.get("brand") or ident.get("display_name")
+                      or os.environ.get("HUB_BRAND") or key.title()).strip()
     ident["brand"] = key.title() if not brand_value or brand_value.startswith("{{") else brand_value
 
     app_name = str(ident.get("app_name") or os.environ.get("HUB_APP_NAME") or key).strip()
@@ -81,7 +90,8 @@ def load() -> dict:
         app_name = key
     ident["app_name"] = app_name
 
-    app_host = str(ident.get("app_host") or os.environ.get("HUB_PUBLIC_URL")
+    app_host = str(ident.get("app_host") or ident.get("live_url") or ident.get("public_url")
+                   or os.environ.get("HUB_PUBLIC_URL")
                    or f"urn:hub:{key}").strip().rstrip("/")
     if not app_host or app_host.startswith("{{"):
         app_host = f"urn:hub:{key}"

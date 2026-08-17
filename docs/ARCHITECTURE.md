@@ -114,7 +114,9 @@ See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
 | Strict completion proves more | Evidence dereference plus a typed exit-0 receipt the WORKER produced | The hub never runs the command itself; the token grants terminal board authority, not a shell. See [SECURITY.md](../SECURITY.md). |
 | Unsafe Django defaults are visible | AST audit for DEBUG, literal SECRET_KEY fallback, and `ALLOWED_HOSTS="*"` | This is a focused audit, not a complete Django deployment check. |
 | Mutating Hub routes have an explicit guard | URL resolver audit recognizes `@writer` or the narrow origin-gated mint | Reads are deliberately unauthenticated and expose whatever entities contain. |
-| Running build matches deploy record | Git/build stamp and `PROJECT/state.json` comparison; optional `served` observation | The Hub does not deploy or continuously probe production by itself. Adopt the deploy/canary patterns. |
+| Running build matches deploy record | Git or normalized `HUB_BUILD_SHA` / `SOURCE_VERSION` / build stamp and `PROJECT/state.json`; optional external `served` comparison | The Hub does not deploy or continuously probe production by itself. Adopt the deploy/canary patterns. |
+| Done work is deployed/live | Immutable deploy entity with exact `sha == served_sha`, explicit `tasks_closed[]`, and the running artifact SHA | Git ancestry is optional source/legacy enrichment; the canary and deploy writer must be wired by the adopter. |
+| Portable identity is coherent | Audit emits a high finding when Django `HUB_PROJECT_KEY` differs from `PROJECT/project.json` | Correct the mismatch before further mutations so discovery and entity ids share one namespace. |
 | Browser launch cannot mint general write authority | CSRF mint; signed bounded grant; token-gated single-use consume | Enabling process launch is a privileged local capability and requires workstation installation. |
 
 ## What is not automatic

@@ -25,6 +25,14 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - Removed repository-audit fan-out from task completion. Child receipts compose upward, releases
   prove only a newly created critical integration seam, and observed failures become fresh repair
   tasks instead of speculative work imposed on every delivery agent.
+- Delivery now treats the required `verified_by` result plus `evidence_uri` as an ordinary done
+  task's accepted-operation proof; only a task that explicitly declares a critical command needs
+  an additional matching exit-0 transient receipt. The cockpit no longer calls correctly untested
+  work "unverified."
+- Adaptive WIP now recovers one requested seat after any canonical completion carrying its required
+  real-operation result and evidence, rather than only after rare `verification_run` events, while
+  `receipt.failed` remains a congestion signal even when no test exit code exists. Throughput no
+  longer depends on manufacturing tests.
 
 ### Hub Excellence Contract and live throughput cockpit
 
@@ -37,6 +45,13 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ### Interop truth, portable identity, and bounded realtime correctness
 
+- Production delivery is now artifact-native: normalized `HUB_BUILD_SHA`, `SOURCE_VERSION`, or the
+  pre-build stamp supplies running identity when `.git` is absent. Immutable deploy records require
+  exact `sha == served_sha` plus explicit done `tasks_closed[]`, so named work can be proven live
+  directly; Git ancestry remains optional legacy/source enrichment.
+- Production mutations and agent discovery inherit the baked revision through `_git_head()`'s
+  artifact fallback, and the audit now emits a high finding when Django `HUB_PROJECT_KEY` disagrees
+  with the portable identity key.
 - `start_task` now delegates the entire lease + `todo -> in_progress` transition to the claim
   seam. It no longer follows a successful claim with a schema-invalid `active/planning_state`
   update that hid the granted lease behind an MCP tool error. MCP argument errors are JSON-RPC

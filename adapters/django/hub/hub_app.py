@@ -8,8 +8,10 @@ Settings keys (all optional; the {{...}} literals are the documented defaults th
 substitutes at scaffold time):
     HUB_PROJECT_KEY   entity-id prefix (lowercase slug), e.g. "acme".  Default "{{PROJECT_KEY}}".
     HUB_BRAND         human brand for titles, e.g. "Acme".             Default "{{BRAND}}".
+    HUB_PROJECT_DIR   canonical project-plane directory.               Default BASE_DIR/PROJECT.
     HUB_BUILD_STAMP   BASE_DIR-relative path of the build-sha stamp the deploy pipeline bakes
                       into the artifact.                               Default "build_sha.txt".
+    HUB_BUILD_SHA     explicit immutable revision injected by the artifact platform; overrides stamp.
     HUB_DONE_STRICTNESS completion proof dial: tracked or strict.       Default "tracked".
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
@@ -19,8 +21,8 @@ substitutes at scaffold time):
     HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
     HUB_WORKER_GRANT_TTL_S      short grant lifetime, clamped by hub_core. Default 120 seconds.
-The PROJECT/ plane dir is resolved relative to the Django BASE_DIR; HUB_DIR (env) overrides the
-event-log location (default PROJECT/.hub).
+The project plane defaults to Django ``BASE_DIR/PROJECT``; ``HUB_PROJECT_DIR`` relocates that whole
+canonical plane and ``HUB_DIR`` can separately relocate runtime ledger state.
 """
 import ast
 import functools
@@ -46,7 +48,18 @@ def _dj_setting(name, default=None):
 
 
 BASE_DIR = Path(_dj_setting("BASE_DIR") or os.environ.get("HUB_BASE_DIR") or Path.cwd())
-PROJECT = BASE_DIR / "PROJECT"
+_PROJECT_SETTING = _dj_setting("HUB_PROJECT_DIR")
+_PROJECT_OVERRIDE = _PROJECT_SETTING or os.environ.get("HUB_PROJECT_DIR")
+PROJECT = Path(_PROJECT_OVERRIDE) if _PROJECT_OVERRIDE else BASE_DIR / "PROJECT"
+if not PROJECT.is_absolute():
+    PROJECT = BASE_DIR / PROJECT
+# hub_core.identity is deliberately Django-free and reads this same canonical override from the
+# environment. Mirror a Django setting into the process before loading identity so the adapter,
+# agent card, MCP metadata, schemas, and ledger cannot split across two Project Planes.
+if _PROJECT_SETTING:
+    os.environ["HUB_PROJECT_DIR"] = str(PROJECT)
+else:
+    os.environ.setdefault("HUB_PROJECT_DIR", str(PROJECT))
 HUB_DIR = Path(os.environ.get("HUB_DIR") or (PROJECT / ".hub"))
 SCHEMA_DIR = PROJECT / "schema"
 _IDENTITY = _identity.load()
@@ -155,25 +168,52 @@ def current_state(st=None):
 
 
 def _git_head():
+    """Return the running code identity in every deployment shape.
+
+    A source checkout can ask Git directly. A production image normally contains no ``.git``;
+    there the pre-build stamp is the artifact's own identity and is the value that must ride on
+    Hub mutations and discovery metadata.
+    """
     try:
         r = subprocess.run(["git", "-C", str(BASE_DIR), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=4)
-        return r.stdout.strip() or None
+        head = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
-        return None
+        head = ""
+    return head or _running_sha()
 
 
 def _build_stamp_path() -> Path:
     return BASE_DIR / _dj_setting("HUB_BUILD_STAMP", "build_sha.txt")
 
 
+def _normalize_build_sha(value):
+    """Canonical raw Git identity, or ``None`` for a mutable/non-revision value."""
+    import re
+
+    value = str(value or "").strip().lower()
+    if value.startswith("build-"):
+        value = value[6:]
+    return value if re.fullmatch(r"[0-9a-f]{7,64}", value) else None
+
+
 def _running_sha():
-    """The sha baked into the artifact at build time (HUB_BUILD_STAMP) — the RUNNING build's
-    identity where there is no .git (the deployed container)."""
+    """The immutable identity carried by the RUNNING artifact, even when ``.git`` is absent.
+
+    An explicit Hub override wins. The pre-build stamp is next because adopters commonly bake a
+    short SHA while buildpacks expose the same revision as a full ``SOURCE_VERSION``; choosing the
+    stamp keeps it directly comparable to the deploy proof. ``SOURCE_VERSION`` remains the
+    zero-file fallback for platforms that inject the revision themselves.
+    """
+    for value in (_dj_setting("HUB_BUILD_SHA"), os.environ.get("HUB_BUILD_SHA")):
+        revision = _normalize_build_sha(value)
+        if revision:
+            return revision
     try:
-        return _build_stamp_path().read_text(encoding="utf-8").strip() or None
+        stamped = _normalize_build_sha(_build_stamp_path().read_text(encoding="utf-8"))
     except OSError:
-        return None
+        stamped = None
+    return stamped or _normalize_build_sha(os.environ.get("SOURCE_VERSION"))
 
 
 def _state_json() -> dict:
@@ -186,16 +226,37 @@ def _state_json() -> dict:
     return {}
 
 
-def build_meta(served=None) -> dict:
-    """The build/coherence block for /hub.json. `coherent` is COMPUTED, never read from state.json."""
+def build_meta(served=None, state=None) -> dict:
+    """The build/coherence block for /hub.json. ``coherent`` is always computed.
+
+    Runtime ``PROJECT/state.json`` remains a useful deploy-side shortcut. If it is absent, the
+    latest immutable post-canary deploy entity is already durable canonical evidence and supplies
+    the same release SHA; production must not report "no deploy" while its ledger names one.
+    """
     sj = _state_json()
-    head = _git_head() or _running_sha()   # deployed container has no .git -> the baked sha IS the running identity
-    sha = sj.get("last_deploy_sha")
-    coherent = bool(head and sha and head == sha and (served is None or served == head))
+    head = _git_head()  # Git checkout or, in a production artifact, the baked build stamp.
+    sha = _normalize_build_sha(sj.get("last_deploy_sha"))
+    release = None
+    if not sha and state is not None:
+        candidates = []
+        for deploy in state.get("by_type", {}).get("deploy", []):
+            shipped = _normalize_build_sha(deploy.get("sha"))
+            observed = _normalize_build_sha(deploy.get("served_sha"))
+            if (shipped and observed == shipped and
+                    isinstance(deploy.get("tasks_closed"), list)):
+                candidates.append(deploy)
+        if candidates:
+            release = max(candidates, key=lambda row: str(row.get("at") or ""))
+            sha = _normalize_build_sha(release.get("sha"))
+    served_sha = _normalize_build_sha(served) if served is not None else None
+    coherent = bool(head and sha and head == sha and (served is None or served_sha == head))
     return {
-        "repo": sj.get("repo_build"), "deploy": sj.get("last_deploy_build"),
-        "tag": sj.get("last_deploy_tag"), "sha": sha, "served_sha": served, "head": head,
-        "coherent": coherent, "live_url": sj.get("live_url"),
+        "repo": sj.get("repo_build"),
+        "deploy": sj.get("last_deploy_build") or (release or {}).get("build"),
+        "tag": sj.get("last_deploy_tag"), "sha": sha, "served_sha": served_sha, "head": head,
+        "coherent": coherent, "live_url": sj.get("live_url") or _IDENTITY.get("app_host"),
+        "release_source": "state.json" if _normalize_build_sha(sj.get("last_deploy_sha"))
+                          else ("deploy entity" if release else None),
     }
 
 
@@ -303,6 +364,21 @@ def route_guard_adapter(state):
     return viols
 
 
+def identity_settings_adapter(state):
+    """One project must present one entity namespace at every discovery and mutation edge."""
+    configured = str(PROJECT_KEY or "").strip().lower()
+    portable = str(_IDENTITY.get("key") or "").strip().lower()
+    if configured == portable:
+        return []
+    return [_sv(
+        "identity:project-key-mismatch",
+        "Django HUB_PROJECT_KEY matches PROJECT/project.json key",
+        "HUB_PROJECT_KEY=%r but portable identity key=%r" % (configured, portable),
+        "one identical project key",
+        "align HUB_PROJECT_KEY with PROJECT/project.json before accepting another mutation",
+    )]
+
+
 # (base, head) -> paths changed between two commits, memoized: both ends are immutable, so the
 # answer cannot change, and a warm audit must not pay a subprocess. None means the range could not
 # be read (a shallow clone, an unfetched sha) — UNKNOWN, never "empty".
@@ -326,8 +402,8 @@ def _range_touched_paths(base, head):
 
 def _run_audit_with_store(s, served=None) -> dict:
     state = current_state(s)
-    bm = build_meta(served)
-    coh = {"head": bm["head"], "sha": bm["sha"], "served": served}
+    bm = build_meta(served, state=state)
+    coh = {"head": bm["head"], "sha": bm["sha"], "served": bm["served_sha"]}
     # DEPLOY BOOKKEEPING IS NOT DRIFT. A deploy records its own sha in the state file AFTER the
     # canary passes, so HEAD sits one commit past the shipped sha from then until the next deploy.
     # coherence:repo demanded exact equality, which made it permanently high — reachable-green only
@@ -348,10 +424,12 @@ def _run_audit_with_store(s, served=None) -> dict:
     elif not bm["sha"]:
         # Pre-first-deploy is a legitimate state: visible, but it must not block the very deploy
         # that creates the record.
-        coh["unknown"] = "no deploy record yet (PROJECT/state.json last_deploy_sha missing — the deploy script writes it)"
+        coh["unknown"] = ("no deploy record yet (neither PROJECT/state.json last_deploy_sha nor "
+                          "a coherent immutable deploy entity is present)")
         coh["unknown_severity"] = "warn"
     return _audit.audit(state, registry(), store=s, coherence=coh,
-                        adapters=[settings_ast_adapter, route_guard_adapter])
+                        adapters=[settings_ast_adapter, identity_settings_adapter,
+                                  route_guard_adapter])
 
 
 def run_audit(st=None, served=None) -> dict:

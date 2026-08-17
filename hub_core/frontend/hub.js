@@ -1861,8 +1861,13 @@
     });
   }
 
+  function servedSuffix() {
+    var observed = D.build && D.build.served_sha;
+    return observed ? "&served=" + encodeURIComponent(observed) : "";
+  }
+
   function readDelta(since) {
-    return timedFetch("delta.json?since=" + encodeURIComponent(since), {
+    return timedFetch("delta.json?since=" + encodeURIComponent(since) + servedSuffix(), {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
@@ -1874,7 +1879,7 @@
     });
   }
   function recoverSnapshot(reason) {
-    return timedFetch("?format=json", {
+    return timedFetch("?format=json" + servedSuffix(), {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
@@ -1971,7 +1976,7 @@
   function connectLive() {
     if (LIVE.source || !global.EventSource) { renderConnectionStatus(); return; }
     var source;
-    try { source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor)); }
+    try { source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor) + servedSuffix()); }
     catch (error) { renderConnectionStatus(); return; }
     LIVE.source = source;
     source.onopen = function () {

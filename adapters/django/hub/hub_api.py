@@ -464,7 +464,7 @@ _STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None}
 _STATE_LOCK = threading.RLock()
 _SNAP_CACHE = {"key": None, "value": None}
 _AUDIT_CACHE = {"key": None, "value": None}
-_DELIVERY_CACHE = {"values": {}, "latest": {}, "building": set()}
+_DELIVERY_CACHE = {"values": {}, "building": set()}
 _DELIVERY_LOCK = threading.RLock()
 
 
@@ -547,90 +547,42 @@ def _projected(store, cursor):
         return events, state
 
 
-def _unmeasured_delivery(state, served=None, prior=None):
-    """Current delivery shape without putting repository subprocesses on the push path."""
-    prior = prior or {}
-    prior_records = prior.get("records") or {}
-    records, unlanded, available = {}, [], []
-    for task in state.get("by_type", {}).get("task", []):
-        if task.get("status") != "done":
-            continue
-        task_id = task["id"]
-        commits = [str(c) for c in ((task.get("provenance") or {}).get("commits") or [])
-                   if str(c).strip()]
-        old = prior_records.get(task_id) or {}
-        if old.get("commits") == commits:
-            record = dict(old)
-        else:
-            runs = task.get("verification_run") or []
-            if isinstance(runs, dict):
-                runs = [runs]
-            verified = any(isinstance(run, dict) and run.get("exit_code") == 0 for run in runs)
-            record = {
-                "state": "verified" if verified else "unverified",
-                "state_reason": "delivery ancestry is materializing off the realtime path",
-                "verified": verified, "landed": None, "deployed": None, "live": None,
-                "commits": commits,
-            }
-        records[task_id] = record
-        if record.get("landed") is False:
-            unlanded.append(task_id)
-        if record.get("live") is True:
-            available.append(task_id)
-    landing_complete = bool(records) and all(r.get("landed") is not None for r in records.values())
-    release_complete = bool(records) and all(r.get("deployed") is not None for r in records.values())
-    live_complete = bool(records) and all(r.get("live") is not None for r in records.values())
-    measured = {"verified": True, "landing": landing_complete,
-                "release": release_complete, "live": live_complete}
-    notes = {
-        "verified": None,
-        "landing": None if landing_complete else "delivery ancestry is materializing off the realtime path",
-        "release": None if release_complete else "release ancestry is materializing off the realtime path",
-        "live": None if live_complete else "live ancestry is materializing off the realtime path",
-    }
-    return {
-        "records": records,
-        "counts": {"done": len(records),
-                   "verified": sum(1 for r in records.values() if r.get("verified")),
-                   "landed": sum(1 for r in records.values() if r.get("landed") is True),
-                   "landed_unmeasured": sum(1 for r in records.values() if r.get("landed") is None),
-                   "unlanded": len(unlanded),
-                   "deployed": sum(1 for r in records.values() if r.get("deployed") is True),
-                   "live": len(available)},
-        "measured": measured, "notes": notes, "unlanded": unlanded, "available": available,
-        "live_attested": False,
-        "live_identity": {"source": "caller-supplied ?served" if served else None,
-                          "sha": served or None},
-        "integration_ref": prior.get("integration_ref") or "HEAD",
-    }
-
-
-def _cache_delivery(key, served, value):
+def _cache_delivery(key, value):
     with _DELIVERY_LOCK:
         _DELIVERY_CACHE["values"][key] = value
-        _DELIVERY_CACHE["latest"][served] = value
         if len(_DELIVERY_CACHE["values"]) > 12:
             _DELIVERY_CACHE["values"].pop(next(iter(_DELIVERY_CACHE["values"])), None)
 
 
 def _delivery_fast(state, cursor, served):
-    key = (cursor.get("seq", 0), cursor.get("hash", ""), served)
+    # The artifact stamp is production's direct running identity. Include it in the cache key so
+    # a new image can never inherit a delivery projection materialized by an older one, even when
+    # both point at the same durable ledger cursor.
+    artifact_sha = hub_app._running_sha()
+    identity_key = (served, artifact_sha)
+    key = (cursor.get("seq", 0), cursor.get("hash", ""), *identity_key)
     with _DELIVERY_LOCK:
         exact = _DELIVERY_CACHE["values"].get(key)
         if exact is not None:
             return exact, True
-        prior = _DELIVERY_CACHE["latest"].get(served)
         should_build = key not in _DELIVERY_CACHE["building"]
         if should_build:
             _DELIVERY_CACHE["building"].add(key)
-    provisional = _unmeasured_delivery(state, served=served, prior=prior)
+    # Exact sha/served_sha/tasks_closed proof is pure entity projection and belongs on the direct
+    # path. Git ancestry is legacy/source-checkout enrichment only.
+    provisional = delivery.direct_block(state, served=served)
+    if not delivery.repository_available():
+        _cache_delivery(key, provisional)
+        with _DELIVERY_LOCK:
+            _DELIVERY_CACHE["building"].discard(key)
+        return provisional, True
     if should_build:
         # Ancestry measurement is useful but can spawn many git commands. Keep it completely off
         # the delta/SSE response path; its own completion wakes the cockpit with a second patch.
         def materialize():
             try:
                 measured = delivery.block(state, served=served)
-                _cache_delivery(key, served, measured)
+                _cache_delivery(key, measured)
                 realtime.publish(hub_app.HUB_DIR,
                                  {"kind": "projection.delivery", "cursor": cursor.get("seq", 0)},
                                  channel=hub_app.PROJECT_KEY)
@@ -697,7 +649,7 @@ def _snapshot(served=None):
         else:
             audit = hub_app.run_audit(s, served=served)
             _AUDIT_CACHE["key"], _AUDIT_CACHE["value"] = audit_key, audit
-        build = hub_app.build_meta(served)
+        build = hub_app.build_meta(served, state=state)
         last = events[-1] if events else {}
         inflight = _inflight(state)
         adher = adherence.score(events, state, leases=inflight)

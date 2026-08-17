@@ -58,6 +58,7 @@ launcher never receives it. Read [SECURITY.md](SECURITY.md) before enabling writ
 | Understand components, storage, flows, and guarantees | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Threat model, trust boundaries, deployment checklist | [SECURITY.md](SECURITY.md) |
 | Mount the Hub into Django | [adapters/django/MOUNTING.md](adapters/django/MOUNTING.md) |
+| Upgrade an existing adopter without replacing its identity or ledger | [docs/ADOPTER-UPGRADE.md](docs/ADOPTER-UPGRADE.md) |
 | Operate the HTTP API | [adapters/django/HUB-API.md](adapters/django/HUB-API.md) |
 | Run, back up, restore, rotate, or troubleshoot | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
 | Apply the transient proof policy | [docs/TESTING.md](docs/TESTING.md) |
@@ -133,10 +134,15 @@ commit:
 bash init.sh ../my-project my-project "My Project" https://my-project.example.com
 ```
 
-It copies `PROJECT/`, `hub_core/`, adapters, patterns, the operating/security agreements, and the
+It copies `.gitignore`, `PROJECT/`, `hub_core/`, adapters, patterns, the operating/security agreements, and the
 architecture contract; installs the governance templates as `CLAUDE.md` and `AGENTS.md`; substitutes `{{PROJECT_KEY}}`, `{{BRAND}}`, and
 `{{LIVE_URL}}`; and fails if a placeholder survives. It does not merge into an existing project or
 mount the Django app automatically.
+
+Existing projects use the manifest-driven [whole-unit upgrader](docs/ADOPTER-UPGRADE.md). It advances
+the engine, Django adapter, schemas, and canonical quality/doctrine contracts together, records the
+exact scaffold commit and file hashes, and preserves project identity, seed, state, live ledger,
+project laws, and adopter extras.
 
 Then, inside the new project:
 
@@ -191,7 +197,9 @@ without installing and exercising the workstation half through its real operatio
   event streams, and any read authentication.
 - Durable storage and a demonstrated backup/restore operation for `HUB_DIR`.
 - A secret manager and write-token rotation process.
-- The build stamp and live front-door canary.
+- An immutable build identity (`HUB_BUILD_SHA`, a platform-provided `SOURCE_VERSION`, or a pre-build
+  stamp), the live front-door canary, and its immutable `{sha, served_sha, tasks_closed}` deploy
+  record.
 - Alert delivery and scheduling for standing monitors.
 - Project-specific schemas and business invariants, plus temporary critical-boundary probes when
   a task genuinely needs one.

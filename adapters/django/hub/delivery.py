@@ -1,55 +1,33 @@
-"""Where a task's WORK actually is — from recorded evidence only.
+"""Where completed work actually is, from durable release evidence.
 
-`done` is a claim about a RECEIPT. *Landed* is a claim about the integration branch. *Deployed* is
-a claim about a release record. *Live* is a claim about the running artifact. They are four
-different questions, and collapsing them into one green word is how a board reports success for
-work that is still sitting on a worktree branch.
+``done``, ``landed``, ``deployed``, and ``live`` remain separate claims.  Production delivery does
+not depend on a ``.git`` directory: a post-canary deploy record names the exact shipped SHA, the
+exact SHA observed at the front door, and the task ids that release closes.  When those SHAs match,
+the running artifact's pre-build stamp can prove the named tasks live with no ancestry subprocess.
 
-So no state here is read off a status label. Each leg has exactly ONE evidence source:
-
-    verified   an exit-0 verification_run receipt on the task
-    landed     a recorded commit that is an ANCESTOR of the integration branch
-    deployed   a deploy entity whose recorded sha carries that commit
-    live       the served sha this request was handed matches a deploy that carries it
-
-THE CENTRAL RULE: a leg that cannot be measured in this context reports UNMEASURED — never False,
-and never quietly True. Inside a shipped container there is no `.git`, so the ancestry probe cannot
-run; the honest answer is "nobody asked", and a `landed` count computed as done-minus-unlanded
-would silently promote every task whose ancestry was never checked into a positive claim about the
-integration branch. Counts here are therefore COUNTED from what measured true, never subtracted,
-and the never-measured remainder gets its own number so the two halves of any ratio describe the
-same set.
-
-`live` additionally distinguishes ATTESTED from claimed: only the caller can probe the running box,
-so `?served=<sha>` is a caller's assertion. It is honoured, because the caller is the only one who
-can see the box — but it is never silent. An unattested live reading says so.
+Git ancestry remains useful in a source checkout and for legacy deploy records that predate
+``tasks_closed``.  It is optional corroboration, never a prerequisite for production truth.
 """
 import subprocess
 
 from . import hub_app
 
-# The absence VOCABULARY: what each unmeasured leg means, so a record is never absent-with-no-
-# reason. A field that cannot say WHY it is unknown reads as a bug in the board rather than a
-# question nobody could ask.
+
 _ABSENT_DEFAULT = {
-    "landing": "no repository in this context — commit ancestry could not be checked here",
-    "release": "no deploy record carries a comparable sha",
-    "live": "the running artifact was not probed, so no task can be proven live here",
-    "verified": "no verification_run receipt recorded on this task",
+    "landing": "no repository or exact release closure establishes landing in this context",
+    "release": "no coherent deploy closure names this task",
+    "live": "the running artifact has no comparable pre-build SHA",
+    "verified": "no substantive completion result and evidence are recorded on this task",
 }
-# Worst-to-best, so a record's headline state is the FURTHEST leg it can actually prove.
-_STATE_ORDER = {"unrecorded": 0, "unverified": 1, "verified": 2, "landed": 3,
-                "deployed": 4, "live": 5}
 
 
 def _git(*args):
-    """Run a git command in the repo root. Returns None when git or the repo is absent — which is
-    a measurement that could not be taken, not a negative result."""
+    """Run a Git command in the repo root, returning ``None`` when it cannot answer."""
     try:
         out = subprocess.run(("git",) + args, cwd=str(hub_app.BASE_DIR), capture_output=True,
                              text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
-        return None  # absorbs: no git binary / no repo / timeout — the leg is unmeasurable
+        return None
     return out.stdout.strip() if out.returncode == 0 else None
 
 
@@ -57,113 +35,150 @@ def _repo_present():
     return _git("rev-parse", "--git-dir") is not None
 
 
+def repository_available():
+    """Cheap hot-path hint for whether optional ancestry enrichment is worth dispatching."""
+    return (hub_app.BASE_DIR / ".git").exists()
+
+
 def _integration_ref():
-    """The branch a commit must reach to count as landed. HEAD is the honest default: an adopter's
-    integration branch is theirs to name, and guessing 'main' would report red on a repo that
-    calls it something else."""
     return hub_app._dj_setting("HUB_INTEGRATION_REF", None) or "HEAD"
 
 
 def _commits_of(task):
-    return [c for c in ((task.get("provenance") or {}).get("commits") or []) if str(c).strip()]
+    return [str(c).strip() for c in ((task.get("provenance") or {}).get("commits") or [])
+            if str(c).strip()]
 
 
-def _receipt_ok(task):
+def _completion_proof(task):
+    """Return the task's accepted-operation proof and, when absent, the exact reason.
+
+    Every legitimate ``done`` transition already requires a substantive ``verified_by`` result
+    plus evidence. That is the proof for ordinary work. A task opts into one additional boundary
+    only by declaring ``verification_command``; then its matching exit-0 transient receipt is also
+    required. Absence of a test command is therefore never rendered as an ordinary task failing
+    verification.
+    """
+    results = task.get("verified_by")
+    evidence = task.get("evidence_uri")
+    has_results = isinstance(results, list) and bool(results) and all(
+        isinstance(value, str) and value.strip() for value in results)
+    has_evidence = isinstance(evidence, list) and bool(evidence) and all(
+        isinstance(value, str) and value.strip() for value in evidence)
+    if not has_results or not has_evidence:
+        return False, _ABSENT_DEFAULT["verified"]
+
+    command = str(task.get("verification_command") or "").strip()
+    if not command:
+        return True, None
     runs = task.get("verification_run") or []
     if isinstance(runs, dict):
         runs = [runs]
-    return any(isinstance(r, dict) and r.get("exit_code") == 0 for r in runs)
+    passed = any(isinstance(run, dict) and run.get("exit_code") == 0
+                 and str(run.get("command") or "") == command for run in runs)
+    if passed:
+        return True, None
+    return False, "declared critical probe has no matching exit-0 transient receipt"
+
+
+def _sha(value):
+    return hub_app._normalize_build_sha(value) or ""
 
 
 def _is_ancestor(commit, ref):
-    """True/False when the question could be asked, None when it could not (unknown commit, no
-    repo). A shallow clone that does not CONTAIN the commit cannot answer it either, and that is
-    an unmeasured leg rather than an unlanded commit."""
+    """True/False when Git answered, ``None`` when the commit or repository is unavailable."""
     if _git("cat-file", "-e", "%s^{commit}" % commit) is None:
         return None
     try:
         out = subprocess.run(("git", "merge-base", "--is-ancestor", commit, ref),
                              cwd=str(hub_app.BASE_DIR), capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
-        return None  # absorbs: probe could not run — unmeasurable, never "not landed"
+        return None
     if out.returncode == 0:
         return True
     if out.returncode == 1:
         return False
-    return None  # any other exit is git failing to answer, not a negative answer
+    return None
 
 
-def block(state, served=None):
-    """The delivery projection for the whole board.
+def _release_rows(state):
+    """Normalize deploy records without promoting an incoherent canary to release evidence."""
+    rows = []
+    for deploy in state.get("by_type", {}).get("deploy", []):
+        tasks = deploy.get("tasks_closed")
+        explicit = isinstance(tasks, list)
+        shipped, observed = _sha(deploy.get("sha")), _sha(deploy.get("served_sha"))
+        rows.append({
+            "id": deploy.get("id"),
+            "at": deploy.get("at"),
+            "sha": shipped,
+            "served_sha": observed,
+            "tasks": set(str(task) for task in tasks) if explicit else set(),
+            "explicit": explicit,
+            "coherent": bool(explicit and shipped and observed and shipped == observed),
+        })
+    return rows
 
-    {records: {task_id: record}, counts, measured: {leg: bool}, notes, unlanded: [...],
-     available: [...], live_attested: bool, live_identity: {...}}"""
-    tasks = state.get("by_type", {}).get("task", [])
-    deploys = state.get("by_type", {}).get("deploy", [])
-    repo = _repo_present()
-    ref = _integration_ref()
 
-    # A deploy record is comparable only if it names a sha we can relate commits to.
-    deploy_shas = [str(d.get("sha") or "").strip() for d in deploys if str(d.get("sha") or "").strip()]
-    served_sha = str(served or "").strip()
+def _live_identity(served=None):
+    """Identify the code answering this request without putting Git on the live path."""
+    artifact = _sha(hub_app._running_sha())
+    caller = _sha(served)
+    conflict = bool(artifact and caller and artifact != caller)
+    running = artifact or caller
+    if artifact:
+        source = "artifact build stamp"
+    elif caller:
+        source = "caller-supplied ?served fallback"
+    else:
+        source = None
+    return {"sha": running or None, "artifact_sha": artifact or None,
+            "caller_sha": caller or None, "source": source, "conflict": conflict}
 
-    measured = {"verified": True,          # a receipt is on the entity; always askable
-                "landing": bool(repo),
-                "release": bool(deploy_shas),
-                "live": bool(served_sha and deploy_shas and repo)}
-    notes = {leg: (None if ok else _ABSENT_DEFAULT[leg]) for leg, ok in measured.items()}
-    if repo and not deploy_shas:
-        notes["release"] = "no deploy has been recorded on this board yet"
 
-    records, unlanded, available = {}, [], []
-    for t in tasks:
-        if (t.get("status") or "").lower() != "done":
-            continue
-        tid = t["id"]
-        commits = _commits_of(t)
-        verified = _receipt_ok(t)
+def _headline(record, ref):
+    if record["landed"] is False:
+        return "unlanded", ("recorded commit is not an ancestor of %s — done on the board, "
+                            "not on the integration branch" % ref)
+    if record["live"] is True:
+        return "live", "named by the deploy closure carried by this running artifact"
+    if record["deployed"] is True:
+        return "deployed", "named by an exact post-canary deploy closure"
+    if record["landed"] is True:
+        return "landed", "on the integration branch"
+    if record["deployed"] is False:
+        reason = "not named by any coherent deploy closure"
+    else:
+        reason = None
+    if record["verified"]:
+        return "verified", reason or _ABSENT_DEFAULT["landing"]
+    proof_reason = record.get("proof_reason") or _ABSENT_DEFAULT["verified"]
+    if record["commits"]:
+        return "unverified", proof_reason
+    return "unverified", proof_reason or reason or (
+        "no commit recorded on this task, so downstream ancestry cannot be asked")
 
-        landed = None
-        if repo and commits:
-            answers = [_is_ancestor(c, ref) for c in commits]
-            if any(a is True for a in answers):
-                landed = True
-            elif all(a is False for a in answers):
-                landed = False
-            # a mix of False and None stays None: one uncheckable commit means the question was
-            # not fully asked, and "partially unlanded" is not a claim this can make
-        deployed = None
-        if landed is True and deploy_shas:
-            deployed = any(_is_ancestor(c, sha) is True for c in commits for sha in deploy_shas)
-        live = None
-        if deployed is True and served_sha:
-            live = any(_is_ancestor(c, served_sha) is True for c in commits)
 
-        if landed is False:
-            state_name, reason = "unlanded", (
-                "recorded commit is not an ancestor of %s — done on the board, not on the "
-                "integration branch" % ref)
-        elif live is True:
-            state_name, reason = "live", "carried by the served artifact"
-        elif deployed is True:
-            state_name, reason = "deployed", "carried by a recorded release"
-        elif landed is True:
-            state_name, reason = "landed", "on the integration branch"
-        elif verified:
-            state_name, reason = "verified", (notes["landing"] or "landing not established")
-        elif commits:
-            state_name, reason = "unverified", _ABSENT_DEFAULT["verified"]
-        else:
-            state_name, reason = ("unverified" if not verified else "verified"), (
-                "no commit recorded on this task, so nothing downstream of the receipt can be asked")
+def _finish(records, identity, ref, release_rows):
+    unlanded = [task for task, row in records.items() if row["landed"] is False]
+    available = [task for task, row in records.items() if row["live"] is True]
+    for record in records.values():
+        record["state"], record["state_reason"] = _headline(record, ref)
 
-        records[tid] = {"state": state_name, "state_reason": reason, "verified": verified,
-                        "landed": landed, "deployed": deployed, "live": live, "commits": commits}
-        if landed is False:
-            unlanded.append(tid)
-        if live is True:
-            available.append(tid)
-
+    any_explicit = any(row["explicit"] for row in release_rows)
+    any_coherent = any(row["coherent"] for row in release_rows)
+    landing_complete = bool(records) and all(r["landed"] is not None for r in records.values())
+    release_complete = bool(records) and all(r["deployed"] is not None for r in records.values())
+    live_complete = bool(records) and all(r["live"] is not None for r in records.values())
+    notes = {
+        "verified": None,
+        "landing": None if landing_complete else _ABSENT_DEFAULT["landing"],
+        "release": ("deploy records exist but none has matching sha/served_sha"
+                    if any_explicit and not any_coherent else
+                    (None if release_complete else _ABSENT_DEFAULT["release"])),
+        "live": ("caller-observed SHA conflicts with this artifact's build stamp"
+                 if identity["conflict"] else
+                 (None if live_complete else _ABSENT_DEFAULT["live"])),
+    }
     counts = {
         "done": len(records),
         "verified": sum(1 for r in records.values() if r["verified"]),
@@ -174,12 +189,93 @@ def block(state, served=None):
         "live": len(available),
     }
     return {
-        "records": records, "counts": counts, "measured": measured, "notes": notes,
-        "unlanded": unlanded, "available": available,
-        # A live reading rests on a sha the CALLER supplied; only the caller can probe the box.
-        # Allowed, never silent.
-        "live_attested": False,
-        "live_identity": {"source": "caller-supplied ?served" if served_sha else None,
-                          "sha": served_sha or None},
+        "records": records, "counts": counts,
+        "measured": {"verified": True, "landing": landing_complete,
+                     "release": release_complete, "live": live_complete},
+        "notes": notes, "unlanded": unlanded, "available": available,
+        # A coherent deploy's served_sha is the durable receipt from the independent canary.
+        "live_attested": bool(identity["sha"] and not identity["conflict"] and any(
+            row["coherent"] and row["sha"] == identity["sha"] for row in release_rows)),
+        "live_identity": identity,
         "integration_ref": ref,
     }
+
+
+def direct_block(state, served=None):
+    """Fast production projection using only entities plus the artifact build stamp."""
+    tasks = state.get("by_type", {}).get("task", [])
+    releases = _release_rows(state)
+    identity = _live_identity(served)
+    coherent = [row for row in releases if row["coherent"]]
+    # An explicit but failed canary is not a release and cannot turn unknown delivery into a
+    # measured negative. Once one coherent closure exists, absence from every carried-task set is
+    # meaningful because modern closures name the complete already-done set in that release.
+    explicit_protocol = bool(coherent)
+    records = {}
+
+    for task in tasks:
+        if (task.get("status") or "").lower() != "done":
+            continue
+        tid = task["id"]
+        verified, proof_reason = _completion_proof(task)
+        commits = _commits_of(task)
+        closures = [row for row in coherent if tid in row["tasks"]]
+        deployed = True if closures else (False if explicit_protocol else None)
+        landed = True if deployed is True else None  # a coherent downstream closure implies landing
+        if not identity["sha"]:
+            live = None
+        elif identity["conflict"]:
+            live = False
+        elif closures:
+            live = any(row["sha"] == identity["sha"] for row in closures)
+        else:
+            live = False if explicit_protocol else None
+        records[tid] = {
+            "verified": verified, "proof_reason": proof_reason,
+            "landed": landed, "deployed": deployed,
+            "live": live, "commits": commits,
+            "release_sha": (max(closures, key=lambda row: str(row.get("at") or ""))["sha"]
+                            if closures else None),
+        }
+    return _finish(records, identity, _integration_ref(), releases)
+
+
+def block(state, served=None):
+    """Delivery projection enriched with optional Git ancestry for source/legacy contexts."""
+    result = direct_block(state, served=served)
+    if not _repo_present():
+        return result
+
+    ref = _integration_ref()
+    deploys = state.get("by_type", {}).get("deploy", [])
+    deploy_shas = [_sha(row.get("sha")) for row in deploys if _sha(row.get("sha"))]
+    releases = _release_rows(state)
+    tasks = {task["id"]: task for task in state.get("by_type", {}).get("task", [])}
+    identity = result["live_identity"]
+
+    for tid, record in result["records"].items():
+        commits = _commits_of(tasks.get(tid, {}))
+        if commits and record["landed"] is not True:
+            answers = [_is_ancestor(commit, ref) for commit in commits]
+            if any(answer is True for answer in answers):
+                record["landed"] = True
+            elif answers and all(answer is False for answer in answers):
+                record["landed"] = False
+
+        # Legacy records had no tasks_closed. Preserve their ancestry-based answer without
+        # overriding a modern explicit closure's measured negative.
+        if record["deployed"] is None and record["landed"] is True and deploy_shas:
+            answers = [_is_ancestor(commit, sha) for commit in commits for sha in deploy_shas]
+            if any(answer is True for answer in answers):
+                record["deployed"] = True
+            elif answers and all(answer is False for answer in answers):
+                record["deployed"] = False
+        if (record["live"] is None and record["deployed"] is True and identity["sha"] and commits
+                and not identity["conflict"]):
+            answers = [_is_ancestor(commit, identity["sha"]) for commit in commits]
+            if any(answer is True for answer in answers):
+                record["live"] = True
+            elif answers and all(answer is False for answer in answers):
+                record["live"] = False
+
+    return _finish(result["records"], identity, ref, releases)

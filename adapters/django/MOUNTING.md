@@ -55,7 +55,9 @@ ASGI_APPLICATION = "your_project.asgi.application"
 # --- hub configuration (all keys optional; defaults shown) ---
 HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "acme"
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
+# HUB_PROJECT_DIR = BASE_DIR / "PROJECT"  # override for monorepos; env form is also accepted
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
+# HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
@@ -107,8 +109,11 @@ operators/agents may hold it because terminal governance authority is still priv
 
 Notes:
 
-- `BASE_DIR` must exist in settings (Django's default template provides it). The adapter
-  resolves `PROJECT/`, the build stamp, and evidence paths relative to it.
+- `BASE_DIR` must exist in settings (Django's default template provides it). The adapter resolves
+  the build stamp and evidence paths relative to it. The project plane defaults to
+  `BASE_DIR/PROJECT`; set `HUB_PROJECT_DIR` (Django setting or environment) when a monorepo keeps
+  the canonical plane elsewhere. A relative override is resolved from `BASE_DIR`, and identity,
+  schemas, ledger, claims, and grants all follow that one plane.
 - `HUB_PROJECT_KEY` must match `^[a-z0-9][a-z0-9-]*$` — it prefixes every entity id
   (`acme:task:0001`). Pick it once; ids are allocated once and never renumbered.
 - The AST security audit (part of `hubaudit`) scans your settings file and FAILS on:
@@ -204,6 +209,13 @@ sure that proxy does not buffer `text/event-stream`, does not cache or transform
 connection a suitable idle timeout. Those proxy settings are part of the realtime path: buffering
 turns immediate server events back into delayed batches even when Django is correct.
 
+The Hub kit is inlined and does not require `collectstatic`, but the host product often does. Build
+the product's static artifact under **production settings**. In particular, never run
+`DEBUG=1 python manage.py collectstatic` when `STORAGES` selects its hashed/manifest backend only in
+production: that creates a development artifact and the released app then resolves a manifest that
+was never built. A container build should use `DEBUG=0` (plus a non-secret build-only
+`SECRET_KEY` where settings require one) for `collectstatic`.
+
 The built-in wake bus is literal push with process scope, which is complete for one ASGI worker.
 If the deployment runs multiple server processes or hosts, configure `HUB_REALTIME_BROKER` with a
 shared broker factory. It must return an object exposing `publish(channel, signal)` and
@@ -253,7 +265,8 @@ credential-shaped pushes.
 
 The audit is computed-not-attested: schema validity of every entity, referential integrity
 (no dangling idrefs), ADR numbering, event-log hash-chain tamper check, build coherence
-(git HEAD vs deploy record vs served sha), settings AST safety, and route-guard introspection
+(Git/artifact identity vs deploy record vs served sha), portable-identity alignment
+(`HUB_PROJECT_KEY` must match `PROJECT/project.json`), settings AST safety, and route-guard introspection
 (every `/hub/api/` route must carry either the general `@writer` token gate or the explicitly narrow
 origin-gated launch mint marker). It never trusts a stored boolean.
 
@@ -262,10 +275,22 @@ origin-gated launch mint marker). It never trusts a stored boolean.
 The audit wants to know WHICH build is running:
 
 - In a checkout, it uses `git rev-parse HEAD`.
-- In a deployed artifact (no `.git`), it reads the `HUB_BUILD_STAMP` file — have your build
-  write the commit sha into it (e.g. `git rev-parse --short HEAD > build_sha.txt` at image build).
-- Your deploy script records the shipped sha in `PROJECT/state.json` (`last_deploy_sha`).
-- A reverse-proxy/canary can pass the sha it observed live as `?served=<sha>`.
+- In a deployed artifact (no `.git`), an explicit immutable `HUB_BUILD_SHA` wins, followed by the
+  pre-build `HUB_BUILD_STAMP`, then the platform-provided `SOURCE_VERSION` fallback. The
+  stamp precedes `SOURCE_VERSION` because many platforms expose a full SHA while established Hub
+  artifacts deliberately stamp its short, deploy-record-compatible form. Have your build inject
+  or write the commit sha **before** constructing the artifact (for example,
+  `git rev-parse --short HEAD > build_sha.txt`). The same artifact-native identity is attached to
+  production Hub mutations and drives live delivery without requiring Git in the container.
+- Your deploy script may also record the shipped sha in `PROJECT/state.json`
+  (`last_deploy_sha`). If that runtime shortcut is absent, build/audit coherence falls back to the
+  latest coherent immutable deploy entity rather than reporting a false "no deploy record".
+- After the front-door canary sees that exact SHA, `POST /hub/api/deploy` records immutable
+  `sha`, matching `served_sha`, and the explicit done `tasks_closed[]` carried by the release.
+  That exact closure plus the running artifact stamp proves those tasks live directly. Git ancestry
+  remains optional source-checkout/legacy enrichment.
+- A reverse-proxy/canary may also pass the sha it observed as `?served=<sha>`; it is an external
+  comparison, not the primary running identity, and a conflict with the artifact stamp is visible.
 
 Unknowable coherence is REPORTED, never silently skipped: missing build identity is a blocking
 violation in prod and an amber warning under `DEBUG`; a missing deploy record (pre-first-deploy)

@@ -16,11 +16,14 @@ The companion files implement the contract:
 | `standing-canary.md` | Law 4: the out-of-band re-check, executed at natural moments — not a cron |
 | `pre-receive-gate.sh` | Adjacent: server-side push gate (secrets can never enter the repo) — code, because it refuses |
 
-For a mounted Hub, add one project-specific post-canary integration: append a validated `deploy`
-entity and update the running deployment's `PROJECT/state.json` with `last_deploy_sha` and
-`live_url`. The generic shell skeleton cannot know how to reach a container/host's durable runtime
-mount, so it does not pretend to perform that integration. Until it is wired, Hub build coherence
-will remain unknown or stale.
+For a mounted Hub, add one project-specific post-canary integration: append one immutable validated
+`deploy` entity whose `sha` and canary-observed `served_sha` match exactly and whose
+`tasks_closed[]` explicitly names the already-done work carried by that release. Also update the
+running deployment's `PROJECT/state.json` with `last_deploy_sha` and `live_url`. The running Hub
+reads its own normalized `HUB_BUILD_SHA`, platform-provided `SOURCE_VERSION`, or pre-build stamp; the
+exact deploy closure therefore proves named tasks live without requiring `.git` in the image. The
+generic shell cannot know how to reach a container/host's durable runtime mount, so the adopter must
+wire this integration. Until then, Hub build and delivery coherence remain unknown.
 
 ---
 
@@ -124,7 +127,7 @@ build           $BUILD_CMD inside the worktree
 ship            $SHIP_CMD  (the only org-specific part)
 canary          poll $LIVE_URL for "build-$SHA"; fail closed         (Law 3)
 bless           write "<sha> <url>" to the blessed-records dir       (Law 4; failure blocks)
-record          invoke the project's deploy-entity/runtime-state writer
+record          POST immutable {sha, served_sha:sha, tasks_closed:[done ids], at}; write runtime state
 ```
 
 Anti-patterns this contract explicitly bans:
