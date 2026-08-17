@@ -28,6 +28,9 @@ import urllib.request
 from typing import Any
 
 
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; HubLiveClient/1.0)"
+
+
 def _base_url(value: str | None) -> str:
     raw = (value or os.environ.get("HUB_API_BASE") or "").strip().rstrip("/")
     if not raw:
@@ -48,7 +51,15 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _post(base: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json", "Accept": "application/json", **_auth_headers()}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        # Some production edges reject Python urllib's default signature before the request can
+        # reach Hub authentication. Keep a stable browser-compatible identity while allowing an
+        # adopter to name its own operational client at the edge.
+        "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
+        **_auth_headers(),
+    }
     request = urllib.request.Request(
         f"{base}/api/{operation}",
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
