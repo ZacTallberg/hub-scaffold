@@ -475,14 +475,19 @@ def _range_touched_paths(base, head):
     return val
 
 
-def _legacy_receipt_baseline():
-    """Read the adopter's immutable migration cutoff; absent/invalid means no exception."""
+def _compatibility_baselines():
+    """Read immutable adopter cutoffs; absent/invalid records enable no exception."""
     try:
         manifest = json.loads((WORK_ROOT / "hub-scaffold-adoption.json").read_text(encoding="utf-8"))
-        record = (manifest.get("compatibility") or {}).get("legacy_done_receipts")
-        return record if isinstance(record, dict) else None
+        compatibility = manifest.get("compatibility") or {}
+        receipt = compatibility.get("legacy_done_receipts")
+        entity_schema = compatibility.get("legacy_entity_schema")
+        return (
+            receipt if isinstance(receipt, dict) else None,
+            entity_schema if isinstance(entity_schema, dict) else None,
+        )
     except (OSError, ValueError, TypeError):
-        return None
+        return None, None
 
 
 def _run_audit_with_store(s, served=None) -> dict:
@@ -512,8 +517,10 @@ def _run_audit_with_store(s, served=None) -> dict:
         coh["unknown"] = ("no deploy record yet (neither PROJECT/state.json last_deploy_sha nor "
                           "a coherent immutable deploy entity is present)")
         coh["unknown_severity"] = "warn"
+    receipt_baseline, entity_schema_baseline = _compatibility_baselines()
     return _audit.audit(state, registry(), store=s, coherence=coh,
-                        legacy_receipt_baseline=_legacy_receipt_baseline(),
+                        legacy_receipt_baseline=receipt_baseline,
+                        legacy_entity_schema_baseline=entity_schema_baseline,
                         adapters=[settings_ast_adapter, identity_settings_adapter,
                                   storage_runtime_adapter,
                                   route_guard_adapter])

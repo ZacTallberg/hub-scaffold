@@ -50,6 +50,14 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - Adopter upgrades now hash-anchor a one-time legacy receipt cutoff. Audits separately account for
   immutable pre-contract done tasks missing only `verified_by`/`evidence_uri`, never invent evidence,
   and continue to block every other or post-cutoff schema defect.
+- Added a fail-closed legacy adopter-schema lane at that original cutoff: exact portable validation
+  signatures are grouped by entity type, every subject must remain untouched since capture, receipt
+  debt stays separately accounted, and no ledger row, evidence claim, or canonical schema is altered.
+- Documented the private-board routing boundary: middleware may registry-pre-authenticate a scoped
+  token only to preserve opaque API routing; `@writer` reauthenticates and remains final authority,
+  while invalid tokens reveal no route and no credential grants Hub read access.
+- Fixed `hub_core.client create --plan-item` to emit canonical `{step, done:false}` plan rows instead
+  of a non-schema `status` field.
 
 ### Hub Excellence Contract and live throughput cockpit
 

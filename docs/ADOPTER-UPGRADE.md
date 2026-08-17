@@ -50,3 +50,11 @@ head. This does not rewrite history or fabricate evidence. It only lets the audi
 for already-done tasks whose sole schema debt is a missing/empty `verified_by` or `evidence_uri`.
 The anchor must still match the immutable ledger; other defects and every post-cutoff completion
 remain blocking. Future upgrades preserve the original cutoff.
+
+That same first boundary records `compatibility.legacy_entity_schema` at the **original** receipt
+cutoff. It contains exact SHA-256 signatures, grouped by entity type, of canonical portable-schema
+errors that remain after receipt-only debt is removed in memory. The runtime accounts a signature
+only when the cutoff hash matches this ledger, the entity's last event is at or before the cutoff,
+and its current type + full error signature are allowlisted. A single later touch requires the whole
+entity to satisfy the current schema. The ledger is never rewritten, schemas are never broadened,
+and future upgrades preserve rather than recapture this boundary.

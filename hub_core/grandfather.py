@@ -27,7 +27,19 @@ or before that exact hash-anchored cutoff, and invalid *solely* because `verifie
 `evidence_uri` is absent/empty, is accounted as legacy receipt debt. The historical entity is never
 rewritten and no evidence is invented. Anything completed later, any mismatched anchor, or any
 additional schema defect remains a blocking high finding.
+
+An equally narrow adopter-schema lane may account for immutable pre-adoption entities that carried
+extensions outside today's canonical schemas. It is tied to that same original receipt cutoff and
+allows only an exact entity-type + portable validation signature whose subject was never touched
+after the cutoff. A later write therefore opts the whole entity into the current contract.
 """
+
+import re
+
+
+LEGACY_ENTITY_SCHEMA_POLICY = (
+    "pre-cutoff untouched entities with exact portable schema signatures only"
+)
 
 
 def condition_seq(events):
@@ -55,6 +67,17 @@ def anchors_at(events, seqs):
             if ev.get("seq") in want}
 
 
+def last_event_seq(events):
+    """{aggregate: last canonical event seq}; every post-cutoff touch remains visible."""
+    seqs = {}
+    for event in events:
+        aggregate = event.get("aggregate")
+        seq = event.get("seq")
+        if aggregate and isinstance(seq, int):
+            seqs[aggregate] = seq
+    return seqs
+
+
 def legacy_receipt_context(events, baseline):
     """Return the anchored cutoff and current-condition seqs, or None fail-closed.
 
@@ -72,6 +95,55 @@ def legacy_receipt_context(events, baseline):
     if anchors_at(events, [seq]).get(seq) != anchor:
         return None
     return {"seq": seq, "anchor_hash": anchor, "conditions": condition_seq(events)}
+
+
+def legacy_entity_schema_context(events, baseline, receipt_baseline):
+    """Return a fail-closed exact schema-compatibility context, or ``None``.
+
+    The cutoff is not independently selectable: it must be the adopter's original
+    ``legacy_done_receipts`` anchor.  Signatures are accepted only in their canonical hash form.
+    """
+    if not isinstance(baseline, dict) or not isinstance(receipt_baseline, dict):
+        return None
+    seq = baseline.get("seq")
+    anchor = baseline.get("anchor_hash")
+    if seq != receipt_baseline.get("seq") or anchor != receipt_baseline.get("anchor_hash"):
+        return None
+    if (
+        not isinstance(seq, int)
+        or seq <= 0
+        or not isinstance(anchor, str)
+        or not anchor
+        or not isinstance(baseline.get("captured_at"), str)
+        or not baseline.get("captured_at")
+        or baseline.get("policy") != LEGACY_ENTITY_SCHEMA_POLICY
+    ):
+        return None
+    raw = baseline.get("signatures")
+    if not isinstance(raw, dict):
+        return None
+    signatures = {}
+    for entity_type, values in raw.items():
+        if not isinstance(entity_type, str) or not entity_type or not isinstance(values, list):
+            return None
+        if any(
+            not isinstance(value, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+            for value in values
+        ):
+            return None
+        if len(values) != len(set(values)):
+            return None
+        signatures[entity_type] = frozenset(values)
+    events = list(events)
+    if anchors_at(events, [seq]).get(seq) != anchor:
+        return None
+    return {
+        "seq": seq,
+        "anchor_hash": anchor,
+        "signatures": signatures,
+        "last_events": last_event_seq(events),
+    }
 
 
 def baseline_index(guards, baselines, anchors=None):

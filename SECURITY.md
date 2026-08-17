@@ -55,6 +55,37 @@ personal data, confidential prompts, or sensitive evidence in Hub entities if th
 reachable by people who must not see them. If the board is private, enforce authentication and
 access control in Django or at the reverse proxy and test that boundary.
 
+For a private board, middleware may make one routing-only exception so a **valid scoped agent** can
+reach `/hub/api/*` without gaining `/hub/`, collection, audit, schema, or live-stream reads. Preserve
+an opaque boundary: header presence alone would turn an anonymous 404 into the API's 403 and reveal
+the route. Instead, pre-authenticate the token against the canonical registry; invalid, expired,
+revoked, malformed, or missing credentials receive the same opaque response as every other private
+request. `@writer` then authenticates again and remains the final identity + scope authority.
+
+For example, in middleware placed after Django's authentication middleware:
+
+```python
+from django.http import HttpResponseNotFound
+from hub import hub_app
+from hub_core.agent_auth import CredentialError, CredentialRegistry
+
+path = request.path_info
+token = request.headers.get("X-Agent-Token") or ""
+if path.startswith("/hub/api/") and token:
+    try:
+        CredentialRegistry(hub_app.HUB_DIR).authenticate(token)
+    except CredentialError:
+        pass
+    else:
+        return self.get_response(request)  # routing only; @writer reauthenticates + checks scope
+if path.startswith("/hub/") and not request.user.is_authenticated:
+    return HttpResponseNotFound()  # or the adopter's existing identical private-login response
+```
+
+This pre-authentication grants no read or write authority, creates no user session, and must never
+be cached as authorization. Do not exempt any read route. A valid credential reaches the endpoint;
+only its `@writer` decorator decides whether that credential's scopes permit the operation.
+
 ## Secret handling
 
 - Generate a distinct high-entropy `HUB_WRITE_TOKEN` for each deployment while compatibility is
