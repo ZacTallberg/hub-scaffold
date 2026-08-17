@@ -48,8 +48,8 @@ command for each, keep it beside the runbook, and every step below becomes liter
    behaviour — it is refusing to produce an artifact that cannot say what it is.
 4. **Acquire one real per-target release lease, then ship the EXACT SHA, never a branch name.**
    Builds for different artifacts may overlap, but the swap-through-canary boundary for one front
-   door is serialized. Give every artifact its own remote script, log, and verdict identity; a
-   shared per-app log lets an older release overwrite or satisfy a newer observer. You stamped a
+   door is serialized. Give every release attempt its own remote script, log, and verdict identity;
+   per-app and per-tag paths both collide under retries. You stamped a
    specific revision in step 3;
    pushing a branch ships whatever that branch points at now, which on a detached checkout or a
    worker branch is something else entirely — an artifact whose identity names bytes it was not
@@ -118,6 +118,6 @@ deliberate. If the last-good sha IS the failed sha, stop: re-shipping it cannot 
 
 Two agents releasing one front door can overwrite each other even when identity travels inside the
 artifact: the older, slower swap may land last. A real per-target lease must span swap, canary,
-blessing, and deploy-record append; per-artifact logs prevent cross-talk between observers. If a
+blessing, and deploy-record append; per-attempt logs prevent cross-talk between observers. If a
 mutable app-scoped build setting also exists, acquire the lease before setting it and release it
 only after clearing your own value. Do not pretend a documented convention is mutual exclusion.
