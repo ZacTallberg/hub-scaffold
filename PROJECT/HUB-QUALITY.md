@@ -39,6 +39,9 @@ This is product work, not a demand for a permanent visual test suite.
 - Realtime starts with a complete snapshot and monotonic cursor. Every canonical mutation publishes
   once after commit into a persistent push stream; the connected client reconciles immediately to the
   highest announced cursor. Normal operation has no interval polling and no manual sync control.
+- An active ledger has one mutation entrance: the served authenticated write API. Agent scripts and
+  operator tooling must use it so append and push publication are indivisible. Direct EventStore,
+  JSONL, or SQLite mutation is offline recovery only and must occur with live writers drained.
 - The UI names one transport truth: **Connected** or **Disconnected**. A disconnect never masquerades
   as freshness; reconnect performs one ordered, deduplicated cursor catch-up and then returns to push.
   Recovery reads are recovery only, not an alternate steady-state synchronization loop.

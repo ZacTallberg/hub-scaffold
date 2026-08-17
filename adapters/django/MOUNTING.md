@@ -239,6 +239,12 @@ cannot wake an SSE connection owned by process B; the stream reports `realtime.s
 rather than pretending otherwise. Broker failure reports `shared-degraded`; durable mutations are
 never rolled back, and reconnect cursor recovery remains authoritative.
 
+This guarantee assumes the active board has one write entrance: these served API routes. A Python
+sidecar that imports the store, a management shell that appends directly, or a script that edits the
+ledger is not a live writer and cannot publish into the server's wake plane. Use
+`python -m hub_core.client` or ordinary HTTP for all agent/operator mutations. Stop or drain the Hub
+before any explicit direct-ledger recovery operation.
+
 This is the transport contract:
 
 - normal Hub writes and reads remain ordinary HTTP requests;
@@ -262,7 +268,8 @@ python manage.py seedhub            # idempotent genesis import (re-running skip
 ```
 
 `seedhub` is the ONE sanctioned hand-authored entry point. After genesis, the board changes
-only through the typed write API (discover -> claim -> implement -> record).
+only through the served typed write API (discover -> claim -> implement -> record). This is also a
+realtime invariant: never call the store directly from a side process while the Hub is active.
 
 ## 7. The audit as a board-integrity gate
 

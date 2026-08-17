@@ -44,7 +44,9 @@ python manage.py seedhub
 ```
 
 `seedhub` is idempotent by entity id. A rejected seed exits nonzero; an existing id is skipped, not
-updated. After genesis, use the typed API rather than editing the event log or generated views.
+updated. After genesis, use the served typed API rather than editing the event log or generated
+views. `python -m hub_core.client` is the dependency-free command wrapper. Direct EventStore,
+JSONL, or SQLite mutation is an offline recovery operation only: drain live writers first.
 
 ## Runtime storage
 
@@ -180,4 +182,5 @@ not use `-NoExit` and closes its own host when the wrapper returns.
 | Audit reports `coherence:unknown` | No Git/build stamp or no first-deploy record |
 | Schema load fails after copy | `PROJECT/schema/` is absent or does not match the adapter's `BASE_DIR` |
 | Different workers see different boards | Server processes are using different `HUB_DIR` paths |
+| Connected cockpit trails the ledger | A writer bypassed the served API, or a multi-process deployment lacks/has lost its shared broker; restore the single live write entrance or broker, then reconnect once for cursor recovery |
 | Launch grant immediately fails | Issuer mismatch, expiry, changed action/task/count, replay, or token mismatch |

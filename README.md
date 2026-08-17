@@ -26,6 +26,9 @@ a rare critical boundary.
 - A typed write API with scoped revocable agent credentials, expiring fenced task leases, atomic
   failure-to-repair routing, and a guarded completion transition. Shared-root auth is an explicit
   migration bridge, not ordinary worker identity.
+- A dependency-free live-board client (`python -m hub_core.client`) that keeps agent mutations on
+  that HTTP seam. It never opens the ledger: durable append and realtime wake remain one operation
+  instead of letting a connected cockpit silently lag an out-of-process write.
 - Event-sourced AgentRuns carry commands, messages, checkpoints, input, handoffs, cooperative
   cancellation, recovery envelopes, and composed child receipts; current MCP Tasks methods expose
   the real durable lifecycle without advertising phantom A2A or notification transports.
@@ -134,6 +137,28 @@ Add `--reload` only for local code editing. Hypercorn or Daphne can serve the sa
 For production, pin the chosen server in the adopting app, terminate TLS at the deployment edge,
 and disable reverse-proxy buffering/caching for `text/event-stream`; see the
 [ASGI mounting contract](adapters/django/MOUNTING.md#5-serve-the-live-hub-through-asgi).
+
+### Operate a running board without bypassing realtime
+
+Once a Hub service is running, every agent and operator mutation goes through its served HTTP API.
+Do not import `EventStore`, call `hub_app.store()`, edit `events.jsonl`, or open `events.db` from a
+side process to change an active board: those are offline recovery surfaces and cannot wake the
+process that owns a connected stream. The small standard-library client makes the correct path the
+fast path:
+
+```bash
+export HUB_API_BASE=http://127.0.0.1:8000/hub
+export HUB_AGENT_TOKEN='<scoped worker credential>' # HUB_WRITE_TOKEN is the migration fallback
+python -m hub_core.client create --title "Ship the export" --acceptance "The live export works" --priority P1
+python -m hub_core.client claim example:task:0001 --agent worker-1
+HUB_LEASE_TOKEN='<returned fencing token>' python -m hub_core.client complete example:task:0001 \
+  --agent worker-1 --accept-note "The live export returned its artifact" \
+  --evidence http://127.0.0.1:8000/export/latest
+```
+
+The command response is the operation receipt; the open cockpit receives the same mutation by push.
+Direct ledger access is permitted only while writers are drained for an explicit backup, restore,
+or disaster-recovery operation.
 
 ## Stamp a new project
 
