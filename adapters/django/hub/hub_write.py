@@ -10,6 +10,7 @@ import re
 import subprocess
 import time
 from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from django.http import HttpResponseNotAllowed, JsonResponse
@@ -654,6 +655,167 @@ def release(request, b):
         return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
     hub_app.release_lease(eid, token)
     return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
+
+
+def _bounded_setting(name, default, low, high):
+    try:
+        value = int(hub_app._dj_setting(name, os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(high, value))
+
+
+@writer(scope="task:fail")
+def fail(request, b):
+    """Atomically turn one real failed attempt into bounded, specialist-routable repair work."""
+    eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
+    signature = str(b.get("signature") or "").strip()
+    note = str(b.get("note") or "").strip()
+    kind = str(b.get("kind") or "execution").strip()
+    if (not isinstance(eid, str) or not eid.strip() or not isinstance(token, str) or
+            not token.strip() or not signature or len(signature) > 256 or not note or
+            len(note) > 4000 or not kind or len(kind) > 128):
+        return JsonResponse({"errors": [{"code": "need_failure",
+            "msg": "id, token, signature (<=256), note (<=4000), and kind (<=128) are required"}]},
+            status=400)
+    evidence = b.get("evidence_uri") or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    if (not isinstance(evidence, list) or len(evidence) > 32 or
+            any(not isinstance(item, str) or not item.strip() for item in evidence)):
+        return JsonResponse({"errors": [{"code": "bad_failure_evidence"}]}, status=422)
+    consequential = b.get("consequential", False)
+    if not isinstance(consequential, bool):
+        return JsonResponse({"errors": [{"code": "bad_consequential",
+                                         "msg": "consequential must be boolean"}]}, status=422)
+
+    failure_key = "fail:" + hashlib.sha256(
+        (eid + "\0" + token + "\0" + signature).encode("utf-8")).hexdigest()[:32]
+    store = hub_app.store()
+    try:
+        replay = next((event for event in store.events(eid)
+                       if event.get("idem_key") == failure_key), None)
+        if replay:
+            hub_app.release_lease(eid, token)
+            payload = replay.get("payload") or {}
+            return JsonResponse({"ok": True, "idempotent": True, "task": eid,
+                                 "repair_task": payload.get("repair_task"),
+                                 "failure_repeats": payload.get("failure_repeats"),
+                                 "circuit_open": bool(payload.get("poison_blocked"))})
+
+        with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+            lease = hub_app._read_lease(eid)
+            if not lease:
+                return JsonResponse({"errors": [{"code": "must_claim"}]}, status=409)
+            if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
+                                            request.hub_auth.credential_id):
+                return JsonResponse({"errors": [{"code": "lease",
+                    "msg": "failure must come from the current fenced lease owner"}]}, status=409)
+            if lease.get("agent") != agent:
+                return JsonResponse({"errors": [{"code": "identity",
+                                                  "lease_agent": lease.get("agent")}]}, status=409)
+
+            state = hub_app.current_state(store)
+            ent = state.get("entities", {}).get(eid)
+            if not ent or ent.get("type") != "task":
+                return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+            if ent.get("status") != "in_progress":
+                return JsonResponse({"errors": [{"code": "not_in_progress"}]}, status=409)
+
+            total = int(ent.get("failure_count") or 0) + 1
+            repeats = (int(ent.get("failure_repeats") or 0) + 1
+                       if ent.get("failure_signature") == signature else 1)
+            threshold = _bounded_setting("HUB_FAILURE_CIRCUIT_THRESHOLD", 3, 1, 100)
+            base = _bounded_setting("HUB_FAILURE_BACKOFF_BASE_S", 30, 1, 86400)
+            ceiling = _bounded_setting("HUB_FAILURE_BACKOFF_MAX_S", 3600, base, 86400)
+            backoff = min(ceiling, base * (2 ** min(repeats - 1, 20)))
+            circuit = repeats >= threshold
+            now = datetime.now(timezone.utc)
+            at = now.isoformat().replace("+00:00", "Z")
+            not_before = (now + timedelta(seconds=backoff)).isoformat().replace("+00:00", "Z")
+
+            repair_local = "repair-" + hashlib.sha256(
+                (eid + "\0" + signature).encode("utf-8")).hexdigest()[:16]
+            repair_id = ids.make_id(hub_app.PROJECT_KEY, "task", repair_local)
+            repair = state.get("entities", {}).get(repair_id)
+            if repair and repair.get("status") in ("done", "dropped", "shadow"):
+                repair_id = ids.make_id(hub_app.PROJECT_KEY, "task",
+                                        repair_local + "-r" + str(total))
+                repair = state.get("entities", {}).get(repair_id)
+
+            last_failure = {"signature": signature, "note": note, "at": at, "kind": kind,
+                            "consequential": consequential, "evidence_uri": evidence,
+                            "agent": agent}
+            source_payload = {
+                "type": "task", "status": "todo", "failure_count": total,
+                "failure_repeats": repeats, "failure_signature": signature,
+                "last_failure": last_failure, "retry_backoff_s": backoff,
+                "not_before": not_before, "repair_task": repair_id,
+                "poison_blocked": circuit,
+                "poison_reason": (f"failure signature repeated {repeats} times; "
+                                  f"repair through {repair_id} before retry") if circuit else "",
+                "operator_attention": consequential,
+            }
+            source_merged = {**ent, **source_payload, "version": ent.get("version", 0) + 1}
+            source_errors = validate(source_merged, "task", hub_app.registry())
+            if source_errors:
+                return JsonResponse({"errors": [{"code": "schema", "msg": error}
+                                                  for error in source_errors]}, status=422)
+
+            auth = _event_identity(agent)
+            operations = [{
+                "aggregate": eid, "type": "task.failed", "payload": source_payload,
+                "expected_version": ent.get("version"), "git_sha": hub_app._git_head(),
+                "idem_key": failure_key, **auth,
+            }]
+            repair_created = not repair
+            if repair_created:
+                required = ["hub.repair"] + (["hub.operator"] if consequential else [])
+                repair_payload = {
+                    "type": "task", "title": "Repair: " + note.splitlines()[0][:180],
+                    "status": "todo", "priority": "P0" if consequential else "P1",
+                    "phase": "Repair lane", "work_kind": "product",
+                    "acceptance": ("Identify and land the cause-specific repair, preserve the "
+                                   "failed-attempt evidence, clear the source circuit when safe, "
+                                   "and make the source task ready for a fresh fenced claim."),
+                    "touches": list(ent.get("touches") or []), "surfaced_by": eid,
+                    "repair_for": eid,
+                    "repair_role": "operator-repair" if consequential else "repair-specialist",
+                    "operator_attention": consequential,
+                    "routing": {"required_capabilities": required,
+                                "risk": "high" if consequential else "moderate"},
+                    "source": "failure:" + eid,
+                }
+                repair_merged = {"id": repair_id, **repair_payload, "version": 1}
+                repair_errors = validate(repair_merged, "task", hub_app.registry())
+                if repair_errors:
+                    return JsonResponse({"errors": [{"code": "schema", "msg": error}
+                                                      for error in repair_errors]}, status=422)
+                operations.append({
+                    "aggregate": repair_id, "type": "task.created", "payload": repair_payload,
+                    "expected_version": 0, "git_sha": hub_app._git_head(),
+                    "idem_key": "repair:" + repair_local, **auth,
+                })
+
+            try:
+                events = store.append_batch(operations)
+            except ConflictError as conflict:
+                return JsonResponse({"errors": [{"code": "conflict",
+                    "expected": conflict.expected, "current": conflict.current}]}, status=409)
+            lease_released = hub_app.release_lease(eid, token)
+
+        # One wake after the full batch is durable; the cumulative patch contains every event.
+        if events:
+            hub_app.publish_event(events[-1])
+        hub_app.schedule_task_ready(eid, not_before)
+        return JsonResponse({"ok": True, "task": eid, "repair_task": repair_id,
+                             "repair_created": repair_created, "failure_count": total,
+                             "failure_repeats": repeats, "backoff_s": backoff,
+                             "not_before": not_before, "circuit_open": circuit,
+                             "lease_released": lease_released,
+                             "events": [event["event_id"] for event in events]})
+    finally:
+        store.close()
 
 
 @writer(scope="task:claim")

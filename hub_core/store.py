@@ -565,6 +565,124 @@ class EventStore:
                 model_version=model_version, repo_build=repo_build, git_sha=git_sha,
                 idem_key=idem_key)
 
+    def append_batch(self, operations) -> list[dict]:
+        """Commit multiple aggregate events at one canonical-file boundary.
+
+        Failure handling must update its source task and create its repair task all-or-none. A
+        sequence of ordinary appends cannot promise that: a process can die between acknowledged
+        lines. This path builds the complete hash-chained suffix, atomically replaces the JSONL
+        with old bytes + that suffix, then indexes every row in one SQLite transaction. A crash
+        after the replace but before the index commit self-heals from the canonical file exactly as
+        a single append does.
+
+        Every operation has the same keyword shape as ``append``. Idempotent replay succeeds only
+        when the entire batch is already present; a partial replay is named rather than silently
+        manufacturing a mixed commit.
+        """
+        import json
+
+        ops = [dict(op) for op in (operations or [])]
+        if not ops:
+            return []
+        with LedgerLock(self.root):
+            head_hash = self._meta_get("chain_head") or ""
+            if jsonl_tail_hash(self.jsonl) != head_hash:
+                self._reconcile_heal()
+            c = self._db
+            c.execute("BEGIN IMMEDIATE")
+            if self._jsonl_tail_seq() > self._last_seq_and_hash()[0]:
+                c.execute("ROLLBACK")
+                self._reconcile()
+                c.execute("BEGIN IMMEDIATE")
+            try:
+                replay = []
+                for op in ops:
+                    idem = op.get("idem_key")
+                    row = (c.execute("SELECT raw FROM events WHERE aggregate=? AND idem_key=?",
+                                     (op["aggregate"], idem)).fetchone() if idem else None)
+                    replay.append(json.loads(row["raw"]) if row else None)
+                if any(replay):
+                    if not all(replay):
+                        c.execute("ROLLBACK")
+                        raise ValueError("partial idempotent batch exists; refusing a mixed commit")
+                    c.execute("COMMIT")
+                    return replay
+
+                last_seq, prev_hash = self._last_seq_and_hash()
+                heads = {}
+                seen_idem = set()
+                events = []
+                for offset, op in enumerate(ops, 1):
+                    aggregate = op["aggregate"]
+                    head = heads.get(aggregate, self.head_version(aggregate))
+                    expected = op.get("expected_version")
+                    if expected is not None and expected != head:
+                        c.execute("ROLLBACK")
+                        raise ConflictError(aggregate, expected, head)
+                    idem = op.get("idem_key")
+                    idem_pair = (aggregate, idem)
+                    if idem and idem_pair in seen_idem:
+                        c.execute("ROLLBACK")
+                        raise ValueError("duplicate aggregate/idempotency key inside batch")
+                    seen_idem.add(idem_pair)
+                    ev = {
+                        "seq": last_seq + offset,
+                        "event_id": str(uuid.uuid4()),
+                        "ts": _now_iso(),
+                        "agent_id": op.get("agent_id"),
+                        "session_id": op.get("session_id"),
+                        "parent_event_id": op.get("parent_event_id"),
+                        "actor_kind": op.get("actor_kind", "agent"),
+                        "type": op["type"],
+                        "aggregate": aggregate,
+                        "base_version": head,
+                        "result_version": head + 1,
+                        "payload": op.get("payload") or {},
+                        "model_version": op.get("model_version"),
+                        "repo_build": op.get("repo_build"),
+                        "git_sha": op.get("git_sha"),
+                        "idem_key": idem,
+                        "prev_hash": prev_hash,
+                    }
+                    ev["hash"] = sha256_hex(prev_hash + canonical(
+                        {key: ev[key] for key in _HASH_FIELDS}))
+                    events.append(ev)
+                    heads[aggregate] = head + 1
+                    prev_hash = ev["hash"]
+
+                old = self.jsonl.read_text(encoding="utf-8")
+                if old and not old.endswith("\n"):
+                    old += "\n"
+                durable_replace(self.jsonl, old + "".join(canonical(ev) + "\n" for ev in events))
+                try:
+                    for ev in events:
+                        self._index_event(ev)
+                    self._stamp_jsonl_size()
+                    c.execute("COMMIT")
+                except Exception:
+                    try:
+                        c.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    self._reconcile()
+                    recovered = []
+                    for ev in events:
+                        row = self._db.execute("SELECT raw FROM events WHERE event_id=?",
+                                               (ev["event_id"],)).fetchone()
+                        if not row:
+                            raise
+                        recovered.append(json.loads(row["raw"]))
+                    return recovered
+                return events
+            except ConflictError:
+                raise
+            except Exception:
+                try:
+                    c.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+
     def _append_locked(self, *, aggregate, type, payload, expected_version, agent_id,
                        session_id, parent_event_id, actor_kind, model_version, repo_build,
                        git_sha, idem_key):

@@ -67,6 +67,15 @@ TOOLS = [
          "id": {"type": "string"}, "agent": {"type": "string"},
          "lease_token": {"type": "string"}},
          "required": ["id", "agent", "lease_token"]}},
+    {"name": "fail_task",
+     "description": "Atomically record one real failed attempt, return its fenced lease, apply bounded backoff/circuit state, and create or reuse specialist repair work.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "lease_token": {"type": "string"}, "signature": {"type": "string"},
+         "note": {"type": "string"}, "kind": {"type": "string"},
+         "consequential": {"type": "boolean"},
+         "evidence": {"type": "array", "items": {"type": "string"}}},
+         "required": ["id", "agent", "lease_token", "signature", "note"]}},
     {"name": "finish_task",
      "description": "Submit completion; include an exit-0 verification_run only when this task explicitly carries a transient critical-boundary command.",
      "inputSchema": {"type": "object", "properties": {
@@ -143,6 +152,16 @@ def _call_tool(name, args, auth_headers):
         return _tool_result(*_seam("/hub/api/release", {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
         }, auth_headers))
+    if name == "fail_task":
+        payload = {"id": args["id"], "agent": args["agent"],
+                   "token": args["lease_token"], "signature": args["signature"],
+                   "note": args["note"]}
+        for key in ("kind", "consequential"):
+            if args.get(key) is not None:
+                payload[key] = args[key]
+        if args.get("evidence") is not None:
+            payload["evidence_uri"] = args["evidence"]
+        return _tool_result(*_seam("/hub/api/fail", payload, auth_headers))
     if name == "finish_task":
         payload = {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
