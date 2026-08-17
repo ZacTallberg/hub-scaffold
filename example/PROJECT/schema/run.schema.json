@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:run",
+  "title": "AgentRun",
+  "description": "One durable, resumable execution attempt for a board task. Commands, messages, checkpoints, handoffs, input state, cancellation, and outcome fold from the canonical event plane.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "recordId": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "arguments": { "type": "object" },
+        "status": { "enum": ["queued", "running", "completed", "failed", "cancelled"] },
+        "created_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "updated_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "result": { "type": "object" },
+        "error": { "type": "object" },
+        "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } }
+      },
+      "required": ["id", "name", "arguments", "status", "created_at", "updated_at"]
+    },
+    "message": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "role": { "enum": ["system", "operator", "worker", "tool"] },
+        "kind": { "enum": ["progress", "context", "instruction", "output", "error"] },
+        "content": {},
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "agent": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "role", "kind", "content", "at", "agent"]
+    },
+    "checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "state": {},
+        "completed_steps": {
+          "type": "array", "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "agent": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "sequence", "summary", "state", "completed_steps", "evidence_uri", "at", "agent"]
+    },
+    "handoff": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/recordId" },
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "checkpoint": { "$ref": "#/$defs/recordId" },
+        "status": { "enum": ["offered", "accepted", "declined"] },
+        "at": { "$ref": "hub:common#/$defs/isoDate" },
+        "accepted_at": { "$ref": "hub:common#/$defs/isoDate" }
+      },
+      "required": ["id", "from", "to", "summary", "status", "at"]
+    },
+    "inputRequest": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" }
+      },
+      "required": ["method", "params"]
+    },
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "run": { "$ref": "hub:common#/$defs/idref" },
+        "completed_at": { "$ref": "hub:common#/$defs/isoDate" },
+        "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+        "result": { "type": "object" }
+      },
+      "required": ["run", "completed_at", "evidence_uri", "result"]
+    }
+  },
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "run" },
+    "task": { "$ref": "hub:common#/$defs/idref" },
+    "title": { "type": "string", "minLength": 1 },
+    "goal": { "type": "string" },
+    "status": { "enum": ["working", "input_required", "handoff_pending", "cancel_requested", "cancelled", "completed", "failed"] },
+    "status_message": { "type": "string" },
+    "owner": { "type": "string", "minLength": 1 },
+    "credential_id": { "type": "string", "minLength": 1 },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "parent_run": { "$ref": "hub:common#/$defs/idref" },
+    "commands": { "type": "array", "items": { "$ref": "#/$defs/command" }, "maxItems": 2048 },
+    "messages": { "type": "array", "items": { "$ref": "#/$defs/message" }, "maxItems": 4096 },
+    "checkpoints": { "type": "array", "items": { "$ref": "#/$defs/checkpoint" }, "maxItems": 2048 },
+    "handoffs": { "type": "array", "items": { "$ref": "#/$defs/handoff" }, "maxItems": 512 },
+    "input_requests": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/inputRequest" }
+    },
+    "input_responses": {
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    },
+    "cancel_requested_at": { "$ref": "hub:common#/$defs/isoDate" },
+    "cancel_requested_by": { "type": "string", "minLength": 1 },
+    "cancel_reason": { "type": "string" },
+    "result": { "type": "object" },
+    "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+    "error": {
+      "type": "object", "additionalProperties": true,
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "required": ["code", "message"]
+    },
+    "receipt_chain": { "type": "array", "items": { "$ref": "#/$defs/receipt" } },
+    "ttl_ms": { "type": ["integer", "null"], "minimum": 1 },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": [
+    "id", "type", "task", "title", "status", "owner", "attempt", "trace_id",
+    "commands", "messages", "checkpoints", "handoffs", "input_requests", "input_responses",
+    "receipt_chain", "evidence_uri", "ttl_ms", "version"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "input_required" } }, "required": ["status"] },
+      "then": { "properties": { "input_requests": { "minProperties": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] },
+      "then": { "required": ["result"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": { "required": ["error"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "handoff_pending" } }, "required": ["status"] },
+      "then": { "properties": { "handoffs": { "minItems": 1 } } }
+    }
+  ]
+}

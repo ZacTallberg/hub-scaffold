@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, mcp_server
+from . import hub_api, hub_write, hubsite, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -42,6 +42,8 @@ urlpatterns = [
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),
+    path("api/run", run_api.create_run),
+    path("api/run/update", run_api.update_run),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP
     # client can discover the board, pull ready work, spec a stub, and finish with a receipt. It
     # never touches the ledger directly — every mutation goes through the /hub/api/* write seam

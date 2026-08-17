@@ -152,6 +152,23 @@ cure is structural, not disciplinary).
 - **Steering is cheap by design:** because every seat checkpoints into `STATE.md`, the leader
   (or operator) can redirect any seat at any time and lose at most one atomic unit of work.
 
+### Durable execution state (AgentRun)
+
+- A board task is owed work; an AgentRun is one execution attempt. Never overload the backlog row
+  with volatile command/message/process state or keep the recovery truth only in agent memory.
+- A worker holding the current fenced task lease creates and mutates its run. Commands, structured
+  messages, checkpoints, input requests, handoffs, cancellation intent, and outcomes append to the
+  canonical event plane and are pushed live immediately.
+- Checkpoint before an interrupt, handoff, or safe cancellation boundary. A replacement lease
+  holder resumes from the latest checkpoint, completed step IDs, unfinished commands, recent
+  context, and composed child receipts; it does not replay completed work to rediscover proof.
+- Cancellation is cooperative: request intent, reach a safe checkpoint, then acknowledge. A real
+  completion may win the race. A completed run is immutable.
+- Protocol discovery is literal. MCP task handles represent durable AgentRuns and use the current
+  Tasks-extension shapes; MCP task notification subscriptions and A2A interfaces remain
+  unadvertised until their callable transports exist. Hub SSE remains the authoritative
+  committed-event push rail—never introduce a periodic sync cycle as execution coordination.
+
 ## §6 Completion evidence & credit (the leader's core duty)
 
 1. **The real operation is the default proof.** The worker performs the changed behavior and
