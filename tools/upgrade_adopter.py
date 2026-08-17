@@ -320,6 +320,24 @@ def ledger_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def common_ledger_cutoff(
+    repository_events: list[dict[str, Any]], authoritative_events: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Return the last event in the exact immutable prefix shared by two ledgers."""
+    cutoff = None
+    for repository_event, authoritative_event in zip(repository_events, authoritative_events):
+        if (
+            repository_event.get("seq") != authoritative_event.get("seq")
+            or repository_event.get("hash") != authoritative_event.get("hash")
+        ):
+            break
+        cutoff = {
+            "seq": repository_event["seq"],
+            "anchor_hash": repository_event["hash"],
+        }
+    return cutoff
+
+
 def capture_legacy_entity_schema(
     events: list[dict[str, Any]], receipt_cutoff: dict[str, Any]
 ) -> dict[str, Any]:
@@ -454,6 +472,22 @@ def main() -> int:
         action="store_true",
         help="replace conflicting canonical paths after review; adopter-only extras remain",
     )
+    parser.add_argument(
+        "--compatibility-ledger",
+        type=Path,
+        help=(
+            "read-only snapshot of the authoritative production events.jsonl; compatibility "
+            "uses only its exact immutable prefix shared with the repository ledger"
+        ),
+    )
+    parser.add_argument(
+        "--reanchor-compatibility",
+        action="store_true",
+        help=(
+            "explicitly move an existing local-only compatibility cutoff backward to the "
+            "shared production prefix (requires --compatibility-ledger; never moves forward)"
+        ),
+    )
     arguments = parser.parse_args()
 
     supplied_manifest = arguments.manifest.expanduser().absolute()
@@ -469,14 +503,58 @@ def main() -> int:
     if not isinstance(compatibility, dict):
         raise UpgradeError("manifest compatibility must be a JSON object")
     ledger = ledger_events(target_root / "PROJECT" / ".hub" / "events.jsonl")
+    compatibility_cutoff = (
+        {"seq": ledger[-1]["seq"], "anchor_hash": ledger[-1]["hash"]} if ledger else None
+    )
+    authoritative_ledger = ledger
+    if arguments.reanchor_compatibility and not arguments.compatibility_ledger:
+        raise UpgradeError("--reanchor-compatibility requires --compatibility-ledger")
+    if arguments.compatibility_ledger:
+        authoritative_path = arguments.compatibility_ledger.expanduser().absolute().resolve()
+        authoritative_ledger = ledger_events(authoritative_path)
+        compatibility_cutoff = common_ledger_cutoff(ledger, authoritative_ledger)
+        if (ledger or authoritative_ledger) and compatibility_cutoff is None:
+            raise UpgradeError(
+                "repository and authoritative production ledgers share no immutable prefix"
+            )
+
     if "legacy_done_receipts" not in compatibility:
-        if ledger:
-            cutoff = {"seq": ledger[-1]["seq"], "anchor_hash": ledger[-1]["hash"]}
+        if compatibility_cutoff:
             compatibility["legacy_done_receipts"] = {
-                **cutoff,
+                **compatibility_cutoff,
                 "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                 "policy": "missing verified_by/evidence_uri only",
             }
+    elif arguments.compatibility_ledger:
+        receipt = compatibility.get("legacy_done_receipts")
+        receipt_seq = receipt.get("seq") if isinstance(receipt, dict) else None
+        receipt_hash = receipt.get("anchor_hash") if isinstance(receipt, dict) else None
+        anchor_is_authoritative = any(
+            event.get("seq") == receipt_seq and event.get("hash") == receipt_hash
+            for event in authoritative_ledger
+        )
+        if not anchor_is_authoritative:
+            if not arguments.reanchor_compatibility:
+                raise UpgradeError(
+                    "legacy compatibility cutoff is absent from the authoritative ledger; "
+                    "review the shared prefix and rerun with --reanchor-compatibility"
+                )
+            if not compatibility_cutoff or not isinstance(receipt_seq, int):
+                raise UpgradeError("cannot derive a safe backward compatibility cutoff")
+            if compatibility_cutoff["seq"] >= receipt_seq:
+                raise UpgradeError(
+                    "refusing compatibility reanchor that does not move strictly backward"
+                )
+            now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+            compatibility["legacy_done_receipts"] = {
+                **receipt,
+                **compatibility_cutoff,
+                "reanchored_at": now,
+                "reanchored_from": {"seq": receipt_seq, "anchor_hash": receipt_hash},
+            }
+            # Entity signatures are cutoff-specific. Recompute them below against the smaller,
+            # authoritative common prefix rather than preserving a now-misaddressed record.
+            compatibility.pop("legacy_entity_schema", None)
     if "legacy_entity_schema" not in compatibility and ledger:
         compatibility["legacy_entity_schema"] = capture_legacy_entity_schema(
             ledger, compatibility.get("legacy_done_receipts")

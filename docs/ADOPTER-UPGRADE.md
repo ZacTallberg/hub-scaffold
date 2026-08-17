@@ -51,6 +51,20 @@ for already-done tasks whose sole schema debt is a missing/empty `verified_by` o
 The anchor must still match the immutable ledger; other defects and every post-cutoff completion
 remain blocking. Future upgrades preserve the original cutoff.
 
+When production writes to a durable ledger that is not the repository copy, take a read-only
+snapshot of that actual `events.jsonl` and supply it during the upgrade:
+
+```bash
+python tools/upgrade_adopter.py ../my-project/hub-scaffold-adoption.json \
+  --compatibility-ledger /safe/read-only/production-events.jsonl
+```
+
+The upgrader then anchors only at the last exact event shared by both histories. If an older
+manifest was accidentally anchored beyond that production prefix, review the reported divergence
+and rerun with `--reanchor-compatibility`. That explicit operation may move both compatibility
+records strictly **backward** to the shared prefix; it can never move them forward, and it changes
+neither ledger. Subjects touched after the smaller cutoff become fully strict.
+
 That same first boundary records `compatibility.legacy_entity_schema` at the **original** receipt
 cutoff. It contains exact SHA-256 signatures, grouped by entity type, of canonical portable-schema
 errors that remain after receipt-only debt is removed in memory. The runtime accounts a signature

@@ -58,6 +58,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   while invalid tokens reveal no route and no credential grants Hub read access.
 - Fixed `hub_core.client create --plan-item` to emit canonical `{step, done:false}` plan rows instead
   of a non-schema `status` field.
+- The adopter upgrader can now anchor compatibility against a read-only production-ledger snapshot.
+  It uses only the exact shared immutable prefix and requires an explicit flag to repair a
+  local-only cutoff; repair is backward-only and never mutates either ledger.
 
 ### Hub Excellence Contract and live throughput cockpit
 
