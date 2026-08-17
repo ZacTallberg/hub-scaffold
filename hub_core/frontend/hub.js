@@ -119,6 +119,31 @@
     if (s < 0) return "in " + fmtAge(-s);
     return fmtAge(s) + " ago";
   }
+  var TASK_SLE_H = { P0: 4, P1: 24, P2: 72, P3: 168 };
+  function taskAgeSle(task) {
+    var p = (task && task.provenance) || {};
+    var created = Date.parse(p.created_at || "");
+    if (isNaN(created)) return null;
+    var terminal = task.status === "done" || task.status === "dropped";
+    var ended = terminal ? Date.parse(p.updated_at || "") : Date.now();
+    if (isNaN(ended)) ended = Date.now();
+    var ageS = Math.max(0, Math.round((ended - created) / 1000));
+    var hours = TASK_SLE_H[task.priority] || TASK_SLE_H.P2;
+    var ratio = ageS / (hours * 3600);
+    var role = ratio >= 1 ? "fail" : ratio >= .75 ? "warn" : "pass";
+    var state = terminal ? (ratio >= 1 ? "closed beyond SLE" : "closed within SLE")
+      : ratio >= 1 ? "SLE breached" : ratio >= .75 ? "SLE at risk" : "within SLE";
+    return { age_s: ageS, hours: hours, ratio: ratio, role: role, state: state, terminal: terminal };
+  }
+  function taskAgeSleNode(task, compact) {
+    var s = taskAgeSle(task);
+    if (!s) return null;
+    var ageLabel = s.terminal ? "cycle " + fmtAge(s.age_s) : "age " + fmtAge(s.age_s);
+    var text = compact ? (ageLabel + " · " + s.state) : (ageLabel + " · " + s.hours + "h SLE · " + s.state);
+    return el("span", { class: "task-age-sle b-" + s.role, text: text,
+      "data-task-age-sle": task.id,
+      title: (s.ratio * 100).toFixed(0) + "% of the " + s.hours + " hour service-level expectation" });
+  }
 
   /* ---- data ---- */
   function parseData() {
@@ -205,6 +230,9 @@
   function txt(s, cls) { return el("td", cls ? { class: cls } : null, [doc.createTextNode(s == null ? "" : String(s))]); }
   function COLS_TASK() {
     return [
+      { label: "Task", k: "title", cls: "col-title", cell: function (r) { return el("td", { class: "col-title" }, [
+          el("span", { class: "task-title", text: r.title || localId(r.id) }), taskAgeSleNode(r, false)
+        ].filter(Boolean)); } },
       { label: "ID", k: "legacy_ref", cls: "col-id", cell: function (r) { return txt(r.legacy_ref || localId(r.id), "col-id"); } },
       { label: "Status", k: "status", cls: "col-status", cell: function (r) { return el("td", { class: "col-status" }, [taskStatusBadge(r)]); } },
       { label: "Held by", k: "id", cls: "col-pickup", sortVal: function (r) { return leaseOf(r.id) ? 0 : 1; }, cell: function (r) {
@@ -225,8 +253,7 @@
           return el("td", { class: "col-progress task-progress-cell" }, [
             el("span", { class: "mini-progress", "aria-hidden": "true" }, [el("span", { style: "width:" + p.pct + "%" })]),
             el("span", { class: "mini-progress-label", text: p.done + "/" + p.total })]);
-        } },
-      { label: "Title", k: "title", cls: "col-title", cell: function (r) { return txt(r.title, "col-title"); } }
+        } }
     ];
   }
   function COLS_ADR() {
@@ -390,6 +417,8 @@
   function taskCard(task, lease) {
     var prog = taskProgress(task);
     var kids = [
+      el("div", { class: "tcard-title", text: task.title || localId(task.id) }),
+      taskAgeSleNode(task, true),
       el("div", { class: "tcard-head" }, [
         el("span", { class: "tcard-id", text: task.legacy_ref || localId(task.id) }),
         taskStatusBadge(task),
@@ -398,9 +427,8 @@
           el("span", { class: "lease-dot", "aria-hidden": "true" }),
           doc.createTextNode(lease.agent || "worker")
         ]) : null
-      ].filter(Boolean)),
-      el("div", { class: "tcard-title", text: task.title || localId(task.id) })
-    ];
+      ].filter(Boolean))
+    ].filter(Boolean);
     if (prog) {
       kids.push(el("div", { class: "tcard-prog" }, [
         el("div", { class: "tcard-track" }, [el("div", { class: "tcard-fill", style: "width:" + prog.pct + "%" })]),
@@ -722,14 +750,12 @@
   }
 
   /* ---- DEPENDENCY DAG: the shape of what is left, not just its size ----
-     Frontier layers as columns of nodes with the critical path threaded through them. The number
-     "critical path 11" is a claim the operator has to take on faith; the chain shows WHICH
-     eleven, so the one queue worth unblocking first is visible. */
+     The chart is explicitly a frontier histogram. It never draws a synthetic edge between an
+     arbitrary dot in adjacent layers. The separately rendered longest chain is the actual path
+     returned by hub_core.dag and names every task it shows. */
   function dagChart(dg) {
-    // The frontier, DRAWN: one column per dependency layer, the critical path threaded through
-    // them as a flowing spine, and every layer labelled with how wide it actually is. The point
-    // is that "critical path 11" becomes a shape you can read — where the board narrows to a
-    // single file, and where it opens wide enough to absorb more workers.
+    // One column per dependency layer, explicitly labelled with its exact width. This is a
+    // histogram of workable frontier mass, not a node/edge diagram.
     if (!dg || !dg.nodes) return null;
     var layers = dg.layers || [];
     if (!layers.length) return null;
@@ -742,29 +768,11 @@
     var H = Math.max(150, (tall - 1) * 19 + 96), MID = H / 2 - 14;
     var g = svgEl("svg", { viewBox: "0 0 " + W + " " + H, class: "dag-svg", role: "img",
       preserveAspectRatio: "xMidYMid meet",
-      "aria-label": "Dependency frontier: " + n + " layers, widest " + dg.max_frontier_width
+      "aria-label": "Frontier histogram: " + n + " layers, widest " + dg.max_frontier_width
                     + ", critical path " + dg.critical_path_length });
-
-    // gradient + glow so the spine reads as energy moving through the graph
-    var defs = svgEl("defs");
-    var lg = svgEl("linearGradient", { id: "dagSpine", x1: "0", y1: "0", x2: "1", y2: "0" });
-    lg.appendChild(svgEl("stop", { offset: "0", "stop-color": "var(--accent, #4f7cff)" }));
-    lg.appendChild(svgEl("stop", { offset: "1", "stop-color": "var(--pass, #2fae66)" }));
-    defs.appendChild(lg);
-    g.appendChild(defs);
 
     var stepX = W / (n + 1);
     var pts = layers.map(function (_w, i) { return stepX * (i + 1); });
-
-    // the spine first, so nodes sit on top of it
-    for (var i = 0; i < n - 1; i++) {
-      var x1 = pts[i], x2 = pts[i + 1], mx = (x1 + x2) / 2;
-      // a gentle S-curve rather than a straight rule — a dependency chain is a flow, and a
-      // straight line between two dots reads as a divider
-      var d = "M " + x1.toFixed(1) + " " + MID + " C " + mx.toFixed(1) + " " + MID + ", "
-            + mx.toFixed(1) + " " + MID + ", " + x2.toFixed(1) + " " + MID;
-      g.appendChild(svgEl("path", { d: d, class: "dag-edge on-path", fill: "none" }));
-    }
 
     layers.forEach(function (width, i) {
       var x = pts[i];
@@ -778,13 +786,8 @@
       }
       for (var k = 0; k < shown; k++) {
         var y = MID + (k - (shown - 1) / 2) * 19;
-        var onPath = k === 0;
-        if (onPath) {
-          g.appendChild(svgEl("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: "9",
-            class: "dag-halo" }));
-        }
-        g.appendChild(svgEl("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: onPath ? "5.5" : "4",
-          class: "dag-node" + (onPath ? " on-path" : "") }));
+        g.appendChild(svgEl("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: "4",
+          class: "dag-node" }));
       }
       if (width > shown) {
         var more = svgEl("text", { x: x.toFixed(1), y: (MID + (shown - 1) / 2 * 19 + 26).toFixed(1),
@@ -801,7 +804,7 @@
 
     var cap = svgEl("text", { x: (W / 2).toFixed(1), y: (H - 24).toFixed(1), "text-anchor": "middle",
       class: "dag-axis dag-axis-cap", "font-size": "9.5" });
-    cap.textContent = "tasks workable at each step  →";
+    cap.textContent = "frontier histogram · tasks workable at each step  →";
     g.appendChild(cap);
     return g;
   }
@@ -834,8 +837,8 @@
       var chain = el("div", { class: "dag-path" });
       path.forEach(function (n, i) {
         if (i) chain.appendChild(el("span", { class: "dag-arrow", "aria-hidden": "true", text: "→" }));
-        var b = el("button", { class: "dag-step", type: "button", title: n.title || n.id,
-          text: localId(n.id) });
+        var b = el("button", { class: "dag-step", type: "button", title: n.id,
+          text: n.title || localId(n.id) });
         if (BY_ID[n.id]) b.addEventListener("click", function () { openEntity("task", BY_ID[n.id]); });
         else b.disabled = true;
         chain.appendChild(b);
@@ -2209,6 +2212,7 @@
       _panes[t.key] = pane; panes.appendChild(pane);
     });
     initLaunchControls();
+    initDensityControl();
     var mo = doc.getElementById("universalModal");
     if (mo) mo.addEventListener("click", function (e) { if (e.target === mo) closeModal(); });
     var mc = doc.getElementById("modalClose"); if (mc) mc.addEventListener("click", closeModal);
@@ -2216,6 +2220,7 @@
     tickClock(); setInterval(tickClock, 1000);
     paintBackdrop();
     renderConnectionStatus();
+    scheduleTaskAgeRefresh();
 
     global.HubCommands = [
       { id: "cmd:overview", title: "Go to Overview", sub: "tab", run: function () { activate("overview"); } },
@@ -2255,10 +2260,45 @@
     else doc.documentElement.setAttribute("data-theme", next);
     toast("Theme: " + next, "info");
   }
+  function setDensity(value, persist) {
+    value = value === "compact" ? "compact" : "comfortable";
+    doc.documentElement.setAttribute("data-density", value);
+    var control = doc.getElementById("hub-density-select");
+    if (control && control.value !== value) control.value = value;
+    if (persist) try { localStorage.setItem("hub-density", value); } catch (e) {}
+    return value;
+  }
+  function initDensityControl() {
+    var control = doc.getElementById("hub-density-select");
+    var current = doc.documentElement.getAttribute("data-density") || "comfortable";
+    setDensity(current, false);
+    if (control) control.addEventListener("change", function () {
+      toast("Density: " + setDensity(control.value, true), "info");
+    });
+  }
   function cycleDensity() {
     var r = doc.documentElement, cur = r.getAttribute("data-density") || "comfortable";
     var next = cur === "compact" ? "comfortable" : "compact";
-    r.setAttribute("data-density", next); toast("Density: " + next, "info");
+    setDensity(next, true); toast("Density: " + next, "info");
+  }
+
+  var _taskAgeTimer = null;
+  function refreshTaskAges() {
+    Array.prototype.forEach.call(doc.querySelectorAll("[data-task-age-sle]"), function (node) {
+      var task = BY_ID[node.getAttribute("data-task-age-sle")];
+      var next = task && taskAgeSleNode(task, node.closest && !!node.closest(".tcard"));
+      if (!next) return;
+      node.className = next.className;
+      node.textContent = next.textContent;
+      node.title = next.title;
+    });
+  }
+  function scheduleTaskAgeRefresh() {
+    if (_taskAgeTimer) clearTimeout(_taskAgeTimer);
+    // Exact local clock derivation, not a server poll: wake on the next minute boundary so age and
+    // SLE risk cannot wait for a board event to become truthful.
+    var delay = 60020 - (Date.now() % 60000);
+    _taskAgeTimer = setTimeout(function () { refreshTaskAges(); scheduleTaskAgeRefresh(); }, delay);
   }
 
   global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity,

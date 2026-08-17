@@ -75,6 +75,7 @@ body.hub-app {
 }
 .navbar-brand .brand-mark svg { width: 22px; height: 22px; }
 .navbar-right { display: flex; align-items: center; gap: 12px; }
+.hub-density-select, .hub-theme-select { min-width: 88px; }
 
 .status-pill {
   display: flex; align-items: center; gap: 8px;
@@ -913,7 +914,7 @@ body.hub-app {
 /* =============================================================================
    RESPONSIVE — below 720px, the modal detail grid + overview grids collapse.
    ========================================================================== */
-@media (max-width: 1200px) {
+@media (max-width: 1100px) {
   .compact-task-sort { display: flex; }
   .task-table-wrapper { overflow-x: hidden; }
   .task-table { display: block; width: 100%; }
@@ -996,7 +997,7 @@ body.hub-app {
   .task-table .mini-progress { flex: 1; width: auto; max-width: none; }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   /* The navbar must WRAP under 720px: it is a non-wrapping space-between row, and once brand +
      pills + theme select exceed the viewport the right group runs past the edge — body clips it
      (overflow-x hidden), so the theme control was silently CUT OFF on phones, measured at
@@ -1006,7 +1007,7 @@ body.hub-app {
                  flex-wrap: wrap; }
   .navbar-brand { font-size: 13px; min-width: 0; }
   .navbar-right { gap: 6px; flex-wrap: wrap; min-width: 0; justify-content: flex-end; }
-  .hub-theme-select { max-width: 42vw; }
+  .hub-density-select, .hub-theme-select { max-width: 42vw; }
   .status-pill { min-width: 0; padding: 6px 9px; }
   .status-pill .status-meta, .status-pill .clock { display: none; }
   .overview-signal-strip { align-items: flex-start; flex-direction: column; gap: 8px; }
@@ -1341,6 +1342,16 @@ body.hub-app {
 .tcard-agent { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: var(--step--1); color: var(--accent, #4f7cff); font-weight: 600; }
 .tcard-agent.is-stalled { color: var(--warn-solid, #d99a2b); }
 .tcard-title { font-weight: 600; line-height: var(--leading-tight); }
+.tcard > .task-age-sle { margin-top: -2px; }
+.task-title { display: block; color: var(--text); font-weight: 680; line-height: 1.3; }
+.task-age-sle {
+  display: inline-flex; width: fit-content; margin-top: 5px; padding: 2px 7px;
+  border: 1px solid currentColor; border-radius: var(--radius-pill);
+  font: 650 9.5px/1.25 var(--mono); letter-spacing: .015em; white-space: nowrap;
+}
+.task-age-sle.b-pass { color: var(--pass-fg); background: var(--pass); }
+.task-age-sle.b-warn { color: var(--warn-fg); background: var(--warn); }
+.task-age-sle.b-fail { color: var(--fail-fg); background: var(--fail); }
 .tcard-track { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
 .tcard-fill {
   height: 100%; border-radius: 3px;
@@ -1917,7 +1928,7 @@ body.hub-app {
 body[data-fleet="0"] .hub-backdrop::before,
 body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 
-@media (max-width: 1040px) {
+@media (max-width: 1100px) {
   .progress-stats { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
   .operations-grid,
   .next-grid,
@@ -1925,7 +1936,7 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .outcome-grid .delivery-flow { justify-content: stretch; }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   body.hub-app { font-size: 13px; }
   .navbar-main { padding: 9px 14px 10px; }
   .navbar-brand::after { display: none; }
@@ -1935,7 +1946,8 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .navbar-right .status-meta,
   .navbar-right .clock { display: none; }
   .navbar-right .btn-white { min-width: 38px; padding-inline: 9px; justify-content: center; }
-  .hub-theme-select { width: 72px; min-width: 72px; margin-left: auto; padding-inline: 7px; }
+  .hub-density-select { width: 88px; min-width: 88px; margin-left: auto; padding-inline: 7px; }
+  .hub-theme-select { width: 72px; min-width: 72px; padding-inline: 7px; }
   .tabs-bar { padding-inline: 8px; scroll-snap-type: x proximity; }
   .tab-btn { padding: 13px 12px; scroll-snap-align: start; }
   .tab-btn.active::after { inset-inline: 12px; }
@@ -1953,6 +1965,35 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .integrity-summary > .badge { display: none; }
   .integrity-grid { grid-template-columns: 1fr; padding: 0 12px 12px; }
   .integrity-grid > .card:last-child:nth-child(odd) { grid-column: auto; }
+}
+
+/* Density is an actual spatial mode, not a preference label that changes nothing. */
+:root[data-density="compact"] .overview-scroll { padding: clamp(12px, 1.5vw, 20px); }
+:root[data-density="compact"] .overview-scroll > .card,
+:root[data-density="compact"] .overview-scroll > .ov-grid,
+:root[data-density="compact"] .overview-scroll > .operations-grid,
+:root[data-density="compact"] .overview-scroll > .next-grid,
+:root[data-density="compact"] .overview-scroll > .outcome-grid { margin-bottom: 12px; }
+:root[data-density="compact"] .toolbar { padding-block: 7px; gap: 8px; }
+:root[data-density="compact"] .tab-btn { padding-block: 10px; padding-inline: 14px; }
+:root[data-density="compact"] .card-header { padding: 11px 14px; }
+:root[data-density="compact"] .card-body { padding: 12px 14px; }
+:root[data-density="compact"] .data-table th,
+:root[data-density="compact"] .data-table td { padding-block: 7px; }
+:root[data-density="compact"] .tcard { gap: 5px; padding: 9px 10px; }
+
+@media (max-width: 320px) {
+  .navbar-main { padding-inline: 9px; }
+  .navbar-right { flex-wrap: wrap; }
+  .navbar-right .status-pill { flex-basis: 100%; }
+  .hub-density-select, .hub-theme-select { min-width: 0; width: calc(50% - 23px); margin-left: 0; }
+  .overview-scroll { padding: 12px 9px 22px; }
+  .progress-hero { padding: 18px 14px; }
+  .progress-stats, .dag-facts { grid-template-columns: 1fr; }
+  .hero-command-mode { display: none; }
+  .task-table tbody tr[data-hub-row] { padding-inline: 11px; gap: 8px; }
+  .task-age-sle { white-space: normal; }
+  .tab-btn { padding-inline: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

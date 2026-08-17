@@ -22,6 +22,13 @@ adopters never fork component CSS to gain character. Accent pairing may tint nav
 and the ambient field, but the five semantic status hues are invariant. A motif is a resting-field
 geometry only—its intensity and motion still answer canonical fleet and failure state.
 
+Task scanning starts with the outcome title and a clock-derived age/SLE signal (P0 4h, P1 24h,
+P2 72h, P3 168h). That clock updates locally on its exact display boundary; it is not a network
+poll or a second source of board state. The dependency graphic is explicitly a frontier histogram,
+while the named longest chain comes from the actual DAG. Comfortable/compact density is persisted
+and changes real spacing. The shared shell recomposes at the wide, condensed, card, and 320px
+edges without hiding work.
+
 `done` means the real operation completed. Do not weaken that success because a task correctly has
 no `verification_run`: a receipt is expected only when the task explicitly declared a rare,
 transient critical-boundary `verification_command`. Keep those exceptional receipts detailed and

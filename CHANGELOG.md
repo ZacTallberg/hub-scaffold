@@ -36,6 +36,10 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ### Hub Excellence Contract and live throughput cockpit
 
+- Task scanning now leads with outcome title plus live age/SLE risk; the dependency visualization
+  is truthfully labeled as a frontier histogram and the separately named longest chain comes from
+  the actual DAG. A visible persistent density control changes real cockpit spacing, with deliberate
+  1100px, 760px, and 320px recomposition and centralized live reduced-motion response.
 - Made project art direction a portable scaffold input: a validated mark, paired accent field,
   display voice, surface character, and optional ambient motif now flow through the shared shell.
   The initializer creates a distinct, overridable starter for every project while semantic status,
@@ -46,6 +50,10 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   governance, mounting, construction, and bootstrap paths.
 - Reconciled cockpit theme, responsive, keyboard, print, palette, and live-update contracts; strengthened
   event-time history, heartbeat presence, WIP enforcement, atomic pickup, and proof truth.
+- Added compatibility-first atomic pull routing: tasks can declare capability, risk, resource,
+  locality, and outcome requirements; workers declare current placement facts; incompatible work is
+  filtered before quality/latency/cost scoring, and the dependency-derived ready frontier remains
+  the authoritative queue.
 
 ### Interop truth, portable identity, and bounded realtime correctness
 
