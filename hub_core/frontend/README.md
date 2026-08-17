@@ -16,6 +16,12 @@ exception. Tabs and dialogs follow the keyboard/focus contracts in the canonical
 changes use appropriate live regions. Reduced motion, forced colors, narrow reflow, transport
 degradation, and false-green delivery states are first-class renderer states, not cleanup work.
 
+`PROJECT/project.json.visual` is the bounded authored layer: `mark`, `accent_h`,
+`accent_pair_h`, `display_voice`, `surface`, and optional `motif`. The shell consumes those tokens;
+adopters never fork component CSS to gain character. Accent pairing may tint navigation, surfaces,
+and the ambient field, but the five semantic status hues are invariant. A motif is a resting-field
+geometry only—its intensity and motion still answer canonical fleet and failure state.
+
 `done` means the real operation completed. Do not weaken that success because a task correctly has
 no `verification_run`: a receipt is expected only when the task explicitly declared a rare,
 transient critical-boundary `verification_command`. Keep those exceptional receipts detailed and

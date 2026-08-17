@@ -11,6 +11,10 @@
 #   Brand Name    human-facing name; becomes {{BRAND}} everywhere
 #   live-url      optional; becomes {{LIVE_URL}} (default: https://<project-key>.example.com)
 #
+# Optional authored visual inputs are environment variables: HUB_VISUAL_MARK, HUB_ACCENT_H,
+# HUB_ACCENT_PAIR_H, HUB_DISPLAY_VOICE, HUB_SURFACE_CHARACTER, and HUB_AMBIENT_MOTIF. When omitted,
+# the key deterministically selects a coherent starter so two generated Hubs are not identical.
+#
 # What it does: copies .gitignore, PROJECT/ (including its explicit project.json identity), hub_core/,
 # adapters/, patterns/, campaigns/, OPERATING-AGREEMENT.md,
 # SECURITY.md, and docs/ARCHITECTURE.md into
@@ -33,6 +37,29 @@ case "$KEY" in
     exit 1;;
 esac
 [ -n "$LIVE_URL" ] || LIVE_URL="https://$KEY.example.com"
+
+# --- authored starter identity ---------------------------------------------------------------
+# Bounded vocabularies keep this art direction portable and safe to inject as data/CSS tokens.
+KEY_SUM="$(printf '%s' "$KEY" | cksum | awk '{print $1}')"
+MARKS=(cube bolt pulse route target rocket branch stack package gauge)
+VOICES=(precision editorial kinetic humanist monumental)
+SURFACES=(glass paper luminous technical soft)
+MOTIFS=(grid constellation orbit waves embers threads petals monolith rings stage)
+VISUAL_MARK="${HUB_VISUAL_MARK:-${MARKS[$((KEY_SUM % ${#MARKS[@]}))]}}"
+ACCENT_H="${HUB_ACCENT_H:-$((KEY_SUM % 360))}"
+ACCENT_PAIR_H="${HUB_ACCENT_PAIR_H:-$(((ACCENT_H + 52 + KEY_SUM % 64) % 360))}"
+DISPLAY_VOICE="${HUB_DISPLAY_VOICE:-${VOICES[$((KEY_SUM % ${#VOICES[@]}))]}}"
+SURFACE_CHARACTER="${HUB_SURFACE_CHARACTER:-${SURFACES[$((KEY_SUM % ${#SURFACES[@]}))]}}"
+AMBIENT_MOTIF="${HUB_AMBIENT_MOTIF:-${MOTIFS[$((KEY_SUM % ${#MOTIFS[@]}))]}}"
+[[ " ${MARKS[*]} " == *" $VISUAL_MARK "* ]] || { echo "ERROR: unsupported HUB_VISUAL_MARK: $VISUAL_MARK" >&2; exit 1; }
+[[ " ${VOICES[*]} " == *" $DISPLAY_VOICE "* ]] || { echo "ERROR: unsupported HUB_DISPLAY_VOICE: $DISPLAY_VOICE" >&2; exit 1; }
+[[ " ${SURFACES[*]} " == *" $SURFACE_CHARACTER "* ]] || { echo "ERROR: unsupported HUB_SURFACE_CHARACTER: $SURFACE_CHARACTER" >&2; exit 1; }
+[[ " ${MOTIFS[*]} " == *" $AMBIENT_MOTIF "* ]] || { echo "ERROR: unsupported HUB_AMBIENT_MOTIF: $AMBIENT_MOTIF" >&2; exit 1; }
+for HUE_VALUE in "$ACCENT_H" "$ACCENT_PAIR_H"; do
+  [[ "$HUE_VALUE" =~ ^[0-9]+$ ]] && [ "$HUE_VALUE" -le 360 ] || {
+    echo "ERROR: accent hues must be integers from 0 through 360" >&2; exit 1;
+  }
+done
 
 # Scaffold root = the directory this script lives in (works from any cwd).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,18 +102,30 @@ cp "$ROOT/governance/AGENTS.md.template" "$TARGET/AGENTS.md"
 # sed-escape replacement text (we use | as the sed delimiter): escape \, &, and |.
 esc() { printf '%s' "$1" | sed -e 's/[\\&]/\\&/g' -e 's/|/\\|/g'; }
 KEY_R="$(esc "$KEY")"; BRAND_R="$(esc "$BRAND")"; URL_R="$(esc "$LIVE_URL")"
+MARK_R="$(esc "$VISUAL_MARK")"; ACCENT_R="$(esc "$ACCENT_H")"; PAIR_R="$(esc "$ACCENT_PAIR_H")"
+VOICE_R="$(esc "$DISPLAY_VOICE")"; SURFACE_R="$(esc "$SURFACE_CHARACTER")"; MOTIF_R="$(esc "$AMBIENT_MOTIF")"
 
-grep -rIl -e '{{PROJECT_KEY}}' -e '{{BRAND}}' -e '{{LIVE_URL}}' "$TARGET" 2>/dev/null \
+grep -rIl -e '{{PROJECT_KEY}}' -e '{{BRAND}}' -e '{{LIVE_URL}}' -e '{{VISUAL_MARK}}' \
+  -e '{{ACCENT_H}}' -e '{{ACCENT_PAIR_H}}' -e '{{DISPLAY_VOICE}}' \
+  -e '{{SURFACE_CHARACTER}}' -e '{{AMBIENT_MOTIF}}' "$TARGET" 2>/dev/null \
   | while IFS= read -r f; do
       sed -i \
         -e "s|{{PROJECT_KEY}}|$KEY_R|g" \
         -e "s|{{BRAND}}|$BRAND_R|g" \
         -e "s|{{LIVE_URL}}|$URL_R|g" \
+        -e "s|{{VISUAL_MARK}}|$MARK_R|g" \
+        -e "s|{{ACCENT_H}}|$ACCENT_R|g" \
+        -e "s|{{ACCENT_PAIR_H}}|$PAIR_R|g" \
+        -e "s|{{DISPLAY_VOICE}}|$VOICE_R|g" \
+        -e "s|{{SURFACE_CHARACTER}}|$SURFACE_R|g" \
+        -e "s|{{AMBIENT_MOTIF}}|$MOTIF_R|g" \
         "$f"
     done
 
 # Placeholder gate: nothing leaves init half-templated (fail-closed).
-if LEFT="$(grep -rIln -e '{{PROJECT_KEY}}' -e '{{BRAND}}' -e '{{LIVE_URL}}' "$TARGET" 2>/dev/null)" \
+if LEFT="$(grep -rIln -e '{{PROJECT_KEY}}' -e '{{BRAND}}' -e '{{LIVE_URL}}' -e '{{VISUAL_MARK}}' \
+  -e '{{ACCENT_H}}' -e '{{ACCENT_PAIR_H}}' -e '{{DISPLAY_VOICE}}' \
+  -e '{{SURFACE_CHARACTER}}' -e '{{AMBIENT_MOTIF}}' "$TARGET" 2>/dev/null)" \
    && [ -n "$LEFT" ]; then
   echo "ERROR: placeholders survived templating in:" >&2
   printf '%s\n' "$LEFT" >&2
@@ -109,6 +148,7 @@ cat <<EOF
 
 Initialized '$KEY' ($BRAND) at $TARGET — placeholders substituted, git genesis committed.
 Portable identity written to PROJECT/project.json (app host: $LIVE_URL; worker: hub-$KEY://).
+Art direction: $VISUAL_MARK · hues $ACCENT_H/$ACCENT_PAIR_H · $DISPLAY_VOICE · $SURFACE_CHARACTER · $AMBIENT_MOTIF.
 
 Next steps (the adoption runbook lives in the scaffold README):
   1. Mount the hub in your web project per adapters/django/MOUNTING.md
