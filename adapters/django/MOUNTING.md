@@ -47,8 +47,17 @@ HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 7)
 HUB_DONE_STRICTNESS = "tracked"       # the flow-vs-proof dial — see "The strictness dial" below
+HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
 # HUB_SETTINGS_FILE = BASE_DIR / "config" / "settings.py"  # only if the audit should scan a
 #                                       # different file than DJANGO_SETTINGS_MODULE resolves to
+
+# Optional: forward the host app's own 5xx into the hub's operational error stream, so the
+# board's errors card covers the app the hub is mounted in (the coverage block names this
+# channel either way):
+# LOGGING = {..., "handlers": {"hub_errors": {
+#     "()": "hub_core.errorlog.HubErrorHandler", "hub_dir": str(BASE_DIR / "PROJECT" / ".hub"),
+#     "level": "ERROR"}},
+#     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"}}}
 
 # Write-API token: ALWAYS from the environment, NEVER a committed literal.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
@@ -189,11 +198,22 @@ is amber so it cannot block the very deploy that creates it.
 - Fail-closed: when no token is configured, every general write and launch consume returns 403.
   Reads stay public; the optional CSRF-gated mint capability is described below.
 - Endpoints (all POST, JSON body): `/hub/api/task`, `/hub/api/complete`, `/hub/api/adr`,
-  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`, and
-  `/hub/api/launch-grant/consume`.
+  `/hub/api/capability`, `/hub/api/decision`, `/hub/api/claim`, `/hub/api/heartbeat`,
+  `/hub/api/ask`, `/hub/api/ack`, `/hub/api/presence`, `/hub/api/app-error`,
+  `/hub/api/agent-error`, `/hub/api/ack-error`, `/hub/api/clear-errors`,
+  `/hub/api/launch-grant/consume` — plus the operator-grade verbs (`/hub/api/answer`,
+  `/hub/api/directive`, `/hub/api/mint-token`), which the general token alone may call.
+- Two classes: the general `HUB_WRITE_TOKEN` (identity declared per call) and minted per-agent
+  tokens (`POST /hub/api/mint-token`; identity proven by the credential, per-agent revocation,
+  sha256-only at rest). `GET /hub/whoami.json` reports which class a request presented.
+- Optional presence headers on any write — `X-Hub-Machine`, `X-Hub-Session`, `X-Hub-Cwd`,
+  `X-Hub-Focus` — feed the board's live-console view; `/hub/api/presence` is the heartbeat.
 
-The write token authorizes all of those endpoints and, through task verification commands,
-operating-system shell execution. It is never suitable for browser storage or an untrusted client.
+The write token grants terminal board authority — `done`, deploy records, ruling ADRs, and (for
+the general token) directives addressed to every agent. The hub never executes a task's
+`verification_command` (the worker runs it and submits a typed receipt), but strict-mode
+evidence URLs are fetched server-side. It is never suitable for browser storage or an untrusted
+client.
 
 The sole exception is the optional `POST /hub/api/launch-grant`: it is a same-origin,
 `@csrf_protect` browser capability that can mint only a short-lived grant bound to

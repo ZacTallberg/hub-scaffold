@@ -8,10 +8,33 @@ to the public.
 
 | Surface | Authentication | Authority |
 |---|---|---|
-| `GET /hub/*` | None | Read the full projected Hub state, schemas, graph, and audit output |
-| General `POST /hub/api/*` | `X-Write-Token` | Mutate entities, manage leases, and consume launch grants |
-| `POST /hub/api/launch-grant` | Same-origin CSRF, only when enabled | Mint a short-lived, action/task/count/issuer-bound launch capability; cannot mutate board entities |
+| `GET /hub/*` | None | Read the full projected Hub state, schemas, graph, audit output, questions/inbox, the operational error stream, observed presence, and board search |
+| General `POST /hub/api/*` | `X-Write-Token` (general) | Mutate entities, manage leases, ingest errors, refresh presence, and consume launch grants. The GENERAL token additionally issues directives, answers questions, and mints identity tokens |
+| Same, with a MINTED token | `X-Write-Token` (per-agent, sha256-only at rest) | Work-grade writes only, attributed to the bound agent; a payload declaring another agent is refused; operator verbs are refused by class |
+| `POST /hub/api/launch-grant`, `POST /hub/api/client-error` | Same-origin CSRF, launch mint only when enabled | Mint a short-lived, action/task/count/issuer-bound launch capability / record one bounded, redacted browser diagnostic; neither can mutate board entities |
 | Windows protocol handler | Local user context + configured issuer + local token file | Consume a valid grant and start the configured wrapper |
+
+### Two token classes, one fail-closed resolver
+
+`HUB_WRITE_TOKEN` remains the operator-grade credential. `POST /hub/api/mint-token` (general
+token only) mints per-agent tokens whose sha256 alone is stored in `HUB_DIR/tokens.json` — a
+lost token is re-minted, never recovered, and revocation is per-agent instead of the
+all-or-nothing rotation a single shared secret forces. A minted token PROVES identity: writes
+attribute to the bound agent by credential, not by claim, and an impersonating payload fails
+loudly (`agent_token_mismatch`). Directive/answer/mint authority stays with the general token
+by CLASS, so handing a worker its own credential never hands it the ability to command the
+fleet. `GET /hub/whoami.json` reports a presented token's class without echoing it. Every 4xx
+auth refusal is recorded into the operational error stream — a worker whose token was rotated
+out otherwise retries forever while the board shows nothing but a seat going quietly stale.
+
+### The write seam refuses secret-shaped payloads
+
+Every write body is scanned (private keys, platform token formats, JWTs, bearer strings,
+credential assignments) and refused `422 secret_shaped_payload` before it can reach the
+ledger: the ledger is append-only under a hash chain, so a secret written into it can never be
+removed without destroying the tamper-evidence. Recognizable redaction placeholders pass — the
+guard must not refuse what a member types after being told to redact. This is a screen against
+the accidental paste, not a DLP product; a determined writer can still encode a secret past it.
 
 ### The write token is production-grade, but it is NOT code execution
 
@@ -35,6 +58,16 @@ the snapshot or a type/entity endpoint. Never store credentials, private URLs, i
 personal data, confidential prompts, or sensitive evidence in Hub entities if the read surface is
 reachable by people who must not see them. If the board is private, enforce authentication and
 access control in Django or at the reverse proxy and test that boundary.
+
+The new read surfaces widen what "the complete projected board" includes: questions and answers
+(`questions.json`, `inbox.json`), observed presence — agent names, machine names, session working
+directories and focus lines — and the operational error stream (redacted at write, but messages
+originate in your services). The inbox long-poll (`inbox/wait`) additionally holds a server
+thread; it is hard-bounded (≤25s, a small waiter pool that degrades to an immediate honest poll
+when full), but on a public deployment it is one more reason reads should sit behind your own
+authentication boundary. Error-stream ingest (`app-error`, `agent-error`) and queue actions
+(`ack-error`, `clear-errors`) are all write-token-gated; the browser's `client-error` is
+same-origin CSRF-gated, size-bounded, and its rows are held below the board's bar by default.
 
 ## Secret handling
 
@@ -82,8 +115,10 @@ process merely because a `hub-worker://` URL was opened.
 
 ## Security limitations worth preserving in reviews
 
-- One shared token grants all general write operations; there is no user identity, role, scope, or
-  revocation list.
+- The general token grants all write operations under a caller-declared identity; minted tokens
+  add proven per-agent identity and per-agent revocation, but there are still no roles or scopes
+  beyond the general/minted class split, and reads carry no identity at all.
+- The secret-shape scan is a screen against accidental pastes, not data-loss prevention.
 - Evidence URL dereferencing follows HTTP behavior available to Python's standard library and is
   not an SSRF sandbox.
 - Evidence filesystem paths are resolved from `BASE_DIR` for existence checks but are not a path

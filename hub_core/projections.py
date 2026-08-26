@@ -54,6 +54,10 @@ def hub_snapshot(st, *, build, audit, generated_at=None, live=None) -> dict:
         "lessons": _sorted(st, "lesson"),
         "methods": _sorted(st, "method"),
         "reviews": _sorted(st, "review"),
+        # The addressed-delivery plane: operator directives (answers included) and per-agent
+        # delivery acks, so the inbox, the board, and the JSON API read one truth.
+        "directives": _sorted(st, "directive"),
+        "acks": _sorted(st, "ack"),
         "graph": st["graph"],
         "dangling": st["dangling"],
         "live": live or {},

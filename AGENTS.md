@@ -27,7 +27,11 @@ from a working multi-project system. Nothing here names any specific person, hos
 - **hub** (`hub_core/` + `adapters/`) — nouns you operate: events → projected tasks/ADRs/features/etc.,
   token-gated writes, server-granted "done", and an optional single-use-grant worker bridge. Mounts
   at `/hub` in a Django site; reads are unauthenticated, and the workstation bridge is disabled by
-  default.
+  default. The board is a live cockpit: observed presence (who is on it, from which machine and
+  console, doing what), the ask/answer loop (a blocked worker's question is DELIVERED to the
+  operator's inbox long-poll, the answer comes back addressed, the ack closes it), and a bounded
+  operational error stream with an honest read-time bar. Two token classes: the general operator
+  token, and minted per-agent tokens that prove identity and revoke individually.
 - **plane** (`PROJECT/`) — the durable on-disk tree: charter, doctrine, ADRs, registers, research,
   verification contracts, the leader/worker/verifier protocol. What a cold session reads to pick up.
 - **patterns** (`patterns/`) — opt-in enforcement: deploy contract, standing canary, pre-receive gate,
@@ -82,7 +86,10 @@ disposable `verification-closer` only when consequence or sampling warrants it.
   `verification_command`, which the
   worker runs OUT-OF-BAND, submitting a typed exit-0 receipt the hub validates — the hub never
   executes it (that was an RCE path and is gone); strict URL evidence IS still fetched by the server.
-  Treat every token holder as trusted at the Hub service-account/network boundary. `SECURITY.md` is
+  Treat every token holder as trusted at the Hub service-account/network boundary. Operator verbs
+  (directives, answering questions, minting identity tokens) require the GENERAL token by class —
+  a worker's minted token cannot command the fleet. Every write is refused if it looks like it
+  carries a secret: the append-only ledger can never unlearn one. `SECURITY.md` is
   authoritative for this threat model.
 - **Normative docs are not automatic controls.** `PROJECT/verify/`, campaigns, and patterns describe
   roles and contracts. A canary, alert, backup, verifier, or conformance scan exists only after it is

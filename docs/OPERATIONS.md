@@ -45,6 +45,9 @@ updated. After genesis, use the typed API rather than editing the event log or g
 | `events.jsonl` | Canonical event history | Yes—primary recovery artifact |
 | `events.db`, `events.db-wal`, `events.db-shm` | Rebuildable SQLite index | Optional; quiesce writes for a consistent copy |
 | `claims/*.json` | Expiring task leases | Usually no; losing them makes the durable `in_progress` task reclaimable |
+| `presence/` (+ `presence/_retired/`) | Observed seats/consoles; rows unseen past the horizon are archived, never deleted | Usually no; it repopulates as agents check in |
+| `errors.jsonl`, `errors-acked.json` | Bounded, redacted operational error stream + acknowledged signatures | According to incident policy; the stream is capped at ~2 MB |
+| `tokens.json` | Minted per-agent token digests (sha256 only — never the token values) | Yes; losing it revokes every minted token at once (re-mint to recover) |
 | `.attest-secret` | Launch-grant signing secret | Yes if launch continuity matters; keep secret |
 | `grants/*.used` | Consumed nonces | Retain at least through maximum grant lifetime |
 | `grants/decisions.jsonl` | Launch grant/consume/refusal audit trail | According to audit policy |
@@ -105,7 +108,12 @@ pattern shows how to stamp and probe an artifact; wire the real ship and alert m
 4. Confirm the old token receives `403` and the new token succeeds on a harmless, intended call.
 5. Remove old secret versions according to local policy.
 
-There is no overlap set or per-client revocation: the configured token is the one accepted token.
+There is no overlap set for the GENERAL token: the configured token is the one accepted general
+token. Minted per-agent tokens are the finer-grained alternative: revoke one agent with
+`POST /hub/api/mint-token {"target": "<agent>", "revoke": true}` and re-mint, without touching
+anyone else's credential. Auth refusals after a rotation are visible on the board's operational
+error stream (`hub.auth` rows) — a client still presenting the old token shows up there instead
+of failing invisibly.
 
 ## Queue and lease recovery
 

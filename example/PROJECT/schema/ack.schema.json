@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:ack",
+  "title": "Ack — one agent's record that one directive was delivered",
+  "description": "Stable id <project>:ack:<directive-local>--<agent> makes at-least-once delivery idempotent: a retrying caller replays the same ack instead of minting twins. An acked directive stops being addressed to that agent (the inbox closes it for them), and a directive whose every named target has acked retires itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "ack" },
+    "directive": { "$ref": "hub:common#/$defs/idref" },
+    "agent": { "type": "string", "minLength": 1, "description": "The acking agent. Under a minted (identity-bound) token this is forced from the token binding server-side, never trusted from the payload." },
+    "note": { "type": "string", "description": "What was done to satisfy the directive." },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "directive", "agent", "version"]
+}

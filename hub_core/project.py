@@ -20,7 +20,11 @@ _KNOWN = {"task", "adr", "feat", "gap", "cap", "contract", "deploy", "commit", "
           "finding", "lesson", "method", "review",
           # telemetry = one worker SESSION (hub.worker-telemetry-event-and-cockpit): the fleet's
           # own health folds like every other entity instead of hiding in note bodies.
-          "telemetry"}
+          "telemetry",
+          # The addressed-delivery plane: a directive is an operator instruction aimed at named
+          # agents (an answer to a question is a directive with `answers`); an ack is one agent's
+          # record that delivery landed. Both fold so the inbox and the board read one truth.
+          "directive", "ack"}
 
 
 def register_types(names):
@@ -81,6 +85,8 @@ _EDGES = {
     "cap": {"realized_by": "realized_by", "depends_on": "depends_on", "consumed_by": "consumed_by"},
     "deploy": {"tasks_closed": "closed_task", "reverts": "reverts", "touches": "touches"},
     "note": {"relates_to": "relates_to"},
+    "directive": {"answers": "answers", "supersedes": "supersedes"},
+    "ack": {"directive": "acks"},
 }
 
 

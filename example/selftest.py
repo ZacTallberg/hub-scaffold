@@ -64,7 +64,14 @@ rung("no-token-403", post("/hub/api/task", {"title": "x", "agent": "ladder"}, to
 # token; the separate authoritative consume endpoint still does.
 page = csrf_client.get("/hub/")
 rung("hub-page-csrf-200", page, 200)
-page_text = page.content.decode("utf-8").lower()
+# The guard is about the CHROME: no token-entry UI, no unlock affordance. The #hub-data
+# JSON island is data, and it legitimately carries the operational error stream — which
+# includes recorded auth refusals that NAME the token header. Searching the whole page
+# would make the board unable to report an auth refusal without failing its own selftest,
+# so the island is excised before the check.
+import re as _re
+page_text = _re.sub(r'<script id="hub-data".*?</script>', "",
+                    page.content.decode("utf-8"), flags=_re.S).lower()
 if "x-write-token" in page_text or "unlock" in page_text:
     failures.append("browser-write-token-ui-present")
 csrf = csrf_client.cookies["csrftoken"].value
@@ -283,6 +290,156 @@ done = [t["id"] for t in state["data"] if t.get("status") == "done"]
 print("done tasks in snapshot:", done)
 if tid2 not in done:
     failures.append("snapshot-missing-done")
+
+print("== the secret-shape refusal at the write choke point ==")
+# A pasted credential must be refused at the door: the ledger is append-only, so a secret
+# that lands can never be removed. A redaction PLACEHOLDER must pass — refusing what a
+# member types after being told to redact makes the error message a dead end.
+rung("secret-shaped-422", post("/hub/api/note", {
+    "title": "ladder: failing command output",
+    "body_md": "it dies with DB_PASSWORD=hunter2secret99 in the log", "agent": "ladder"}), 422)
+rung("redacted-placeholder-200", post("/hub/api/note", {
+    "title": "ladder: redacted command output",
+    "body_md": "it dies with DB_PASSWORD=[REDACTED] in the log", "agent": "ladder"}), 200)
+
+print("== ask -> deliver -> answer -> ack: the loop closes ==")
+OPERATOR = hub_app.operator_agent()
+askr = rung("ask-200", post("/hub/api/ask", {
+    "agent": "asker-one",
+    "question": "how do I reach the staging database endpoint from the worker seat",
+    "context": "the connection refuses from my machine; works from the host"}), 200)
+ask_id = askr["data"]["id"]
+rung("ask-needs-agent-422", post("/hub/api/ask", {"question": "who am I"}), 422)
+dup = rung("ask-duplicate-409", post("/hub/api/ask", {
+    "agent": "asker-two",
+    "question": "how can I reach the staging database endpoint from a worker seat"}), 409)
+if not (dup.get("errors") or [{}])[0].get("matches"):
+    failures.append("ask-duplicate-missing-matches")
+rung("ask-anyway-200", post("/hub/api/ask", {
+    "agent": "asker-two", "anyway": True,
+    "question": "how can I reach the staging database endpoint from a worker seat"}), 200)
+inbox_op = json.loads(client.get("/hub/inbox.json?agent=" + OPERATOR).content)["data"]
+if not any(i.get("id") == ask_id for i in inbox_op.get("items", [])):
+    failures.append("ask-not-addressed-to-operator")
+# The long-poll answers immediately when the fingerprint differs, and reports an honest
+# wait when it matches (wait=0 keeps the ladder fast).
+w = json.loads(client.get("/hub/inbox/wait?agent=" + OPERATOR + "&fp=stale&wait=0").content)["data"]
+if w.get("fingerprint") == "stale" or w.get("degraded"):
+    failures.append("inbox-wait-immediate-change")
+rung("answer-200", post("/hub/api/answer", {
+    "question": ask_id,
+    "text": "use the service name, not the raw address — the worker seat resolves it"}), 200)
+qs = json.loads(client.get("/hub/questions.json").content)
+qrow = next((r for r in qs["data"] if r["id"] == ask_id), None)
+if not qrow or qrow.get("open") or not qrow.get("answered"):
+    failures.append("answer-left-question-open")
+inbox_asker = json.loads(client.get("/hub/inbox.json?agent=asker-one").content)["data"]
+answer_item = next((i for i in inbox_asker.get("items", []) if i.get("kind") == "answer"), None)
+if not answer_item:
+    failures.append("answer-not-addressed-to-asker")
+else:
+    rung("ack-200", post("/hub/api/ack", {
+        "agent": "asker-one", "directive": answer_item["id"]}), 200)
+    dirs = json.loads(client.get("/hub/directive.json").content)["data"]
+    drow = next((d for d in dirs if d["id"] == answer_item["id"]), None)
+    # Every named target acked -> the directive retires itself; a delivered queue that
+    # never leaves "active" is a queue people learn to ignore.
+    if not drow or drow.get("status") != "fulfilled":
+        failures.append("full-ack-did-not-retire-directive")
+    inbox_after = json.loads(client.get("/hub/inbox.json?agent=asker-one").content)["data"]
+    if any(i.get("id") == answer_item["id"] for i in inbox_after.get("items", [])):
+        failures.append("acked-item-still-addressed")
+rung("directive-all-200", post("/hub/api/directive", {
+    "title": "ladder: standing instruction", "body_md": "hold the line", "targets": ["all"]}), 200)
+
+print("== identity: minted tokens bind, mismatches refuse, whoami tells the truth ==")
+mint = rung("mint-token-200", post("/hub/api/mint-token", {"target": "worker-seven"}), 200)
+minted_token = (mint.get("data") or {}).get("token") or ""
+rung("minted-cannot-mint-403", post("/hub/api/mint-token", {"target": "worker-eight"},
+                                    token=minted_token), 403)
+rung("minted-cannot-answer-403", post("/hub/api/answer", {"question": ask_id, "text": "no"},
+                                      token=minted_token), 403)
+rung("minted-mismatch-422", post("/hub/api/note", {
+    "title": "ladder: impersonation attempt", "agent": "somebody-else"}, token=minted_token), 422)
+attributed = rung("minted-attributed-200", post("/hub/api/note", {
+    "title": "ladder: attributed by the credential"}, token=minted_token), 200)
+ent = json.loads(client.get("/hub/note/" + attributed["data"]["id"].rsplit(":", 1)[-1] + ".json").content)["data"]
+if (ent.get("provenance") or {}).get("agent") != "worker-seven":
+    failures.append("minted-write-not-attributed")
+who = json.loads(client.get("/hub/whoami.json", HTTP_X_WRITE_TOKEN=minted_token).content)["data"]
+if who.get("token_class") != "minted" or who.get("bound_agent") != "worker-seven" \
+        or not who.get("identity_is_proven"):
+    failures.append("whoami-minted-class")
+who_g = json.loads(client.get("/hub/whoami.json", HTTP_X_WRITE_TOKEN=TOKEN).content)["data"]
+if who_g.get("token_class") != "general" or who_g.get("identity_is_proven"):
+    failures.append("whoami-general-class")
+rung("revoked-token-403", post("/hub/api/note", {"title": "after revoke"}, token="x"), 403)
+rung("mint-revoke-200", post("/hub/api/mint-token", {"target": "worker-seven", "revoke": True}), 200)
+rung("minted-after-revoke-403", post("/hub/api/note", {
+    "title": "ladder: revoked credential"}, token=minted_token), 403)
+
+print("== presence: observed seats, live consoles, abandoned claims ==")
+rung("presence-ping-200", post("/hub/api/presence", {"agent": "seat-one"},
+                               ), 200)
+resp = client.post("/hub/api/presence", data=json.dumps({"agent": "seat-two"}),
+                   content_type="application/json", HTTP_X_WRITE_TOKEN=TOKEN,
+                   HTTP_X_HUB_MACHINE="box-a", HTTP_X_HUB_SESSION="sess1234",
+                   HTTP_X_HUB_CWD="services/api", HTTP_X_HUB_FOCUS="wiring the export job")
+rung("presence-ping-headers-200", resp, 200)
+snap = json.loads(client.get("/hub/hub.json").content)
+sessions = (snap.get("live") or {}).get("sessions_live") or []
+if not any(s.get("agent") == "seat-two" and s.get("focus") == "wiring the export job"
+           for s in sessions):
+    failures.append("live-console-not-on-board")
+fleet_cards = (snap.get("live") or {}).get("fleet") or []
+if not any(c.get("agent") == "seat-two" and c.get("status") == "active" for c in fleet_cards):
+    failures.append("focused-console-reads-idle")
+
+print("== the operational error stream: ingest, bar, ack truthfulness, bounded clear ==")
+e1 = rung("app-error-201", post("/hub/api/app-error", {
+    "app": "billing", "kind": "server", "message": "nightly export crashed",
+    "severity": "critical", "details": "Traceback ... ValueError"}), 201)
+fp = e1["data"]["fingerprint"]
+rung("agent-error-201", post("/hub/api/agent-error", {
+    "agent": "seat-one", "source": "launcher", "message": "worker wrapper exited 1"}), 201)
+errs = json.loads(client.get("/hub/errors.json").content)
+if not any(r.get("fingerprint") == fp for r in errs["data"]):
+    failures.append("app-error-not-on-bar")
+if errs["metadata"].get("coverage") is None:
+    failures.append("errors-missing-coverage")
+# a browser transport blip is recorded but held BELOW the bar
+csrf2 = csrf_client.cookies["csrftoken"].value
+blip = csrf_client.post("/hub/api/client-error",
+                        data=json.dumps({"source": "sync", "message": "Failed to fetch"}),
+                        content_type="application/json", HTTP_X_CSRFTOKEN=csrf2)
+rung("client-error-201", blip, 201)
+deferred = json.loads(client.get("/hub/errors.json?include=deferred").content)["data"]
+blip_row = next((r for r in deferred if str(r.get("source", "")).startswith("browser.sync")), None)
+if not blip_row or blip_row.get("bar") != "deferred":
+    failures.append("browser-blip-cleared-the-bar")
+rung("reopen-unacked-409", post("/hub/api/ack-error", {"fingerprint": fp, "reopen": True}), 409)
+rung("ack-error-201", post("/hub/api/ack-error", {"fingerprint": fp, "agent": "ladder",
+                                                  "note": "fixed in the export job"}), 201)
+rung("reopen-acked-200", post("/hub/api/ack-error", {"fingerprint": fp, "reopen": True}), 200)
+rung("clear-unbounded-400", post("/hub/api/clear-errors", {}), 400)
+rung("clear-only-acked-200", post("/hub/api/clear-errors", {"only_acked": True}), 200)
+
+print("== board search, plan checkpoint notes, attention rail ==")
+hits = json.loads(client.get("/hub/search.json?q=queue lease truth").content)["data"]
+if not any(h.get("id") == qid for h in hits):
+    failures.append("search-missed-known-task")
+cur = hub_app.current_state()["entities"][qid]
+rung("plan-note-200", post("/hub/api/task", {
+    "id": qid, "agent": "queue-rescuer", "expected_version": cur["version"],
+    "plan": [{"step": "diagnose", "done": True, "note": "root cause found in the export path"},
+             {"step": "fix", "done": False}]}), 200)
+snap2 = json.loads(client.get("/hub/hub.json").content)
+attn_kinds = {a.get("kind") for a in (snap2.get("live") or {}).get("attention") or []}
+if "open-question" not in attn_kinds:
+    failures.append("open-question-not-on-attention-rail")
+inflight_rows = (snap2.get("live") or {}).get("inflight") or []
+if not any(r.get("last_note") for r in inflight_rows):
+    failures.append("checkpoint-note-not-on-live-row")
 
 print("LADDER:", "ALL RUNGS PASS" if not failures else ("FAILED: " + ", ".join(failures)))
 sys.exit(1 if failures else 0)

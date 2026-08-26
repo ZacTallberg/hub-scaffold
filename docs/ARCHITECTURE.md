@@ -17,10 +17,13 @@ Django adapter at /hub -------------- unauthenticated GETs ----------> browser /
         | validate, OCC, lease checks, completion gate
         v
 hub_core EventStore
-        |-- PROJECT/.hub/events.jsonl   canonical append-only event log
-        |-- PROJECT/.hub/events.db      rebuildable SQLite index
-        |-- PROJECT/.hub/claims/        expiring task leases
-        `-- PROJECT/.hub/grants/        optional launch grant state
+        |-- PROJECT/.hub/events.jsonl       canonical append-only event log
+        |-- PROJECT/.hub/events.db          rebuildable SQLite index
+        |-- PROJECT/.hub/claims/            expiring task leases
+        |-- PROJECT/.hub/presence/          observed seats/consoles (self-retiring, archived)
+        |-- PROJECT/.hub/errors.jsonl (+ errors-acked.json)   bounded operational error stream
+        |-- PROJECT/.hub/tokens.json        minted per-agent token digests (sha256 only)
+        `-- PROJECT/.hub/grants/            optional launch grant state
                  |
                  v
         deterministic fold + derived graph/flags
@@ -67,10 +70,20 @@ transactional index for optimistic concurrency and idempotency; it is reconciled
 `EventStore` opens. Claiming emits the durable `todo` to `in_progress` transition; the expiring lease
 and consumed launch nonces remain runtime sidecars rather than entity events.
 
-Folding is last-write-wins per aggregate field. The fold materializes seven entity types:
-`task`, `adr`, `feat`, `gap`, `cap`, `deploy`, and `note`. Decision-log events remain in the event
+Folding is last-write-wins per aggregate field. The base fold materializes `task`, `adr`,
+`feat`, `gap`, `cap`, `deploy`, `note`, `directive` (an operator instruction addressed to named
+agents; an answer to a question is a directive with `answers`), and `ack` (one agent's record
+that one directive was delivered) — plus the engine-known knowledge types an instance may adopt.
+The adapter additionally registers every type `PROJECT/schema/*.schema.json` declares, so an
+instance-local type folds without an engine edit. Decision-log events remain in the event
 stream but are not projected as an entity collection. Derived state includes dependency edges,
 dangling references, task actionability, back-references, counts, phases, and feature coverage.
+
+Presence, the error stream, and token digests are runtime SIDECARS like claims/: observed state,
+never ledger truth. They change with no ledger event, so the snapshot memo, the ETag, and the
+live stream each carry their change stamps — a board keyed on the ledger head alone would freeze
+its fleet strip and error card between appends. Presence rows unseen past a horizon are archived
+into `presence/_retired/` (archive over delete) and reappear on the next check-in.
 
 The following are projections, not independent stores:
 
@@ -84,16 +97,21 @@ The following are projections, not independent stores:
 
 General HTTP writes pass through one gate:
 
-1. require `POST` and a constant-time-matched `X-Write-Token`;
-2. parse JSON;
-3. merge an update with the current aggregate;
-4. require `expected_version` for updates;
-5. validate the merged entity against its schema;
-6. append with aggregate-scoped idempotency and optimistic concurrency.
+1. require `POST` and a constant-time-matched token — the general `HUB_WRITE_TOKEN` (identity
+   declared per call) or a minted per-agent token (identity proven by the credential; an
+   impersonating payload is refused, and operator verbs — directive/answer/mint — are refused
+   by class). Refusals are recorded into the operational error stream;
+2. parse JSON and refuse secret-shaped payloads (the ledger can never unlearn a secret);
+3. refresh the caller's observed presence from the optional `X-Hub-*` headers (fail-soft);
+4. merge an update with the current aggregate;
+5. require `expected_version` for updates;
+6. validate the merged entity against its schema;
+7. append with aggregate-scoped idempotency and optimistic concurrency.
 
 Task completion has additional steps: a live lease, an acceptance note, evidence, optional or
-required proof checks according to `HUB_DONE_STRICTNESS`, execution of any stored
-`verification_command`, and a recomputed audit that refuses completion on critical violations.
+required proof checks according to `HUB_DONE_STRICTNESS`, a typed exit-0 receipt for any stored
+`verification_command` (which the WORKER ran — the hub never executes it), and a recomputed
+audit that refuses completion on critical violations.
 The final append rechecks the fencing token under the cross-process claim lock and uses the version
 whose command was verified, preventing an expired worker or concurrently changed task from landing
 an obsolete completion.
@@ -112,6 +130,12 @@ See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
 | Mutating Hub routes have an explicit guard | URL resolver audit recognizes `@writer` or the narrow origin-gated mint | Reads are deliberately unauthenticated and expose whatever entities contain. |
 | Running build matches deploy record | Git/build stamp and `PROJECT/state.json` comparison; optional `served` observation | The Hub does not deploy or continuously probe production by itself. Adopt the deploy/canary patterns. |
 | Browser launch cannot mint general write authority | CSRF mint; signed bounded grant; token-gated single-use consume | Enabling process launch is a privileged local capability and requires workstation installation. |
+| A question reaches someone who can answer it | The ask writer delivers into the operator's addressed inbox; `inbox/wait` long-polls it; answering is ONE verb (reply directive + question retired); the asker's ack closes delivery and full-ack retires the directive | Delivery is proven only when the asker acks; the duplicate-ask guard fails OPEN so a search outage can never silence a real question. |
+| Secrets cannot enter the append-only ledger by accident | Secret-shape refusal at the single write choke point | A screen against pastes, not DLP — deliberate encoding passes. |
+| Writes attribute to who actually made them | Minted per-agent tokens (sha256-only at rest); payload/binding mismatches refuse; mints are recorded on the ledger | Only where minted tokens are adopted; the general token still carries declared identity. |
+| "Who is working right now" is observed, not promised | Presence sidecars per (agent, machine, console); leases are checked against the holder's presence and report `abandoned` when it goes silent; the live stream ticks on sidecar changes | Presence rides authenticated writes and the heartbeat ping; a worker that never sends headers is visible only through its leases and events. |
+| Operational failures reach one queue with an honest bar | Token-gated ingest (`app-error`/`agent-error`), CSRF-gated browser diagnostics, write-time redaction + per-fingerprint throttling, a read-time bar shared by the board and the API, truthful ack/reopen, bounded clears, per-channel coverage | The stream sees only what is wired to report into it — coverage names silent channels precisely because silence is not health. |
+| A replayed ledger line cannot double-apply | Reconcile collapses a byte-identical replayed line (announced by name); a genuine fork still linearizes with nothing dropped; content tampering is still `verify_chain`'s catch | The collapse requires byte-identity (same event id and hash); anything else follows the fork/corruption rules. |
 
 ## What is not automatic
 

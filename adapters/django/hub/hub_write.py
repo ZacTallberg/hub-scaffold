@@ -13,20 +13,62 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import collision, ids, validate
+from hub_core import collision, errorlog, ids, secretscan, validate
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
 from . import hub_app
 
 
-def _token_ok(request) -> bool:
+def resolve_token(got: str):
+    """(token_class, bound_agent) for a presented token, or None if invalid. Fail-closed:
+    with nothing configured, nothing validates.
+
+    Two classes:
+    - "general" — HUB_WRITE_TOKEN, the operator-grade credential. Terminal board authority;
+      the caller declares its agent name per call (the original single-token model, kept).
+    - "minted" — a per-agent token from POST /hub/api/mint-token, stored as sha256 only.
+      Identity is PROVEN: writes are attributed to the bound agent, a payload declaring
+      someone else is refused, and revocation is per-agent instead of the all-or-nothing
+      rotation a shared secret forces. Minted tokens cannot mint tokens, issue directives,
+      or answer questions — those stay operator-grade.
+    """
+    if not got:
+        return None
     want = hub_app._dj_setting("HUB_WRITE_TOKEN") or os.environ.get("HUB_WRITE_TOKEN")
-    if not want:
-        return False  # fail-closed: writes disabled until a token is configured
-    # header only (NOT ?token= — query params leak into access logs/referers); constant-time compare.
-    got = request.headers.get("X-Write-Token") or ""
-    return bool(got) and hmac.compare_digest(got, want)
+    if want and hmac.compare_digest(got, want):
+        return ("general", None)
+    digest = hashlib.sha256(got.encode("utf-8")).hexdigest()
+    for hashed, agent in hub_app.read_minted_tokens().items():
+        if agent and hmac.compare_digest(digest, hashed.lower()):
+            return ("minted", agent)
+    return None
+
+
+_AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def valid_agent_name(name) -> bool:
+    # fullmatch, NOT match: `$` also matches immediately before a trailing newline, so a
+    # name with one passed the shape check and then failed deeper as an id error — a 500
+    # that renders frame locals under DEBUG. Anchor the end for real.
+    return bool(isinstance(name, str) and _AGENT_RE.fullmatch(name))
+
+
+def _record_refusal(request, code, message):
+    """Put a 4xx refusal into the operational stream. A worker whose token was rotated out
+    otherwise retries forever while the board shows nothing but a seat going quietly stale —
+    indistinguishable from someone stepping away. Fail-soft: telemetry must never be the
+    reason a refusal turns into a 500."""
+    try:
+        errorlog.record(
+            hub_app.HUB_DIR, "hub.auth", message, severity="warning", code=code,
+            context={"component": "hub-write", "path": request.path_info,
+                     "method": request.method,
+                     "agent": (request.headers.get("X-Hub-Agent") or "")[:120],
+                     "machine": (request.headers.get("X-Hub-Machine") or "")[:120]})
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 def _body(request):
@@ -42,15 +84,66 @@ def writer(fn):
     def w(request, *a, **k):
         if request.method != "POST":
             return HttpResponseNotAllowed(["POST"])
-        if not _token_ok(request):
+        resolved = resolve_token(request.headers.get("X-Write-Token") or "")
+        if resolved is None:
+            _record_refusal(request, "auth_refused",
+                            "a write was refused: missing or invalid X-Write-Token")
             return JsonResponse({"errors": [{"code": "forbidden", "msg": "missing/invalid X-Write-Token"}]}, status=403)
         b = _body(request)
         if b is None:
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+        # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
+        # writer. The ledger is append-only and hash-chained — a secret written into it can
+        # never be removed without destroying the tamper-evidence, so the door refuses it in
+        # milliseconds with instructions instead of a human cleaning up an immutable record.
+        shape = secretscan.secret_problem(b)
+        if shape:
+            return JsonResponse({"errors": [{"code": "secret_shaped_payload",
+                "msg": f"refused: the payload looks like it contains {shape}. The hub ledger "
+                       f"is append-only and hash-chained — a secret written here can never be "
+                       f"removed. Redact it and retry. If a real secret already reached the "
+                       f"ledger, ROTATE it; editing the chain is not possible."}]}, status=422)
+        klass, bound = resolved
+        declared = b.get("agent")
+        if klass == "minted":
+            # Identity is the token's, never the payload's. A contradicting declared agent
+            # is a misconfiguration (or impersonation) and fails LOUDLY, not silently.
+            if declared and declared != bound:
+                _record_refusal(request, "agent_token_mismatch",
+                                "a write was refused: token bound to '%s' but the payload "
+                                "declared '%s'" % (bound, declared))
+                return JsonResponse({"errors": [{"code": "agent_token_mismatch",
+                    "msg": f"this token is bound to agent '{bound}' but the payload declares "
+                           f"'{declared}' — the caller's identity configuration is stale"}]},
+                    status=422)
+            b["agent"] = bound
+        request.hub_token_class = klass
+        request.hub_agent = b.get("agent") or bound or ""
+        # OBSERVED PRESENCE rides the authenticated write seam: every write refreshes the
+        # caller's row from the optional X-Hub-Machine/-Session/-Cwd/-Focus headers, so the
+        # board knows who is on it without anyone filing a report — and an unauthenticated
+        # caller can never forge a seat. Fail-soft by construction.
+        agent_for_presence = request.hub_agent
+        if valid_agent_name(agent_for_presence):
+            hub_app.observe_presence(agent_for_presence, request.headers)
         return fn(request, b, *a, **k)
     # Marker asserted on every general mutation route; the launch mint has its own narrow marker.
     w._hub_token_gated = True
     return w
+
+
+def _operator_only(request, what: str):
+    """403 unless the presented token is the general (operator-grade) one. Directives reach
+    into every targeted agent's working context and minting identities grants authority —
+    both are an authority tier above ordinary board writes, so a worker-grade minted token
+    is refused by class, not by name."""
+    if getattr(request, "hub_token_class", "") == "general":
+        return None
+    _record_refusal(request, "operator_token_required",
+                    "a %s was refused: requires the general write token" % what)
+    return JsonResponse({"errors": [{"code": "operator_token_required",
+        "msg": f"{what} requires the general write token; a minted per-agent token is "
+               f"worker-grade and cannot do this"}]}, status=403)
 
 
 def _evidence_problem(ev):
@@ -320,7 +413,15 @@ def capability(request, b):
 def _slug(text, fallback):
     s = "".join(c if c.isalnum() or c in "._-" else "-" for c in str(text or "").lower())
     s = re.sub(r"-{2,}", "-", s).strip("-._")[:48].strip("-._")
-    return s or fallback
+    if s and s[0].isalnum():
+        return s
+    # A title that is entirely punctuation (or opens with it) used to fall back to the bare
+    # type name — which COLLIDES every such entity into one id — or mint an id the grammar
+    # refuses (an unhandled 500). A stable digest keeps the id deterministic: the same title
+    # always resolves to the same entity, which is what create-or-update needs.
+    if str(text or "").strip():
+        return "x" + hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:16]
+    return fallback
 
 
 def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None):
@@ -419,7 +520,10 @@ def claim(request, b):
         if status not in ("todo", "in_progress"):
             return JsonResponse({"errors": [{"code": "not_claimable",
                                              "msg": "only todo or in_progress tasks can be claimed"}]}, status=409)
-        res = hub_app.claim(eid, agent, ttl_s=ttl)
+        # The observed caller machine rides into the lease, so the live board can say WHERE
+        # each agent's work is happening instead of painting it onto every seat they own.
+        machine = (request.headers.get("X-Hub-Machine") or "").strip().lower()
+        res = hub_app.claim(eid, agent, ttl_s=ttl, machine=machine)
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if status != "in_progress":
@@ -448,7 +552,8 @@ def heartbeat(request, b):
         ttl = 0
     if ttl < 1 or ttl > 86400:
         return JsonResponse({"errors": [{"code": "bad_ttl", "msg": "ttl_s must be 1..86400"}]}, status=422)
-    res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=ttl)
+    machine = (request.headers.get("X-Hub-Machine") or "").strip().lower()
+    res = hub_app.heartbeat(b.get("id"), b.get("token"), ttl_s=ttl, machine=machine)
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
@@ -514,3 +619,438 @@ def consume_launch_grant(request, b):
     if not ok:
         return JsonResponse({"errors": [{"code": "launch_refused", "msg": str(detail)}]}, status=403)
     return JsonResponse({"data": {"authorized": True, "count": int(detail)}})
+
+
+# ── The ask/answer loop: a blocked worker's question actually reaches the operator ──
+
+_ASK_NOISE = {
+    "the", "and", "for", "are", "but", "not", "you", "your", "our", "with", "that", "this",
+    "from", "have", "has", "was", "were", "why", "how", "what", "when", "who", "should",
+    "would", "could", "can", "does", "did", "any", "all", "its", "there", "their",
+}
+_ASK_DUP_BAR = 0.5          # Jaccard over significant tokens
+
+
+def _ask_tokens(text):
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9._/-]{2,}", str(text or "").lower())
+            if w not in _ASK_NOISE}
+
+
+def _ask_overlap(one, other):
+    a, b = _ask_tokens(one), _ask_tokens(other)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / float(len(a | b))
+
+
+def _already_covered(state, text):
+    """Surfaces the answer could already be on: questions (open or answered) and any adopted
+    knowledge entities (lessons; notes tagged as shared memory). FAILS OPEN, deliberately
+    and in both directions: any error returns nothing and the ask proceeds — a worker
+    blocked on a real question must never be silenced by a search outage. A duplicate is
+    cheap and visible; a lost question is neither."""
+    hits = []
+    try:
+        for eid, ent in (state.get("entities") or {}).items():
+            if not isinstance(ent, dict):
+                continue
+            etype = ent.get("type")
+            tags = {str(t).lower() for t in (ent.get("tags") or [])}
+            if etype == "note" and "question" in tags:
+                score = max(_ask_overlap(text, ent.get("title")),
+                            _ask_overlap(text, ent.get("body_md")))
+                kind = "open" if "open" in tags else "answered"
+            elif etype == "lesson" and ent.get("status") not in ("superseded", "dropped"):
+                score = _ask_overlap(text, ent.get("title") or ent.get("statement"))
+                kind = "crystallized"
+            elif etype == "note" and tags & {"pattern", "memory", "solution"}:
+                score = _ask_overlap(text, ent.get("title"))
+                kind = "crystallized"
+            else:
+                continue
+            if score >= _ASK_DUP_BAR:
+                hits.append({"score": round(score, 2), "id": eid, "kind": kind,
+                             "title": str(ent.get("title") or ent.get("statement") or "")[:120]})
+    except Exception:                                        # noqa: BLE001 - fail open
+        return []
+    # One id, one row: a question both open on the board AND crystallized matches on two
+    # surfaces and would print twice, overstating the case against the asker.
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    best, seen = [], set()
+    for hit in hits:
+        if hit["id"] in seen:
+            continue
+        seen.add(hit["id"])
+        best.append(hit)
+    return best[:5]
+
+
+@writer
+def ask(request, b):
+    """A worker's question to the operator, as a first-class board entity that DELIVERS.
+
+    The note lands tagged `question`+`open`, carries its asker in a stable field (never
+    derived from provenance, which answering rewrites), fires on the live stream the moment
+    it exists, and blocks in /hub/inbox/wait for whoever answers. Idempotent on the exact
+    wording (the id is a digest of it), and guarded against restatements: a question the
+    board already has — open, answered, or crystallized — is refused with the matching ids
+    instead of minting another copy, because "search before you ask" is a rule, and a rule
+    that depends on every future caller remembering it is not a control. `anyway: true` is
+    the escape hatch for a question that genuinely is different."""
+    agent = b.get("agent") or ""
+    if not valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent",
+            "msg": "ask requires a valid agent name (the asker) in the payload"}]}, status=422)
+    text = str(b.get("question") or "").strip()
+    if not text:
+        return JsonResponse({"errors": [{"code": "need_question"}]}, status=400)
+    state = hub_app.current_state()
+    if not b.get("anyway"):
+        dups = _already_covered(state, text)
+        if dups:
+            return JsonResponse({"errors": [{"code": "duplicate_question",
+                "msg": "the board already has this question — read the matches first; if "
+                       "yours is genuinely different, retry with anyway=true; if it is the "
+                       "same one still unanswered, add to that thread instead of filing "
+                       "another copy",
+                "matches": dups}]}, status=409)
+    local = "q-%s-%s" % (_slug(agent, "agent"),
+                         hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
+    eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
+    existing = state["entities"].get(eid)
+    payload = {"type": "note", "category": "context", "title": text[:300],
+               "asker": agent, "status": "standing", "tags": ["question", "open"],
+               "body_md": str(b.get("context") or "")}
+    related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
+    if related:
+        payload["relates_to"] = related
+    resp, status = _append("note", eid, payload,
+                           expected_version=existing.get("version") if existing else None,
+                           agent=agent, idem=b.get("idem_key"), etype="note.created")
+    return JsonResponse(resp, status=status)
+
+
+@writer
+def answer(request, b):
+    """Close a question: reply to the asker AND retire the open question, as ONE verb.
+
+    A half-done answer is worse than either half alone — a reply sent with the question
+    still open means the board's question count only ever grows; a question closed with no
+    reply means the asker learns nothing. The reply is a directive targeted at the asker
+    (so it is ADDRESSED: the asker's inbox wait returns it, and their ack closes delivery),
+    idempotent per question — re-answering updates the one answer directive in place, never
+    mints a second copy delivered who-knows-where."""
+    refused = _operator_only(request, "answering a question")
+    if refused is not None:
+        return refused
+    question_id = str(b.get("question") or "").strip()
+    text = str(b.get("text") or "").strip()
+    if not question_id or not text:
+        return JsonResponse({"errors": [{"code": "need_question_and_text"}]}, status=400)
+    if ":" not in question_id:
+        question_id = ids.make_id(hub_app.PROJECT_KEY, "note", question_id)
+
+    state = hub_app.current_state()
+    note_ent = (state.get("entities") or {}).get(question_id)
+    if not note_ent or note_ent.get("type") != "note":
+        return JsonResponse({"errors": [{"code": "no_such_question", "msg": question_id}]}, status=404)
+    # The asker comes from the note's own stable field. provenance.agent is the LAST writer,
+    # which after a first answer is the answerer — deriving from it mis-targets every
+    # re-answered directive at the operator themselves.
+    asker = str(note_ent.get("asker") or (note_ent.get("provenance") or {}).get("agent") or "").strip().lower()
+    if not valid_agent_name(asker):
+        return JsonResponse({"errors": [{"code": "unknown_asker",
+            "msg": "the question does not name who asked; issue a directive instead"}]}, status=409)
+
+    question_text = str(note_ent.get("title") or "")
+    payload = {
+        "type": "directive",
+        "title": ("Answer: %s" % question_text)[:300],
+        "body_md": text + "\n\n---\nIn answer to your question: " + question_text,
+        "targets": [asker],
+        "status": "active",
+        "answers": question_id,
+    }
+    existing_dir = next(
+        (e for e in state["entities"].values()
+         if isinstance(e, dict) and e.get("type") == "directive"
+         and e.get("answers") == question_id),
+        None)
+    agent = b.get("agent", hub_app.operator_agent())
+    if existing_dir:
+        eid = existing_dir["id"]
+        resp, status = _append("directive", eid, payload,
+                               expected_version=existing_dir.get("version"),
+                               agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+    else:
+        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
+        resp, status = _append("directive", eid, payload, expected_version=None,
+                               agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+    if status not in (200, 201):
+        return JsonResponse(resp, status=status)
+
+    # Retire the question by flipping its tags: `open` -> `answered`. The tag, not the
+    # status enum, is what marks a question as awaiting an answer.
+    still_open = False
+    try:
+        tags = [t for t in (note_ent.get("tags") or []) if str(t).lower() != "open"]
+        if "answered" not in [str(t).lower() for t in tags]:
+            tags.append("answered")
+        closed = {k: v for k, v in note_ent.items() if k not in ("version", "provenance")}
+        closed["tags"] = tags
+        _retire_resp, retire_status = _append(
+            "note", question_id, closed, expected_version=note_ent.get("version"),
+            agent=agent, idem=None, etype="note.created")
+        still_open = retire_status not in (200, 201)
+    except Exception:                                    # noqa: BLE001 - never lose the reply
+        still_open = True
+    if still_open:
+        # Loud, in the response the operator reads: an answer that leaves its question open
+        # is how a board's question count only ever grows.
+        resp.setdefault("data", {})["question_still_open"] = True
+    resp.setdefault("data", {})["directive"] = eid
+    resp["data"]["asker"] = asker
+    return JsonResponse(resp, status=status)
+
+
+@writer
+def directive(request, b):
+    """An operator instruction addressed to named agents (or 'all'). Operator-grade: an
+    instruction injected into every targeted agent's working context is an authority tier
+    above ordinary board writes, so a worker-grade minted token is refused by class."""
+    refused = _operator_only(request, "issuing a directive")
+    if refused is not None:
+        return refused
+    agent = b.get("agent", hub_app.operator_agent())
+    is_create = not b.get("id")
+    if is_create:
+        state = hub_app.current_state()
+        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
+        b.setdefault("status", "active")
+        b.setdefault("targets", ["all"])
+    else:
+        eid = b["id"]
+    payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key")}
+    payload["type"] = "directive"
+    resp, status = _append("directive", eid, payload, expected_version=b.get("expected_version"),
+                           agent=agent, idem=b.get("idem_key"),
+                           etype="directive.issued" if is_create else "directive.updated")
+    return JsonResponse(resp, status=status)
+
+
+@writer
+def ack(request, b):
+    """One agent's record that one directive (or answer) was delivered to it. Any bound
+    agent acks FOR ITSELF — under a minted token the writer choke point already forced
+    b['agent'] to the token's identity. Stable id => replay-safe for offline retry queues."""
+    agent = b.get("agent") or ""
+    if not valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent"}]}, status=422)
+    directive_id = str(b.get("directive") or "")
+    if ":" not in directive_id:
+        directive_id = ids.make_id(hub_app.PROJECT_KEY, "directive", directive_id) \
+            if directive_id else ""
+    state = hub_app.current_state()
+    if not directive_id or directive_id not in state["entities"]:
+        return JsonResponse({"errors": [{"code": "unknown_directive", "id": directive_id}]}, status=404)
+    local = "%s--%s" % (directive_id.rsplit(":", 1)[-1], _slug(agent, "agent"))
+    eid = ids.make_id(hub_app.PROJECT_KEY, "ack", local)
+    existing = state["entities"].get(eid)
+    payload = {"type": "ack", "directive": directive_id, "agent": agent,
+               "note": str(b.get("note") or "")}
+    resp, status = _append("ack", eid, payload,
+                           expected_version=existing.get("version") if existing else None,
+                           agent=agent, idem=b.get("idem_key") or f"ack:{eid}",
+                           etype="ack.recorded")
+    if status in (200, 201):
+        _retire_if_fully_acked(directive_id, agent)
+    return JsonResponse(resp, status=status)
+
+
+def _retire_if_fully_acked(directive_id, actor):
+    """Close a directive once every agent it names has acknowledged it. Without this,
+    delivered-and-read directives sit "active" forever and the queue reads as a backlog —
+    and a queue people learn to ignore is worse than no queue. Deliberately conservative:
+    only explicitly named targets ('all' has no closed roster to check off), and any
+    failure is swallowed — an ack that was correctly recorded must not fail because the
+    tidy-up afterwards did."""
+    try:
+        state = hub_app.current_state()
+        ent = (state.get("entities") or {}).get(directive_id)
+        if not ent or ent.get("status") != "active":
+            return
+        targets = [str(t).strip().lower() for t in (ent.get("targets") or []) if str(t).strip()]
+        if not targets or "all" in targets:
+            return
+        acked = set()
+        for other in (state.get("entities") or {}).values():
+            if other.get("type") == "ack" and other.get("directive") == directive_id:
+                acked.add(str(other.get("agent") or "").strip().lower())
+        if not all(t in acked for t in targets):
+            return
+        payload = {k: ent[k] for k in ("type", "title", "body_md", "targets",
+                                       "remediation_cmd", "answers") if k in ent}
+        payload["status"] = "fulfilled"
+        _append("directive", directive_id, payload, expected_version=ent.get("version"),
+                agent=actor, idem=f"retire:{directive_id}:{ent.get('version')}",
+                etype="directive.updated")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+@writer
+def mint_token(request, b):
+    """Mint a token BOUND to one agent. Operator-grade.
+
+    With only the shared token, every write resolves to whatever agent the payload claims,
+    so the board's attribution is a label, not a control. A minted token proves who the
+    caller is: writes attribute to the bound agent, a payload claiming someone else is
+    refused, and revocation is per-agent instead of the all-or-nothing rotation a shared
+    secret forces. The value is returned EXACTLY once and only its sha256 is stored, so a
+    lost token is re-minted, never recovered — and the mint itself lands on the ledger,
+    because granting an identity is as consequential as using one."""
+    refused = _operator_only(request, "minting an identity token")
+    if refused is not None:
+        return refused
+    target = (b.get("target") or "").strip().lower()
+    if not valid_agent_name(target):
+        return JsonResponse({"errors": [{"code": "bad_target",
+            "msg": "target must be an agent name (lowercase slug)"}]}, status=422)
+    if b.get("revoke"):
+        tokens = hub_app.read_minted_tokens()
+        remaining = {h: a for h, a in tokens.items() if a != target}
+        removed = len(tokens) - len(remaining)
+        hub_app.write_minted_tokens(remaining)
+        return JsonResponse({"data": {"target": target, "revoked": removed}})
+    import secrets as _secrets
+    token = f"hub-{target}-{_secrets.token_urlsafe(24)}"
+    hub_app.add_minted_token(hashlib.sha256(token.encode("utf-8")).hexdigest(), target)
+    eid = ids.make_id(hub_app.PROJECT_KEY, "note", f"token-minted--{_slug(target, 'agent')}")
+    existing = hub_app.current_state()["entities"].get(eid)
+    _append("note", eid,
+            {"type": "note", "title": f"Identity token minted for {target}",
+             "category": "context", "tags": ["identity", "token", "audit"],
+             "body_md": f"A token bound to `{target}` was minted with the general write "
+                        f"token. Only its sha256 is stored; every write presented with it "
+                        f"is attributed to that agent."},
+            expected_version=existing.get("version") if existing else None,
+            agent=b.get("agent", hub_app.operator_agent()), idem=None, etype="note.created")
+    return JsonResponse({"data": {
+        "target": target, "token": token,
+        "note": ("Shown once — only its sha256 is stored. Every write presented with it is "
+                 "attributed to this agent, and it can be revoked without touching anyone "
+                 "else's access."),
+    }})
+
+
+@writer
+def presence_ping(request, b):
+    """The seat heartbeat. An ordinary write proves an agent ACTED; only a repeating
+    heartbeat proves the seat is still there after the request returned. A session between
+    tasks pings here (with X-Hub-Machine/-Session/-Cwd/-Focus headers) so the board's
+    live-console view stays true, and the response publishes the shared freshness contract
+    so clients and the board can never quietly disagree about what offline means."""
+    from hub_core import presence as _presence
+    agent = b.get("agent") or ""
+    if not valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent"}]}, status=422)
+    hub_app.observe_presence(agent, request.headers, heartbeat=True)
+    import time as _t
+    return JsonResponse({"data": {"ok": True, "server_time": _t.time(),
+                                  **_presence.contract()}})
+
+
+# ── Operational error ingest: the surfaces the audit cannot see ──
+
+@writer
+def app_error(request, b):
+    """Errors from a SATELLITE SERVICE this project ships, forwarded by that service's own
+    error handler. Without this channel, "is anything broken?" has to be asked once per
+    service, by someone who already suspects the answer — so it never gets asked. Services
+    forward only what belongs on a queue a human drains: server exceptions and background
+    job deaths, never uncaught browser noise from somebody's stale tab. Attributed to the
+    APP (source `app.<slug>.<kind>`), never to a person's machine."""
+    slug = re.sub(r"[^a-z0-9-]", "", str(b.get("app") or "").strip().lower())[:60]
+    if not slug:
+        return JsonResponse({"errors": [{"code": "need_app", "msg": "app slug is required"}]}, status=400)
+    kind = re.sub(r"[^a-z_]", "", str(b.get("kind") or "server").strip().lower())[:20] or "server"
+    row = errorlog.record(
+        hub_app.HUB_DIR,
+        "app.%s.%s" % (slug, kind),
+        str(b.get("message") or "Application error")[:800],
+        severity=str(b.get("severity") or "error").lower(),
+        code=str(b.get("code") or "app_error")[:120],
+        details=str(b.get("details") or "")[:2000],
+        context={
+            "app": slug,
+            "component": str(b.get("component") or "app")[:120],
+            "operation": str(b.get("operation") or "")[:120],
+            "path": str(b.get("path") or "")[:240],
+            "machine": str(b.get("host") or "")[:120],
+        },
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
+
+
+@writer
+def agent_error(request, b):
+    """Operational failures on a WORKER's side — a launcher that will not start, tooling
+    that cannot write, a reporter refused upstream. Without this the operational stream
+    covers exactly one computer: the one the hub runs on, and every worker-side failure is
+    written to a local log read by nobody."""
+    agent = b.get("agent") or getattr(request, "hub_agent", "") or "unknown-agent"
+    row = errorlog.record(
+        hub_app.HUB_DIR,
+        "agent.%s.%s" % (agent, str(b.get("source") or "worker")[:60]),
+        str(b.get("message") or "Worker reported an operational error")[:800],
+        severity=str(b.get("severity") or "error").lower(),
+        code=str(b.get("code") or "agent_error")[:120],
+        details=str(b.get("details") or "")[:2000],
+        context={
+            "component": str(b.get("component") or "worker")[:120],
+            "operation": str(b.get("operation") or "")[:120],
+            "agent": str(agent)[:120],
+            "machine": str(b.get("machine") or "")[:120],
+        },
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
+
+
+@writer
+def ack_error(request, b):
+    """Acknowledge (or reopen) one recurring error signature — the button of the error
+    queue. Reporting is truthful both ways: reopening a signature that was never acked is
+    a refusal, not a 200 over a row nothing touched."""
+    fingerprint = str(b.get("fingerprint") or "")[:32]
+    if not fingerprint:
+        return JsonResponse({"errors": [{"code": "need_fingerprint"}]}, status=400)
+    if b.get("reopen"):
+        if not errorlog.unack(hub_app.HUB_DIR, fingerprint):
+            return JsonResponse({"errors": [{"code": "not_acked", "msg":
+                "that signature is not acknowledged, so there was nothing to reopen"}]}, status=409)
+        return JsonResponse({"data": {"fingerprint": fingerprint, "reopened": True}})
+    entry = errorlog.ack(hub_app.HUB_DIR, fingerprint,
+                         actor=b.get("agent") or "", note=b.get("note") or "")
+    if not entry:
+        return JsonResponse({"errors": [{"code": "ack_failed"}]}, status=500)
+    return JsonResponse({"data": {"fingerprint": fingerprint, "acked": entry}}, status=201)
+
+
+@writer
+def clear_errors(request, b):
+    """Clear resolved errors — by age, or by acknowledgement. Never 'everything': a clear
+    must never be the operation that destroys evidence of a failure nobody has looked at."""
+    import time as _t
+    only_acked = bool(b.get("only_acked"))
+    before = b.get("older_than_hours")
+    before_epoch = None
+    if before not in (None, ""):
+        try:
+            before_epoch = _t.time() - (float(before) * 3600.0)
+        except (TypeError, ValueError):
+            return JsonResponse({"errors": [{"code": "bad_older_than_hours"}]}, status=400)
+    if before_epoch is None and not only_acked:
+        return JsonResponse({"errors": [{"code": "need_bound",
+            "msg": "pass older_than_hours and/or only_acked; a clear is never unbounded"}]},
+            status=400)
+    return JsonResponse({"data": errorlog.clear(hub_app.HUB_DIR, before_epoch, only_acked)})

@@ -16,10 +16,25 @@ failure mode justifies them.
 
 - Canonical events in `PROJECT/.hub/events.jsonl`, hash-chained and append-only.
 - A rebuildable SQLite index with optimistic concurrency and aggregate-scoped idempotency.
-- JSON-Schema-validated tasks, ADRs, features, gaps, capabilities, deploys, and notes.
+- JSON-Schema-validated tasks, ADRs, features, gaps, capabilities, deploys, notes, directives,
+  and delivery acks.
 - Derived dependency/urgency state, graph, collections, audit, and a browser dashboard.
-- A typed write API with one shared header token, expiring task leases, and a guarded completion
-  transition.
+- A typed write API with a general operator token plus optional minted per-agent tokens
+  (identity proven by the credential, per-agent revocation, sha256-only at rest), expiring task
+  leases, and a guarded completion transition. Every write is refused if it looks like it
+  contains a secret — the append-only ledger can never unlearn one.
+- The ask/answer loop: a blocked worker's question is DELIVERED (an addressed inbox with a
+  bounded long-poll), answering replies to the asker AND retires the question in one verb, and
+  the asker's ack closes the loop. Duplicate asks are refused with the matching ids, failing
+  open so a search outage never silences a real question.
+- Observed presence: per-(agent, machine) rows with per-console sessions (working directory +
+  focus), a shared freshness contract, self-retiring rows (archived, never deleted), and leases
+  checked against the holder's presence so an abandoned claim stops reading as somebody working.
+- A bounded, redacted operational error stream — host-app 5xx, satellite services, worker-side
+  failures, browser diagnostics — with a read-time severity bar shared by the board and the API,
+  truthful ack/reopen, bounded clears, and per-channel coverage so an empty card says whether it
+  is everything.
+- Ranked full-board search and a request-identity probe (`whoami.json`).
 - A focused computed audit for schemas, references, ADR numbering, event integrity, build
   coherence, selected Django safety settings, and mutation-route guards.
 - A minimal mounted Django example and end-to-end refusal tests.
@@ -37,12 +52,15 @@ Hub reads are unauthenticated by default and expose the complete projected board
 not mean automatically redacted: keep sensitive material out of entities or add an authentication
 boundary.
 
-The general `HUB_WRITE_TOKEN` is more powerful than an ordinary tracker token. A write-token holder
-can grant `done`, record deploys, and rule ADRs. It is NOT code execution: the Hub never runs a
-task's `verification_command` — the worker runs it out-of-band and submits a typed exit-0 receipt
+The general `HUB_WRITE_TOKEN` is more powerful than an ordinary tracker token. A general-token
+holder can grant `done`, record deploys, rule ADRs, issue directives addressed to every agent,
+and mint per-agent identity tokens. It is NOT code execution: the Hub never runs a task's
+`verification_command` — the worker runs it out-of-band and submits a typed exit-0 receipt
 the Hub validates. Strict evidence URLs ARE still fetched by the server. Treat the token as production credentials,
-give it only to trusted operators/agents, and isolate the service accordingly. The optional browser
-launcher never receives it. Read [SECURITY.md](SECURITY.md) before enabling writes or worker launch.
+give it only to trusted operators/agents, and isolate the service accordingly. Hand each worker a
+MINTED token instead of the general one: minted tokens attribute writes by credential, cannot
+command the fleet, and revoke per-agent. The optional browser
+launcher never receives either. Read [SECURITY.md](SECURITY.md) before enabling writes or worker launch.
 
 ## Documentation map
 

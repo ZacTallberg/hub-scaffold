@@ -69,7 +69,14 @@ def worker_protocol() -> str:
 
 @functools.lru_cache(maxsize=1)
 def registry():
-    return hub_core.Registry.from_dir(SCHEMA_DIR)
+    reg = hub_core.Registry.from_dir(SCHEMA_DIR)
+    # Admit every schema-declared type to the fold. project.register_types documented this
+    # call and nothing made it — a docstring describing a wire that is not there — so an
+    # instance-local schema validated perfectly while its events silently fell out of the
+    # projection.
+    _project.register_types(
+        sid.split(":", 1)[1] for sid in reg.by_id if sid.startswith("hub:") and ":" in sid)
+    return reg
 
 
 def store():
@@ -330,9 +337,10 @@ def _write_lease(task_id, lease):
     _os.replace(tmp, p)
 
 
-def claim(task_id, agent, ttl_s=900):
+def claim(task_id, agent, ttl_s=900, machine=""):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
+        machine = (machine or "").strip().lower()[:120]
         cur = _read_lease(task_id)
         if cur and cur.get("expires", 0) > now:
             if cur.get("agent") != agent:
@@ -340,10 +348,16 @@ def claim(task_id, agent, ttl_s=900):
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
             cur["expires"] = now + ttl_s
+            if machine:
+                cur["machine"] = machine
             _write_lease(task_id, cur)
             return {"ok": True, **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
                  "claimed": now, "expires": now + ttl_s}
+        # One person legitimately runs several machines; recording which one made the claim
+        # keeps the live board from painting one agent's work onto every seat they own.
+        if machine:
+            lease["machine"] = machine
         _write_lease(task_id, lease)
         return {"ok": True, **lease}
 
@@ -353,12 +367,15 @@ def lease_valid(task_id, token):
     return bool(cur and cur.get("token") == token and cur.get("expires", 0) > _time.time())
 
 
-def heartbeat(task_id, token, ttl_s=900):
+def heartbeat(task_id, token, ttl_s=900, machine=""):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         cur = _read_lease(task_id)
         if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
             return {"ok": False, "reason": "no/stale lease"}
         cur["expires"] = _time.time() + ttl_s
+        machine = (machine or "").strip().lower()[:120]
+        if machine:
+            cur["machine"] = machine
         _write_lease(task_id, cur)
         return {"ok": True, "expires": cur["expires"]}
 
@@ -382,3 +399,128 @@ def release_lease(task_id, token) -> bool:
             except OSError:
                 return False
         return True
+
+
+# ---- observed presence: who is on this board right now (hub_core.presence over HUB_DIR) ----
+from hub_core import presence as _presence
+
+# A live lease whose holder has not been observed for this long is reported ABANDONED: a
+# lease is a promise, not an observation, and "who is working right now" must not be
+# answered by believing a long TTL over the silence sitting right next to it. Presence is
+# the falsifier, not the source — with no presence data at all, leases are reported as the
+# files claim rather than declaring the whole fleet abandoned.
+ABANDONED_AFTER_S = int(os.environ.get("HUB_LEASE_ABANDONED_AFTER_S", "900"))
+
+
+def observe_presence(agent, headers, *, heartbeat=False):
+    """Refresh observed presence from a request's optional X-Hub-* headers. Fail-soft by
+    construction (hub_core.presence swallows I/O); called from the write seam so presence
+    can never be forged by an unauthenticated caller."""
+    _presence.observe(
+        HUB_DIR, agent,
+        machine=headers.get("X-Hub-Machine") or "",
+        session=headers.get("X-Hub-Session") or "",
+        cwd=headers.get("X-Hub-Cwd") or "",
+        focus=headers.get("X-Hub-Focus") or "",
+        heartbeat=heartbeat)
+
+
+def read_presence():
+    return _presence.read(HUB_DIR)
+
+
+def live_sessions():
+    return _presence.live_sessions(HUB_DIR)
+
+
+def presence_stamp():
+    return _presence.stamp(HUB_DIR)
+
+
+def all_leases(include_expired=False):
+    """Every task lease on disk: who holds it, from which machine, until when — and whether
+    the holder has gone silent (`abandoned`). The lease data always existed; a board that
+    never projects it renders every task `unowned`, which reads as "nobody reports their
+    work" when the truth is "the board cannot see the reports"."""
+    out = {}
+    now = _time.time()
+    try:
+        paths = sorted(CLAIMS.glob("*.json"))
+    except OSError:
+        return out
+    seen_by_agent, seen_by_pair = {}, {}
+    try:
+        for row in _presence.rows(HUB_DIR):
+            stamp = _presence.epoch(row.get("last_seen"))
+            agent = row.get("agent") or ""
+            machine = (row.get("machine") or "").strip().lower()
+            if stamp and agent:
+                seen_by_agent[agent] = max(seen_by_agent.get(agent, 0), stamp)
+                if machine:
+                    seen_by_pair[(agent, machine)] = max(seen_by_pair.get((agent, machine), 0), stamp)
+    except Exception:                                        # noqa: BLE001
+        seen_by_agent, seen_by_pair = {}, {}
+    for p in paths:
+        try:
+            lease = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # a torn/malformed lease file is skipped — a board that 500s on one
+                      # bad file is worse than a board missing one row
+        if not isinstance(lease, dict) or not lease.get("task"):
+            continue
+        expires = float(lease.get("expires") or 0)
+        if not include_expired and expires <= now:
+            continue
+        agent = lease.get("agent") or ""
+        machine = (lease.get("machine") or "").strip().lower()
+        last_seen = seen_by_pair.get((agent, machine)) or seen_by_agent.get(agent) or 0
+        unheard_s = int(now - last_seen) if last_seen else None
+        abandoned = bool(seen_by_agent) and (last_seen == 0 or unheard_s > ABANDONED_AFTER_S)
+        out[str(lease["task"])] = {
+            "agent": agent, "machine": machine,
+            "claimed": lease.get("claimed"), "expires": expires,
+            "live": expires > now and not abandoned,
+            "abandoned": abandoned,
+            "unheard_s": unheard_s,
+            "held_for_s": max(0, int(now - float(lease.get("claimed") or now))),
+        }
+    return out
+
+
+# ---- per-agent identity tokens (sha256-only sidecar beside claims/) ----
+TOKENS = HUB_DIR / "tokens.json"
+
+
+def operator_agent() -> str:
+    """The identity questions are addressed to and answers come from. One name, settable —
+    HUB_OPERATOR_AGENT in settings or env."""
+    return str(_dj_setting("HUB_OPERATOR_AGENT")
+               or os.environ.get("HUB_OPERATOR_AGENT") or "operator").strip().lower()
+
+
+def read_minted_tokens() -> dict:
+    """{sha256(token): agent}. Only digests are stored — a lost token is re-minted, never
+    recovered."""
+    try:
+        value = json.loads(TOKENS.read_text(encoding="utf-8"))
+        return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_minted_tokens(tokens: dict) -> None:
+    HUB_DIR.mkdir(parents=True, exist_ok=True)
+    with ProcessFileLock(HUB_DIR, name=".tokens.lock", timeout=10):
+        tmp = TOKENS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(tokens, indent=1, sort_keys=True), encoding="utf-8")
+        _os.replace(tmp, TOKENS)
+
+
+def add_minted_token(digest: str, agent: str) -> None:
+    HUB_DIR.mkdir(parents=True, exist_ok=True)
+    with ProcessFileLock(HUB_DIR, name=".tokens.lock", timeout=10):
+        tokens = read_minted_tokens()
+        tokens[digest] = agent
+        tmp = TOKENS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(tokens, indent=1, sort_keys=True), encoding="utf-8")
+        _os.replace(tmp, TOKENS)

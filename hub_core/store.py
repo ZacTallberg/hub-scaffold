@@ -445,13 +445,29 @@ class EventStore:
         it is re-chained in FILE ORDER (new seq + prev_hash, hash recomputed) — deterministic, so
         concurrent healers produce identical bytes. Fail-closed: an event that does not self-verify
         against its OWN claimed fields, or whose claimed prev_hash names no event in this log, is
-        not a race loser but corruption/forgery — refuse to heal, raise. Nothing is ever dropped."""
+        not a race loser but corruption/forgery — refuse to heal, raise. Nothing REAL is ever
+        dropped — with one carve-out, announced by name: a line BYTE-IDENTICAL to an event already
+        kept (same event_id, same hash) is a REPLAY of the log's own content, not a second event.
+        A backup/restore that re-appends the tail produces exactly this shape, and re-chaining the
+        replay as a new event would apply the same payload twice (a task completed twice, a version
+        bumped twice). The hash chain is unchanged by collapsing it, which is what proves the
+        collapse loses nothing."""
         healed, dirty, prev, known, seen_seqs = [], False, "", set(), set()
+        kept_hash_by_event_id = {}
         for i, ev in enumerate(events):
-            want_seq = i + 1
+            # The expected seq follows the HEALED chain, not the raw file index — a collapsed
+            # replay must not leave a gap that re-chains every later event off by one.
+            want_seq = len(healed) + 1
             if not dirty and ev.get("seq") == want_seq and ev.get("prev_hash") == prev:
                 healed.append(ev)
             else:
+                if (ev.get("event_id") in kept_hash_by_event_id
+                        and kept_hash_by_event_id[ev.get("event_id")] == ev.get("hash")):
+                    print("NOTE hub_core.store: byte-identical replayed line collapsed "
+                          "(event %s, seq %s) — a replay of the log's own content, not a second "
+                          "event; the chain is unchanged by it" % (ev.get("event_id"), ev.get("seq")))
+                    dirty = True   # the rewritten file drops the duplicate line
+                    continue
                 claimed = {k: ev.get(k) for k in _HASH_FIELDS}
                 if sha256_hex(ev.get("prev_hash", "") + canonical(claimed)) != ev.get("hash"):
                     raise ValueError(
@@ -483,6 +499,7 @@ class EventStore:
             prev = healed[-1]["hash"]
             known.add(prev)
             seen_seqs.add(healed[-1]["seq"])
+            kept_hash_by_event_id[healed[-1].get("event_id")] = healed[-1].get("hash")
         if dirty:
             durable_replace(self.jsonl, "\n".join(canonical(e) for e in healed) + "\n")
             print("NOTE hub_core.store: healed ledger written (%d events, chain re-verified on rebuild)"
