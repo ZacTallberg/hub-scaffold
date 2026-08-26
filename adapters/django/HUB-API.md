@@ -42,6 +42,14 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 - **`done` never goes through `POST /hub/api/task`** — setting `status:"done"` there returns `409 use_complete`.
   Terminal completion is only `POST /hub/api/complete`, which is evidence- and audit-gated.
 - **Decisions are ADRs** (`POST /hub/api/adr`), not task notes. Accepted ADRs are immutable — supersede, don't rewrite.
+- **Blocked on a fact only the operator has? `POST /hub/api/ask`** — never stall in silence. The
+  question is delivered (the operator's inbox long-poll returns it within a second), the answer
+  comes back addressed to you (`GET /hub/inbox.json?agent=<you>`), and your ack closes the loop.
+  Search first (`GET /hub/search.json?q=…`) — an ask the board already has is refused with the
+  matching ids, and the guard fails OPEN so a search outage never silences a real question.
+- **Optional presence headers on any write** — `X-Hub-Machine`, `X-Hub-Session`, `X-Hub-Cwd`,
+  `X-Hub-Focus` — feed the board's live-console view; `POST /hub/api/presence` is the seat
+  heartbeat between tasks. An authenticated write refreshes your observed seat automatically.
 
 ## READ endpoints (GET, public)
 
@@ -52,7 +60,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
 | `GET /hub/audit.json` | the computed audit: `{ok, exit_code, counts, violations[]}`. exit_code 0=pass, 3=warn, 2=violation. |
 | `GET /hub/graph.json` | dependency edges + dangling references. |
-| `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note`. |
+| `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note, directive, ack`. |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
@@ -61,6 +69,12 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
 | `GET /hub/delta.json?since=<seq>` | Reconnect/recovery form of the cumulative patch: `{changed[], removed[], cursor, audit, live}`. The normal connected path receives this payload inside SSE and does not call this endpoint. `since >= head` still returns refreshed live blocks for lease-only truth; a `cursor.seq` below your `since` means the head regressed—fall back to a full snapshot. |
+| `GET /hub/questions.json` | every question with the numbers the feed is about: per-row `open/answered/acked` plus `waiting_seconds`/`reply_seconds`, and metadata with the longest wait (and who), median reply time, per-asker lanes, and a 14-day asked/answered strip. "Answered" and "delivered" are different facts; only the asker's ack closes the loop. |
+| `GET /hub/inbox.json?agent=<name>` | what is addressed to that agent right now — directives aimed at it, the answer to its own question, and (for the operator, `HUB_OPERATOR_AGENT`) every open question. `{items[], fingerprint, count}`. |
+| `GET /hub/inbox/wait?agent=<name>&fp=<fingerprint>&wait=<s>` | **long-poll**: returns the moment the addressed set differs from `fp` (≤25s, bounded waiter pool — past the ceiling it answers immediately with `degraded:true`, an honest poll). A supervisor loop spends its sleep blocked here; that is the mechanism behind "an ask reaches the operator in about a second". The FINGERPRINT of the addressed set, not the event cursor, decides a wake — unrelated board traffic never trains anyone to ignore the channel. |
+| `GET /hub/errors.json` | the operational error stream — the failures the ledger audit cannot see — with the BAR applied at read (critical/high in this system's own surfaces; foreign-scanner noise and recovered transport blips deferred, `?include=deferred` shows everything). Metadata carries the 24h histogram, trend, top sources, unclaimed count, and per-channel `coverage` so an empty list says whether it is everything. |
+| `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
+| `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
@@ -76,7 +90,10 @@ source of truth, and every ratio carries its denominator.
 | `cursor` | `{seq, hash, ts}` — the head this payload was folded at. |
 | `activity` | recent canonical events; a done task carries the `receipt` that granted it. |
 | `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
-| `fleet` | per-agent cards: current lease, plan step, recent action trail, completions. |
+| `fleet` | per-agent cards: current lease, plan step, the last checkpoint note, recent action trail, completions, machine, and every live console (`sessions`). An agent with no claim but a fresh console focus reads `active` — working, just not on a board task — never `idle`. |
+| `sessions_live` | every live console, flat: agent, machine, session id, cwd, focus, age. The surface that stops two sessions from unknowingly working the same thing. |
+| `asks` / `asks_open` | open questions (who, what, since when). They also ride the attention rail. |
+| `errors` / `error_log` | the operational stream (bar-annotated rows) and its shape — histogram, trend, top sources, unclaimed count, per-channel coverage. |
 | `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. Readiness comes from actionable acceptance and dependencies, never from the presence of a test command. |
 | `adherence` | **is the board still being FOLLOWED and kept current** — six dimensions (`specced, proven, evidenced, fresh, current, moving`), each `{ok, total, unmeasured, pct}`. An empty denominator reports `pct: null`, never 100. `score` averages only the MEASURED dimensions and `unmeasurable` names the rest. |
 | `dag` | critical path length, widest frontier, layer widths, the critical `path` itself, and the min-makespan `eta_tasks` for the fleet actually present. `acyclic: false` means the numbers are a floor, not a schedule. |
@@ -139,7 +156,7 @@ request first, checkpoint at a safe boundary, then acknowledge; completion may w
 For MCP Tasks calls, declare `io.modelcontextprotocol/tasks` in that individual request's client
 capabilities. Set `Mcp-Name` to the AgentRun `taskId` for `tasks/get`, `tasks/update`, and
 `tasks/cancel`. Mutating methods also carry the task fencing token in
-`params._meta["io.zacoberg.hub/leaseToken"]`. The optional protocol `pollIntervalMs` hint is
+`params._meta["io.github.hub-scaffold/leaseToken"]`. The optional protocol `pollIntervalMs` hint is
 intentionally omitted: canonical Hub coordination is committed-event push, not periodic sync.
 
 | Endpoint | Key body fields | Success | Notable refusals |
@@ -205,6 +222,32 @@ Completed dependency receipts compose upward: downstream and release tasks inher
 only a newly introduced critical integration seam. They do not rerun child proof or nest verifier
 fan-out. Once the actual changed behavior succeeds and no critical boundary remains, stop.
 
+### The ask/answer loop and the directive plane
+
+| Endpoint (scope) | Key body fields | Behaviour |
+|---|---|---|
+| `/hub/api/ask` (`ask:write`) | `agent` (the asker), `question`, optional `context`, `relates_to[]`, `anyway` | Mints a note tagged `question`+`open` carrying its `asker` in a STABLE field (provenance is rewritten by answering, so deriving the asker from it mis-addresses every re-answered reply). Id keyed on the wording — a retry updates, never twins. Refuses `409 duplicate_question` with the matching ids when the board already has it (open, answered, or crystallized); pass `anyway:true` for a genuinely different question. The guard fails OPEN: a search outage never silences a real ask. |
+| `/hub/api/answer` (`directive:write`) | `question` (id or local), `text` | ONE verb: mints/updates the answer **directive** targeted at the asker (idempotent per question — re-answering updates in place) AND retires the question (`open`→`answered`). `data.question_still_open:true` flags a retire that failed. |
+| `/hub/api/directive` (`directive:write`) | Create: `title`, `body_md`, optional `targets[]` (default `["all"]`), `remediation_cmd`, `deadline`; update: `id` + `expected_version` | An operator instruction addressed to named agents. `directive:write` is an authority tier above ordinary board writes — the shared-root credential holds it; issue it to a worker credential only deliberately. |
+| `/hub/api/ack` (`ack:write`) | `agent`, `directive` (id or local), optional `note` | One agent's record that delivery landed. Stable id (replay-safe). The item leaves that agent's inbox; a directive whose every NAMED target has acked retires itself to `fulfilled`. |
+| `/hub/api/presence` (`presence:write`) | `agent` (+ the `X-Hub-*` headers) | The seat heartbeat; the response carries the shared freshness contract. Ordinary writes stamp activity on their own. |
+
+### The operational error stream
+
+| Endpoint (scope) | Key body fields | Behaviour |
+|---|---|---|
+| `/hub/api/app-error` (`error:report`) | `app` (slug), `message`, optional `kind`, `severity`, `code`, `details`, `component`, `operation`, `path`, `host` | `201 {fingerprint}` — a satellite service's server exception/job death, attributed to the APP. Forward only what belongs on a queue a human drains. |
+| `/hub/api/agent-error` (`error:report`) | `agent`, `message`, optional `source`, `severity`, `details`, `machine` | `201 {fingerprint}` — a worker-side operational failure, so the stream covers more than the hub's own host. |
+| `/hub/api/ack-error` (`error:manage`) | `fingerprint`, optional `note`; or `fingerprint` + `reopen:true` | Ack collapses the signature off the queue without deleting rows; reopening a never-acked signature is `409 not_acked`, not a 200 over an untouched row. |
+| `/hub/api/clear-errors` (`error:manage`) | `older_than_hours` and/or `only_acked:true` | Bounded by AGE or ACK, never "everything"; `only_acked` is a restriction (an unacked row never drops, however old). Unbounded is `400 need_bound`. |
+| `/hub/api/client-error` (same-origin CSRF) | `source`, `message`, optional `severity`, `code` | Bounded browser diagnostics from the board itself; rows are held below the read-time bar by default. |
+
+Rows are redacted at write and throttled per fingerprint (the count is preserved) — an
+unthrottled flood does not just add noise, it EVICTS every other error from a bounded store.
+Every write on every endpoint above is additionally screened for secret shapes and refused
+`422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
+be removed, only rotated. Recognizable redaction placeholders pass.
+
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
 (dereferenceable-evidence mode).
 
@@ -226,7 +269,11 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 `verification_command_is_a_suite` (422) ·
 `bad_sha`/`release_not_observed`/`need_tasks_closed`/`invalid_task_closure` (422) ·
 `immutable_deploy`/`adr_immutable` (409) · `bad_grant_request` (422) · `launch_disabled`/`not_found` (404) ·
-`launch_refused` (403) · `launch_unavailable` (503).
+`launch_refused` (403) · `launch_unavailable` (503) ·
+`need_agent`/`secret_shaped_payload`/`bad_older_than_hours` (400/422) ·
+`need_question`/`need_question_and_text`/`need_app`/`need_bound`/`need_fingerprint` (400) ·
+`duplicate_question`/`unknown_asker`/`not_acked` (409) ·
+`no_such_question`/`unknown_directive` (404).
 
 An actively held claim and a stale heartbeat are the exceptions: they return `{ok:false, reason:…}`
 with status 409. A wrong method returns Django's 405 response, and missing read entities use Django's ordinary

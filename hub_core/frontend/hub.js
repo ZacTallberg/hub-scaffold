@@ -88,7 +88,8 @@
     adr: { accepted: "pass", proposed: "info", superseded: "stale", deprecated: "warn", rejected: "fail" },
     feat: { shipped: "pass", partial: "warn", planned: "info", experimental: "info", removed: "stale" },
     gap: { open: "fail", investigating: "warn", mitigated: "info", closed: "pass", "wont-fix": "stale" },
-    cap: { extracted: "pass", reusable: "pass", proven: "pass", prototype: "warn", concept: "info", service: "info" }
+    cap: { extracted: "pass", reusable: "pass", proven: "pass", prototype: "warn", concept: "info", service: "info" },
+    directive: { active: "info", fulfilled: "pass", superseded: "stale", expired: "warn" }
   };
   function roleOf(type, status) { return (SROLE[type] || {})[status] || "info"; }
   function badge(type, status) {
@@ -152,7 +153,8 @@
   }
   var D = parseData();
   var BY_ID = {};
-  var COLLECTIONS = ["tasks", "adrs", "feats", "gaps", "caps", "deploys", "notes"];
+  var COLLECTIONS = ["tasks", "adrs", "feats", "gaps", "caps", "deploys", "notes",
+                     "directives", "acks"];
   function rebuildIndex() {
     BY_ID = {};
     COLLECTIONS.forEach(function (k) {
@@ -171,7 +173,8 @@
     { key: "gaps", label: "Gaps", icon: "warning", pick: function (d) { return d.gaps || []; }, type: "gap", cols: COLS_GAP() },
     { key: "caps", label: "Capabilities", icon: "stack", pick: function (d) { return d.caps || []; }, type: "cap", cols: COLS_CAP() },
     { key: "deploys", label: "Deploys", icon: "rocket", pick: function (d) { return d.deploys || []; }, type: "deploy", cols: COLS_DEPLOY() },
-    { key: "notes", label: "Findings", icon: "stack", pick: function (d) { return d.notes || []; }, type: "note", cols: COLS_NOTE() }
+    { key: "notes", label: "Findings", icon: "stack", pick: function (d) { return d.notes || []; }, type: "note", cols: COLS_NOTE() },
+    { key: "directives", label: "Directives", icon: "bolt", pick: function (d) { return d.directives || []; }, type: "directive", cols: COLS_DIRECTIVE() }
   ];
   TABS.forEach(function (t) { if (t.pick) t.rows = t.pick(D); });
   function tabByKey(key) { for (var i = 0; i < TABS.length; i++) if (TABS[i].key === key) return TABS[i]; return null; }
@@ -295,6 +298,24 @@
       { label: "Tags", k: "tags", cell: function (r) { return txt((r.tags || []).join(", "), "cell-sub"); } }
     ];
   }
+  function COLS_DIRECTIVE() {
+    function ackCount(r) {
+      var n = 0;
+      (D.acks || []).forEach(function (a) { if (a.directive === r.id) n++; });
+      return n;
+    }
+    return [
+      { label: "ID", k: "id", cls: "col-id", cell: function (r) { return txt(localId(r.id), "col-id"); } },
+      { label: "Status", k: "status", cell: function (r) { return el("td", null, [badge("directive", r.status)]); } },
+      { label: "Title", k: "title", cls: "col-title", cell: function (r) { return txt(r.title, "col-title"); } },
+      { label: "Targets", k: "targets", cell: function (r) { return txt((r.targets || []).join(", "), "cell-sub"); } },
+      { label: "Acked", k: "id", cls: "num", sortVal: ackCount, cell: function (r) {
+          var named = (r.targets || []).filter(function (t) { return t !== "all"; }).length;
+          return txt(named ? (ackCount(r) + "/" + named) : String(ackCount(r)), "num");
+        } },
+      { label: "Kind", k: "answers", cell: function (r) { return txt(r.answers ? "answer" : "directive", "cell-sub"); } }
+    ];
+  }
   function deployCoherence(r) {
     var ok = !!r.audit_ok;
     return el("span", { class: "badge b-" + (ok ? "pass" : "fail") }, [
@@ -315,7 +336,8 @@
   // One-click narrowing on the field that actually distinguishes a type's rows. A free-text box
   // makes the operator guess the vocabulary; a facet bar SHOWS it, with counts.
   var FACET_FIELD = { tasks: "status", adrs: "status", feats: "status", gaps: "severity",
-                      caps: "maturity", deploys: "audit_ok", notes: "category" };
+                      caps: "maturity", deploys: "audit_ok", notes: "category",
+                      directives: "status" };
   function facetField(tab) { return FACET_FIELD[tab.key]; }
   function facetCounts(tab, field) {
     var counts = {};
@@ -553,6 +575,7 @@
     "dangling-dep": "Unsatisfiable dep", "governance-amber": "Needs a ruling",
     "blocked": "Blocked", "needs-spec": "Needs spec", "circuit-open": "Circuit open",
     "adherence-drift": "Board drifting", "unlanded": "Not landed",
+    "open-question": "Open question", "error-unclaimed": "Unclaimed error",
     "delivery-unmeasured-landing": "Landing unknown",
     "delivery-unmeasured-release": "Release unknown",
     "delivery-unmeasured-live": "Live state unknown"
@@ -561,6 +584,7 @@
     "board-drained": "fail", "stalled-lease": "warn", "dangling-dep": "warn",
     "governance-amber": "warn", "blocked": "info", "needs-spec": "info",
     "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
+    "open-question": "warn", "error-unclaimed": "fail",
     "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
     "delivery-unmeasured-live": "warn"
   };
@@ -582,6 +606,10 @@
       node.addEventListener("click", function () { focusCard("adherenceCard"); });
     } else if (it.route && it.route.focus === "delivery") {
       node.addEventListener("click", function () { focusCard("deliveryCard"); });
+    } else if (it.route && it.route.focus === "asks") {
+      node.addEventListener("click", function () { focusCard("asksCard"); });
+    } else if (it.route && it.route.focus === "errors") {
+      node.addEventListener("click", function () { focusCard("errorsCard"); });
     } else {
       node.disabled = true;
       node.title = "nothing to open for this item";
@@ -967,16 +995,41 @@
     var head = el("div", { class: "agent-head" }, [
       el("span", { class: "agent-dot s-" + c.status, "aria-hidden": "true" }),
       el("span", { class: "agent-name", text: c.agent }),
+      c.machine ? el("span", { class: "agent-mach", title: "machine", text: c.machine }) : null,
       el("span", { class: "agent-status s-" + c.status, text: c.status })
-    ]);
+    ].filter(Boolean));
     var now = c.task
       ? el("div", { class: "agent-now" }, [
           el("span", { class: "agent-now-lbl", text: "on" }),
           el("span", { class: "agent-now-task", text: c.task }),
           el("span", { class: "agent-now-age", text: c.age_s != null ? fmtAge(c.age_s) : "" })
         ])
+      : c.focus
+      // No claim, but a live console with a focus: actively working something, just not a
+      // board task. Show WHAT, not "idle" — the exact case that makes a busy fleet look asleep.
+      ? el("div", { class: "agent-now" }, [
+          el("span", { class: "agent-now-lbl", text: "on" }),
+          el("span", { class: "agent-now-task", text: c.focus })
+        ])
       : el("div", { class: "agent-now is-idle", text: c.idle_s != null ? ("last active " + fmtAge(c.idle_s) + " ago") : "idle" });
     var kids = [head, now];
+    if (c.last_note) {
+      // The last checkpoint note: the context that turns "working on X" into
+      // "working on X, last did Y".
+      kids.push(el("div", { class: "agent-note", text: "↳ " + c.last_note }));
+    }
+    // Every live console this agent has open (id · directory · focus): the surface that
+    // stops two sessions from unknowingly working the same thing.
+    if ((c.sessions || []).length) {
+      kids.push(el("ul", { class: "agent-sessions" }, c.sessions.slice(0, 4).map(function (s) {
+        return el("li", { class: "agent-sess" }, [
+          el("span", { class: "sess-id", text: s.session || "?" }),
+          s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null,
+          s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
+          el("span", { class: "sess-age", text: s.age_s != null ? fmtAge(s.age_s) : "" })
+        ].filter(Boolean));
+      })));
+    }
     if (c.plan_total > 0) {
       var ppct = c.plan_pct != null ? c.plan_pct : 0;
       kids.push(el("div", { class: "agent-prog" }, [
@@ -1122,6 +1175,114 @@
     return el("div", { class: "donut" }, [s]);
   }
 
+
+  /* ---- ASKS: who is blocked on one fact, and for how long ----
+     A question is not "one row" — it is a person blocked for a measurable length of time,
+     and the cost compounds for as long as it sits. Open questions ride the attention rail
+     too; this card is where they are read. */
+  function asksCard(asks, openCount) {
+    asks = asks || [];
+    var body = el("div", { class: "card-body" });
+    if (!asks.length) {
+      body.appendChild(el("div", { class: "attn-clear" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+        doc.createTextNode(" No open questions — nobody is blocked waiting on an answer.")
+      ]));
+    } else {
+      asks.forEach(function (q) {
+        var node = el("button", { class: "ask-item", type: "button",
+          "aria-label": (q.from || "someone") + " asks " + (q.title || "") }, [
+          el("span", { class: "ask-head" }, [
+            el("span", { class: "ask-from", text: q.from || "someone" }),
+            el("time", { class: "rel-time ask-age", datetime: q.at || "", "data-ts": q.at || "", text: relativeTime(q.at) })
+          ]),
+          el("span", { class: "ask-title", text: q.title || "" }),
+          q.body ? el("span", { class: "ask-body", text: String(q.body).slice(0, 220) }) : null
+        ].filter(Boolean));
+        if (q.id && BY_ID[q.id]) {
+          node.addEventListener("click", function () { openEntity("note", BY_ID[q.id]); });
+        } else { node.disabled = true; }
+        body.appendChild(node);
+      });
+      body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
+        "Answer with POST api/answer {question, text} — one verb replies to the asker AND retires the question." }));
+    }
+    return el("section", { class: "card asks-card", id: "asksCard", "aria-labelledby": "asksTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "asksTitle" }, [icon("users"),
+          doc.createTextNode("Open questions" + (openCount ? "  ·  " + openCount : ""))])
+      ]),
+      body
+    ]);
+  }
+
+  /* ---- ERRORS: the operational stream the ledger audit cannot see ----
+     The bar is applied at read and shared with the API, so the human and every machine
+     consumer read the same queue. Deferred rows are counted, never hidden-and-forgotten. */
+  function errorsCard(rows, meta) {
+    rows = rows || []; meta = meta || {};
+    var onBar = rows.filter(function (r) { return r.bar === "on"; });
+    var body = el("div", { class: "card-body" });
+    if (meta.available === false) {
+      body.appendChild(el("div", { class: "callout fail" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.fail }),
+        el("div", { text: "The error store is impaired (" + (meta.reason || "write failure") + ") — quiet here does NOT mean healthy." })
+      ]));
+    }
+    var hourly = meta.hourly || [];
+    if (hourly.length) {
+      var max = Math.max.apply(null, [1].concat(hourly));
+      body.appendChild(el("div", { class: "err-shape" }, [
+        el("div", { class: "spark err-spark", "aria-hidden": "true" }, hourly.map(function (v) {
+          return el("span", { class: "spark-bar" + (v ? "" : " is-zero"),
+            style: "height:" + Math.round(4 + (v / max) * 22) + "px", title: v + " in that hour" });
+        })),
+        el("span", { class: "cell-sub", text:
+          (meta.last_24h || 0) + " in 24h · " + (meta.trend || "quiet")
+          + (meta.unclaimed ? " · " + meta.unclaimed + " unclaimed" : "")
+          + (meta.external_rows ? " · " + meta.external_rows + " foreign" : "") })
+      ]));
+    }
+    if (!onBar.length) {
+      var cov = meta.coverage || {};
+      var silent = (cov.channels || []).filter(function (c) { return c.silent; }).length;
+      body.appendChild(el("div", { class: "attn-clear" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+        doc.createTextNode(" Nothing on the board" +
+          (silent ? " — but " + silent + " of " + (cov.channels || []).length +
+            " reporting channels are silent, so read this as \u201cno report\u201d, not \u201cno failures\u201d." : "."))
+      ]));
+    } else {
+      onBar.slice(0, 8).forEach(function (r) {
+        var where = (r.context && r.context.app) || r.origin_app || r.origin_machine || r.origin || "";
+        body.appendChild(el("div", { class: "err-item" + (r.acked ? " is-acked" : "") }, [
+          el("span", { class: "err-head" }, [
+            el("span", { class: "badge b-" + (r.severity === "critical" ? "fail" : "warn"), text: r.severity || "error" }),
+            where ? el("span", { class: "err-where", text: where }) : null,
+            el("time", { class: "rel-time err-age", datetime: r.ts || "", "data-ts": r.ts || "", text: relativeTime(r.ts) }),
+            el("span", { class: "err-claim", text: r.acked ? ("claimed by " + ((r.acked || {}).by || "someone")) : "unclaimed" })
+          ].filter(Boolean)),
+          el("span", { class: "err-msg", text: r.message || "" }),
+          el("span", { class: "err-meta mono", text: (r.source || "") + " · " + (r.fingerprint || "")
+            + (r.occurrences_since_last ? " · \u00d7" + (1 + r.occurrences_since_last) : "") })
+        ]));
+      });
+      body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
+        "Claim a signature with POST api/ack-error {fingerprint} — acking collapses it off the queue without deleting the rows." }));
+    }
+    var srcs = (meta.top_sources || []).slice(0, 3).map(function (s) { return s.source + " \u00d7" + s.count; }).join("  ·  ");
+    if (srcs) body.appendChild(el("p", { class: "cell-sub", text: "top sources: " + srcs }));
+    return el("section", { class: "card errors-card", id: "errorsCard", "aria-labelledby": "errorsTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "errorsTitle" }, [icon("warning"),
+          doc.createTextNode("Operational errors" + (meta.unclaimed ? "  ·  " + meta.unclaimed + " unclaimed" : ""))]),
+        el("span", { class: "badge b-" + (meta.unclaimed ? "fail" : "pass"),
+                     text: meta.unclaimed ? String(meta.unclaimed) : "clear" })
+      ]),
+      body
+    ]);
+  }
+
   function overviewHeading(kicker, title, copy) {
     return el("div", { class: "overview-heading" }, [
       el("span", { class: "overview-heading-kicker", text: kicker }),
@@ -1144,6 +1305,14 @@
       "See who is advancing work and the decisions that can change throughput immediately."));
     scroll.appendChild(el("div", { class: "operations-grid" }, [
       fleetView(L.fleet, L.worker_health), attentionRail(L.attention)
+    ]));
+
+    // The ask/answer loop and the operational stream, side by side: who is blocked on a
+    // fact, and what is broken — the two queues that must never sit unread.
+    scroll.appendChild(overviewHeading("Signals", "Questions and failures",
+      "A blocked person and an unclaimed failure are the two most expensive things a board can let sit."));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [
+      asksCard(L.asks, L.asks_open), errorsCard(L.errors, L.error_log)
     ]));
 
     var dc = dagCard(L.dag);
@@ -1338,7 +1507,7 @@
     if (r.verified_by && r.verified_by.length) links.push(row("Verified by", el("div", null, r.verified_by.map(function (s) { return el("div", { class: "detail-prose", text: "• " + s }); }))));
     if (links.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Links & evidence", "branch", links)]));
 
-    ["context_md", "decision_md", "consequences_md"].forEach(function (f) {
+    ["body_md", "context_md", "decision_md", "consequences_md"].forEach(function (f) {
       if (r[f]) body.appendChild(el("div", { class: "detail-grid one" }, [section(f.replace("_md", "").replace(/^./, function (c) { return c.toUpperCase(); }), "info", [el("div", { class: "detail-prose", text: r[f] })])]));
     });
 
@@ -1798,7 +1967,7 @@
   }
 
   var TYPE_COLLECTION = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps",
-                          deploy: "deploys", note: "notes" };
+                          deploy: "deploys", note: "notes", directive: "directives", ack: "acks" };
   function applyDelta(payload) {
     // DELTA CONSUME: patch only the changed entities into in-memory state and re-render. The wire
     // carries the changed rows, never the whole board. The cockpit blocks ride along in
@@ -2227,6 +2396,9 @@
       { id: "cmd:tasks", title: "Go to Tasks", sub: "tab", run: function () { activate("tasks"); } },
       { id: "cmd:fleet", title: "Show the fleet", sub: "verb", run: function () { focusCard("fleetCard"); } },
       { id: "cmd:attention", title: "What needs the operator?", sub: "verb", run: function () { focusCard("attentionCard"); } },
+      { id: "cmd:asks", title: "Open questions", sub: "verb", run: function () { focusCard("asksCard"); } },
+      { id: "cmd:errors", title: "Operational errors", sub: "verb", run: function () { focusCard("errorsCard"); } },
+      { id: "cmd:directives", title: "Go to Directives", sub: "tab", run: function () { activate("directives"); } },
       { id: "cmd:adherence", title: "Board adherence", sub: "verb", run: function () { focusCard("adherenceCard"); } },
       { id: "cmd:dag", title: "Dependency frontier", sub: "verb", run: function () { focusCard("dagCard"); } },
       { id: "cmd:theme", title: "Toggle light / dark theme", sub: "verb", run: toggleTheme },
@@ -2236,7 +2408,7 @@
 
     var initial = "overview";
     try { var p = new URL(location.href).searchParams.get("tab"); if (p && _panes[p]) initial = p; } catch (e) {}
-    var keyMap = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes" };
+    var keyMap = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes", directive: "directives" };
     if (location.hash) {
       var m = location.hash.slice(1).match(/^([a-z]+)-(.+)$/);
       if (m && keyMap[m[1]]) initial = keyMap[m[1]];

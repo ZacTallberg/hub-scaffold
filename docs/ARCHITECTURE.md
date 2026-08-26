@@ -87,12 +87,17 @@ The following are projections, not independent stores:
 
 General HTTP writes pass through one gate:
 
-1. require `POST` and a constant-time-matched `X-Write-Token`;
-2. parse JSON;
-3. merge an update with the current aggregate;
-4. require `expected_version` for updates;
-5. validate the merged entity against its schema;
-6. append with aggregate-scoped idempotency and optimistic concurrency.
+1. authenticate — a scoped `X-Agent-Token` credential (identity and operations frozen at
+   issuance) or the constant-time-matched shared-root `X-Write-Token` compatibility bridge —
+   and enforce the endpoint's operation scope. Refusals are recorded into the operational
+   error stream;
+2. parse JSON and refuse secret-shaped payloads (the ledger can never unlearn a secret);
+3. refresh the caller's observed presence from the optional `X-Hub-*` headers (fail-soft);
+4. merge an update with the current aggregate;
+5. require `expected_version` for updates;
+6. validate the merged entity against its schema;
+7. append with aggregate-scoped idempotency and optimistic concurrency, then publish the
+   identity-only wake signal to connected cockpits.
 
 Task completion has additional steps: a live lease, an acceptance note, evidence, strict-mode
 evidence dereferencing, and validation of a worker-produced typed receipt only when the task
@@ -102,6 +107,15 @@ The final append rechecks the fencing token under the cross-process claim lock a
 whose command was verified, preventing an expired worker or concurrently changed task from landing
 an obsolete completion.
 See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
+
+### Runtime sidecars beyond claims
+
+Observed presence (`presence/`, per agent-machine row with per-console sessions, self-retiring
+into `presence/_retired/` — archive over delete), the bounded redacted operational error stream
+(`errors.jsonl` + `errors-acked.json`), and the agent-credential registry are runtime state like
+claims/: they change with no ledger event, so the snapshot memo carries their change stamps and
+mutations to them publish realtime wake signals — a board keyed on the ledger head alone would
+freeze its fleet strip and error card between appends.
 
 ## Enforcement matrix
 
@@ -120,6 +134,12 @@ See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
 | Done work is deployed/live | Immutable deploy entity with exact `sha == served_sha`, explicit `tasks_closed[]`, and the running artifact SHA | Git ancestry is optional source/legacy enrichment; the canary and deploy writer must be wired by the adopter. |
 | Portable identity is coherent | Audit emits a high finding when Django `HUB_PROJECT_KEY` differs from `PROJECT/project.json`; `public_origin()` and `host_name()` give URL and allowlist consumers one normalized view | Correct the mismatch before further mutations so discovery and entity ids share one namespace. Bare legacy hosts remain readable, but new identity files should store a full HTTP(S) origin. |
 | Browser launch cannot mint general write authority | CSRF mint; signed bounded grant; token-gated single-use consume | Enabling process launch is a privileged local capability and requires workstation installation. |
+
+| A question reaches someone who can answer it | The ask writer delivers into the operator's addressed inbox; `inbox/wait` long-polls it; answering is ONE verb (reply directive + question retired); the asker's ack closes delivery and full-ack retires the directive | Delivery is proven only when the asker acks; the duplicate-ask guard fails OPEN so a search outage can never silence a real question. |
+| Secrets cannot enter the append-only ledger by accident | Secret-shape refusal at the single write choke point | A screen against pastes, not DLP — deliberate encoding passes. |
+| "Who is working right now" is observed, not promised | Presence sidecars per (agent, machine, console); a claimless console with a fresh focus renders active, never idle; presence changes publish wake signals | Presence rides authenticated writes and the heartbeat ping; a worker that never sends headers is visible only through its leases and events. |
+| Operational failures reach one queue with an honest bar | Scope-gated ingest (`app-error`/`agent-error`), CSRF-gated browser diagnostics, write-time redaction + per-fingerprint throttling, a read-time bar shared by the board and the API, truthful ack/reopen, bounded clears, per-channel coverage | The stream sees only what is wired to report into it — coverage names silent channels precisely because silence is not health. |
+| A replayed ledger line cannot double-apply | Reconcile collapses a byte-identical replayed line (announced by name); a genuine fork still linearizes with nothing dropped; content tampering is still `verify_chain`'s catch | The collapse requires byte-identity (same event id and hash); anything else follows the fork/corruption rules. |
 
 ## What is not automatic
 

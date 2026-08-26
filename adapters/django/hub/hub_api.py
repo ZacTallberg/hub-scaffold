@@ -7,19 +7,50 @@ reconnect cursor reconciliation closes the only interval in which a client could
 """
 import asyncio
 import json
+import re
 import threading
 import time
 
 from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpResponse
-from django.views.decorators.http import require_GET
+from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.http import require_GET, require_POST
 
-from hub_core import adherence, cost, dag, failure_taxonomy, flow, project, projections, telemetry, upcast, wip
+from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
+                      inbox as inbox_core, project, projections, telemetry, upcast, wip)
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
 
 _COLLECTION = {"task": "tasks", "run": "runs", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
-               "deploy": "deploys", "note": "notes"}
+               "deploy": "deploys", "note": "notes", "directive": "directives", "ack": "acks"}
+
+
+def _epoch(value):
+    """ISO-8601 -> epoch seconds, or None when it cannot be read as a plausible instant.
+
+    RANGE-checked, not just format-checked, at this one choke point: external systems emit
+    sentinel dates (year-0001 minimums, year-9999 maximums) as routine data, and a sentinel
+    parses perfectly and then renders as an age of two thousand years — or overflows a
+    platform time call and 500s the endpoint forever. Anything outside a plausible window
+    maps to "absent", which every caller already handles."""
+    import datetime as _dtm
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = _dtm.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dtm.timezone.utc)
+    if not (1990 <= dt.year <= 2100):
+        return None
+    try:
+        return dt.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 # How long a live lease may go without finishing before the board calls the worker stuck.
 STALL_S = 900
@@ -137,8 +168,12 @@ def _plan_progress(ent):
     total = len(plan)
     done = sum(1 for s in plan if isinstance(s, dict) and s.get("done"))
     step = next((s.get("step") for s in plan if isinstance(s, dict) and not s.get("done")), None)
+    # The last checkpoint note is the CONTEXT that turns "working on X" into "working on X,
+    # last did Y" — the fact a peer needs to decide whether to coordinate, wait, or move on.
+    noted = [s for s in plan if isinstance(s, dict) and s.get("note")]
     return {"plan_done": done, "plan_total": total, "step": (str(step)[:70] if step else None),
-            "plan_pct": (round(done * 100 / total) if total else None)}
+            "plan_pct": (round(done * 100 / total) if total else None),
+            "last_note": (str(noted[-1].get("note"))[:90] if noted else None)}
 
 
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
@@ -171,7 +206,92 @@ def _readiness(state, lease_rows=None):
 _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 
 
-def _attention(state, audit, inflight, adher=None, deliv=None):
+# The board's copy about its operational error stream promises only critical and high
+# problems — warnings, foreign-scanner traffic and transient transport blips never reach it.
+# The promise is enforced HERE, at read, in the one predicate every consumer shares: a bar
+# kept only in the renderer lies to every machine reader. Applied at READ, never at write,
+# so improving the predicate reclassifies the whole retained window retroactively.
+_BLIP = re.compile(r"^(HTTP 5|HTTP 0|Failed to fetch|NetworkError|Load failed|"
+                   r"Live stream unavailable)", re.I)
+
+
+def _error_bar(row):
+    """(on_bar, reason). One shared predicate for the board, the JSON API and the rail."""
+    if row.get("external"):
+        return False, "foreign client, not this system"
+    sev = str(row.get("severity") or "error").lower()
+    if sev not in ("critical", "error"):
+        return False, "severity %s" % sev
+    # A tab that briefly could not reach the hub is the board losing its connection, not a
+    # defect anybody can be asked to fix.
+    if str(row.get("source") or "").startswith("browser.") and _BLIP.match(str(row.get("message") or "")):
+        return False, "transport blip that recovered"
+    return True, ""
+
+
+def _errors_block():
+    """The operational error stream, bar-annotated, plus the SHAPE a reader actually needs:
+    is it getting worse, which source is responsible, and is any of it even ours."""
+    rows, metadata = errorlog.read(hub_app.HUB_DIR)
+    now = time.time()
+    buckets = [0] * 24
+    severities = {"critical": 0, "error": 0, "warning": 0}
+    sources, external, on_bar_n, unclaimed = {}, 0, 0, []
+    for row in rows:
+        ok, why = _error_bar(row)
+        row["bar"] = "on" if ok else "deferred"
+        if not ok:
+            row["defer_reason"] = why
+        else:
+            on_bar_n += 1
+            if not row.get("acked"):
+                unclaimed.append(row)
+        try:
+            age_h = int((now - float(row.get("epoch") or 0)) // 3600)
+        except (TypeError, ValueError):
+            age_h = 999
+        if 0 <= age_h < 24:
+            buckets[23 - age_h] += 1
+        sev = row.get("severity") or "error"
+        if sev in severities:
+            severities[sev] += 1
+        if row.get("external"):
+            external += 1
+        src = str(row.get("source") or "unknown")
+        entry = sources.setdefault(src, {"source": src, "count": 0,
+                                         "external": bool(row.get("external")), "newest": ""})
+        # occurrences_since_last is what the write-time throttle collapsed, so the true
+        # weight of a repeating error is not the number of rows it left behind.
+        entry["count"] += 1 + int(row.get("occurrences_since_last") or 0)
+        if str(row.get("ts") or "") > entry["newest"]:
+            entry["newest"] = str(row.get("ts") or "")
+    recent = sum(buckets[-6:])
+    earlier = sum(buckets[:-6]) or 0
+    if not rows:
+        trend = "quiet"
+    elif recent == 0:
+        trend = "cooling"
+    elif earlier and recent > (earlier / 3.0) * 1.6:
+        trend = "rising"
+    elif earlier and recent < (earlier / 3.0) * 0.5:
+        trend = "cooling"
+    else:
+        trend = "steady"
+    metadata.update({
+        "hourly": buckets, "severities": severities,
+        "top_sources": sorted(sources.values(), key=lambda s: -s["count"])[:6],
+        "external_rows": external, "app_rows": max(0, len(rows) - external),
+        "trend": trend, "last_24h": sum(buckets),
+        "on_board": on_bar_n, "unclaimed": len(unclaimed),
+        # "Is this everything?" is the one question a list of errors can never answer about
+        # itself, and the one a reader must have answered before an empty card may be read
+        # as good news.
+        "coverage": errorlog.coverage(rows),
+    })
+    return rows, metadata, unclaimed
+
+
+def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_unclaimed=None):
     """The consolidated 'Needs the operator' rail: every signal a human (or a spec pass) must act
     on, unioned from sources otherwise scattered across tabs and the audit JSON — a poison-blocked
     task, a stuck worker, a dep that can never be satisfied, governance amber, blocked work,
@@ -204,6 +324,22 @@ def _attention(state, audit, inflight, adher=None, deliv=None):
             add(1, "stalled-lease",
                 f"{r.get('agent')} has held the lease {_fmt_age(r.get('age_s'))} without finishing",
                 r.get("task"), r.get("title"))
+
+    # OPEN QUESTIONS are operator work: an ask nobody sees is a worker blocked on one fact,
+    # and the cost of a question compounds for as long as it sits.
+    for q in (asks or []):
+        add(1, "open-question",
+            f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}", q.get("id"),
+            q.get("title"), route={"view": "overview", "focus": "asks"})
+
+    # UNCLAIMED operational errors that clear the bar. The same set a human sees — the rail
+    # must never hand a machine a longer list than the person who would be asked about it.
+    for r in (error_unclaimed or [])[:5]:
+        where = (r.get("context") or {}).get("app") or r.get("origin_app") or r.get("origin") or ""
+        add(2, "error-unclaimed",
+            (f"[{where}] " if where else "") + str(r.get("message") or "")[:140],
+            None, str(r.get("source") or "error"),
+            route={"view": "overview", "focus": "errors"})
 
     # DELIVERY: a done task master never received is a worker's finished work sitting outside the
     # integration branch — the same class of loss as a stuck seat, and invisible to every
@@ -418,27 +554,55 @@ def _fleet(events, state, inflight):
             tr.append({"action": action, "title": str(title)[:64], "ts": e.get("ts"),
                        "seq": e.get("seq")})
 
+    # Live consoles per agent, from observed presence: an agent working WITHOUT a formal
+    # claim must not render as idle — that is the exact case that makes a busy fleet look
+    # asleep. A console's focus becomes the card's "on" line when no lease exists, and the
+    # per-console rows are the surface that stops two sessions from unknowingly working the
+    # same thing.
+    sessions_by_agent = {}
+    try:
+        for s in hub_app.live_sessions():
+            sessions_by_agent.setdefault(s["agent"], []).append(s)
+    except Exception:                                        # noqa: BLE001 - never 500 the board
+        sessions_by_agent = {}
+
     cards = []
-    for ag in set(lease_by_agent) | set(trails):
+    for ag in set(lease_by_agent) | set(trails) | set(sessions_by_agent):
         lt = _parse(last_ts.get(ag))
         idle_s = int((now - lt).total_seconds()) if lt else None
         lease = lease_by_agent.get(ag)
-        if not lease and (idle_s is None or idle_s > 1800):
+        sessions = sessions_by_agent.get(ag, [])
+        if not lease and not sessions and (idle_s is None or idle_s > 1800):
             continue
-        status = ("stalled" if (lease and lease.get("stalled")) else "working" if lease
-                  else "recent" if (idle_s is not None and idle_s < 300) else "idle")
+        newest_session_age = sessions[0].get("age_s") if sessions else None
+        if lease and lease.get("stalled"):
+            status = "stalled"
+        elif lease:
+            status = "working"
+        elif newest_session_age is not None and newest_session_age < 300:
+            # A live console, just not on a board task. The age check is an explicit
+            # None-test: `(age or huge) < 300` sent a console that pinged ZERO seconds ago
+            # — the most active possible — to idle, because 0 is falsy.
+            status = "active"
+        elif idle_s is not None and idle_s < 300:
+            status = "recent"
+        else:
+            status = "idle"
         cards.append({
             "agent": ag, "status": status,
+            "machine": (sessions[0].get("machine") if sessions else "") or "",
             "task": lease.get("title") if lease else None,
             "task_id": lease.get("task") if lease else None,
+            "focus": (sessions[0].get("focus") if (not lease and sessions) else "") or "",
             "age_s": lease.get("age_s") if lease else None,
             "idle_s": idle_s, "trail": trails.get(ag, []),
+            "sessions": sessions[:6],
             "done_total": sum(1 for e in events if e.get("agent_id") == ag
                               and e.get("type") == "task.transitioned"
                               and (e.get("payload") or {}).get("status") == "done"),
             **_plan_progress(ents.get(lease.get("task"), {}) if lease else {}),
         })
-    rank = {"working": 0, "stalled": 0, "recent": 1, "idle": 2}
+    rank = {"working": 0, "stalled": 0, "active": 1, "recent": 1, "idle": 2}
     cards.sort(key=lambda c: (rank.get(c["status"], 3), c.get("idle_s") or 0))
     return cards
 
@@ -598,6 +762,20 @@ def _delivery_fast(state, cursor, served):
     return provisional, False
 
 
+def _live_side_blocks(state):
+    """The addressed plane, the operational stream, and the live consoles — computed once
+    per live payload so the attention rail, the cockpit cards, and the JSON endpoints all
+    read ONE answer to "what is open" and "what is broken". Fail-soft: a sidecar problem
+    must never take the board down."""
+    asks = inbox_core.question_items(state)
+    error_rows, error_meta, error_unclaimed = _errors_block()
+    try:
+        sessions_live = hub_app.live_sessions()
+    except Exception:                                        # noqa: BLE001
+        sessions_live = []
+    return asks, error_rows, error_meta, error_unclaimed, sessions_live
+
+
 def _live_blocks(events, state, audit, deliv, cursor):
     last = events[-1] if events else {}
     inflight = _inflight(state)
@@ -607,6 +785,7 @@ def _live_blocks(events, state, audit, deliv, cursor):
         hub_app._schedule_lease_truth(lease)
     adher = adherence.score(events, state, leases=inflight)
     hub_dir = hub_app.HUB_DIR
+    asks, error_rows, error_meta, error_unclaimed, sessions_live = _live_side_blocks(state)
     return {
         "transport": "event-stream",
         "realtime": hub_app.realtime_info(),
@@ -622,7 +801,19 @@ def _live_blocks(events, state, audit, deliv, cursor):
         "fleet": _fleet(events, state, inflight),
         "worker_health": _worker_health(state, events, inflight),
         "failure_modes": _failure_modes(events),
-        "attention": _attention(state, audit, inflight, adher, deliv),
+        # OPEN QUESTIONS: who is blocked on one fact, and for how long — the whole ask →
+        # deliver → answer → ack loop closes through the board, so the board shows it.
+        "asks": asks[:12],
+        "asks_open": len(asks),
+        # THE OPERATIONAL ERROR STREAM, bar-annotated, with the shape a reader needs
+        # (trend, sources, coverage) — the failures the ledger audit cannot see.
+        "errors": error_rows[:40],
+        "error_log": error_meta,
+        # EVERY LIVE CONSOLE, flat: the surface that stops two sessions from unknowingly
+        # working the same thing. The per-agent fleet cards roll these up.
+        "sessions_live": sessions_live[:12],
+        "attention": _attention(state, audit, inflight, adher, deliv,
+                                asks=asks, error_unclaimed=error_unclaimed),
         "telemetry": telemetry.read_aggregate(hub_dir),
         "cost": cost.cost_block(hub_dir, state),
         "wip": hub_app.wip_status(len(inflight)),
@@ -639,7 +830,11 @@ def _snapshot(served=None):
         # throughput windows). The push lane uses exact semantic lease timers; this bucket only
         # prevents a standalone full-snapshot caller from retaining a stale time-derived view.
         git_head = hub_app._git_head()
+        # Presence and the error sidecars change with NO ledger event; a memo blind to them
+        # serves a live board whose fleet strip and error card are frozen at whatever the
+        # last append happened to capture.
         key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
+               hub_app.presence_stamp(), errorlog.stamp(hub_app.HUB_DIR),
                git_head, int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
@@ -662,6 +857,8 @@ def _snapshot(served=None):
         # Until then, an unmeasured leg stays an honest unknown rather than silent green.
         deliv, _ = _delivery_fast(state, cur, served)
         hub_dir = hub_app.HUB_DIR
+        side_asks, side_error_rows, side_error_meta, side_unclaimed, side_sessions = \
+            _live_side_blocks(state)
         live = {
             "transport": "event-stream",
             "realtime": hub_app.realtime_info(),
@@ -685,7 +882,16 @@ def _snapshot(served=None):
             "fleet": _fleet(events, state, inflight),
             "worker_health": _worker_health(state, events, inflight),
             "failure_modes": _failure_modes(events),
-            "attention": _attention(state, audit, inflight, adher, deliv),
+            # The addressed plane, the operational stream, and the live consoles — the same
+            # blocks the push patches carry (_live_blocks), so the first paint and every
+            # later patch read one truth.
+            "asks": side_asks[:12],
+            "asks_open": len(side_asks),
+            "errors": side_error_rows[:40],
+            "error_log": side_error_meta,
+            "sessions_live": side_sessions[:12],
+            "attention": _attention(state, audit, inflight, adher, deliv,
+                                    asks=side_asks, error_unclaimed=side_unclaimed),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
             # aggregate, never a bespoke side-channel field.
             "telemetry": telemetry.read_aggregate(hub_dir),
@@ -974,3 +1180,308 @@ def next_json(request):
                                       "snoozed": len(snoozed),
                                       "snoozed_next": snoozed[0]["not_before"] if snoozed else None,
                                       **wip_st}})
+
+
+# ── The ask/answer surfaces: questions, the addressed inbox, and its long-poll ──
+
+_ANSWER_ECHO = "\n\n---\nIn answer to your question:"
+
+
+@require_GET
+def questions_json(request):
+    """Every question with the numbers the feed is actually about: a question is not "one
+    row", it is a person blocked for a measurable length of time. Rows carry whether an
+    answer exists AND whether the asker acknowledged it landing — "answered" and
+    "delivered" are different facts, and only the second closes the loop."""
+    state, _ = _snapshot()
+    entities = state["entities"]
+    acks = {}
+    for ent in entities.values():
+        if ent.get("type") == "ack":
+            acks.setdefault(ent.get("directive"), set()).add(
+                str(ent.get("agent") or "").lower())
+    answers = {}
+    for ent in entities.values():
+        if ent.get("type") == "directive" and ent.get("answers"):
+            answers[ent["answers"]] = ent
+    rows = []
+    now = time.time()
+    for eid, ent in entities.items():
+        if ent.get("type") != "note":
+            continue
+        tags = [str(t).lower() for t in (ent.get("tags") or [])]
+        if "question" not in tags or inbox_core.AUTOMATION_TAGS.intersection(tags):
+            continue
+        prov = ent.get("provenance") or {}
+        asker = str(ent.get("asker") or prov.get("agent") or "").lower()
+        reply = answers.get(eid)
+        answer_body = str((reply or {}).get("body_md") or "")
+        # The answer directive echoes the question back at the end; strip it so the reply
+        # reads as a reply.
+        if _ANSWER_ECHO in answer_body:
+            answer_body = answer_body.split(_ANSWER_ECHO)[0]
+        answer_prov = (reply or {}).get("provenance") or {}
+        acked = bool(reply and asker in (acks.get(reply.get("id")) or set()))
+        asked_at = str(prov.get("created_at") or "")
+        asked_epoch = _epoch(asked_at) or 0
+        answered_at = str(answer_prov.get("created_at") or answer_prov.get("updated_at") or "") \
+            if reply else ""
+        row = {
+            "id": eid, "asker": asker, "at": asked_at,
+            "title": str(ent.get("title") or ""),
+            "context": str(ent.get("body_md") or "")[:1400],
+            "open": "open" in tags,
+            "answered": bool(reply),
+            "answer_id": (reply or {}).get("id", ""),
+            "answer": answer_body[:1800],
+            "answer_by": str(answer_prov.get("agent") or "") if reply else "",
+            "answer_at": answered_at,
+            "acked": acked,
+            "asked_epoch": asked_epoch,
+        }
+        if reply:
+            replied = _epoch(answered_at)
+            row["reply_seconds"] = max(0, int(replied - asked_epoch)) \
+                if (asked_epoch and replied) else None
+            row["waiting_seconds"] = None
+        else:
+            row["reply_seconds"] = None
+            row["waiting_seconds"] = max(0, int(now - asked_epoch)) if asked_epoch else None
+        rows.append(row)
+    # Newest first within each state; anything still needing a human ahead of what is
+    # closed: waiting-for-an-answer, then answered-but-not-yet-delivered, then done.
+    rows.sort(key=lambda r: r["at"], reverse=True)
+    rows.sort(key=lambda r: (r["acked"], r["answered"]))
+
+    waits = [r["waiting_seconds"] for r in rows if r["open"] and r["waiting_seconds"] is not None]
+    answered_waits = sorted(r["reply_seconds"] for r in rows if r["reply_seconds"] is not None)
+    mid = len(answered_waits) // 2
+    median_reply = (answered_waits[mid] if len(answered_waits) % 2
+                    else (answered_waits[mid - 1] + answered_waits[mid]) // 2) \
+        if answered_waits else None
+    # Per-person lanes: who is asking, how many are still open, how long they have waited.
+    people = {}
+    for r in rows:
+        lane = people.setdefault(r["asker"] or "unknown",
+                                 {"agent": r["asker"] or "unknown", "asked": 0, "open": 0,
+                                  "worst_wait": 0})
+        lane["asked"] += 1
+        if r["open"]:
+            lane["open"] += 1
+            lane["worst_wait"] = max(lane["worst_wait"], r["waiting_seconds"] or 0)
+    lanes = sorted(people.values(), key=lambda l: (-l["open"], -l["worst_wait"]))
+    # A 14-day strip, so "are we keeping up" is answerable at a glance.
+    days = []
+    for back in range(13, -1, -1):
+        lo, hi = now - (back + 1) * 86400, now - back * 86400
+        days.append({
+            "asked": sum(1 for r in rows if lo <= r["asked_epoch"] < hi),
+            "answered": sum(1 for r in rows
+                            if r["answered"] and lo <= (_epoch(r["answer_at"]) or 0) < hi),
+        })
+    longest = max(waits) if waits else 0
+    return JsonResponse({"data": rows, "metadata": {
+        "open": sum(1 for r in rows if r["open"]),
+        "answered_not_acked": sum(1 for r in rows if r["answered"] and not r["acked"]),
+        "closed": sum(1 for r in rows if r["acked"]),
+        "longest_wait_seconds": longest,
+        "longest_wait_who": next((r["asker"] for r in rows
+                                  if r["open"] and (r["waiting_seconds"] or 0) == longest), ""),
+        "median_reply_seconds": median_reply,
+        "replied_count": len(answered_waits),
+        "lanes": lanes[:6],
+        "days": days}})
+
+
+def _operator_agent() -> str:
+    """The identity questions are addressed to and answers come from. One name, settable —
+    HUB_OPERATOR_AGENT in settings or the environment."""
+    import os as _os
+    return str(hub_app._dj_setting("HUB_OPERATOR_AGENT")
+               or _os.environ.get("HUB_OPERATOR_AGENT") or "operator").strip().lower()
+
+
+@require_GET
+def inbox_json(request):
+    """What is addressed to ?agent= right now: directives aimed at it, the answer to its
+    own question, and — for the operator — every open question."""
+    agent = (request.GET.get("agent") or "").strip().lower()
+    if not agent:
+        return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
+    state, _ = _snapshot()
+    return JsonResponse({"data": inbox_core.snapshot(state, agent, _operator_agent()),
+                         "metadata": {"agent": agent, "operator": _operator_agent()}})
+
+
+@require_GET
+def inbox_wait(request):
+    """Long-poll: return the moment something is addressed to ?agent=.
+
+    This is the mechanism behind "asking the operator reaches them in about a second": a
+    supervisor loop spends the sleep it was already doing blocked here, so an ask raises a
+    notification on the answerer's side without anybody watching a browser tab, and the
+    answer lands back on the asker's side the same way. Bounded hard — never longer than
+    MAX_WAIT_S, never more than MAX_WAITERS at once (past the ceiling it answers
+    immediately with degraded=true: an honest poll, not a starved server)."""
+    agent = (request.GET.get("agent") or "").strip().lower()
+    if not agent:
+        return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
+    known = (request.GET.get("fp") or "")[:64]
+    try:
+        timeout = float(request.GET.get("wait") or inbox_core.MAX_WAIT_S)
+    except (TypeError, ValueError):
+        timeout = inbox_core.MAX_WAIT_S
+
+    def snapshot_fn(who):
+        s = hub_app.store()
+        try:
+            state = project.state(s.events())
+        finally:
+            s.close()
+        return inbox_core.snapshot(state, who, _operator_agent())
+
+    def signal_fn():
+        # The cheap fingerprint of everything the snapshot depends on — the wait loop must
+        # not fold the whole ledger per poll tick. "" on error never equals a real signal,
+        # so a failed read degrades to always-fold rather than skipping a real change.
+        try:
+            s = hub_app.store()
+            try:
+                return str(s.latest_cursor().get("seq") or 0)
+            finally:
+                s.close()
+        except Exception:                                    # noqa: BLE001
+            return ""
+
+    payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn, signal_fn=signal_fn)
+    return JsonResponse({"data": payload,
+                         "metadata": {"agent": agent, "operator": _operator_agent(),
+                                      "max_wait_s": inbox_core.MAX_WAIT_S}})
+
+
+# ── The operational error stream, whoami, and board search ──
+
+@require_GET
+def errors_json(request):
+    """The operational error stream with the bar applied at read. Deferred rows are never
+    DROPPED — a stream that silently discards two thirds of its input is one whose "all
+    clear" cannot be trusted; they are one query param away (?include=deferred)."""
+    rows, metadata, _unclaimed = _errors_block()
+    include = (request.GET.get("include") or "").lower()
+    data = rows if include in ("deferred", "all") else [r for r in rows if r.get("bar") == "on"]
+    metadata["bar"] = ("every row recorded in the window; `bar` says which are on the board"
+                       if data is rows else
+                       "critical and high problems in this system's own surfaces; add "
+                       "?include=deferred for everything the bar held back")
+    return JsonResponse({"data": data, "metadata": metadata})
+
+
+def whoami_json(request):
+    """What the hub ACTUALLY received on this request: the presented credential's mode and
+    subject (or why it is invalid), and which X-Hub-* headers survived any proxy. A stale
+    seat looks identical whether the caller never wrote, a proxy dropped a header, or the
+    credential went invalid — this makes the difference one request. Never echoes tokens."""
+    from . import hub_write
+    auth, problem = hub_write._authenticate(request)
+    seen = {k: v for k, v in request.headers.items() if k.lower().startswith("x-hub-")}
+    data = {
+        "operator": _operator_agent(),
+        "headers_seen": seen,
+        "note": ("mode 'scoped-agent' means writes are attributed to `subject` by the "
+                 "credential itself; 'shared-root' means the compatibility token was "
+                 "presented and per-call agent fields are labels only; null means the "
+                 "presented credential (if any) is not valid here. headers_seen is what "
+                 "reached the hub after any proxy — a header you sent that is missing here "
+                 "was dropped in transit."),
+    }
+    if auth:
+        data.update({"mode": auth.mode, "subject": auth.subject,
+                     "actor_kind": auth.actor_kind,
+                     "scopes": list(getattr(auth, "scopes", ()) or ()),
+                     "credential_id": auth.credential_id})
+    else:
+        data.update({"mode": None, "subject": None, "problem": problem})
+    return JsonResponse({"data": data})
+
+
+_SEARCH_STOP = {"the", "a", "an", "is", "of", "to", "and", "or", "in", "on", "for", "it",
+                "with", "at", "this", "that", "was", "are"}
+
+
+@require_GET
+def search_json(request):
+    """Ranked multi-term search over the whole board — the PULL half of "push pointers,
+    pull content". A substring scan returns nothing for a natural query even when the
+    exact entity exists, and an agent that cannot find the fact at the moment of need
+    re-derives it (or hits the trap it warned about). Stdlib term frequency over
+    title/name/body fields, weighted headline-over-body, exact-phrase boosted."""
+    q = (request.GET.get("q") or "").strip().lower()[:200]
+    try:
+        limit = max(1, min(50, int(request.GET.get("limit") or 10)))
+    except (TypeError, ValueError):
+        limit = 10
+    if not q:
+        return JsonResponse({"data": [], "metadata": {"q": "", "msg": "pass ?q="}})
+    terms = [t for t in re.split(r"[^a-z0-9._-]+", q) if t and t not in _SEARCH_STOP][:24]
+    state, _ = _snapshot()
+    hits = []
+    for ent in state["entities"].values():
+        if not isinstance(ent, dict):
+            continue
+        if ent.get("status") in ("superseded", "dropped", "rejected"):
+            continue
+        title = str(ent.get("title") or ent.get("name") or "")
+        body = str(ent.get("body_md") or ent.get("summary") or ent.get("decision_md") or
+                   ent.get("acceptance") or "")
+        tags = " ".join(str(t) for t in (ent.get("tags") or []))
+        hay_t, hay_b = (title + " " + tags).lower(), body.lower()
+        score = 0.0
+        for term in terms:
+            score += 3.0 * hay_t.count(term) + 1.0 * hay_b.count(term)
+        if not score:
+            continue
+        if q in hay_t:
+            score += 8.0            # exact phrase in the headline
+        elif q in hay_b:
+            score += 3.0
+        score += sum(1.5 for term in terms if term in hay_t)   # breadth of term coverage
+        hits.append({"id": ent.get("id"), "type": ent.get("type"), "title": title[:200],
+                     "status": ent.get("status") or ent.get("maturity") or "",
+                     "excerpt": body[:400], "score": round(score, 2)})
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return JsonResponse({"data": hits[:limit],
+                         "metadata": {"q": q, "terms": terms, "matched": len(hits)}})
+
+
+@require_POST
+@csrf_protect
+def client_error(request):
+    """Accept bounded browser diagnostics from a same-origin board session. The browser
+    never sends stack frames, page contents, or credentials; this endpoint repeats that
+    constraint server-side and the shared store performs final redaction. Browser noise is
+    deliberately held BELOW the bar by the shared read-side predicate — a queue that fills
+    with other people's stale-tab errors is a queue everyone learns to ignore."""
+    if len(request.body or b"") > 16_384:
+        return JsonResponse({"errors": [{"code": "payload_too_large"}]}, status=413)
+    try:
+        body = json.loads((request.body or b"{}").decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+    if not isinstance(body, dict):
+        return JsonResponse({"errors": [{"code": "object_required"}]}, status=400)
+    source = str(body.get("source") or "board")[:120]
+    row = hub_app.record_error(
+        f"browser.{source}",
+        str(body.get("message") or "Browser operation failed")[:800],
+        severity=str(body.get("severity") or "error").lower(),
+        code=str(body.get("code") or "client_error")[:120],
+        context={"component": "hub-board",
+                 "operation": str(body.get("operation") or source)[:120],
+                 "path": request.path_info},
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
+
+
+# Marker consumed by the computed route audit: a same-origin, CSRF-protected, bounded
+# browser telemetry capability, not general write authority.
+client_error._hub_origin_gated = True

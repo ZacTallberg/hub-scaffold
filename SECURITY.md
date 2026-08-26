@@ -47,6 +47,23 @@ handed; it never becomes the thing that runs untrusted strings.
 Treat every credential according to its scopes all the same: completion, deploy, ADR, and credential
 management scopes grant consequential authority. They do not grant a shell.
 
+### The write seam refuses secret-shaped payloads
+
+Every write body is scanned (private keys, platform token formats, JWTs, bearer strings,
+credential assignments) and refused `422 secret_shaped_payload` before it can reach the
+ledger: the ledger is append-only under a hash chain, so a secret written into it can never be
+removed without destroying the tamper-evidence. Recognizable redaction placeholders pass — the
+guard must not refuse what a member types after being told to redact. This is a screen against
+the accidental paste, not a DLP product; a determined writer can still encode a secret past it.
+
+### Refused authentication leaves evidence
+
+Every 4xx auth refusal (invalid credential, insufficient scope) is recorded into the
+operational error stream as a throttled `hub.auth` warning. A worker whose credential was
+revoked or rotated out otherwise retries forever while the board shows nothing but a seat
+going quietly stale — indistinguishable from someone stepping away. `GET /hub/whoami.json`
+answers what a request's credential actually resolves to, without echoing it.
+
 ## Unauthenticated reads
 
 “Public read” means unauthenticated, not automatically sanitized. Every entity field can appear in
@@ -54,6 +71,16 @@ the snapshot or a type/entity endpoint. Never store credentials, private URLs, i
 personal data, confidential prompts, or sensitive evidence in Hub entities if the read surface is
 reachable by people who must not see them. If the board is private, enforce authentication and
 access control in Django or at the reverse proxy and test that boundary.
+
+The delivery/presence/error surfaces widen what "the complete projected board" includes:
+questions and answers (`questions.json`, `inbox.json`), observed presence — agent names,
+machine names, session working directories and focus lines — and the operational error
+stream (redacted at write, but messages originate in your services). The inbox long-poll
+(`inbox/wait`) additionally holds a server thread; it is hard-bounded (≤25s, a small waiter
+pool that degrades to an immediate honest poll when full), but on a public deployment it is
+one more reason reads should sit behind your own authentication boundary. Error-stream
+ingest and queue actions are scope-gated writes; the browser's `client-error` is same-origin
+CSRF-gated, size-bounded, and its rows are held below the board's bar by default.
 
 For a private board, middleware may make one routing-only exception so a **valid scoped agent** can
 reach `/hub/api/*` without gaining `/hub/`, collection, audit, schema, or live-stream reads. Preserve

@@ -2019,3 +2019,51 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .navbar-main::after,
   .progress-hero::before { display: none; }
 }
+
+/* ============ Asks: who is blocked on one fact, and for how long ============ */
+.asks-card .card-body, .errors-card .card-body { display: flex; flex-direction: column; gap: 8px; }
+.ask-item {
+  display: flex; flex-direction: column; gap: 3px; text-align: left; width: 100%;
+  padding: 9px 12px; border: 1px solid var(--border); border-left: 3px solid var(--warn-solid, #d99a2b);
+  border-radius: 8px; background: var(--surface-2); cursor: pointer; font: inherit; color: inherit;
+}
+.ask-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
+.ask-item:disabled { cursor: default; }
+.ask-head { display: flex; align-items: baseline; gap: 8px; }
+.ask-from { font-weight: 700; font-size: 12px; }
+.ask-age { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ask-title { font-size: 12.5px; font-weight: 600; }
+.ask-body { font-size: 11.5px; color: var(--muted); }
+
+/* ============ Operational errors: the queue the audit cannot see ============ */
+.err-item {
+  display: flex; flex-direction: column; gap: 3px; padding: 9px 12px;
+  border: 1px solid var(--border); border-left: 3px solid var(--fail-solid, #e5484d);
+  border-radius: 8px; background: var(--surface-2);
+}
+.err-item.is-acked { border-left-color: var(--border); opacity: .66; }
+.err-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.err-where { font-weight: 700; font-size: 11.5px; }
+.err-age { color: var(--muted); font-size: 11px; }
+.err-claim { margin-left: auto; flex: none; white-space: nowrap; font-size: 10.5px; color: var(--muted); letter-spacing: .03em; text-transform: uppercase; }
+.err-item:not(.is-acked) .err-claim { color: var(--fail-solid, #e5484d); font-weight: 700; }
+.err-msg { font-size: 12.5px; }
+.err-meta { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.err-shape { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
+.err-spark { flex: none; }
+
+/* ============ Fleet cards: machines, live consoles, checkpoint notes ============ */
+.agent-mach { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; white-space: nowrap; }
+.agent-note { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-card.s-abandoned { border-left-color: var(--warn-solid, #d99a2b); }
+.agent-card.s-active { border-left-color: var(--accent, #4f7cff); }
+.agent-dot.s-abandoned { background: var(--warn-solid, #d99a2b); }
+.agent-dot.s-active { background: var(--accent, #4f7cff); animation: agent-pulse 1.8s infinite; }
+.agent-status.s-abandoned { color: var(--warn-solid, #d99a2b); }
+.agent-status.s-active { color: var(--accent, #4f7cff); }
+.agent-sessions { list-style: none; margin: 0; padding: 6px 0 0; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 3px; }
+.agent-sess { display: flex; align-items: baseline; gap: 7px; font-size: 11px; overflow: hidden; }
+.sess-id { font-family: var(--mono, monospace); color: var(--muted); flex: none; }
+.sess-cwd { color: var(--muted); flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-focus { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-age { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }

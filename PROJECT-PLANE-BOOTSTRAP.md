@@ -188,12 +188,12 @@ project key are renameable bindings; the rules are not.
   "$defs": {
     "id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack):[a-z0-9][a-z0-9._-]*$",
       "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
     },
     "idref": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack):[a-z0-9][a-z0-9._-]*$",
       "description": "A machine-resolvable reference to another entity by id. The audit FAILS on any dangling idref."
     },
     "isoDate": { "type": "string", "format": "date-time" },
@@ -323,7 +323,7 @@ project key are renameable bindings; the rules are not.
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
-      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" } }, "required": ["step", "done"] },
+      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." } }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
@@ -703,11 +703,68 @@ project key are renameable bindings; the rules are not.
     "status": { "enum": ["standing", "superseded"], "description": "standing = still true; superseded = replaced by a newer note." },
     "tags": { "type": "array", "items": { "type": "string" } },
     "relates_to": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "task/adr/feat this came from or informs." },
+    "asker": { "type": "string", "description": "For a note tagged `question`: who asked, stamped once by the ask endpoint. First-class on purpose — provenance.agent becomes whoever LAST touched the note (the answerer, after an answer), so deriving the asker from provenance mis-addresses every re-answered reply." },
     "found_at": { "type": "string", "description": "when/where it was learned." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
   },
   "required": ["id", "type", "title", "version"]
+}
+````
+<!-- /TPL -->
+
+<!-- TPL:PROJECT/schema/directive.schema.json -->
+````json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:directive",
+  "title": "Directive — an operator instruction addressed to named agents",
+  "description": "Created ONLY under the `directive:write` scope (the shared-root credential holds it; a worker credential is issued it only deliberately): an instruction injected into every targeted agent's working context is an authority tier above ordinary board writes. An answer to a question is a directive whose `answers` names the question note. Delivery is CLOSED by acks: each targeted agent records one, and a directive whose every named target has acked retires itself to `fulfilled` — a queue of delivered items that never leaves 'active' is a queue people learn to ignore.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "directive" },
+    "title": { "type": "string", "minLength": 1 },
+    "body_md": { "type": "string", "description": "What must change and why — the full instruction. Bodies are delivered whole; a clipped instruction says so rather than silently stopping." },
+    "remediation_cmd": { "type": "string", "description": "The exact command a targeted agent should run, when one exists." },
+    "targets": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Agent names, or the single element 'all'. Auto-retire on full ack applies only to explicitly named targets — 'all' has no closed roster to check off."
+    },
+    "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
+    "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
+    "supersedes": { "$ref": "hub:common#/$defs/idref" },
+    "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "title", "body_md", "targets", "status", "version"]
+}
+````
+<!-- /TPL -->
+
+<!-- TPL:PROJECT/schema/ack.schema.json -->
+````json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:ack",
+  "title": "Ack — one agent's record that one directive was delivered",
+  "description": "Stable id <project>:ack:<directive-local>--<agent> makes at-least-once delivery idempotent: a retrying caller replays the same ack instead of minting twins. An acked directive stops being addressed to that agent (the inbox closes it for them), and a directive whose every named target has acked retires itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "ack" },
+    "directive": { "$ref": "hub:common#/$defs/idref" },
+    "agent": { "type": "string", "minLength": 1, "description": "The acking agent. Under a minted (identity-bound) token this is forced from the token binding server-side, never trusted from the payload." },
+    "note": { "type": "string", "description": "What was done to satisfy the directive." },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "directive", "agent", "version"]
 }
 ````
 <!-- /TPL -->

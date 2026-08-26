@@ -20,7 +20,7 @@ from .hub_write import writer
 
 PROTOCOL_VERSION = "2026-07-28"
 TASKS_EXTENSION = "io.modelcontextprotocol/tasks"
-HUB_LEASE_META = "io.zacoberg.hub/leaseToken"
+HUB_LEASE_META = "io.github.hub-scaffold/leaseToken"
 
 
 def _server_info():
