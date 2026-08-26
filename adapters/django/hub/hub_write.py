@@ -1353,6 +1353,31 @@ def presence_ping(request, b):
                                   **_presence.contract()}})
 
 
+@writer(scope="presence:manage")
+def forget_presence(request, b):
+    """Drop a stale or phantom seat row. Without this, any machine that ever spoke to the
+    hub keeps a presence row until the retirement horizon — a decommissioned laptop or a
+    one-off probe sits on the fleet strip looking like a teammate, and the only remedy is
+    editing files on the host. Refuses to drop everything: at least one of machine/target
+    is required, so a typo can never blank the whole roster."""
+    machine = (b.get("machine") or "").strip().lower()
+    target = (b.get("target") or "").strip().lower()
+    if not machine and not target:
+        return JsonResponse({"errors": [{"code": "need_machine_or_target",
+            "msg": "pass machine and/or target (the agent name) — refusing to drop everything"}]},
+            status=422)
+    from hub_core import presence as _presence
+    removed = _presence.forget(hub_app.HUB_DIR, machine=machine, agent=target)
+    if removed:
+        # Presence changed with no ledger event: wake connected cockpits so the phantom
+        # leaves every open board now, not at the next unrelated append.
+        try:
+            hub_app._publish_realtime("presence.observed")
+        except Exception:                                    # noqa: BLE001
+            pass
+    return JsonResponse({"data": {"machine": machine, "target": target, "forgotten": removed}})
+
+
 # ── Operational error ingest: the surfaces the ledger audit cannot see ──
 
 @writer(scope="error:report")

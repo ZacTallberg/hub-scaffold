@@ -256,6 +256,15 @@ def _payload_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any
     return "presence", {"agent": _agent(arguments)}
 
 
+def _payload_forget_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {}
+    if arguments.machine:
+        payload["machine"] = arguments.machine
+    if arguments.target:
+        payload["target"] = arguments.target
+    return "forget-presence", payload
+
+
 def _payload_app_error(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     payload: dict[str, Any] = {"app": arguments.app, "message": arguments.message}
     for name in ("kind", "severity", "code", "details", "component", "operation", "path", "host"):
@@ -294,14 +303,29 @@ def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     notifier or a supervisor hook: pipe it to whatever raises attention on your platform.
     The fingerprint round-trips so unrelated board traffic never produces output."""
     from urllib.parse import quote
+    import time as _time
     fingerprint = arguments.fp or ""
+    backoff = 1.0
     while True:
-        payload = _get(
-            base,
-            f"inbox/wait?agent={quote(arguments.agent)}&fp={quote(fingerprint)}"
-            f"&wait={arguments.wait}",
-            timeout=arguments.wait + 15,
-        )
+        try:
+            payload = _get(
+                base,
+                f"inbox/wait?agent={quote(arguments.agent)}&fp={quote(fingerprint)}"
+                f"&wait={arguments.wait}",
+                timeout=arguments.wait + 15,
+            )
+        except RuntimeError as error:
+            # A notifier that dies on the first transient outage is a notifier that is
+            # silently off exactly when the hub comes back with news. In --follow mode,
+            # back off and retry (capped); a one-shot wait still reports the failure.
+            if not arguments.follow:
+                raise
+            print(json.dumps({"transient": str(error)[:200], "retry_in_s": backoff}),
+                  file=sys.stderr, flush=True)
+            _time.sleep(backoff)
+            backoff = min(60.0, backoff * 2)
+            continue
+        backoff = 1.0
         data = payload.get("data") or {}
         changed = data.get("fingerprint") != fingerprint
         fingerprint = data.get("fingerprint") or fingerprint
@@ -574,6 +598,12 @@ def _parser() -> argparse.ArgumentParser:
     presence.add_argument("--machine")
     presence.add_argument("--focus")
     presence.set_defaults(payload=_payload_presence)
+
+    forget = commands.add_parser("forget-presence",
+                                 help="drop a phantom/retired seat row (presence:manage scope)")
+    forget.add_argument("--machine")
+    forget.add_argument("--target", help="the agent name")
+    forget.set_defaults(payload=_payload_forget_presence)
 
     app_error = commands.add_parser("app-error",
                                     help="forward a satellite service's server failure")

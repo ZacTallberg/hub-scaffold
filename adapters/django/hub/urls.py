@@ -54,6 +54,7 @@ urlpatterns = [
     path("api/ack", hub_write.ack),
     # Observed presence: the seat heartbeat (ordinary writes stamp activity on their own).
     path("api/presence", hub_write.presence_ping),
+    path("api/forget-presence", hub_write.forget_presence),
     # The operational error stream's ingest and queue actions.
     path("api/app-error", hub_write.app_error),
     path("api/agent-error", hub_write.agent_error),
