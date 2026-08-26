@@ -322,7 +322,11 @@ def _call_default(value):
 
 
 def _settings_file():
-    """The settings.py the AST audit scans: HUB_SETTINGS_FILE, else the DJANGO_SETTINGS_MODULE file."""
+    """The settings.py the AST audit scans: HUB_SETTINGS_FILE, else the DJANGO_SETTINGS_MODULE
+    file, else the structurally resolved site package (the one top-level package holding both
+    settings.py and wsgi.py). The structural resort keeps a seam the environment never reached
+    honest instead of raising a violation against a repo whose layout is perfectly unambiguous;
+    a genuinely ambiguous tree still fails closed."""
     p = _dj_setting("HUB_SETTINGS_FILE")
     if p:
         return Path(p)
@@ -334,7 +338,11 @@ def _settings_file():
             return Path(f) if f else None
         except Exception:
             return None
-    return None
+    try:
+        from hub_core import site_package as _site_package
+        return _site_package.settings_file(WORK_ROOT)
+    except Exception:
+        return None
 
 
 def settings_ast_adapter(state):

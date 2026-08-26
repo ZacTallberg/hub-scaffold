@@ -505,7 +505,7 @@
     rows.forEach(function (r) {
       if (!facetMatch(tab, r)) return;
       if (q) {
-        var hay = [r.legacy_ref, r.title, r.name, r.summary, r.status, r.severity, r.maturity, r.phase, r.source, r.build, r.sha, localId(r.id)].join(" ").toLowerCase();
+        var hay = [r.legacy_ref, r.title, r.name, r.summary, r.status, r.severity, r.maturity, r.phase, r.source, r.build, r.sha, (r.targets || []).join(" "), localId(r.id)].join(" ").toLowerCase();
         if (hay.indexOf(q) < 0) return;
       }
       shown++;
@@ -1254,6 +1254,7 @@
       ]));
     }
     var node = el("button", { class: "ask-item" + (t.open ? "" : " is-settled"), type: "button",
+      "data-focus-key": "ask:" + (t.id || t.title), "data-entity-id": t.id || null,
       "aria-label": (t.asker || "someone") + " asks " + t.title }, kids);
     if (t.id && BY_ID[t.id]) {
       node.addEventListener("click", function () { openEntity("note", BY_ID[t.id]); });
@@ -1572,7 +1573,7 @@
   var _openModalEntity = null;
   function openEntity(type, r, liveRefresh) {
     var role = type === "deploy" ? (r.audit_ok ? "pass" : "fail") : roleOf(type, r.status || r.maturity);
-    var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket" }[type] || "info";
+    var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket", directive: "bolt" }[type] || "info";
     var title = r.title || r.name || (r.number != null ? ("ADR " + r.number) : localId(r.id));
     var body = el("div");
 
@@ -1597,6 +1598,17 @@
       r.sha ? rowMono("SHA", r.sha) : null,
       r.at ? rowMono("At", r.at) : null
     ];
+    if (type === "directive") {
+      // Delivery is the directive's whole point: name the roster and who has checked in.
+      var ackedBy = (D.acks || []).filter(function (a) { return a.directive === r.id; })
+                                  .map(function (a) { return a.agent; });
+      detailRows.push(row("Targets", (r.targets || []).join(", ") || "—"));
+      detailRows.push(row("Acked by", ackedBy.length ? ackedBy.join(", ")
+        : ((r.targets || []).indexOf("all") >= 0 ? "open roster — 'all' has no checklist"
+                                                 : "nobody yet")));
+      if (r.deadline) detailRows.push(rowMono("Deadline", r.deadline));
+      if (r.remediation_cmd) detailRows.push(rowMono("Remediation", r.remediation_cmd));
+    }
     var grid = el("div", { class: "detail-grid" + (detailRows.filter(Boolean).length ? "" : " one") }, [section("Identity", "info", idRows)]);
     if (detailRows.filter(Boolean).length) grid.appendChild(section("Detail", iconName, detailRows));
     body.appendChild(grid);
@@ -1645,6 +1657,8 @@
     if (r.adrs && r.adrs.length) links.push(row("ADRs", chipRow(r.adrs, "adr")));
     if (r.decided_by && r.decided_by.length) links.push(row("Decided by", chipRow(r.decided_by, "adr")));
     if (r.superseded_by && r.superseded_by.length) links.push(row("Superseded by", chipRow(r.superseded_by, "adr")));
+    if (typeof r.answers === "string" && r.answers) links.push(row("Answers", chipRow([r.answers], "note")));
+    if (typeof r.supersedes === "string" && r.supersedes) links.push(row("Supersedes", chipRow([r.supersedes], "directive")));
     if (r.verified_by && r.verified_by.length) links.push(row("Verified by", el("div", null, r.verified_by.map(function (s) { return el("div", { class: "detail-prose", text: "• " + s }); }))));
     if (links.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Links & evidence", "branch", links)]));
 

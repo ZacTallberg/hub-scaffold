@@ -47,7 +47,8 @@
     { key: "gaps", type: "gap", label: "Gaps" },
     { key: "caps", type: "cap", label: "Capabilities" },
     { key: "deploys", type: "deploy", label: "Deploys" },
-    { key: "notes", type: "note", label: "Findings" }
+    { key: "notes", type: "note", label: "Findings" },
+    { key: "directives", type: "directive", label: "Directives" }
   ];
 
   var _data = null, _index = null, _root = null, _input = null, _list = null,
@@ -273,7 +274,7 @@
     // Runnable command verb (window.HubCommands): execute its action instead of navigating.
     if (s.it.run) { try { s.it.run(); } catch (e) {} return; }
     if (global.Hub && global.Hub.openEntity && s.it.rec) {
-      var tabs = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes" };
+      var tabs = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes", directive: "directives" };
       if (global.Hub.activate && tabs[s.it.type]) global.Hub.activate(tabs[s.it.type]);
       global.Hub.openEntity(s.it.type, s.it.rec);
       return;
