@@ -27,7 +27,9 @@ a rare critical boundary.
   failure-to-repair routing, and a guarded completion transition. Shared-root auth is an explicit
   migration bridge, not ordinary worker identity.
 - A dependency-free live-board client (`python -m hub_core.client`) that keeps agent mutations on
-  that HTTP seam. It never opens the ledger: durable append and realtime wake remain one operation
+  that HTTP seam — the task loop AND the delivery loop (`ask`, `inbox`, `wait --follow` as a
+  notifier building block, `answer --crystallize`, `ack`, `presence`, the error-stream verbs,
+  `search`, `whoami`). It never opens the ledger: durable append and realtime wake remain one operation
   instead of letting a connected cockpit silently lag an out-of-process write.
 - Event-sourced AgentRuns carry commands, messages, checkpoints, input, handoffs, cooperative
   cancellation, recovery envelopes, and composed child receipts; current MCP Tasks methods expose

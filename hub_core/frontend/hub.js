@@ -1176,41 +1176,162 @@
   }
 
 
-  /* ---- ASKS: who is blocked on one fact, and for how long ----
-     A question is not "one row" — it is a person blocked for a measurable length of time,
-     and the cost compounds for as long as it sits. Open questions ride the attention rail
-     too; this card is where they are read. */
-  function asksCard(asks, openCount) {
-    asks = asks || [];
+  /* ---- ASKS: the question threads, not a count ----
+     Derived client-side from the collections the snapshot already carries (question notes +
+     answer directives + delivery acks), so the card patches live with the board. A question
+     is a person blocked for a measurable time: open threads lead with their waiting age,
+     answered ones show the reply as a turn plus whether delivery LANDED (the asker's ack) —
+     "answered" and "delivered" are different facts. Lanes and a 14-day strip answer "are we
+     keeping up" without counting rows. */
+  var ANSWER_ECHO = "\n\n---\nIn answer to your question:";
+  function askThreads() {
+    var acksByDirective = {};
+    (D.acks || []).forEach(function (a) {
+      (acksByDirective[a.directive] = acksByDirective[a.directive] || []).push(
+        String(a.agent || "").toLowerCase());
+    });
+    var answerByQuestion = {};
+    (D.directives || []).forEach(function (d) {
+      if (d.answers) answerByQuestion[d.answers] = d;
+    });
+    var threads = [];
+    (D.notes || []).forEach(function (n) {
+      var tags = (n.tags || []).map(function (t) { return String(t).toLowerCase(); });
+      if (tags.indexOf("question") < 0) return;
+      var asker = String(n.asker || (n.provenance || {}).agent || "").toLowerCase();
+      var reply = answerByQuestion[n.id];
+      var answerText = String((reply || {}).body_md || "");
+      var echoAt = answerText.indexOf(ANSWER_ECHO);
+      if (echoAt >= 0) answerText = answerText.slice(0, echoAt);
+      var askedAt = (n.provenance || {}).created_at || "";
+      var answeredAt = reply ? ((reply.provenance || {}).created_at || "") : "";
+      var askedMs = Date.parse(askedAt), answeredMs = Date.parse(answeredAt);
+      threads.push({
+        id: n.id, asker: asker, title: n.title || "", context: n.body_md || "",
+        open: tags.indexOf("open") >= 0,
+        answered: !!reply,
+        answer: answerText,
+        answerBy: reply ? String((reply.provenance || {}).agent || "") : "",
+        acked: !!(reply && (acksByDirective[reply.id] || []).indexOf(asker) >= 0),
+        askedAt: askedAt, askedMs: isNaN(askedMs) ? null : askedMs,
+        answeredMs: isNaN(answeredMs) ? null : answeredMs,
+        waitS: null, replyS: null
+      });
+    });
+    var now = Date.now();
+    threads.forEach(function (t) {
+      if (t.open && t.askedMs != null) t.waitS = Math.max(0, Math.round((now - t.askedMs) / 1000));
+      if (t.answered && t.askedMs != null && t.answeredMs != null) {
+        t.replyS = Math.max(0, Math.round((t.answeredMs - t.askedMs) / 1000));
+      }
+    });
+    threads.sort(function (a, b) { return (b.askedMs || 0) - (a.askedMs || 0); });
+    threads.sort(function (a, b) {
+      function rank(t) { return t.open ? 0 : (t.answered && !t.acked) ? 1 : 2; }
+      return rank(a) - rank(b);
+    });
+    return threads;
+  }
+  function askThread(t) {
+    var stateLbl = t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
+                 : !t.acked ? "answered — awaiting the asker's ack"
+                 : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
+    var kids = [
+      el("span", { class: "ask-head" }, [
+        el("span", { class: "ask-from", text: t.asker || "someone" }),
+        el("span", { class: "ask-state" + (t.open ? " is-open" : t.acked ? " is-closed" : " is-answered"),
+                     text: stateLbl }),
+        el("time", { class: "rel-time ask-age", datetime: t.askedAt || "", "data-ts": t.askedAt || "",
+                     text: relativeTime(t.askedAt) })
+      ]),
+      el("span", { class: "ask-title", text: t.title })
+    ];
+    if (t.context) kids.push(el("span", { class: "ask-body", text: String(t.context).slice(0, 220) }));
+    if (t.answered && t.answer) {
+      kids.push(el("span", { class: "ask-answer" }, [
+        el("span", { class: "ask-answer-by", text: (t.answerBy || "the operator") + " replied" }),
+        el("span", { class: "ask-answer-text", text: String(t.answer).slice(0, 300) })
+      ]));
+    }
+    var node = el("button", { class: "ask-item" + (t.open ? "" : " is-settled"), type: "button",
+      "aria-label": (t.asker || "someone") + " asks " + t.title }, kids);
+    if (t.id && BY_ID[t.id]) {
+      node.addEventListener("click", function () { openEntity("note", BY_ID[t.id]); });
+    } else { node.disabled = true; }
+    return node;
+  }
+  function askStrip(threads) {
+    // 14 days of asked (top, neutral) vs answered (bottom, pass) — keeping up is a SHAPE.
+    var days = [];
+    var now = Date.now();
+    for (var back = 13; back >= 0; back--) {
+      var lo = now - (back + 1) * 86400000, hi = now - back * 86400000;
+      days.push({
+        asked: threads.filter(function (t) { return t.askedMs != null && t.askedMs >= lo && t.askedMs < hi; }).length,
+        answered: threads.filter(function (t) { return t.answeredMs != null && t.answeredMs >= lo && t.answeredMs < hi; }).length
+      });
+    }
+    if (!days.some(function (d) { return d.asked || d.answered; })) return null;
+    var max = Math.max.apply(null, [1].concat(days.map(function (d) { return Math.max(d.asked, d.answered); })));
+    return el("div", { class: "ask-strip", "aria-hidden": "true",
+                       title: "last 14 days — asked (top) vs answered (bottom)" },
+      days.map(function (d) {
+        return el("span", { class: "ask-strip-day" }, [
+          el("span", { class: "ask-strip-asked", style: "height:" + Math.round((d.asked / max) * 12) + "px" }),
+          el("span", { class: "ask-strip-answered", style: "height:" + Math.round((d.answered / max) * 12) + "px" })
+        ]);
+      }));
+  }
+  function asksCard() {
+    var threads = askThreads();
+    var open = threads.filter(function (t) { return t.open; });
+    var awaiting = threads.filter(function (t) { return t.answered && !t.acked && !t.open; });
+    var closed = threads.length - open.length - awaiting.length;
     var body = el("div", { class: "card-body" });
-    if (!asks.length) {
+    // Per-asker lanes: who is blocked, how badly — the rows that change a decision first.
+    var lanes = {};
+    open.forEach(function (t) {
+      var lane = lanes[t.asker] = lanes[t.asker] || { agent: t.asker, open: 0, worst: 0 };
+      lane.open += 1;
+      lane.worst = Math.max(lane.worst, t.waitS || 0);
+    });
+    var laneRows = Object.keys(lanes).map(function (k) { return lanes[k]; })
+      .sort(function (a, b) { return (b.worst - a.worst) || (b.open - a.open); });
+    if (laneRows.length > 1) {
+      body.appendChild(el("div", { class: "ask-lanes" }, laneRows.slice(0, 4).map(function (l) {
+        return el("span", { class: "ask-lane", text:
+          l.agent + " · " + l.open + " open · worst " + fmtAge(l.worst) });
+      })));
+    }
+    if (!threads.length) {
       body.appendChild(el("div", { class: "attn-clear" }, [
         el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
-        doc.createTextNode(" No open questions — nobody is blocked waiting on an answer.")
+        doc.createTextNode(" No questions on the board — nobody is blocked waiting on an answer.")
       ]));
     } else {
-      asks.forEach(function (q) {
-        var node = el("button", { class: "ask-item", type: "button",
-          "aria-label": (q.from || "someone") + " asks " + (q.title || "") }, [
-          el("span", { class: "ask-head" }, [
-            el("span", { class: "ask-from", text: q.from || "someone" }),
-            el("time", { class: "rel-time ask-age", datetime: q.at || "", "data-ts": q.at || "", text: relativeTime(q.at) })
-          ]),
-          el("span", { class: "ask-title", text: q.title || "" }),
-          q.body ? el("span", { class: "ask-body", text: String(q.body).slice(0, 220) }) : null
-        ].filter(Boolean));
-        if (q.id && BY_ID[q.id]) {
-          node.addEventListener("click", function () { openEntity("note", BY_ID[q.id]); });
-        } else { node.disabled = true; }
-        body.appendChild(node);
-      });
+      open.slice(0, 6).forEach(function (t) { body.appendChild(askThread(t)); });
+      awaiting.slice(0, 3).forEach(function (t) { body.appendChild(askThread(t)); });
+      if (!open.length && !awaiting.length) {
+        body.appendChild(el("div", { class: "attn-clear" }, [
+          el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+          doc.createTextNode(" Every question is answered and delivered" +
+            (closed ? " (" + closed + " closed)" : "") + ".")
+        ]));
+      } else if (closed) {
+        body.appendChild(el("p", { class: "cell-sub", text: closed + " closed thread" + (closed === 1 ? "" : "s") + " not shown." }));
+      }
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
-        "Answer with POST api/answer {question, text} — one verb replies to the asker AND retires the question." }));
+        "Ask with the client (python -m hub_core.client ask); answering is ONE verb that replies to the asker AND retires the question." }));
     }
+    var strip = askStrip(threads);
+    if (strip) body.appendChild(strip);
     return el("section", { class: "card asks-card", id: "asksCard", "aria-labelledby": "asksTitle" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title", id: "asksTitle" }, [icon("users"),
-          doc.createTextNode("Open questions" + (openCount ? "  ·  " + openCount : ""))])
+          doc.createTextNode("Questions" + (open.length ? "  ·  " + open.length + " open" : ""))]),
+        awaiting.length ? el("span", { class: "badge b-warn", text: awaiting.length + " undelivered" })
+                        : el("span", { class: "badge b-" + (open.length ? "warn" : "pass"),
+                                       text: open.length ? String(open.length) : "clear" })
       ]),
       body
     ]);
@@ -1270,8 +1391,28 @@
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
         "Claim a signature with POST api/ack-error {fingerprint} — acking collapses it off the queue without deleting the rows." }));
     }
+    var deferred = rows.length - onBar.length;
+    if (deferred > 0) {
+      body.appendChild(el("p", { class: "cell-sub", text:
+        deferred + " row" + (deferred === 1 ? "" : "s") + " below the bar (foreign clients, warnings, recovered blips) — never dropped; errors.json?include=deferred shows them." }));
+    }
     var srcs = (meta.top_sources || []).slice(0, 3).map(function (s) { return s.source + " \u00d7" + s.count; }).join("  ·  ");
     if (srcs) body.appendChild(el("p", { class: "cell-sub", text: "top sources: " + srcs }));
+    // COVERAGE: is this everything? Each channel that CAN report, and whether it has — the
+    // one question an empty list can never answer about itself, rendered instead of implied.
+    var cov = meta.coverage || {};
+    if ((cov.channels || []).length) {
+      var covWrap = el("div", { class: "err-coverage" });
+      covWrap.appendChild(el("span", { class: "err-cov-lbl", text: "channels" }));
+      cov.channels.forEach(function (c) {
+        covWrap.appendChild(el("span", {
+          class: "err-cov-chip" + (c.silent ? " is-silent" : " is-live"),
+          title: c.wired || c.key,
+          text: c.label + (c.silent ? " — silent" : " · " + c.rows)
+        }));
+      });
+      body.appendChild(covWrap);
+    }
     return el("section", { class: "card errors-card", id: "errorsCard", "aria-labelledby": "errorsTitle" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title", id: "errorsTitle" }, [icon("warning"),
@@ -1312,7 +1453,7 @@
     scroll.appendChild(overviewHeading("Signals", "Questions and failures",
       "A blocked person and an unclaimed failure are the two most expensive things a board can let sit."));
     scroll.appendChild(el("div", { class: "operations-grid" }, [
-      asksCard(L.asks, L.asks_open), errorsCard(L.errors, L.error_log)
+      asksCard(), errorsCard(L.errors, L.error_log)
     ]));
 
     var dc = dagCard(L.dag);

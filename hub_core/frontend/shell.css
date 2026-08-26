@@ -2067,3 +2067,27 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .sess-cwd { color: var(--muted); flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-focus { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-age { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+
+/* ============ Question threads: state, turns, lanes, the 14-day strip ============ */
+.ask-state { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; }
+.ask-state.is-open { color: var(--warn-solid, #d99a2b); font-weight: 700; }
+.ask-state.is-answered { color: var(--accent, #4f7cff); }
+.ask-state.is-closed { color: var(--muted); }
+.ask-item.is-settled { border-left-color: var(--border); opacity: .82; }
+.ask-answer { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; padding: 6px 9px; border-left: 2px solid var(--pass-solid, #2fae66); background: var(--surface-1, transparent); border-radius: 0 6px 6px 0; }
+.ask-answer-by { font-size: 10.5px; color: var(--pass-solid, #2fae66); font-weight: 700; }
+.ask-answer-text { font-size: 12px; }
+.ask-lanes { display: flex; flex-wrap: wrap; gap: 6px; }
+.ask-lane { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.ask-strip { display: flex; align-items: center; gap: 3px; margin-top: 8px; }
+.ask-strip-day { display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; width: 9px; }
+.ask-strip-asked, .ask-strip-answered { display: block; width: 100%; min-height: 2px; border-radius: 1px; }
+.ask-strip-asked { background: var(--warn-solid, #d99a2b); opacity: .55; }
+.ask-strip-answered { background: var(--pass-solid, #2fae66); opacity: .75; }
+
+/* ============ Error coverage: which channels are live, which are silent ============ */
+.err-coverage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.err-cov-lbl { font-size: 10px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.err-cov-chip { font-size: 10.5px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.err-cov-chip.is-live { color: var(--pass-solid, #2fae66); border-color: var(--pass-solid, #2fae66); }
+.err-cov-chip.is-silent { color: var(--muted); border-style: dashed; }

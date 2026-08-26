@@ -115,6 +115,32 @@ TOOLS = [
          "evidence": {"type": "array", "items": {"type": "string"}},
          "verification_run": {"type": "object"}},
          "required": ["id", "agent", "lease_token", "note", "evidence"]}},
+    {"name": "ask_operator",
+     "description": "Blocked on a fact only the operator has? File a DELIVERED question instead of "
+                    "stalling in silence. Refused with matching ids when the board already has it; "
+                    "pass anyway=true for a genuinely different question.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "question": {"type": "string"},
+         "context": {"type": "string"}, "anyway": {"type": "boolean"}},
+         "required": ["agent", "question"]}},
+    {"name": "check_inbox",
+     "description": "What is addressed to this agent right now — directives aimed at it and the "
+                    "answer to its own question. Ack what you have acted on.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}}, "required": ["agent"]}},
+    {"name": "ack_directive",
+     "description": "Record that a directive/answer was delivered to this agent; it leaves the "
+                    "inbox, and a directive acked by every named target retires itself.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "directive": {"type": "string"},
+         "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+    {"name": "search_board",
+     "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
+                    "already be recorded.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+         "required": ["query"]}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -278,6 +304,24 @@ def _call_tool(name, args, auth_headers):
         if args.get("verification_run"):
             payload["verification_run"] = args["verification_run"]
         status, body = _seam("/hub/api/complete", payload, auth_headers)
+    elif name == "ask_operator":
+        payload = {"agent": args["agent"], "question": args["question"]}
+        for key in ("context", "anyway"):
+            if args.get(key):
+                payload[key] = args[key]
+        status, body = _seam("/hub/api/ask", payload, auth_headers)
+    elif name == "check_inbox":
+        status, body = _seam("/hub/inbox.json", {"agent": args["agent"]}, auth_headers,
+                             method="get")
+    elif name == "ack_directive":
+        payload = {"agent": args["agent"], "directive": args["directive"]}
+        if args.get("note"):
+            payload["note"] = args["note"]
+        status, body = _seam("/hub/api/ack", payload, auth_headers)
+    elif name == "search_board":
+        status, body = _seam("/hub/search.json",
+                             {"q": args["query"], "limit": int(args.get("limit", 10))},
+                             auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)
