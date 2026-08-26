@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:directive",
+  "title": "Directive — an operator instruction addressed to named agents",
+  "description": "Created ONLY under the `directive:write` scope (the shared-root credential holds it; a worker credential is issued it only deliberately): an instruction injected into every targeted agent's working context is an authority tier above ordinary board writes. An answer to a question is a directive whose `answers` names the question note. Delivery is CLOSED by acks: each targeted agent records one, and a directive whose every named target has acked retires itself to `fulfilled` — a queue of delivered items that never leaves 'active' is a queue people learn to ignore.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "directive" },
+    "title": { "type": "string", "minLength": 1 },
+    "body_md": { "type": "string", "description": "What must change and why — the full instruction. Bodies are delivered whole; a clipped instruction says so rather than silently stopping." },
+    "remediation_cmd": { "type": "string", "description": "The exact command a targeted agent should run, when one exists." },
+    "targets": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Agent names, or the single element 'all'. Auto-retire on full ack applies only to explicitly named targets — 'all' has no closed roster to check off."
+    },
+    "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
+    "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
+    "supersedes": { "$ref": "hub:common#/$defs/idref" },
+    "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "title", "body_md", "targets", "status", "version"]
+}

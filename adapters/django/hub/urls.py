@@ -19,6 +19,14 @@ urlpatterns = [
     path("live/events", hub_api.live_events, name="live-events"),
     path("cursor.json", hub_api.cursor_json, name="cursor"),
     path("delta.json", hub_api.delta_json, name="delta"),
+    # The ask/answer surfaces, the operational stream, board search, and request identity.
+    # Same rule: above the catch-all, or each would 404 as an unknown entity collection.
+    path("questions.json", hub_api.questions_json, name="questions"),
+    path("inbox.json", hub_api.inbox_json, name="inbox"),
+    path("inbox/wait", hub_api.inbox_wait, name="inbox-wait"),
+    path("errors.json", hub_api.errors_json, name="errors"),
+    path("search.json", hub_api.search_json, name="search"),
+    path("whoami.json", hub_api.whoami_json, name="whoami"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -39,6 +47,19 @@ urlpatterns = [
     path("api/take", hub_write.take),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
+    # The ask/answer loop and the directive plane (delivery closed by acks).
+    path("api/ask", hub_write.ask),
+    path("api/answer", hub_write.answer),
+    path("api/directive", hub_write.directive),
+    path("api/ack", hub_write.ack),
+    # Observed presence: the seat heartbeat (ordinary writes stamp activity on their own).
+    path("api/presence", hub_write.presence_ping),
+    # The operational error stream's ingest and queue actions.
+    path("api/app-error", hub_write.app_error),
+    path("api/agent-error", hub_write.agent_error),
+    path("api/ack-error", hub_write.ack_error),
+    path("api/clear-errors", hub_write.clear_errors),
+    path("api/client-error", hub_api.client_error, name="client-error"),
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),

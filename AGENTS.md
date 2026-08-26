@@ -30,7 +30,11 @@ from a working multi-project system. Nothing here names any specific person, hos
 - **hub** (`hub_core/` + `adapters/`) — nouns you operate: events → projected tasks/ADRs/features/etc.,
   token-gated writes, server-granted "done", and an optional single-use-grant worker bridge. Mounts
   at `/hub` in a Django site; reads are unauthenticated, and the workstation bridge is disabled by
-  default.
+  default. The board is a live cockpit: observed presence (who is on it, from which machine and
+  console, doing what), the ask/answer loop (a blocked worker's question is DELIVERED to the
+  operator's inbox long-poll, the answer comes back addressed, the ack closes it), and a bounded
+  operational error stream with an honest read-time bar. Blocked on a fact only the operator has?
+  `POST /hub/api/ask` — never stall in silence, and search the board first (`search.json`).
 - **plane** (`PROJECT/`) — the durable on-disk tree: charter, doctrine, ADRs, registers, research,
   verification contracts, the leader/worker/verifier protocol. What a cold session reads to pick up.
 - **patterns** (`patterns/`) — opt-in enforcement: deploy contract, standing canary, pre-receive gate,

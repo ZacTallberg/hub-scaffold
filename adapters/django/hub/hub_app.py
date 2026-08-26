@@ -712,3 +712,64 @@ def release_lease(task_id, token) -> bool:
         except Exception:
             pass
         return True
+
+
+# ---- observed presence: who is on this board, per (agent, machine, console) ----
+# hub_core.presence over HUB_DIR. Observed state like claims/, never ledger truth: rows are
+# written from the authenticated write seam (an unauthenticated caller can never forge a seat)
+# and from the presence heartbeat, and they self-retire when a seat stops reporting.
+from hub_core import presence as _presence
+
+_PRESENCE_PUBLISH = {"stamp": None, "at": 0.0}
+
+
+def observe_presence(agent, headers, *, heartbeat=False):
+    """Refresh the caller's presence row from optional X-Hub-* headers, then wake connected
+    cockpits — throttled, because presence rides every write and the wake-up plane must not
+    carry one signal per request. Fail-soft end to end: presence must never break a write."""
+    try:
+        _presence.observe(
+            HUB_DIR, agent,
+            machine=headers.get("X-Hub-Machine") or "",
+            session=headers.get("X-Hub-Session") or "",
+            cwd=headers.get("X-Hub-Cwd") or "",
+            focus=headers.get("X-Hub-Focus") or "",
+            heartbeat=heartbeat)
+        stamp = _presence.stamp(HUB_DIR)
+        now = _time.time()
+        if stamp != _PRESENCE_PUBLISH["stamp"] and now - _PRESENCE_PUBLISH["at"] >= 2.0:
+            _PRESENCE_PUBLISH["stamp"] = stamp
+            _PRESENCE_PUBLISH["at"] = now
+            _publish_realtime("presence.observed")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+def read_presence():
+    return _presence.read(HUB_DIR)
+
+
+def live_sessions():
+    return _presence.live_sessions(HUB_DIR)
+
+
+def presence_stamp():
+    return _presence.stamp(HUB_DIR)
+
+
+# ---- the operational error stream: record-and-wake wrappers over hub_core.errorlog ----
+from hub_core import errorlog as _errorlog
+
+
+def record_error(source, message, **kwargs):
+    """Record one operational error and wake connected cockpits. A throttled repeat (the row
+    reports suppressed_since) changed nothing on disk, so it publishes nothing."""
+    row = _errorlog.record(HUB_DIR, source, message, **kwargs)
+    if not row.get("suppressed_since"):
+        _publish_realtime("errors.recorded", fingerprint=row.get("fingerprint"))
+    return row
+
+
+def errors_changed():
+    """Wake cockpits after an ack/reopen/clear — queue state changed with no new row."""
+    _publish_realtime("errors.changed")

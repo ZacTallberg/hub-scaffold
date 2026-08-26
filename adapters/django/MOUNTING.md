@@ -62,6 +62,7 @@ HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
+HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling
@@ -72,6 +73,14 @@ HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see bel
 # Normal workers use scoped X-Agent-Token credentials issued by the credential API.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lower() == "true"
+
+# Optional: forward the host app's own 5xx into the hub's operational error stream, so
+# the board's errors card covers the app the hub is mounted in (the coverage block names
+# this channel either way):
+# LOGGING = {..., "handlers": {"hub_errors": {
+#     "()": "hub_core.errorlog.HubErrorHandler", "hub_dir": str(BASE_DIR / "PROJECT" / ".hub"),
+#     "level": "ERROR"}},
+#     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"}}}
 
 # Optional workstation worker bridge (disabled unless explicitly enabled):
 HUB_WORKER_LAUNCH_ENABLED = False

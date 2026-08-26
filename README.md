@@ -35,6 +35,21 @@ a rare critical boundary.
 - Compatibility-first atomic pull: optional task capability/risk/resource/locality/outcome
   requirements filter workers before quality/latency/cost preference scoring inside the canonical
   ready frontier.
+- The ask/answer loop: a blocked worker's question is DELIVERED (an addressed inbox with a
+  bounded long-poll), answering replies to the asker AND retires the question in one verb, and
+  the asker's ack closes the loop. Duplicate asks are refused with the matching ids, failing
+  open so a search outage never silences a real question. Directives and delivery acks are
+  first-class entity types.
+- Observed presence: per-(agent, machine) rows with per-console sessions (working directory +
+  focus), a shared freshness contract, and self-retiring rows (archived, never deleted). A
+  claimless console with a fresh focus renders ACTIVE with what it is doing — never idle.
+- A bounded, redacted operational error stream — host-app 5xx, satellite services, worker-side
+  failures, browser diagnostics, recorded auth refusals — with a read-time severity bar shared
+  by the board and the API, truthful ack/reopen, bounded clears, and per-channel coverage so an
+  empty card says whether it is everything.
+- Ranked full-board search (`search.json`) and a request-identity probe (`whoami.json`).
+- Every write is refused if it looks like it contains a secret — the append-only ledger can
+  never unlearn one.
 - A focused computed audit for schemas, references, ADR numbering, event integrity, build
   coherence, selected Django safety settings, and mutation-route guards.
 - A minimal mounted Django example in which real Hub operations can be exercised.

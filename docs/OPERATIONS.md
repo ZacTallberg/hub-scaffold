@@ -55,6 +55,8 @@ JSONL, or SQLite mutation is an offline recovery operation only: drain live writ
 | `events.jsonl` | Canonical event history | Yes—primary recovery artifact |
 | `events.db`, `events.db-wal`, `events.db-shm` | Rebuildable SQLite index | Optional; quiesce writes for a consistent copy |
 | `claims/*.json` | Expiring task leases | Usually no; losing them makes the durable `in_progress` task reclaimable |
+| `presence/` (+ `presence/_retired/`) | Observed seats/consoles; rows unseen past the horizon are archived, never deleted | Usually no; it repopulates as agents check in |
+| `errors.jsonl`, `errors-acked.json` | Bounded, redacted operational error stream + acknowledged signatures | According to incident policy; the stream is capped at ~2 MB |
 | `.attest-secret` | Launch-grant signing secret | Yes if launch continuity matters; keep secret |
 | `grants/*.used` | Consumed nonces | Retain at least through maximum grant lifetime |
 | `grants/decisions.jsonl` | Launch grant/consume/refusal audit trail | According to audit policy |
@@ -128,7 +130,12 @@ in `patterns/deploy-runbook.md`.
 4. Confirm the old token receives `403` and the new token succeeds on a harmless, intended call.
 5. Remove old secret versions according to local policy.
 
-There is no overlap set or per-client revocation: the configured token is the one accepted token.
+There is no overlap set for the shared-root compatibility token: the configured token is the
+one accepted root token. Scoped agent credentials are the finer-grained alternative — revoke
+one with `POST /hub/api/agent-credential {"action":"revoke",...}` and issue a fresh one,
+without touching anyone else's access. Auth refusals after a rotation are visible on the
+board's operational error stream (`hub.auth` rows) — a client still presenting the old token
+shows up there instead of failing invisibly.
 
 ## Queue and lease recovery
 

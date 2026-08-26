@@ -14,6 +14,117 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### A working instance's two weeks in production, upserted: delivery, presence, the error stream
+
+A working instance ran this scaffold's shape as a multi-machine agent board for two weeks and
+grew, under load, capabilities this repository had only implied. Everything below is the generic
+form of what that instance PROVED — curated whole units through the scrub gate, never a bulk
+merge — re-derived onto this base's architecture (scoped credentials, the push-realtime plane,
+proof-without-test-accumulation) rather than transplanted, and proven again here by a disposable
+probe against the real served example app plus a read of the rendered board.
+
+**The ask/answer loop, closed.** The board could record a question beautifully and still leave
+the asker blocked in silence — the only delivery mechanism was somebody happening to have a
+browser tab open, and on the origin system a member once waited a day on a question the answerer
+never saw. Now: `POST /hub/api/ask` mints a first-class question (its `asker` is a stable field,
+never derived from provenance — which answering REWRITES, so the origin's prefix-convention
+mis-addressed every re-answered reply; this port fixes the class instead of carrying the
+workaround), `GET /hub/inbox/wait` blocks until something is ADDRESSED to you (bounded ≤25s, a
+small waiter pool that degrades to an honest poll — and the fingerprint of the addressed set,
+not the event cursor, decides a wake, so unrelated board traffic never trains anyone to ignore
+the channel), answering is ONE verb (the reply directive targeted at the asker AND the question
+retired — a half-done answer is worse than either half), and the asker's ack closes delivery,
+with a fully-acked directive retiring itself because a delivered queue that never leaves
+"active" is a queue people learn to ignore. A restated question is refused with the matching ids
+(Jaccard over significant tokens, both surfaces — open/answered questions and any adopted
+knowledge notes), and the guard FAILS OPEN in both directions: a duplicate is cheap and visible,
+a lost question is neither. `directive` and `ack` are first-class entity types (schema + writer
++ tab + fold), authority sits in the existing scope system (`directive:write` — the shared-root
+credential holds it; a worker credential is issued it only deliberately), and `questions.json`
+reports what the feed is actually about: how long each person waited, the longest wait and
+whose, median reply time, per-asker lanes, a 14-day strip.
+
+**Observed presence, per console.** "Who is working right now" was answered from leases alone —
+promises with a TTL, not observations, and an agent working WITHOUT a claim was invisible. Now
+every authenticated write refreshes a presence row keyed per (agent, machine) from optional
+`X-Hub-*` headers, sessions live INSIDE the machine row (id + working directory + FOCUS —
+agent+machine cannot tell four live consoles from one console checking in often, and two
+consoles unknowingly on the same thing is the most expensive duplicate a fleet produces), and
+`POST /hub/api/presence` is the heartbeat that separates "acted recently" from "still there".
+A claimless console with a fresh focus renders ACTIVE with what it is doing, never idle — the
+exact case that makes a busy fleet look asleep. Rows unseen past a horizon self-retire into
+`_retired/` (archive over delete; roster surfaces otherwise become museums), every stored
+timestamp is coerced (one string-shaped stamp in a years-old sidecar must degrade to "unknown",
+never TypeError the whole board to a 500), and the machine-row projection is a DENYLIST — the
+origin's allowlist silently dropped three collected fields on three separate occasions before
+that lesson stuck. Fixed while proving it here, because a port is not done until it runs: the
+card's age check read `(age or huge) < 300`, which sent a console that pinged ZERO seconds ago
+— the most active possible — to idle, because 0 is falsy. The probe caught it only on a fresh
+board; every earlier pass had a second of clock drift hiding it.
+
+**The operational error stream.** The audit proves the LEDGER; nothing proved the system around
+it, and a served 500 existed only in a service log on a host nobody reads. `hub_core/errorlog`
+is a bounded, redacted sidecar with ingest for every surface the audit cannot see — the host
+app's 5xx (a logging handler), satellite services (`app-error`, attributed to the APP), worker
+tooling (`agent-error`), and the board's own browser (CSRF-gated, size-bounded). What made the
+origin's stream trustworthy is ported intact: redaction at the door; per-fingerprint throttling
+with the count preserved (an unthrottled flood does not just add noise — it EVICTS every other
+error from a bounded store); external noise classified BEFORE the throttle so a suppressed
+repeat reports its written sibling's severity; a severity bar applied at READ and shared by the
+board and the API (a bar kept only in the renderer lies to every machine reader — measured on
+the origin: 25 rows to 1); truthful ack/reopen (reopening a never-acked signature is a refusal,
+not a 200 over an untouched row); clears bounded by AGE or ACK, never "everything", with
+`only_acked` a restriction rather than a widening; and per-channel `coverage`, because an empty
+card must say whether it is everything before a reader is entitled to good news. Auth refusals
+land in the same stream: a worker whose credential was revoked otherwise retries forever while
+the board shows a seat going quietly stale.
+
+**The write seam refuses secrets.** The highest-volume risky behaviour on an agent board is
+pasting failing command output into a question, and the ledger is append-only under a hash
+chain — a secret that lands can never be removed without destroying the tamper-evidence. One
+choke point now refuses secret-shaped payloads (private keys, platform token formats, JWTs,
+credential assignments) with instructions, and passes recognizable redaction placeholders —
+refusing what a member types AFTER being told to redact makes the error message a dead end.
+Three traps the origin paid for ride along as regressions-in-comment: `_` is a word character
+(so `\b` never fired before the exact `.env` paste this exists to catch), `\s` crosses
+newlines, and `json.dumps` escapes them.
+
+**Live through the push plane.** Presence and the error sidecars change with NO ledger event,
+so mutations to them publish wake signals on the existing realtime bus (presence throttled —
+it rides every write and the wake-up plane must not carry one signal per request; a throttled
+error repeat that changed nothing on disk publishes nothing), the snapshot memo carries both
+sidecar stamps, and the cumulative patches already carry the new live blocks — the fleet strip
+and the error card move the moment a seat phones in or a failure lands, not when unrelated
+traffic happens to append. The cockpit gained the Signals section (Asks and Errors cards), the
+Directives tab, per-card machine chips, live-console rows, checkpoint notes ("working on X,
+last did Y" — the fact a peer needs to decide whether to coordinate), and attention-rail rows
+for open questions and unclaimed errors. Board search (`search.json`) is the pull half of
+push-pointers-pull-content, and `whoami.json` answers what a request's credential actually
+resolves to — a stale seat looks identical whether the caller never wrote, a proxy dropped a
+header, or the credential went invalid, and diagnosing that from outside once cost hours.
+
+**Engine and schema.** A byte-identical REPLAYED ledger line (a backup/restore re-appending the
+tail) now collapses during reconcile instead of being re-chained as a second event that applies
+the same payload twice — announced by name, chain unchanged, and the heal keys expected seqs on
+the healed chain so a collapse cannot re-chain everything after it off by one; a genuine fork
+still linearizes with nothing dropped, and content tampering is still `verify_chain`'s catch.
+Plan steps carry `note`/`note_at` (the origin's checkpoint notes 422'd at this exact schema
+gate). Timestamp parsing at the new read choke points is RANGE-checked — external systems emit
+year-one sentinels as routine data, and a sentinel parses perfectly and then renders as a
+two-thousand-year age. Slugs that survive as pure punctuation fall back to a stable digest
+instead of colliding every such entity into one id per type. And the MCP lease meta key lost
+its person-specific namespace — the scrub gate caught it the first time this boundary was
+exercised end to end.
+
+Deliberately NOT ported, as instance-specific rather than template material: the self-service
+app provisioning lane, the credential locker, the CI/deploy doctor, machine-enrollment and kit
+distribution channels, the capability catalog file, and the app portfolio with its liveness
+prober — each depends on one organization's hosts, pipeline, or distribution machinery. Also
+deliberately superseded rather than ported: the origin's per-agent minted-token map (this
+base's scoped credential registry is the stronger successor) and its SSE side-channel ticks
+(this base's push bus generalizes them).
+
+
 ### One live write entrance
 
 - Added the dependency-free `python -m hub_core.client` create/claim/heartbeat/complete client so

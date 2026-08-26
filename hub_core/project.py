@@ -13,7 +13,12 @@ from . import upcast as _upcast
 
 # Entity types that fold into the projected state (everything else, e.g. decision/claim, is a
 # log-only event kept in the event store but not materialized as an entity).
-_KNOWN = {"task", "run", "adr", "feat", "gap", "cap", "deploy", "note"}
+_KNOWN = {"task", "run", "adr", "feat", "gap", "cap", "deploy", "note",
+          # The addressed-delivery plane: a directive is an operator instruction aimed at
+          # named agents (an answer to a question is a directive with `answers`); an ack is
+          # one agent's record that delivery landed. Both fold so the inbox, the board, and
+          # the JSON API read one truth.
+          "directive", "ack"}
 # Statuses that count as "satisfied" for dependency purposes.
 _DONE = {"done", "closed", "shipped", "accepted", "extracted", "reusable", "proven"}
 # Dependency SATISFACTION additionally treats a dropped dep as terminally resolved, matching the
@@ -65,6 +70,8 @@ _EDGES = {
     "cap": {"realized_by": "realized_by", "depends_on": "depends_on", "consumed_by": "consumed_by"},
     "deploy": {"tasks_closed": "closed_task", "reverts": "reverts", "touches": "touches"},
     "note": {"relates_to": "relates_to"},
+    "directive": {"answers": "answers", "supersedes": "supersedes"},
+    "ack": {"directive": "acks"},
 }
 
 
