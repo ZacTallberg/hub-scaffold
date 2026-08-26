@@ -313,6 +313,12 @@
           var named = (r.targets || []).filter(function (t) { return t !== "all"; }).length;
           return txt(named ? (ackCount(r) + "/" + named) : String(ackCount(r)), "num");
         } },
+      { label: "Deadline", k: "deadline", cell: function (r) {
+          if (!r.deadline) return txt("", "cell-sub");
+          var overdue = r.status === "active" && Date.parse(r.deadline) < Date.now();
+          return el("td", null, [el("span", { class: overdue ? "deadline-overdue" : "cell-sub",
+            text: (overdue ? "overdue · " : "") + relativeTime(r.deadline) })]);
+        } },
       { label: "Kind", k: "answers", cell: function (r) { return txt(r.answers ? "answer" : "directive", "cell-sub"); } }
     ];
   }
@@ -1048,13 +1054,14 @@
         el("time", { class: "trail-time rel-time", datetime: t.ts || "", "data-ts": t.ts || "", text: relativeTime(t.ts) })
       ]);
     })));
-    var interactive = c.task_id && BY_ID[c.task_id];
-    var card = el(interactive ? "button" : "article", { class: "agent-card s-" + c.status,
-      type: interactive ? "button" : null,
+    // Every card opens the per-agent detail view — the coordination surface. The held
+    // task stays one click away INSIDE it (a chip), so nothing their card answered before
+    // is further away, and a claimless-but-active console finally has somewhere to open.
+    var card = el("button", { class: "agent-card s-" + c.status, type: "button",
       "data-seq": String((c.trail && c.trail[0] && c.trail[0].seq) || ""),
       "data-agent": c.agent,
-      "aria-label": c.agent + " " + c.status + (c.task ? " on " + c.task : "") }, kids);
-    if (interactive) card.addEventListener("click", function () { openEntity("task", BY_ID[c.task_id]); });
+      "aria-label": "open agent " + c.agent + " — " + c.status + (c.task ? " on " + c.task : "") }, kids);
+    card.addEventListener("click", function () { openAgentDetail(c); });
     return card;
   }
 
@@ -1338,6 +1345,93 @@
     ]);
   }
 
+  /* An error row's DETAILS (the stack trace, the context fields, the origin) are served
+     with every row and were rendered nowhere — a queue that names a failure but withholds
+     the way in sends the reader to a server shell. Not an entity, so it gets its own modal. */
+  function openErrorDetail(r) {
+    var role = r.severity === "critical" ? "fail" : "warn";
+    var body = el("div");
+    var idRows = [
+      row("Severity", el("span", { class: "badge b-" + role, text: r.severity || "error" })),
+      rowMono("Source", r.source),
+      rowMono("Fingerprint", r.fingerprint),
+      r.origin ? rowMono("Origin", r.origin + (r.origin_app ? " · " + r.origin_app : "")
+                                   + (r.origin_machine ? " · " + r.origin_machine : "")) : null,
+      rowMono("At", r.ts),
+      r.occurrences_since_last ? rowMono("Collapsed repeats",
+        "\u00d7" + (1 + r.occurrences_since_last) + " (throttled; count preserved)") : null,
+      r.acked ? row("Claimed", (r.acked.by || "someone") + (r.acked.note ? " — " + r.acked.note : ""))
+              : row("Queue state", el("span", { class: "badge b-fail", text: "unclaimed" }))
+    ];
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Signature", "warning", idRows)]));
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Message", "info", [
+      el("div", { class: "detail-prose", text: r.message || "" })])]));
+    var ctx = r.context || {};
+    var ctxRows = Object.keys(ctx).map(function (k) { return rowMono(k, ctx[k]); });
+    if (ctxRows.length) {
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Context", "info", ctxRows)]));
+    }
+    if (r.details) {
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Details", "info", [
+        el("pre", { class: "err-details mono", text: r.details })])]));
+    }
+    body.appendChild(el("p", { class: "cell-sub", text:
+      "Claim: POST api/ack-error {fingerprint: \"" + (r.fingerprint || "") + "\"} — collapses the signature off the queue without deleting rows." }));
+    openModal(role, r.message || "Operational error", r.source || "", "warning", body);
+  }
+
+  /* The per-agent detail view — the coordination surface. A card answers "who is busy";
+     this answers what a peer actually decides with: which consoles they have open and on
+     what, the task they hold and its last checkpoint, their recent trail. */
+  function openAgentDetail(c) {
+    var body = el("div");
+    var idRows = [
+      row("Status", el("span", { class: "agent-status s-" + c.status, text: c.status })),
+      c.machine ? rowMono("Machine", c.machine) : null,
+      c.done_total ? rowMono("Completed on this board", c.done_total) : null,
+      c.idle_s != null ? rowMono("Last board action", fmtAge(c.idle_s) + " ago") : null
+    ];
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Seat", "users", idRows)]));
+    if (c.task_id) {
+      var held = [row("Task", chipRow([c.task_id], "task") || doc.createTextNode(c.task || ""))];
+      if (c.plan_total) {
+        held.push(row("Plan", el("div", null, [
+          el("div", { class: "tcard-track" }, [el("div", { class: "tcard-fill",
+            style: "width:" + (c.plan_pct || 0) + "%" })]),
+          el("div", { class: "cell-sub", text: "step " + (c.plan_done || 0) + "/" + c.plan_total
+             + (c.step ? " — " + c.step : "") })])));
+      }
+      if (c.last_note) held.push(row("Last checkpoint", c.last_note));
+      if (c.age_s != null) held.push(rowMono("Held for", fmtAge(c.age_s)));
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Holding", "checks", held)]));
+    } else if (c.focus) {
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Holding", "checks", [
+        row("Ambient focus", c.focus),
+        row("Note", "working, but not on a board task — coordinate before starting the same thing")])]));
+    }
+    if ((c.sessions || []).length) {
+      var consoles = c.sessions.map(function (sess) {
+        return row((sess.session || "?") + (sess.machine ? " @ " + sess.machine : ""),
+          el("div", null, [
+            sess.focus ? el("div", { class: "detail-prose", text: sess.focus }) : null,
+            el("div", { class: "cell-sub", text: (sess.cwd || "") +
+               (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") })
+          ].filter(Boolean)));
+      });
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Live consoles", "pulse", consoles)]));
+    }
+    if ((c.trail || []).length) {
+      var trail = c.trail.slice(0, 5).map(function (t) {
+        return row(t.action || "", el("div", null, [
+          el("div", { class: "detail-prose", text: t.title || "" }),
+          el("time", { class: "cell-sub rel-time", datetime: t.ts || "", "data-ts": t.ts || "",
+                       text: relativeTime(t.ts) })]));
+      });
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Recent trail", "branch", trail)]));
+    }
+    openModal(c.status === "stalled" ? "warn" : "info", c.agent, "agent", "users", body);
+  }
+
   /* ---- ERRORS: the operational stream the ledger audit cannot see ----
      The bar is applied at read and shared with the API, so the human and every machine
      consumer read the same queue. Deferred rows are counted, never hidden-and-forgotten. */
@@ -1377,7 +1471,9 @@
     } else {
       onBar.slice(0, 8).forEach(function (r) {
         var where = (r.context && r.context.app) || r.origin_app || r.origin_machine || r.origin || "";
-        body.appendChild(el("div", { class: "err-item" + (r.acked ? " is-acked" : "") }, [
+        var item = el("button", { class: "err-item" + (r.acked ? " is-acked" : ""), type: "button",
+          "data-focus-key": "err:" + (r.fingerprint || r.source || ""),
+          "aria-label": "open error " + (r.message || "") }, [
           el("span", { class: "err-head" }, [
             el("span", { class: "badge b-" + (r.severity === "critical" ? "fail" : "warn"), text: r.severity || "error" }),
             where ? el("span", { class: "err-where", text: where }) : null,
@@ -1387,7 +1483,9 @@
           el("span", { class: "err-msg", text: r.message || "" }),
           el("span", { class: "err-meta mono", text: (r.source || "") + " · " + (r.fingerprint || "")
             + (r.occurrences_since_last ? " · \u00d7" + (1 + r.occurrences_since_last) : "") })
-        ]));
+        ]);
+        item.addEventListener("click", function () { openErrorDetail(r); });
+        body.appendChild(item);
       });
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
         "Claim a signature with POST api/ack-error {fingerprint} — acking collapses it off the queue without deleting the rows." }));

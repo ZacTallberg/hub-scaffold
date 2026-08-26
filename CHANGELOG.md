@@ -45,6 +45,22 @@ HTTP — invisible from the two mouths this scaffold actually gives an agent. Cl
   `error:report` credentials, and the properties to preserve when adapting it. Wire it before
   the first feature; a service that keeps failures in its own log can only be debugged from a
   shell on its host.
+- **The convergence sweep, after the sibling seat's best-of-both pass landed.** Four
+  leftovers neither seat had carried: `POST /hub/api/forget-presence` (`presence:manage`) —
+  the engine shipped `presence.forget()` with no door, so a phantom seat was permanent; a
+  decommissioned laptop now leaves every open board immediately, and dropping everything is
+  refused. Overdue directives reach the attention rail naming their unacked targets, and the
+  Directives tab surfaces the deadline — red only while ACTIVE, because a fulfilled
+  directive's past deadline is history, not an alarm (the schema had promised this surfacing
+  since the type landed; nothing delivered it). Error rows open a real detail modal — the
+  stack-trace `details`, context fields, origin, collapsed-repeat count and claim state were
+  served with every row and rendered nowhere, which sent the reader to a server shell for
+  the way in. Agent cards open the per-agent detail view (the coordination surface): the
+  held task as a chip with its plan and last checkpoint, every live console with its focus,
+  the recent trail — and a claimless-but-active console finally has somewhere to open. Plus
+  one robustness fix: the client's `wait --follow` notifier now survives a transient hub
+  outage with capped backoff instead of dying silently exactly when the hub comes back with
+  news.
 - `hubaudit` was re-run against the final tree: the route-guard audit certifies every new
   endpoint (zero critical/high), which the first pass had asserted but never executed.
 

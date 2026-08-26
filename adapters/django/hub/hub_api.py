@@ -332,6 +332,28 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
             f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}", q.get("id"),
             q.get("title"), route={"view": "overview", "focus": "asks"})
 
+    # OVERDUE directives: `deadline` is documented as "surfaced, never enforced" — this is
+    # the surfacing. An active directive past its deadline with targets still unacked is an
+    # instruction the fleet has NOT absorbed on the timeline its author declared.
+    now_epoch = time.time()
+    acked_by_dir = {}
+    for e in entities.values():
+        if e.get("type") == "ack":
+            acked_by_dir.setdefault(e.get("directive"), set()).add(
+                str(e.get("agent") or "").lower())
+    for e in entities.values():
+        if e.get("type") != "directive" or e.get("status") != "active":
+            continue
+        due = _epoch(e.get("deadline"))
+        if not due or due >= now_epoch:
+            continue
+        targets = [str(t).lower() for t in (e.get("targets") or []) if str(t).strip()]
+        missing = [t for t in targets if t != "all" and t not in acked_by_dir.get(e["id"], set())]
+        add(2, "directive-overdue",
+            "past its deadline" + ((" — unacked: " + ", ".join(sorted(missing))) if missing
+                                   else " and 'all'-targeted (no closed roster to check off)"),
+            e["id"], e.get("title"))
+
     # UNCLAIMED operational errors that clear the bar. The same set a human sees — the rail
     # must never hand a machine a longer list than the person who would be asked about it.
     for r in (error_unclaimed or [])[:5]:
