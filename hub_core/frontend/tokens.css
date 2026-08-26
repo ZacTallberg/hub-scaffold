@@ -117,6 +117,10 @@
   --surface-2: light-dark(
           oklch(var(--l-surface-2) var(--neutral-c) var(--accent-h)),
           oklch(0.27 calc(var(--neutral-c) * 1.5) var(--accent-h)));
+  /* Hover-elevated surface: one step beyond surface-2 in each theme's raised direction. */
+  --surface-3: light-dark(
+          oklch(0.94 calc(var(--neutral-c) * 1.5) var(--accent-h)),
+          oklch(0.31 calc(var(--neutral-c) * 1.5) var(--accent-h)));
   --border: light-dark(
           oklch(var(--l-border) calc(var(--neutral-c) * 1.5) var(--accent-h)),
           oklch(0.36 calc(var(--neutral-c) * 2) var(--accent-h)));
@@ -349,9 +353,7 @@ a:hover { color: var(--accent-hover); }
   align-items: center;
   gap: 0.25rem;
   padding-inline: var(--pad-x);
-  background: light-dark(
-        oklch(from var(--surface) l c h / 0.85),
-        oklch(from var(--surface) l c h / 0.85));
+  background: oklch(from var(--surface) l c h / 0.85);
   -webkit-backdrop-filter: saturate(1.4) blur(8px);
   backdrop-filter: saturate(1.4) blur(8px);
   border-bottom: 1px solid var(--border);

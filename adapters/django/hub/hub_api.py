@@ -1376,6 +1376,7 @@ def errors_json(request):
     return JsonResponse({"data": data, "metadata": metadata})
 
 
+@require_GET
 def whoami_json(request):
     """What the hub ACTUALLY received on this request: the presented credential's mode and
     subject (or why it is invalid), and which X-Hub-* headers survived any proxy. A stale
