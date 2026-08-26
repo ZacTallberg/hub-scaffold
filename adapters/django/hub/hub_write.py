@@ -1225,6 +1225,34 @@ def answer(request, b):
         resp.setdefault("data", {})["question_still_open"] = True
     resp.setdefault("data", {})["directive"] = eid
     resp["data"]["asker"] = asker
+
+    # CRYSTALLIZE is OPT-IN, and on the origin system it used to be automatic — thirteen
+    # "lessons" appeared in one afternoon, most of them requests that got fulfilled rather
+    # than rules anybody should carry. The knowledge surface rides every future duplicate-ask
+    # check, so minting indiscriminately taxes it to remember something true for one
+    # afternoon. The answerer decides, because only they know which of the two this was.
+    if not b.get("crystallize"):
+        resp["data"]["crystallized"] = False
+        return JsonResponse(resp, status=status)
+    try:
+        note_local = "qa-" + question_id.rsplit(":", 1)[-1]
+        lesson_id = ids.make_id(hub_app.PROJECT_KEY, "note", note_local)
+        existing_lesson = (state.get("entities") or {}).get(lesson_id)
+        lesson_payload = {
+            "type": "note", "category": "method",
+            "title": (question_text or ("answer for " + asker))[:300],
+            "body_md": text + "\n\n(Crystallized from a question asked by " + asker + ".)",
+            "tags": ["pattern", "memory", "answered-question"],
+            "status": "standing",
+            "relates_to": [question_id],
+        }
+        _lesson_resp, lesson_status = _append(
+            "note", lesson_id, lesson_payload,
+            expected_version=existing_lesson.get("version") if existing_lesson else None,
+            agent=agent, idem=None, etype="note.created")
+        resp["data"]["crystallized"] = lesson_id if lesson_status in (200, 201) else False
+    except Exception:                                    # noqa: BLE001 - bookkeeping never
+        resp["data"]["crystallized"] = False             # loses an answer already sent
     return JsonResponse(resp, status=status)
 
 

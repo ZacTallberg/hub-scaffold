@@ -15,6 +15,21 @@ Examples::
     HUB_LEASE_TOKEN=... python -m hub_core.client complete project:task:0042 \
       --agent worker-1 --accept-note "Live export returned the artifact" \
       --evidence https://project.example/export/latest
+
+The delivery loop rides the same seam. Blocked on a fact only the operator has? Never stall
+in silence::
+
+    python -m hub_core.client ask --agent worker-1 \
+      --question "which queue drains the nightly import backlog" --context "stalls at step 3"
+    python -m hub_core.client inbox --agent operator          # what is addressed to me now
+    python -m hub_core.client wait --agent operator --follow  # block; print arrivals (a notifier)
+    python -m hub_core.client answer project:note:q-worker-1-1a2b3c4d \
+      --text "the retry queue; requeue stalled items"         # needs directive:write
+    python -m hub_core.client ack project:directive:0001 --agent worker-1
+
+`presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
+HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
+error stream.
 """
 
 from __future__ import annotations
@@ -50,7 +65,8 @@ def _auth_headers() -> dict[str, str]:
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
 
 
-def _post(base: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _post(base: str, operation: str, payload: dict[str, Any],
+          extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -59,6 +75,7 @@ def _post(base: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         # adopter to name its own operational client at the edge.
         "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
         **_auth_headers(),
+        **(extra_headers or {}),
     }
     request = urllib.request.Request(
         f"{base}/api/{operation}",
@@ -68,6 +85,51 @@ def _post(base: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        try:
+            body: Any = json.loads(detail)
+        except json.JSONDecodeError:
+            body = detail
+        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+
+
+def _optional_auth_headers() -> dict[str, str]:
+    try:
+        return _auth_headers()
+    except ValueError:
+        return {}          # reads are public; whoami simply reports no credential
+
+
+def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, str]:
+    """The observed-presence headers every write may carry. Environment first, flags win —
+    the board's live-console view is only as true as what the seats send."""
+    values = {
+        "X-Hub-Machine": os.environ.get("HUB_MACHINE", ""),
+        "X-Hub-Session": os.environ.get("HUB_SESSION_ID", ""),
+        "X-Hub-Cwd": os.environ.get("HUB_CWD") or os.getcwd(),
+        "X-Hub-Focus": os.environ.get("HUB_FOCUS", ""),
+    }
+    if arguments is not None:
+        if getattr(arguments, "machine", None):
+            values["X-Hub-Machine"] = arguments.machine
+        if getattr(arguments, "focus", None):
+            values["X-Hub-Focus"] = arguments.focus
+    return {name: value for name, value in values.items() if value}
+
+
+def _get(base: str, path: str, timeout: int = 30) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"{base}/{path.lstrip('/')}",
+        headers={"Accept": "application/json",
+                 "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
+                 **_optional_auth_headers()},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
@@ -139,6 +201,115 @@ def _payload_complete(arguments: argparse.Namespace) -> tuple[str, dict[str, Any
     return "complete", payload
 
 
+def _payload_ask(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {
+        "agent": _agent(arguments),
+        "question": arguments.question,
+    }
+    if arguments.context:
+        payload["context"] = arguments.context
+    if arguments.relates_to:
+        payload["relates_to"] = arguments.relates_to
+    if arguments.anyway:
+        payload["anyway"] = True
+    return "ask", payload
+
+
+def _payload_answer(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"question": arguments.question_id, "text": arguments.text}
+    if arguments.crystallize:
+        payload["crystallize"] = True
+    return "answer", payload
+
+
+def _payload_directive(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"title": arguments.title, "body_md": arguments.body}
+    if arguments.target:
+        payload["targets"] = arguments.target
+    if arguments.remediation_cmd:
+        payload["remediation_cmd"] = arguments.remediation_cmd
+    return "directive", payload
+
+
+def _payload_ack(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments), "directive": arguments.directive_id}
+    if arguments.note:
+        payload["note"] = arguments.note
+    return "ack", payload
+
+
+def _payload_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    return "presence", {"agent": _agent(arguments)}
+
+
+def _payload_app_error(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"app": arguments.app, "message": arguments.message}
+    for name in ("kind", "severity", "code", "details", "component", "operation", "path", "host"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    return "app-error", payload
+
+
+def _payload_agent_error(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments), "message": arguments.message}
+    for name in ("source", "severity", "code", "details", "machine"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    return "agent-error", payload
+
+
+def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"fingerprint": arguments.fingerprint, "agent": _agent(arguments)}
+    if arguments.reopen:
+        payload["reopen"] = True
+    if arguments.note:
+        payload["note"] = arguments.note
+    return "ack-error", payload
+
+
+def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    return _get(base, f"inbox.json?agent={quote(arguments.agent)}")
+
+
+def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Block until something is addressed to the agent. With --follow, loop forever and
+    print each CHANGED addressed set as one JSON line — the building block for a desktop
+    notifier or a supervisor hook: pipe it to whatever raises attention on your platform.
+    The fingerprint round-trips so unrelated board traffic never produces output."""
+    from urllib.parse import quote
+    fingerprint = arguments.fp or ""
+    while True:
+        payload = _get(
+            base,
+            f"inbox/wait?agent={quote(arguments.agent)}&fp={quote(fingerprint)}"
+            f"&wait={arguments.wait}",
+            timeout=arguments.wait + 15,
+        )
+        data = payload.get("data") or {}
+        changed = data.get("fingerprint") != fingerprint
+        fingerprint = data.get("fingerprint") or fingerprint
+        if not arguments.follow:
+            return payload
+        if changed:
+            print(json.dumps(data, sort_keys=True), flush=True)
+
+
+def _run_search(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    return _get(base, f"search.json?q={quote(arguments.query)}&limit={arguments.limit}")
+
+
+def _run_questions(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _get(base, "questions.json")
+
+
+def _run_whoami(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _get(base, "whoami.json")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Mutate a running Hub through the same HTTP seam that publishes realtime state."
@@ -177,6 +348,94 @@ def _parser() -> argparse.ArgumentParser:
     complete.add_argument("--evidence", action="append", required=True)
     complete.add_argument("--expected-version", type=int)
     complete.set_defaults(payload=_payload_complete)
+
+    ask = commands.add_parser("ask", help="ask the operator a question that actually DELIVERS")
+    ask.add_argument("--agent")
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--context")
+    ask.add_argument("--relates-to", action="append", default=[], dest="relates_to")
+    ask.add_argument("--anyway", action="store_true",
+                     help="file even though the board already has a matching question")
+    ask.set_defaults(payload=_payload_ask)
+
+    answer = commands.add_parser("answer",
+                                 help="reply to a question AND retire it (directive:write scope)")
+    answer.add_argument("question_id")
+    answer.add_argument("--text", required=True)
+    answer.add_argument("--crystallize", action="store_true",
+                        help="also mint a standing knowledge note (only when the NEXT person "
+                             "would otherwise re-derive this; most answers are one-offs)")
+    answer.set_defaults(payload=_payload_answer)
+
+    directive = commands.add_parser("directive",
+                                    help="issue an operator instruction (directive:write scope)")
+    directive.add_argument("--title", required=True)
+    directive.add_argument("--body", required=True)
+    directive.add_argument("--target", action="append", default=[])
+    directive.add_argument("--remediation-cmd", dest="remediation_cmd")
+    directive.set_defaults(payload=_payload_directive)
+
+    ack = commands.add_parser("ack", help="record that a directive/answer was delivered to you")
+    ack.add_argument("directive_id")
+    ack.add_argument("--agent")
+    ack.add_argument("--note")
+    ack.set_defaults(payload=_payload_ack)
+
+    presence = commands.add_parser("presence",
+                                   help="seat heartbeat; sends X-Hub-* headers from env/flags")
+    presence.add_argument("--agent")
+    presence.add_argument("--machine")
+    presence.add_argument("--focus")
+    presence.set_defaults(payload=_payload_presence)
+
+    app_error = commands.add_parser("app-error",
+                                    help="forward a satellite service's server failure")
+    app_error.add_argument("--app", required=True)
+    app_error.add_argument("--message", required=True)
+    for name in ("kind", "severity", "code", "details", "component", "operation", "path", "host"):
+        app_error.add_argument("--" + name)
+    app_error.set_defaults(payload=_payload_app_error)
+
+    agent_error = commands.add_parser("agent-error",
+                                      help="report a worker-side operational failure")
+    agent_error.add_argument("--message", required=True)
+    agent_error.add_argument("--agent")
+    for name in ("source", "severity", "code", "details", "machine"):
+        agent_error.add_argument("--" + name)
+    agent_error.set_defaults(payload=_payload_agent_error)
+
+    ack_error = commands.add_parser("ack-error",
+                                    help="claim (or --reopen) one error signature")
+    ack_error.add_argument("fingerprint")
+    ack_error.add_argument("--agent")
+    ack_error.add_argument("--note")
+    ack_error.add_argument("--reopen", action="store_true")
+    ack_error.set_defaults(payload=_payload_ack_error)
+
+    inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
+    inbox.add_argument("--agent", required=True)
+    inbox.set_defaults(runner=_run_inbox)
+
+    wait = commands.add_parser("wait",
+                               help="long-poll the inbox; --follow loops and prints arrivals")
+    wait.add_argument("--agent", required=True)
+    wait.add_argument("--fp", help="last known addressed-set fingerprint")
+    wait.add_argument("--wait", type=int, default=25)
+    wait.add_argument("--follow", action="store_true")
+    wait.set_defaults(runner=_run_wait)
+
+    search = commands.add_parser("search", help="ranked search over the whole board")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=10)
+    search.set_defaults(runner=_run_search)
+
+    questions = commands.add_parser("questions",
+                                    help="every question with waits, lanes, and reply times")
+    questions.set_defaults(runner=_run_questions)
+
+    whoami = commands.add_parser("whoami",
+                                 help="what the hub resolves your credential and headers to")
+    whoami.set_defaults(runner=_run_whoami)
     return parser
 
 
@@ -185,11 +444,16 @@ def main() -> int:
     arguments = parser.parse_args()
     try:
         base = _base_url(arguments.url)
-        operation, payload = arguments.payload(arguments)
-        result = _post(base, operation, payload)
+        if getattr(arguments, "runner", None):
+            result = arguments.runner(base, arguments)
+        else:
+            operation, payload = arguments.payload(arguments)
+            result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
     except (ValueError, RuntimeError) as error:
         print(str(error), file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        return 0
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

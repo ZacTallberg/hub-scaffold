@@ -14,6 +14,45 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### The upsert, completed to every seam the scaffold already speaks
+
+The first pass landed the capabilities; a re-audit found they were reachable only over raw
+HTTP — invisible from the two mouths this scaffold actually gives an agent. Closed:
+
+- **`python -m hub_core.client` speaks the whole loop.** `ask`, `inbox`, `wait` (whose
+  `--follow` mode loops and prints each CHANGED addressed set as one JSON line — the building
+  block for a desktop notifier or supervisor hook, with the fingerprint round-tripped so
+  unrelated board traffic never produces output), `answer --crystallize`, `ack`, `directive`,
+  `presence` (X-Hub-* headers from environment or flags), the error-stream verbs, `search`,
+  `questions`, and `whoami`. The sanctioned seam and the capability set are one thing again.
+- **MCP clients can ask.** `ask_operator`, `check_inbox`, `ack_directive`, and `search_board`
+  join the board tools, routed through the same write seam as everything else.
+- **Answering can crystallize.** `answer {crystallize:true}` additionally mints a standing
+  knowledge note the duplicate-ask guard matches — OPT-IN, because on the origin system the
+  automatic version minted thirteen "lessons" in one afternoon, most of them requests that got
+  fulfilled rather than rules anyone should carry. Proven both directions: the crystallized
+  note exists and tags correctly, and a RESTATED question is refused citing it.
+- **The board renders the surfaces, not summaries of them.** The Questions card became a
+  thread view derived client-side from the collections the snapshot already carries: open
+  threads lead with their waiting age, an answered thread shows the reply as a turn plus
+  whether delivery LANDED ("answered — awaiting the asker's ack" — answered and delivered are
+  different facts), per-asker lanes, and a 14-day asked-vs-answered strip. The errors card
+  gained the per-channel COVERAGE chips (live vs silent — an empty card whose channels are
+  dark must never read as good news) and names its below-the-bar row count instead of hiding
+  it.
+- **`patterns/error-visibility.md`** — the sending half of the error stream: the LOGGING
+  handler for the host app, a bounded fail-soft forwarder for satellite services, scoped
+  `error:report` credentials, and the properties to preserve when adapting it. Wire it before
+  the first feature; a service that keeps failures in its own log can only be debugged from a
+  shell on its host.
+- `hubaudit` was re-run against the final tree: the route-guard audit certifies every new
+  endpoint (zero critical/high), which the first pass had asserted but never executed.
+
+Proven by a second disposable probe against the served example app: 21 more checks across the
+client verbs (including live presence-header observation from the CLI environment), the MCP
+tools end to end, and the crystallize round trip — plus a fresh read of the rendered Signals
+section in every thread state.
+
 ### A working instance's two weeks in production, upserted: delivery, presence, the error stream
 
 A working instance ran this scaffold's shape as a multi-machine agent board for two weeks and

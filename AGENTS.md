@@ -38,7 +38,10 @@ from a working multi-project system. Nothing here names any specific person, hos
 - **plane** (`PROJECT/`) — the durable on-disk tree: charter, doctrine, ADRs, registers, research,
   verification contracts, the leader/worker/verifier protocol. What a cold session reads to pick up.
 - **patterns** (`patterns/`) — opt-in enforcement: deploy contract, standing canary, pre-receive gate,
-  agent guard, conformance-scan spec, and **worker longevity** (`worker-longevity.md`: a worker's
+  agent guard, conformance-scan spec, **error visibility** (`error-visibility.md`: wire every
+  service's failures into the Hub's operational stream BEFORE the first feature — a service
+  that keeps failures in its own log can only be debugged from a shell on its host), and
+  **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
   the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
