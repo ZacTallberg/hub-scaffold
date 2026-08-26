@@ -30,6 +30,20 @@ in silence::
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
+
+The worker LOOP rides the same seam — the converged core of two adopter fleets::
+
+    python -m hub_core.client next                       # top ready + needs-spec + snoozed
+    python -m hub_core.client start proj:task:0042 --agent worker-1
+    python -m hub_core.client step  proj:task:0042 --agent worker-1 --note "schema landed"
+    HUB_LEASE_TOKEN=... python -m hub_core.client finish proj:task:0042 --agent worker-1 \
+      --accept-note "export live" --evidence https://app.example/export --charter-sha <sha>
+    python -m hub_core.client reground                   # after context compaction
+
+When the board ships CHARTER-CORE.md, `finish` refuses a completion whose held charter sha is
+stale or absent — compaction drift is detected at the gate, never discovered later in the work.
+A task that declared a critical-boundary verification_command has it run BY `finish` on this
+worker through hub_core.verifier hardening, and the typed receipt rides the completion.
 """
 
 from __future__ import annotations
@@ -310,6 +324,179 @@ def _run_whoami(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "whoami.json")
 
 
+# ── The worker LOOP: next -> start -> step -> finish, with compaction-proof regrounding ──
+# Extracted from two adopter fleets that each rebuilt this loop independently; the converged
+# core belongs to the template. The deployment-specific halves those tools also carried
+# (offbox ledger sync, credential minting, transcript capture) stay with their instances.
+
+def _charter_file() -> str:
+    return os.environ.get("HUB_CHARTER_FILE") or "CHARTER-CORE.md"
+
+
+def _charter_sha() -> str | None:
+    """sha256 of CHARTER-CORE.md (EOL-normalized), or None when the adopter does not ship one."""
+    import hashlib
+    try:
+        with open(_charter_file(), "rb") as fh:
+            return hashlib.sha256(fh.read().replace(b"\r\n", b"\n")).hexdigest()
+    except OSError:
+        return None
+
+
+def _task_local(task_id: str) -> str:
+    return str(task_id).rsplit(":", 1)[-1]
+
+
+def _fetch_task(base: str, task_id: str) -> dict[str, Any]:
+    payload = _get(base, f"task/{_task_local(task_id)}.json")
+    entity = payload.get("data")
+    if not isinstance(entity, dict):
+        raise RuntimeError(f"no task entity came back for {task_id}")
+    return entity
+
+
+def _run_reground(base: str | None, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Print the charter core and its sha — the re-entry point after context compaction."""
+    sha = _charter_sha()
+    if sha is None:
+        return {"charter_file": _charter_file(), "present": False,
+                "note": "no charter core here — the finish regrounding gate is not in force"}
+    with open(_charter_file(), "r", encoding="utf-8") as fh:
+        body = fh.read()
+    return {"charter_file": _charter_file(), "present": True, "sha256": sha,
+            "carry": "pass this sha to `finish --charter-sha` — a mismatch there means your "
+                     "context drifted past a charter change and you must re-ground first",
+            "body": body}
+
+
+def _run_next(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """DISCOVER: the top ready tasks, with needs-spec and snoozed reported honestly beside
+    them. Answers 429 body verbatim at WIP saturation — a refusal, never silence."""
+    return _get(base, f"next.json?n={max(1, int(arguments.n))}")
+
+
+def _run_start(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Claim the task, return its full entity + plan + the charter sha to carry to finish."""
+    payload: dict[str, Any] = {"id": arguments.task_id, "agent": _agent(arguments)}
+    if arguments.ttl_s is not None:
+        payload["ttl_s"] = arguments.ttl_s
+    claim = _post(base, "claim", payload, extra_headers=_presence_headers(arguments))
+    token = claim.get("token") or (claim.get("data") or {}).get("token") or ""
+    entity = _fetch_task(base, arguments.task_id)
+    sha = _charter_sha()
+    return {"claim": claim, "lease_token": token, "task": entity,
+            "charter": ({"sha256": sha, "carry": "pass to `finish --charter-sha`"} if sha else
+                        {"present": False,
+                         "note": "no charter core here — the finish regrounding gate is not in force"})}
+
+
+def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Mark one plan step done, with the checkpoint note the fleet card surfaces. The write is
+    a full-entity upsert under OCC (the fold replaces payloads; a partial write would drop the
+    fields it omitted)."""
+    import datetime as _dt
+    entity = _fetch_task(base, arguments.task_id)
+    plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
+    if not plan:
+        raise RuntimeError(f"{arguments.task_id} has no plan — record one first (progress on a "
+                           f"planless task is invisible to the whole board)")
+    target = None
+    if arguments.step:
+        wanted = arguments.step.strip()
+        if wanted.isdigit() and 1 <= int(wanted) <= len(plan):
+            target = plan[int(wanted) - 1]
+        else:
+            target = next((s for s in plan if wanted.lower() in str(s.get("step", "")).lower()), None)
+        if target is None:
+            raise RuntimeError(f"no plan step matches {wanted!r}")
+    else:
+        target = next((s for s in plan if not s.get("done")), None)
+        if target is None:
+            raise RuntimeError("every plan step is already done — use `finish`")
+    target["done"] = True
+    if arguments.note:
+        target["note"] = arguments.note[:600]
+        target["note_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    # A MINIMAL delta, exactly like the claim seam's own in_progress append: the fold merges
+    # payloads last-write-wins per key, so echoing the whole entity back would both trip the
+    # status guards and clobber concurrent field changes this client never read.
+    body: dict[str, Any] = {"id": entity["id"], "plan": plan, "agent": _agent(arguments),
+                            "expected_version": entity.get("version")}
+    token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
+    if token:
+        body["token"] = token
+    result = _post(base, "task", body, extra_headers=_presence_headers(arguments))
+    done = sum(1 for s in plan if s.get("done"))
+    return {"updated": result, "step": target.get("step"),
+            "progress": f"{done}/{len(plan)}"}
+
+
+def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Complete the loop's task through the real gate.
+
+    Two disciplines ride this verb beyond a bare `complete`:
+    * REGROUNDING GATE — when the adopter ships CHARTER-CORE.md, finish requires the sha the
+      worker has carried since `start` and refuses a mismatch: a compacted context that lost or
+      outdated its charter is detected here, not discovered later in drifted work.
+    * DECLARED PROBE — when the task itself froze a verification_command, finish runs it HERE,
+      on the worker, through hub_core.verifier's hardening (argv-form, scrubbed env, exfil
+      refusal), and submits the typed receipt. A non-zero exit refuses the completion.
+    """
+    entity = _fetch_task(base, arguments.task_id)
+    current = _charter_sha()
+    charter_note = ""
+    if current is not None:
+        held = (arguments.charter_sha or "").strip().lower()
+        if not held:
+            raise RuntimeError(
+                "this board ships a charter core: pass --charter-sha with the value `start` "
+                "gave you (or run `reground` to re-read the charter and retry)")
+        if held != current:
+            raise RuntimeError(
+                "charter drift detected: the sha you hold does not match the current charter "
+                "core — your context predates a charter change. Run `reground`, re-read it, "
+                "and retry with the current sha.")
+        charter_note = f" · charter-core sha256:{current[:12]}"
+
+    payload: dict[str, Any] = {
+        "id": arguments.task_id,
+        "token": arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN") or "",
+        "agent": _agent(arguments),
+        "accept_note": arguments.accept_note + charter_note,
+        "evidence_uri": arguments.evidence,
+    }
+    if not payload["token"]:
+        raise ValueError("provide --lease-token or set HUB_LEASE_TOKEN")
+
+    command = str(entity.get("verification_command") or "").strip()
+    receipt = None
+    if command:
+        import hashlib
+        import subprocess
+        from . import verifier
+        problem = verifier.exfil_problem(command)
+        if problem:
+            raise RuntimeError(f"the task's declared probe was refused before running: {problem}")
+        argv, use_shell = verifier.build_exec(command)
+        run = subprocess.run(argv, shell=use_shell, env=verifier.hardened_env(),
+                             capture_output=True, timeout=900)
+        output = (run.stdout or b"") + (run.stderr or b"")
+        receipt = {"command": command, "exit_code": int(run.returncode),
+                   "output_sha256": hashlib.sha256(output).hexdigest(),
+                   "ran_by": _agent(arguments)}
+        if run.returncode != 0:
+            return {"refused": "the declared critical probe recorded a non-zero exit — the "
+                               "task is not done; fix the work (or the probe) and retry",
+                    "verification_run": receipt,
+                    "output_tail": output[-2000:].decode("utf-8", errors="replace")}
+        payload["verification_run"] = receipt
+
+    result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
+    return {"completed": result,
+            **({"verification_run": receipt} if receipt else
+               {"note": "no critical probe was declared — done stands on the real operation"})}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Mutate a running Hub through the same HTTP seam that publishes realtime state."
@@ -436,6 +623,47 @@ def _parser() -> argparse.ArgumentParser:
     whoami = commands.add_parser("whoami",
                                  help="what the hub resolves your credential and headers to")
     whoami.set_defaults(runner=_run_whoami)
+
+    # The worker loop: next -> start -> step -> finish (+ reground after compaction).
+    nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")
+    nxt.add_argument("--n", type=int, default=1)
+    nxt.set_defaults(runner=_run_next)
+
+    reground = commands.add_parser("reground",
+                                   help="print the charter core + its sha — re-entry after context compaction")
+    reground.set_defaults(runner=_run_reground, local=True)
+
+    start = commands.add_parser("start", help="claim a task; returns entity + plan + the charter sha to carry")
+    start.add_argument("task_id")
+    start.add_argument("--agent")
+    start.add_argument("--ttl-s", type=int, dest="ttl_s")
+    start.add_argument("--machine")
+    start.add_argument("--focus")
+    start.set_defaults(runner=_run_start)
+
+    step = commands.add_parser("step", help="mark one plan step done with a checkpoint note")
+    step.add_argument("task_id")
+    step.add_argument("--agent")
+    step.add_argument("--step", help="step text fragment or 1-based index; default = first undone")
+    step.add_argument("--note", help="what actually happened at this checkpoint")
+    step.add_argument("--lease-token", dest="lease_token",
+                      help="the held lease's fencing token (or HUB_LEASE_TOKEN)")
+    step.add_argument("--machine")
+    step.add_argument("--focus")
+    step.set_defaults(runner=_run_step)
+
+    finish = commands.add_parser("finish",
+                                 help="complete the loop's task: charter gate + the declared probe (if any) + the real complete()")
+    finish.add_argument("task_id")
+    finish.add_argument("--agent")
+    finish.add_argument("--accept-note", required=True, dest="accept_note")
+    finish.add_argument("--evidence", action="append", required=True)
+    finish.add_argument("--lease-token", dest="lease_token")
+    finish.add_argument("--charter-sha", dest="charter_sha",
+                        help="the sha `start`/`reground` gave you; required when the board ships a charter core")
+    finish.add_argument("--machine")
+    finish.add_argument("--focus")
+    finish.set_defaults(runner=_run_finish)
     return parser
 
 
@@ -443,7 +671,7 @@ def main() -> int:
     parser = _parser()
     arguments = parser.parse_args()
     try:
-        base = _base_url(arguments.url)
+        base = None if getattr(arguments, "local", False) else _base_url(arguments.url)
         if getattr(arguments, "runner", None):
             result = arguments.runner(base, arguments)
         else:
