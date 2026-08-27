@@ -998,6 +998,13 @@
   }
 
   function agentCard(c) {
+    // The card carries lists and progress bars — flow content, which a <button> may not contain:
+    // wrapping it flattens every list into the button's accessible name and drops the structure
+    // assistive tech navigates by. So the CARD stays an <article> and the agent NAME is the real
+    // button, stretched over the card by CSS so the whole surface is still one click.
+    var opener = el("button", { class: "agent-open", type: "button",
+      "aria-label": "open agent " + c.agent + " — " + c.status + (c.task ? " on " + c.task : "") });
+    opener.addEventListener("click", function () { openAgentDetail(c); });
     var head = el("div", { class: "agent-head" }, [
       el("span", { class: "agent-dot s-" + c.status, "aria-hidden": "true" }),
       el("span", { class: "agent-name", text: c.agent }),
@@ -1057,12 +1064,9 @@
     // Every card opens the per-agent detail view — the coordination surface. The held
     // task stays one click away INSIDE it (a chip), so nothing their card answered before
     // is further away, and a claimless-but-active console finally has somewhere to open.
-    var card = el("button", { class: "agent-card s-" + c.status, type: "button",
+    return el("article", { class: "agent-card s-" + c.status,
       "data-seq": String((c.trail && c.trail[0] && c.trail[0].seq) || ""),
-      "data-agent": c.agent,
-      "aria-label": "open agent " + c.agent + " — " + c.status + (c.task ? " on " + c.task : "") }, kids);
-    card.addEventListener("click", function () { openAgentDetail(c); });
-    return card;
+      "data-agent": c.agent }, [opener].concat(kids));
   }
 
   function workerHealthRow(h) {
@@ -1348,7 +1352,7 @@
   /* An error row's DETAILS (the stack trace, the context fields, the origin) are served
      with every row and were rendered nowhere — a queue that names a failure but withholds
      the way in sends the reader to a server shell. Not an entity, so it gets its own modal. */
-  function openErrorDetail(r) {
+  function openErrorDetail(r, liveRefresh) {
     var role = r.severity === "critical" ? "fail" : "warn";
     var body = el("div");
     var idRows = [
@@ -1377,13 +1381,20 @@
     }
     body.appendChild(el("p", { class: "cell-sub", text:
       "Claim: POST api/ack-error {fingerprint: \"" + (r.fingerprint || "") + "\"} — collapses the signature off the queue without deleting rows." }));
+    if (liveRefresh) {
+      refreshModal(role, r.message || "Operational error", r.source || "", "warning", body);
+      return;
+    }
+    // A non-entity dialog still has to obey the live contract: an error that gets CLAIMED
+    // while its detail is open must stop reading "unclaimed" under the operator's eyes.
+    _openModalLive = { kind: "error", key: r.fingerprint || r.source || "" };
     openModal(role, r.message || "Operational error", r.source || "", "warning", body);
   }
 
   /* The per-agent detail view — the coordination surface. A card answers "who is busy";
      this answers what a peer actually decides with: which consoles they have open and on
      what, the task they hold and its last checkpoint, their recent trail. */
-  function openAgentDetail(c) {
+  function openAgentDetail(c, liveRefresh) {
     var body = el("div");
     var idRows = [
       row("Status", el("span", { class: "agent-status s-" + c.status, text: c.status })),
@@ -1429,7 +1440,15 @@
       });
       body.appendChild(el("div", { class: "detail-grid one" }, [section("Recent trail", "branch", trail)]));
     }
-    openModal(c.status === "stalled" ? "warn" : "info", c.agent, "agent", "users", body);
+    var role = c.status === "stalled" ? "warn" : "info";
+    if (liveRefresh) {
+      refreshModal(role, c.agent, "agent", "users", body);
+      return;
+    }
+    // The coordination surface must not freeze: a peer decides "are they still on this?" from
+    // exactly this dialog, and a stale answer here is the duplicate-work bug it exists to stop.
+    _openModalLive = { kind: "agent", key: c.agent };
+    openModal(role, c.agent, "agent", "users", body);
   }
 
   /* ---- ERRORS: the operational stream the ledger audit cannot see ----
@@ -1669,6 +1688,10 @@
   }
 
   var _openModalEntity = null;
+  // The open dialog's subject when it is NOT a ledger entity (an operational error signature,
+  // a fleet seat). Those rows live in the live block rather than BY_ID, so they need their own
+  // handle to stay current — the dialog contract is about the reader, not the storage.
+  var _openModalLive = null;
   function openEntity(type, r, liveRefresh) {
     var role = type === "deploy" ? (r.audit_ok ? "pass" : "fail") : roleOf(type, r.status || r.maturity);
     var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket", directive: "bolt" }[type] || "info";
@@ -1845,6 +1868,27 @@
     }
     openEntity(_openModalEntity.type, current, true);
   }
+  function refreshOpenLiveModal() {
+    if (!_openModalLive) return;
+    var m = doc.getElementById("universalModal");
+    if (!m || !m.classList.contains("show")) return;
+    var L = live(), fresh = null;
+    if (_openModalLive.kind === "agent") {
+      fresh = (L.fleet || []).filter(function (c) { return c.agent === _openModalLive.key; })[0];
+      if (fresh) { openAgentDetail(fresh, true); return; }
+      // The seat left the fleet view (idle past the window, or forgotten). Say so rather than
+      // leaving a confident stale answer on the coordination surface.
+      closeModal();
+      announce("That agent is no longer on the fleet view.");
+      return;
+    }
+    fresh = (L.errors || []).filter(function (r) {
+      return (r.fingerprint || r.source || "") === _openModalLive.key;
+    })[0];
+    if (fresh) { openErrorDetail(fresh, true); return; }
+    closeModal();
+    announce("That error is no longer in the retained window.");
+  }
   function closeModal() {
     var m = doc.getElementById("universalModal");
     if (m) m.classList.remove("show");
@@ -1854,6 +1898,7 @@
     if (_modalOpener && doc.contains(_modalOpener)) { try { _modalOpener.focus(); } catch (e) {} } // absorbs: element detached
     _modalOpener = null;
     _openModalEntity = null;
+    _openModalLive = null;
   }
 
   /* ============================ TOAST + STATUS ============================ */
@@ -2201,6 +2246,7 @@
     rerenderTabs(changes);
     refreshOverview();
     refreshOpenEntityModal();
+    refreshOpenLiveModal();
     reactCockpit(prevProg, prevFleet);
     publishClientState();
     restoreViewState(viewState);
@@ -2259,6 +2305,7 @@
     rerenderTabs(changes);
     refreshOverview();
     refreshOpenEntityModal();
+    refreshOpenLiveModal();
     reactCockpit(prevProg, prevFleet);
     reactToChanges(changes);
     publishClientState();
