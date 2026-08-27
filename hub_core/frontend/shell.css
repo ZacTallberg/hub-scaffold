@@ -2093,6 +2093,19 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .err-cov-chip.is-live { color: var(--pass-solid, #2fae66); border-color: var(--pass-solid, #2fae66); }
 .err-cov-chip.is-silent { color: var(--muted); border-style: dashed; }
 
+/* The agent card is an <article> (its lists and meters are flow content a <button> may not
+   hold) and the agent NAME is the real control, stretched across the card so the whole
+   surface stays one click. The card is the positioning context; the overlay sits under the
+   text layer so nothing inside it is obscured. */
+.agent-card { position: relative; }
+.agent-open {
+  position: absolute; inset: 0; z-index: 1;
+  width: 100%; padding: 0; border: 0; background: none; cursor: pointer;
+  border-radius: inherit;
+}
+.agent-card:has(.agent-open:hover) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.agent-open:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: -2px; }
+
 /* Error detail modal + overdue deadlines + clickable error rows */
 .err-item { text-align: left; width: 100%; font: inherit; color: inherit; cursor: pointer; }
 .err-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
