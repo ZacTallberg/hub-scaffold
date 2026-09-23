@@ -164,6 +164,18 @@ TOOLS = [
          "query": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
          "required": ["query"]}},
+    {"name": "retire_record",
+     "description": "Retire (or re-open) a knowledge record that stopped being true: a gap, note, "
+                    "directive, ADR or finding. A reason is required and is appended with a dated "
+                    "stamp; a closed/mitigated gap must name the task that closed it. Retired "
+                    "records leave search immediately.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "type": {"type": "string"},
+         "title": {"type": "string", "description": "exact title, with type, instead of id"},
+         "status": {"type": "string"}, "note": {"type": "string"},
+         "addressed_by": {"type": "array", "items": {"type": "string"}},
+         "superseded_by": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["agent"]}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -363,6 +375,11 @@ def _call_tool(name, args, auth_headers):
         if args.get("app"):
             payload["app"] = args["app"]
         status, body = _seam("/hub/api/agent/ask", payload, auth_headers)
+    elif name == "retire_record":
+        payload = {key: args[key] for key in ("id", "type", "title", "status", "note",
+                                              "addressed_by", "superseded_by", "agent")
+                   if args.get(key)}
+        status, body = _seam("/hub/api/retire", payload, auth_headers)
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)
