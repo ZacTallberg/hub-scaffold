@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 
 from . import atomic
+from .text import preview
 from .process_lock import ProcessFileLock
 
 SESSION_ACTIVE_S = 900          # a console that prompted within 15 minutes is a live console
@@ -180,8 +181,10 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 # A heartbeat carries no prompt, so it must not blank the last known focus —
                 # keep the prior one until a new prompt replaces it (merge-never-clobber).
                 sessions[sid] = {
-                    "cwd": (cwd or "").strip()[:200] or prior.get("cwd", ""),
-                    "focus": (focus or "").strip()[:180] or prior.get("focus", ""),
+                    "cwd": (cwd or "").strip()[:400] or prior.get("cwd", ""),
+                    # A focus line is display text, so an overlong one is a PREVIEW (it ends in
+                    # an ellipsis) rather than a silent cut mid-word.
+                    "focus": preview(focus, 500) or prior.get("focus", ""),
                     "at": now,
                 }
                 # A console quiet past the keep window is closed. Without pruning this list
@@ -306,8 +309,8 @@ def live_sessions(hub_dir, now: float | None = None) -> list:
                     continue
                 out.append({"agent": agent, "machine": m.get("machine") or "",
                             "session": str(s.get("id") or "")[:8],
-                            "cwd": str(s.get("cwd") or "")[:64],
-                            "focus": str(s.get("focus") or "")[:100],
+                            "cwd": preview(s.get("cwd"), 120),
+                            "focus": preview(s.get("focus"), 160),
                             "age_s": round(now - at)})
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
     return out

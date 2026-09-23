@@ -83,6 +83,16 @@ def _clean(value, limit=800) -> str:
     return text[:limit]
 
 
+def _note(value, limit=4000) -> str:
+    """A claim/resolve note, redacted like every other field but kept WHOLE up to a generous
+    bound -- and past it, clipped visibly. At 240 characters with no marker the root cause a
+    person wrote when they claimed a problem lost its second half without a trace."""
+    text = _clean(value, 10 ** 6)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + " … [clipped: %d of %d characters]" % (limit, len(text))
+
+
 def _context(value) -> dict:
     if not isinstance(value, dict):
         return {}
@@ -324,7 +334,7 @@ def ack(hub_dir, fingerprint: str, actor: str = "", note: str = "") -> dict:
     if not fingerprint:
         return {}
     entry = {"at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-             "by": _clean(actor, 60), "note": _clean(note, 240)}
+             "by": _clean(actor, 60), "note": _note(note)}
     try:
         Path(hub_dir).mkdir(parents=True, exist_ok=True)
         with ProcessFileLock(Path(hub_dir), name=".errors.lock", timeout=5):
