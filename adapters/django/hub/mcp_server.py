@@ -76,15 +76,18 @@ TOOLS = [
          "acceptance": {"type": "string"}, "verification_command": {"type": "string"}},
          "required": ["id", "agent"]}},
     {"name": "start_task",
-     "description": "Claim a task and receive the fenced lease token required by run and completion operations.",
+     "description": "Claim a task and receive the fenced lease token required by run and completion operations. "
+                    "Pass `session` (this console's id) so the board binds the claim to THIS console, not to every console the agent has open.",
      "inputSchema": {"type": "object", "properties": {
-         "id": {"type": "string"}, "agent": {"type": "string"}},
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "session": {"type": "string", "description": "the claiming console's session id"}},
          "required": ["id", "agent"]}},
     {"name": "take_task",
      "description": "Atomically select and claim the highest-ranked ready task compatible with this worker.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"},
          "ttl_s": {"type": "integer", "minimum": 1, "maximum": 86400},
+         "session": {"type": "string", "description": "the claiming console's session id"},
          "worker": schedule.WORKER_PROFILE_SCHEMA}, "required": ["agent"]}},
     {"name": "heartbeat_task",
      "description": "Renew a live task lease; this proves liveness, not progress.",
@@ -270,11 +273,13 @@ def _call_tool(name, args, auth_headers):
                     payload[key] = args[key]
             status, body = _seam("/hub/api/task", payload, auth_headers)
     elif name == "start_task":
-        status, body = _seam("/hub/api/claim", {"id": args["id"], "agent": args["agent"]},
-                             auth_headers)
+        payload = {"id": args["id"], "agent": args["agent"]}
+        if args.get("session"):
+            payload["session"] = args["session"]
+        status, body = _seam("/hub/api/claim", payload, auth_headers)
     elif name == "take_task":
         payload = {"agent": args["agent"]}
-        for key in ("ttl_s", "worker"):
+        for key in ("ttl_s", "worker", "session"):
             if args.get(key) is not None:
                 payload[key] = args[key]
         status, body = _seam("/hub/api/take", payload, auth_headers)

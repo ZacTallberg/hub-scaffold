@@ -314,6 +314,44 @@ def live_sessions(hub_dir, now: float | None = None) -> list:
     return out
 
 
+def attribute_leases(sessions: list, leases: list) -> list:
+    """Bind each live console to the task lease IT holds — never to one inferred from a path.
+
+    A claim asserts responsibility, so attributing it by directory ("this console is standing
+    in the repo that task is about") turns anyone who opens a repository to read a file into
+    its owner — a confident board that is wrong, which is worse than an empty one. The rule:
+
+    * CERTAIN — the lease records the claiming session and it is this console's session.
+    * LEGACY — a lease written without a session (an older client) is attributed only when the
+      agent has exactly ONE live console it could belong to. With several, the honest answer
+      is that the hub does not know, and nothing is attributed.
+
+    Returns new session rows carrying ``task_id`` (or "") and ``has_task``; the input is not
+    mutated. Pure: sessions are ``live_sessions`` rows, leases are live lease records."""
+    by_agent = {}
+    for s in sessions or []:
+        by_agent.setdefault(str(s.get("agent") or "").lower(), []).append(s)
+    held = {}
+    for lease in leases or []:
+        agent = str((lease or {}).get("agent") or "").lower()
+        if agent and lease.get("task"):
+            held.setdefault(agent, []).append(lease)
+    out = []
+    for agent, rows_ in by_agent.items():
+        mine = held.get(agent, [])
+        for s in rows_:
+            sid = str(s.get("session") or "")[:8]
+            tid = next((lease["task"] for lease in mine
+                        if sid and str(lease.get("session") or "")[:8] == sid), "")
+            if not tid and len(rows_) == 1:
+                tid = next((lease["task"] for lease in mine if not lease.get("session")), "")
+            row = dict(s)
+            row.update({"task_id": tid, "has_task": bool(tid)})
+            out.append(row)
+    out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
+    return out
+
+
 def service_identities() -> set:
     """Agents that are automation, not somebody's seat: they authenticate and write, but
     must never appear on the fleet's device roster (a row that can never heartbeat skews

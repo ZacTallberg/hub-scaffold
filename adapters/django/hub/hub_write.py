@@ -667,7 +667,8 @@ def claim(request, b):
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind)
+                            actor_kind=request.hub_auth.actor_kind,
+                            session=_claim_session(request, b))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if status != "in_progress":
@@ -676,13 +677,42 @@ def claim(request, b):
                 expected_version=ent.get("version"), agent=agent,
                 idem=b.get("idem_key"), etype="task.transitioned",
             )
+            if keep_lease_on_raced_transition(res, transition_status):
+                # A RENEWAL whose transition lost an OCC race is not a failed claim: this worker
+                # already held the lease, and the version moved because something else — very
+                # often its own retried request, after a timeout — already did the work.
+                # Releasing here tore down a valid fencing token and made the next complete()
+                # answer "claim the task first" to a worker that had claimed. Hand back the
+                # token it still holds and the version as it now stands.
+                fresh = hub_app.current_state().get("entities", {}).get(eid) or {}
+                res["version"] = fresh.get("version", ent.get("version"))
+                res["transition_raced"] = True
+                return JsonResponse(res, status=200)
             if transition_status != 200:
-                hub_app.release_lease(eid, res["token"])
+                if res.get("created"):
+                    hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=transition_status)
             res["version"] = transition["data"]["version"]
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+def keep_lease_on_raced_transition(res, transition_status) -> bool:
+    """Should a failed todo->in_progress transition LEAVE the lease alone?
+
+    Yes exactly when this call did not create the lease and the transition lost an OCC race.
+    A lease this call CREATED is still cleaned up on failure: nothing else holds it. The rule
+    fails toward keeping: a stranded lease expires on its own, a destroyed one strands the
+    worker that holds its token."""
+    return transition_status == 409 and not (res or {}).get("created")
+
+
+def _claim_session(request, b) -> str:
+    """The console making this claim: an explicit `session` in the body, else the observed
+    presence header every client already sends. Empty when neither is present."""
+    value = b.get("session") if isinstance(b.get("session"), str) else ""
+    return (value or request.headers.get("X-Hub-Session") or "").strip()[:64]
 
 
 @writer(scope="task:release")
@@ -931,7 +961,8 @@ def take(request, b):
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind)
+                            actor_kind=request.hub_auth.actor_kind,
+                            session=_claim_session(request, b))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if task.get("status") != "in_progress":
@@ -939,7 +970,8 @@ def take(request, b):
                                        expected_version=task.get("version"), agent=agent,
                                        idem=b.get("idem_key"), etype="task.transitioned")
             if code != 200:
-                hub_app.release_lease(eid, res["token"])
+                if res.get("created"):
+                    hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=code)
             res["version"] = transition["data"]["version"]
         res["task"] = task

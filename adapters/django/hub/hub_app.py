@@ -575,7 +575,19 @@ def _write_lease(task_id, lease):
 
 
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
-          actor_kind=None):
+          actor_kind=None, session=""):
+    """Grant or renew the fenced lease on one task.
+
+    The result carries ``created``: whether THIS call brought the lease into existence. A caller
+    whose follow-up step fails may tear down only a lease it created — a renewal's token belongs
+    to work already in flight (often the same worker's earlier request whose response timed
+    out), and releasing it strands a worker that did claim.
+
+    ``session`` names the CONSOLE that claimed, not just the agent. With several live consoles
+    per agent the board otherwise cannot tell which window holds the work and has to infer it
+    from a directory — and anyone who reads a repository then looks like its owner.
+    """
+    session = str(session or "").strip()[:64]
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
@@ -592,20 +604,26 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                 cur["actor_kind"] = actor_kind
             cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
+            if session:
+                cur["session"] = session
             _write_lease(task_id, cur)
             _publish_realtime("lease.heartbeat", task=task_id, agent=agent,
                               expires=cur["expires"])
             _schedule_lease_truth(cur)
-            return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
+            return {"ok": True, "created": False,
+                    "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
                  "auth_subject": auth_subject, "credential_id": credential_id,
                  "actor_kind": actor_kind,
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
+        if session:
+            lease["session"] = session
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
                           expires=lease["expires"])
         _schedule_lease_truth(lease)
-        return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **lease}
+        return {"ok": True, "created": True,
+                "heartbeat_after_s": max(1, ttl_s // 3), **lease}
 
 
 def leases(*, now=None, include_expired=False):
