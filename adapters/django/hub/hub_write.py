@@ -553,7 +553,7 @@ feat = _simple_writer("feat", "feat.upserted", name_field="name")
 note = _simple_writer("note", "note.created", name_field="title")
 
 
-@writer
+@writer(scope="record:retire")
 def retire(request, b):
     """Retire (or re-open) one knowledge record: a gap, note, directive, ADR, or finding.
 
@@ -562,7 +562,8 @@ def retire(request, b):
     ``hub_core.record_state``: each type moves only to a status its own schema enumerates, a
     retirement needs a ``note`` (appended with a dated stamp, never written over the evidence),
     and a closed/mitigated gap must name the work that closed it. The caller needs the target
-    type's ordinary ``<type>:write`` scope — retiring is writing that record.
+    ``record:retire`` scope AND the target type's ordinary ``<type>:write`` scope — retiring is
+    writing that record, and a credential scoped to one type cannot retire another.
 
     Target by ``id``, or by ``type`` + exact ``title`` (the name the filer actually remembers).
     """
