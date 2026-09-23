@@ -29,7 +29,8 @@ from a working multi-project system. Nothing here names any specific person, hos
 ## The mental model (four layers)
 - **hub** (`hub_core/` + `adapters/`) — nouns you operate: events → projected tasks/ADRs/features/etc.,
   token-gated writes, server-granted "done", and an optional single-use-grant worker bridge. Mounts
-  at `/hub` in a Django site; reads are unauthenticated, and the workstation bridge is disabled by
+  at `/hub` in a Django site; reads require an authenticated principal unless the operator declares
+  the board public (`HUB_READ_AUTH`), and the workstation bridge is disabled by
   default. The board is a live cockpit: observed presence (who is on it, from which machine and
   console, doing what), the ask/answer loop (a blocked worker's question is DELIVERED to the
   operator's inbox long-poll, the answer comes back addressed, the ack closes it), and a bounded
@@ -95,8 +96,8 @@ disposable `verification-closer` only for a rare critical boundary.
   action/task/count-bound grant; authoritative consume remains write-token-gated.
 
 ## Security boundary you must not infer away
-- **Unauthenticated does not mean sanitized.** `/hub` reads expose the complete projected board.
-  Keep sensitive data out or add a real authentication boundary.
+- **Authenticated does not mean sanitized.** Every authenticated reader (and, on a board declared
+  `HUB_READ_AUTH = "public"`, everyone) sees the complete projected board. Keep sensitive data out.
 - **The write token grants terminal board authority, not code execution.** A writer sets
   `verification_command`, which the
   worker runs OUT-OF-BAND, submitting a typed exit-0 receipt the hub validates — the hub never

@@ -29,8 +29,9 @@ Hard laws:
   SHA/canary per `patterns/deploy-contract.md`.
 - Research precedes build: capture sources, options, and the chosen path in `PROJECT/research/`
   before architectural work starts. A named technology is a hypothesis, not a mandate.
-- Hub reads are unauthenticated by default: publish no topology, credentials, PII, or confidential
-  evidence there; add an explicit authentication boundary when the board is private. General writes
+- Hub reads require an authenticated principal by default; every reader still sees the whole board,
+  so publish no topology, credentials, PII, or confidential evidence there, and declare
+  `HUB_READ_AUTH = "public"` only for a board whose entire content is publishable. General writes
   stay token-gated, and that token is terminal board authority — NOT a shell. The hub never
   executes a task's optional verification_command; when one exists, the worker runs it out-of-band
   and submits a typed exit-0 receipt. Strict mode strengthens evidence handling, not the number of

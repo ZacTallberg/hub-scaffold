@@ -67,9 +67,11 @@ The exact shipped-versus-normative boundary is documented in
 
 ## Security boundary—read before deploying
 
-Hub reads are unauthenticated by default and expose the complete projected board. “Public read” does
-not mean automatically redacted: keep sensitive material out of entities or add an authentication
-boundary.
+Hub reads require an authenticated principal by default — a host-site signed-in user, a live
+scoped agent credential, or the shared-root token — and an anonymous read answers 401. An
+authenticated reader still sees the complete projected board, and a board declared
+`HUB_READ_AUTH = "public"` shows it to everyone (the example does this only under `DEBUG`), so keep
+sensitive material out of entities.
 
 Normal workers use short-lived, revocable, scope-bearing `X-Agent-Token` credentials whose immutable
 subjects are bound into task leases and canonical event provenance. The legacy `HUB_WRITE_TOKEN`
@@ -200,7 +202,8 @@ Then, inside the new project:
 
 1. Mount `adapters/django/hub` under `/hub/` using
    [MOUNTING.md](adapters/django/MOUNTING.md). Never mount it at the site root.
-2. Decide whether Hub reads may be unauthenticated; add a protection boundary if not.
+2. Reads are authenticated by default: wire your site's sign-in (and `HUB_LOGIN_URL`) for people;
+   agents read with their scoped credential. Declare `HUB_READ_AUTH = "public"` only on purpose.
 3. Generate and inject a write token through the deployment secret mechanism.
 4. Validate and seed genesis state.
 5. Exercise each changed production operation directly; use a temporary focused probe only for a
@@ -246,7 +249,7 @@ without installing and exercising the workstation half through its real operatio
 
 - The actual build and ship commands.
 - An ASGI production process server, TLS/reverse-proxy configuration that preserves unbuffered
-  event streams, and any read authentication.
+  event streams, and the sign-in your people use to satisfy the default read gate.
 - Durable storage and a demonstrated backup/restore operation for `HUB_DIR`.
 - A secret manager and write-token rotation process.
 - An immutable build identity (`HUB_BUILD_SHA`, a platform-provided `SOURCE_VERSION`, or a pre-build
