@@ -224,6 +224,56 @@ def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
         s.close()
 
 
+#: How many fresh reads a server-side read-then-append gets before it gives up.
+FRESH_APPEND_ATTEMPTS = 3
+
+
+def _append_fresh(type_, eid, payload, *, agent, idem, etype, operation,
+                  attempts=FRESH_APPEND_ATTEMPTS):
+    """Append where the SERVER derives expected_version from its own read of state.
+
+    Both optimistic-concurrency refusals are retryable here, because the version this path
+    sends comes from a read a concurrent writer can beat:
+
+    - 409 — the entity moved between the read and the append;
+    - 428 — it did not EXIST at the read, so None was sent, and a concurrent writer created
+      it before this append landed. This is the half that is easy to miss: treating it as
+      terminal makes a first-ever write under contention fail with a refusal that the very
+      next fresh read would satisfy.
+
+    Anything else (schema, secret shape) is terminal — retrying cannot help. ``payload`` may
+    be a callable ``payload(existing) -> dict`` when the body is derived from the current
+    entity. When the attempts run out, WHICH status ended the loop travels with the result
+    (``ledger`` on the response body) and into the operational error stream, so a refusal
+    never reaches an operator as a bare status with no cause."""
+    resp, status = {"errors": [{"code": "append_not_attempted"}]}, 0
+    for _attempt in range(max(1, int(attempts))):
+        existing = hub_app.current_state()["entities"].get(eid)
+        body = payload(existing) if callable(payload) else payload
+        resp, status = _append(type_, eid, body,
+                               expected_version=existing.get("version") if existing else None,
+                               agent=agent, idem=idem, etype=etype)
+        if status in (200, 201) or status not in (409, 428):
+            return resp, status
+    code = ""
+    try:
+        code = str((resp.get("errors") or [{}])[0].get("code") or "")
+    except Exception:                                        # noqa: BLE001
+        code = ""
+    resp = dict(resp)
+    resp["ledger"] = {"status": status, "code": code, "attempts": attempts}
+    try:
+        hub_app.record_error(
+            "hub.write", "%s: append to %s gave up after %d fresh reads" % (operation, eid, attempts),
+            severity="error", code="append_contention",
+            details="entity=%s agent=%s attempts=%d last_status=%s last_code=%s"
+                    % (eid, agent, attempts, status, code or "-"),
+            context={"component": "hub-write", "operation": operation})
+    except Exception:                                        # noqa: BLE001 - telemetry never
+        pass                                                 # decides a write's outcome
+    return resp, status
+
+
 @writer(scope="task:write")
 def task(request, b):
     agent = b.get("agent", "agent")
@@ -1132,16 +1182,14 @@ def ask(request, b):
     local = "q-%s-%s" % (_slug(agent, "agent"),
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
-    existing = state["entities"].get(eid)
     payload = {"type": "note", "category": "context", "title": text[:300],
                "asker": agent, "status": "standing", "tags": ["question", "open"],
                "body_md": str(b.get("context") or "")}
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:
         payload["relates_to"] = related
-    resp, status = _append("note", eid, payload,
-                           expected_version=existing.get("version") if existing else None,
-                           agent=agent, idem=b.get("idem_key"), etype="note.created")
+    resp, status = _append_fresh("note", eid, payload, agent=agent, idem=b.get("idem_key"),
+                                 etype="note.created", operation="ask")
     return JsonResponse(resp, status=status)
 
 
@@ -1208,14 +1256,19 @@ def answer(request, b):
     # status enum, is what marks a question as awaiting an answer.
     still_open = False
     try:
-        tags = [t for t in (note_ent.get("tags") or []) if str(t).lower() != "open"]
-        if "answered" not in [str(t).lower() for t in tags]:
-            tags.append("answered")
-        closed = {k: v for k, v in note_ent.items() if k not in ("version", "provenance")}
-        closed["tags"] = tags
-        _retire_resp, retire_status = _append(
-            "note", question_id, closed, expected_version=note_ent.get("version"),
-            agent=agent, idem=None, etype="note.created")
+        def _closed(current):
+            # Rebuilt from the entity as it stands at EACH attempt: a concurrent edit to the
+            # question must survive the retire, not be overwritten by the first read's copy.
+            base = current or note_ent
+            kept = [t for t in (base.get("tags") or []) if str(t).lower() != "open"]
+            if "answered" not in [str(t).lower() for t in kept]:
+                kept.append("answered")
+            closed = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+            closed["tags"] = kept
+            return closed
+        _retire_resp, retire_status = _append_fresh(
+            "note", question_id, _closed, agent=agent, idem=None, etype="note.created",
+            operation="answer:retire-question")
         still_open = retire_status not in (200, 201)
     except Exception:                                    # noqa: BLE001 - never lose the reply
         still_open = True
@@ -1237,7 +1290,6 @@ def answer(request, b):
     try:
         note_local = "qa-" + question_id.rsplit(":", 1)[-1]
         lesson_id = ids.make_id(hub_app.PROJECT_KEY, "note", note_local)
-        existing_lesson = (state.get("entities") or {}).get(lesson_id)
         lesson_payload = {
             "type": "note", "category": "method",
             "title": (question_text or ("answer for " + asker))[:300],
@@ -1246,10 +1298,9 @@ def answer(request, b):
             "status": "standing",
             "relates_to": [question_id],
         }
-        _lesson_resp, lesson_status = _append(
-            "note", lesson_id, lesson_payload,
-            expected_version=existing_lesson.get("version") if existing_lesson else None,
-            agent=agent, idem=None, etype="note.created")
+        _lesson_resp, lesson_status = _append_fresh(
+            "note", lesson_id, lesson_payload, agent=agent, idem=None, etype="note.created",
+            operation="answer:crystallize")
         resp["data"]["crystallized"] = lesson_id if lesson_status in (200, 201) else False
     except Exception:                                    # noqa: BLE001 - bookkeeping never
         resp["data"]["crystallized"] = False             # loses an answer already sent
@@ -1294,13 +1345,11 @@ def ack(request, b):
         return JsonResponse({"errors": [{"code": "unknown_directive", "id": directive_id}]}, status=404)
     local = "%s--%s" % (directive_id.rsplit(":", 1)[-1], _slug(agent, "agent"))
     eid = ids.make_id(hub_app.PROJECT_KEY, "ack", local)
-    existing = state["entities"].get(eid)
     payload = {"type": "ack", "directive": directive_id, "agent": agent,
                "note": str(b.get("note") or "")}
-    resp, status = _append("ack", eid, payload,
-                           expected_version=existing.get("version") if existing else None,
-                           agent=agent, idem=b.get("idem_key") or f"ack:{eid}",
-                           etype="ack.recorded")
+    resp, status = _append_fresh("ack", eid, payload, agent=agent,
+                                 idem=b.get("idem_key") or f"ack:{eid}",
+                                 etype="ack.recorded", operation="ack")
     if status in (200, 201):
         _retire_if_fully_acked(directive_id, agent)
     return JsonResponse(resp, status=status)
