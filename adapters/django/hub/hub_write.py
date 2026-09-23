@@ -130,6 +130,17 @@ def writer(fn=None, *, scope=None):
         marker = _AUTH.set(auth)
         try:
             response = fn(request, b, *a, **k)
+        except ids.InvalidId as exc:
+            # UNMINTABLE ID, answered once for every writer. Each writer composes its entity id
+            # from caller-supplied input (a raw `local`, or a slug of a name), and make_id
+            # refuses what the id grammar does not accept. Unhandled, that refusal is a 500
+            # with an empty body whose only trace is the server log. Scoped to InvalidId on
+            # purpose: a blanket `except ValueError` would dress a genuine server bug up as a
+            # caller error, which is the same failure inverted.
+            response = JsonResponse({"errors": [{"code": "invalid_local", "id": exc.id,
+                "msg": "cannot mint %r: a local id must start with a letter or digit and use "
+                       "only [a-z0-9._-]. Send a valid 'local', or a name/title that slugs to "
+                       "one." % (exc.id,)}]}, status=400)
         finally:
             _AUTH.reset(marker)
         response["X-Hub-Auth-Subject"] = auth.subject
@@ -414,10 +425,15 @@ def adr(request, b):
 @writer(scope="capability:write")
 def capability(request, b):
     agent = b.get("agent", "agent")
-    name = b.get("name")
-    if not name:
-        return JsonResponse({"errors": [{"code": "need_name"}]}, status=400)
+    name = str(b.get("name") or "")
+    # Guard on the SLUG, not the raw string: a whitespace-only name is truthy and used to walk
+    # past `if not name` into an id the grammar refuses (a 500). "This name yields a usable
+    # local" is the precondition actually meant. The slug rule itself is unchanged, so a
+    # retried registration keeps resolving to the same id.
     local = b.get("local") or "".join(c if c.isalnum() or c in "._-" else "-" for c in name.lower())
+    if not name.strip() or not str(local).strip("-._"):
+        return JsonResponse({"errors": [{"code": "need_name",
+            "msg": "name is required to register a capability"}]}, status=400)
     eid = ids.make_id(hub_app.PROJECT_KEY, "cap", local)
     payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key", "local")}
     payload["type"] = "cap"
