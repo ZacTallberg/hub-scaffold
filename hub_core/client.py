@@ -29,8 +29,10 @@ in silence::
 
 A claim that stopped being true is retired, never deleted — the reason is appended, dated::
 
-    python -m hub_core.client retire project:gap:0007 --status closed       --addressed-by project:task:0042 --note "export now streams; measured 3 s"
-    python -m hub_core.client retire "the queue saturates at noon" --type note       --note "no longer true after the worker split"
+    python -m hub_core.client retire project:gap:0007 --status closed \
+      --addressed-by project:task:0042 --note "export now streams; measured 3 s"
+    python -m hub_core.client retire "the queue saturates at noon" --type note \
+      --note "no longer true after the worker split"
 
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
