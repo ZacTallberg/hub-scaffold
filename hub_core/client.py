@@ -79,6 +79,28 @@ def _auth_headers() -> dict[str, str]:
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
 
 
+def _decode_success(status: int, raw: bytes) -> dict[str, Any]:
+    """A successful write's body, or an honest account of why there is none to quote.
+
+    An endpoint that answers 2xx with an empty (or non-JSON) body used to crash the decode or,
+    in sibling tools, print a line of Nones -- a success that reads as a non-event, which is
+    exactly what invites a re-run and a duplicate write. The hub is the authority; this line
+    says only what the transport knows.
+    """
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return {"accepted": True, "status": status,
+                "note": "the hub accepted the write and returned no body, so there is no id or "
+                        "version to quote -- read the board to see the result; do not re-run it"}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"accepted": True, "status": status,
+                "note": "the hub answered 2xx with a body that is not JSON (a proxy page?) -- "
+                        "the write may not have reached the hub; read the board before re-running",
+                "body_head": text[:200]}
+
+
 def _post(base: str, operation: str, payload: dict[str, Any],
           extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     headers = {
@@ -99,16 +121,84 @@ def _post(base: str, operation: str, payload: dict[str, Any],
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            return _decode_success(response.status, response.read())
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         try:
             body: Any = json.loads(detail)
         except json.JSONDecodeError:
             body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+        raise HubRefused(error.code, body) from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+
+
+class HubRefused(RuntimeError):
+    """The hub answered and said no (HTTP 4xx/5xx). Its message is the refusal body, as JSON,
+    so the existing callers that print str(error) keep printing the same thing."""
+
+    def __init__(self, status: int, body: Any):
+        super().__init__(json.dumps({"status": status, "response": body}))
+        self.status = status
+        self.body = body
+
+    def codes(self) -> list[str]:
+        errors = self.body.get("errors") if isinstance(self.body, dict) else None
+        return [str(e.get("code")) for e in (errors or []) if isinstance(e, dict)]
+
+
+def _evidence_problems(evidence: list[str]) -> list[str]:
+    """Evidence is a REFERENCE -- a URL, a commit sha, a path -- so it is one token. Prose
+    always contains whitespace and never dereferences; refusing it here puts the error in front
+    of the writer, in one edit, instead of after a round trip."""
+    return [item for item in evidence if not str(item).strip() or len(str(item).split()) > 1]
+
+
+def _evidence_help(error: "HubRefused") -> str:
+    """Turn an evidence_unresolvable refusal into the exact re-run, item by item."""
+    bad, fix = {}, ""
+    for entry in ((error.body or {}).get("errors") or []) if isinstance(error.body, dict) else []:
+        if isinstance(entry, dict):
+            bad.update(entry.get("bad") or {})
+            fix = fix or str(entry.get("fix") or "")
+    lines = ["  --> ONE unresolvable --evidence item refuses the WHOLE completion: nothing was",
+             "      recorded and the task is still in progress."]
+    for item, why in list(bad.items())[:6]:
+        lines.append("      %s  (%s)" % (item, why))
+    if fix:
+        lines.append("      " + fix)
+    return "\n".join(lines)
+
+
+def _note_refused_finish(base: str, arguments: argparse.Namespace, error: Exception) -> None:
+    """Write a REFUSED completion onto the task, so it is as visible as one that landed.
+
+    A refusal printed to stderr is loud to whoever is at the terminal and invisible to everyone
+    else: the board goes on showing an in-progress task with a claim on it and no hint that its
+    holder tried to close it and was told no -- precisely what an unattended worker leaves
+    behind. Best-effort by construction: the original refusal always propagates unchanged, and a
+    failure to annotate is announced rather than swallowed.
+    """
+    import datetime as _dt
+    reason = str(error).replace("\n", " ")
+    try:
+        entity = _fetch_task(base, arguments.task_id)
+        plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
+        plan.append({"step": "finish REFUSED -- task still in progress", "done": False,
+                     "note": "the hub refused the completion, so this task is NOT done: " + reason,
+                     "note_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+        body: dict[str, Any] = {"id": entity["id"], "plan": plan, "agent": _agent(arguments),
+                                "expected_version": entity.get("version")}
+        token = getattr(arguments, "lease_token", None) or os.environ.get("HUB_LEASE_TOKEN")
+        if token:
+            body["token"] = token
+        _post(base, "task", body, extra_headers=_presence_headers(arguments))
+        print("NOTE: the refusal is recorded on %s as an open plan step." % entity["id"],
+              file=sys.stderr)
+    except Exception as annotate_error:                          # noqa: BLE001
+        print("NOTE: could not record the refused finish on the board (%s: %s) -- the task "
+              "reads in progress with no reason attached; say why with `step --note`."
+              % (type(annotate_error).__name__, str(annotate_error)[:200]), file=sys.stderr)
 
 
 def _optional_auth_headers() -> dict[str, str]:
@@ -468,6 +558,11 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
       on the worker, through hub_core.verifier's hardening (argv-form, scrubbed env, exfil
       refusal), and submits the typed receipt. A non-zero exit refuses the completion.
     """
+    malformed = _evidence_problems(arguments.evidence)
+    if malformed:
+        raise ValueError("evidence is a reference (a URL, a commit sha, a path), so it is one "
+                         "token with no spaces; put prose in --accept-note. Not a reference: "
+                         + "; ".join(repr(item) for item in malformed))
     entity = _fetch_task(base, arguments.task_id)
     current = _charter_sha()
     charter_note = ""
@@ -517,7 +612,13 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
                     "output_tail": output[-2000:].decode("utf-8", errors="replace")}
         payload["verification_run"] = receipt
 
-    result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
+    try:
+        result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
+    except HubRefused as refusal:
+        _note_refused_finish(base, arguments, refusal)
+        if "evidence_unresolvable" in refusal.codes():
+            raise RuntimeError(str(refusal) + "\n" + _evidence_help(refusal)) from refusal
+        raise
     return {"completed": result,
             **({"verification_run": receipt} if receipt else
                {"note": "no critical probe was declared — done stands on the real operation"})}
@@ -708,7 +809,23 @@ def main() -> int:
             result = arguments.runner(base, arguments)
         else:
             operation, payload = arguments.payload(arguments)
-            result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+            if operation == "complete":
+                malformed = _evidence_problems(payload.get("evidence_uri") or [])
+                if malformed:
+                    raise ValueError("evidence is a reference (a URL, a commit sha, a path), so "
+                                     "it is one token with no spaces; put prose in "
+                                     "--accept-note. Not a reference: "
+                                     + "; ".join(repr(item) for item in malformed))
+            try:
+                result = _post(base, operation, payload,
+                               extra_headers=_presence_headers(arguments))
+            except HubRefused as refusal:
+                if operation == "complete":
+                    _note_refused_finish(base, arguments, refusal)
+                    if "evidence_unresolvable" in refusal.codes():
+                        raise RuntimeError(str(refusal) + "\n" + _evidence_help(refusal)) \
+                            from refusal
+                raise
     except (ValueError, RuntimeError) as error:
         print(str(error), file=sys.stderr)
         return 1
