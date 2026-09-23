@@ -91,24 +91,47 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         **_auth_headers(),
         **(extra_headers or {}),
     }
-    request = urllib.request.Request(
-        f"{base}/api/{operation}",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
+    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    # BACK-PRESSURE IS RETRIED, NOTHING ELSE. A 503 whose code says the write never happened
+    # (the ledger lock was busy, a sidecar feed lost its append) is safe to repeat by
+    # construction; any other failure is returned to the caller unchanged, because a retry that
+    # reports failure for a write that landed is worse than the failure it was avoiding.
+    for attempt in range(_BUSY_ATTEMPTS):
+        request = urllib.request.Request(
+            f"{base}/api/{operation}", data=data, headers=headers, method="POST")
         try:
-            body: Any = json.loads(detail)
-        except json.JSONDecodeError:
-            body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            try:
+                body: Any = json.loads(detail)
+            except json.JSONDecodeError:
+                body = detail
+            if error.code == 503 and attempt < _BUSY_ATTEMPTS - 1 and _retryable(body):
+                import time as _time
+                try:
+                    delay = float(error.headers.get("Retry-After") or 2)
+                except (TypeError, ValueError):
+                    delay = 2.0
+                _time.sleep(max(0.5, min(delay, 10.0)) * (attempt + 1))
+                continue
+            raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+    raise RuntimeError(f"Hub stayed busy at {base} after {_BUSY_ATTEMPTS} attempts")
+
+
+_BUSY_ATTEMPTS = 3
+_RETRYABLE_CODES = {"busy", "update_write_failed"}
+
+
+def _retryable(body: Any) -> bool:
+    """True only for a refusal that states nothing was written."""
+    try:
+        return any((e or {}).get("code") in _RETRYABLE_CODES for e in body.get("errors") or [])
+    except AttributeError:
+        return False
 
 
 def _optional_auth_headers() -> dict[str, str]:

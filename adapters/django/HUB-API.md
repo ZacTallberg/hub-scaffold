@@ -278,6 +278,13 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 `duplicate_question`/`unknown_asker`/`not_acked` (409) ·
 `no_such_question`/`unknown_directive` (404).
 
+**`503 busy` is back-pressure, not a fault.** When the ledger lock stays held past
+`HUB_LEDGER_WAIT_S` (default 30 s) any hub path — read or write — answers
+`503 {errors:[{code:"busy", retry_after}]}` with a `Retry-After` header. The failure happens
+before anything is written, so the same call is safe to repeat; `hub_core.client` retries it on its
+own. A `LedgerBusyMiddleware` WARNING row (`source: hub.ledger`) trends the pressure instead of
+putting a defect on the error queue.
+
 An actively held claim and a stale heartbeat are the exceptions: they return `{ok:false, reason:…}`
 with status 409. A wrong method returns Django's 405 response, and missing read entities use Django's ordinary
 404 response. Treat a refusal as guidance—fix its cause rather than retrying blindly.

@@ -186,9 +186,24 @@ def registry():
     return hub_core.Registry.from_dir(SCHEMA_DIR)
 
 
+def ledger_wait_s() -> float:
+    """How long a request waits for the ledger lock before answering 503 busy.
+
+    HUB_LEDGER_WAIT_S (setting or environment), default 30 s: long enough to outlast a full index
+    rebuild, short enough to stay under common proxy read timeouts. Offline tools that construct
+    their own EventStore keep the store's far-off ceiling."""
+    raw = _dj_setting("HUB_LEDGER_WAIT_S") or os.environ.get("HUB_LEDGER_WAIT_S") or 30
+    try:
+        return max(1.0, min(float(raw), 600.0))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def store():
-    """A fresh EventStore handle per call (cheap; avoids cross-thread sqlite handles)."""
-    return hub_core.EventStore(HUB_DIR)
+    """A fresh EventStore handle per call (cheap; avoids cross-thread sqlite handles). Bounded by
+    ledger_wait_s(): a lock held past it raises hub_core.store.StoreBusy, which the write seam
+    and LedgerBusyMiddleware answer 503 + Retry-After — never a 500."""
+    return hub_core.EventStore(HUB_DIR, lock_timeout=ledger_wait_s())
 
 
 def current_state(st=None):
