@@ -18,7 +18,7 @@ from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import agent_auth, collision, flow, ids, schedule, secretscan, validate
 from hub_core.process_lock import ProcessFileLock
-from hub_core.store import ConflictError
+from hub_core.store import ConflictError, StoreBusy
 
 from . import hub_app
 
@@ -209,6 +209,11 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
                       git_sha=hub_app._git_head(), idem_key=idem, **_event_identity(agent))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
+    except StoreBusy as busy:
+        # BACK-PRESSURE, NOT A FAULT. The lock was held past the wait budget, so nothing was
+        # appended — no line, no index row, no fsync. 503 + Retry-After (set by
+        # LedgerBusyMiddleware) says exactly that to a caller that already retries writes.
+        return ({"errors": [{"code": "busy", "msg": str(busy), "retry_after": 2}]}, 503)
     if ev.get("seq", 0) > before:
         hub_app.publish_event(ev)
     return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)

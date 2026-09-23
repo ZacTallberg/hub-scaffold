@@ -42,6 +42,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     # ... your middleware ...
+    # Early, before any read gate: a busy ledger answers 503 + Retry-After on every hub path,
+    # reads included, and records a WARNING row instead of a 5xx defect.
+    "hub.middleware.LedgerBusyMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",   # optional: no-store on dynamic HTML after deploys
 ]
 
@@ -63,6 +66,7 @@ HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
+# HUB_LEDGER_WAIT_S = 30               # request wait for the ledger lock before 503 busy
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling

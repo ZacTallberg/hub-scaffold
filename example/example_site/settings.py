@@ -45,6 +45,8 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # A busy ledger answers 503 + Retry-After on every hub path, reads included — never a 500.
+    "hub.middleware.LedgerBusyMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",
 ]
 
