@@ -1039,7 +1039,7 @@ Explicitly out of scope, with the reason. A non-goal may only move into scope vi
 
 ## 5. Quality bar
 - **Born-safe:** prod settings hardened at birth (no DEBUG default, no committed secrets,
-  unauthenticated reads only when contents are publishable, general writes token-gated).
+  reads authenticated unless the board is declared public, general writes token-gated).
 - **Truth-first:** every rendered assertion derives from gathered evidence (`DOCTRINE.md` §2) —
   the truth matrix (`registers/TRUTH-MATRIX.md`) is the acceptance checklist for any new surface.
 - **Gate-green:** `hubaudit` PASS + every project invariant gate that has actually been implemented

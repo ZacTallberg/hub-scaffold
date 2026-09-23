@@ -379,6 +379,12 @@ def settings_ast_adapter(state):
     return viols
 
 
+def _is_hub_view(callback):
+    """True when a URL callback is one of this adapter package's own views."""
+    module = str(getattr(callback, "__module__", "") or "")
+    return module.split(".")[0] == __name__.split(".")[0] and module != __name__
+
+
 def route_guard_adapter(state):
     """Auth-boundary primitive: assert every mutating route has an explicit gate.
 
@@ -399,6 +405,19 @@ def route_guard_adapter(state):
             sub = getattr(p, "url_patterns", None)
             if sub is not None:
                 walk(sub, pat)
+            elif "hub/api/" not in pat and _is_hub_view(getattr(p, "callback", None)):
+                # Every non-mutation Hub route is a READ of the projected board and must carry
+                # the read gate, so a public board is a declared setting, never a route that
+                # was simply added without one. Discovery documents (the agent card) declare
+                # themselves public explicitly.
+                cb = getattr(p, "callback", None)
+                if not (getattr(cb, "_hub_read_gated", False)
+                        or getattr(cb, "_hub_public_discovery", False)):
+                    viols.append(_sv("routes:read-ungated", "every Hub read route carries the read gate",
+                                     "%s -> %s is not wrapped by read_auth.reader" %
+                                     (pat, getattr(cb, "__name__", "?")),
+                                     "read_auth.reader(view)",
+                                     remediation="wrap the read view with read_auth.reader in urls.py"))
             elif "hub/api/" in pat:
                 cb = getattr(p, "callback", None)
                 guarded = getattr(cb, "_hub_token_gated", False) or getattr(cb, "_hub_origin_gated", False)
@@ -420,6 +439,22 @@ def route_guard_adapter(state):
     except Exception as e:
         return [_sv("routes:introspect", "URLConf is walkable", str(e), "walkable")]
     return viols
+
+
+def read_posture_adapter(state):
+    """A public board in production is a decision the audit keeps visible, not a default.
+
+    Reads are authenticated unless ``HUB_READ_AUTH = "public"``. Under DEBUG a public board is
+    the local preview and says nothing; outside DEBUG it is one high finding naming the setting,
+    because the board projects every question, error and assignment it holds."""
+    from . import read_auth
+    if read_auth.mode() != read_auth.PUBLIC or _dj_setting("DEBUG", False):
+        return []
+    return [_sv("routes:public-read", "Hub reads require an authenticated principal in production",
+                "HUB_READ_AUTH='public' with DEBUG off: every board read is anonymous",
+                "HUB_READ_AUTH unset (required)",
+                remediation="remove HUB_READ_AUTH='public', or keep it only for a board whose "
+                            "entire content is deliberately public")]
 
 
 def identity_settings_adapter(state):
@@ -531,7 +566,7 @@ def _run_audit_with_store(s, served=None) -> dict:
                         legacy_entity_schema_baseline=entity_schema_baseline,
                         adapters=[settings_ast_adapter, identity_settings_adapter,
                                   storage_runtime_adapter,
-                                  route_guard_adapter])
+                                  route_guard_adapter, read_posture_adapter])
 
 
 def run_audit(st=None, served=None) -> dict:

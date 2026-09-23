@@ -1,36 +1,39 @@
-"""The agent-operable Hub at /hub — unauthenticated reads and explicitly gated mutations.
+"""The agent-operable Hub at /hub — authenticated reads and explicitly gated mutations.
 
-Rendered entirely by hub_core (shell.render); no Django templates. The host must add read
-authentication when entity data is not public. NEVER mount at the front door.
+Rendered entirely by hub_core (shell.render); no Django templates. Every read route is wrapped
+by ``read_auth.reader``: reads require an authenticated principal unless the operator declares
+the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, mcp_server, run_api
+from . import hub_api, hub_write, hubsite, mcp_server, read_auth, run_api
+
+R = read_auth.reader
 
 app_name = "hub"
 urlpatterns = [
-    path("", hubsite.hub, name="hub"),
-    path("hub.json", hub_api.hub_json),
-    path("audit.json", hub_api.audit_json),
-    path("graph.json", hub_api.graph_json),
-    path("next.json", hub_api.next_json),
+    path("", R(hubsite.hub), name="hub"),
+    path("hub.json", R(hub_api.hub_json)),
+    path("audit.json", R(hub_api.audit_json)),
+    path("graph.json", R(hub_api.graph_json)),
+    path("next.json", R(hub_api.next_json)),
     # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
     # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
-    path("live/events", hub_api.live_events, name="live-events"),
-    path("cursor.json", hub_api.cursor_json, name="cursor"),
-    path("delta.json", hub_api.delta_json, name="delta"),
+    path("live/events", R(hub_api.live_events), name="live-events"),
+    path("cursor.json", R(hub_api.cursor_json), name="cursor"),
+    path("delta.json", R(hub_api.delta_json), name="delta"),
     # The ask/answer surfaces, the operational stream, board search, and request identity.
     # Same rule: above the catch-all, or each would 404 as an unknown entity collection.
-    path("questions.json", hub_api.questions_json, name="questions"),
-    path("inbox.json", hub_api.inbox_json, name="inbox"),
-    path("inbox/wait", hub_api.inbox_wait, name="inbox-wait"),
-    path("errors.json", hub_api.errors_json, name="errors"),
-    path("search.json", hub_api.search_json, name="search"),
-    path("whoami.json", hub_api.whoami_json, name="whoami"),
-    path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
-    path("schema/<str:type>.schema.json", hub_api.schema_json),
-    path("<str:type>.json", hub_api.type_json),
-    path("<str:type>/<str:local>.json", hub_api.entity_json),
+    path("questions.json", R(hub_api.questions_json), name="questions"),
+    path("inbox.json", R(hub_api.inbox_json), name="inbox"),
+    path("inbox/wait", R(hub_api.inbox_wait), name="inbox-wait"),
+    path("errors.json", R(hub_api.errors_json), name="errors"),
+    path("search.json", R(hub_api.search_json), name="search"),
+    path("whoami.json", R(hub_api.whoami_json), name="whoami"),
+    path("dag.graphml", R(hub_api.dag_graphml), name="dag-graphml"),
+    path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
+    path("<str:type>.json", R(hub_api.type_json)),
+    path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
     path("api/task", hub_write.task),
     path("api/complete", hub_write.complete),
     path("api/adr", hub_write.adr),

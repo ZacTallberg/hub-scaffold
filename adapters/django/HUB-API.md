@@ -1,8 +1,11 @@
 # HUB API — the reference for an agent operating the hub
 
-Everything an agent needs to read and drive the Hub over HTTP. Reads are unauthenticated; writes are
-token-gated. An unauthenticated read returns the complete projected board, so it is safe to expose
-only when entity contents are intentionally publishable. You do not need to read the source—this is
+Everything an agent needs to read and drive the Hub over HTTP. Reads require an authenticated
+principal by default — a host-site signed-in user, any live `X-Agent-Token`, or the shared-root
+`X-Write-Token` — and answer `401 {"errors":[{"code":"read_auth_required"}]}` otherwise; writes are
+additionally scope-gated. A deployment that sets `HUB_READ_AUTH = "public"` serves the complete
+projected board to anyone, so that setting is safe only when entity contents are intentionally
+publishable (the computed audit reports it as a high finding outside `DEBUG`). You do not need to read the source—this is
 the contract.
 
 This served API is the only mutation entrance for an active board. Using it makes durable append,

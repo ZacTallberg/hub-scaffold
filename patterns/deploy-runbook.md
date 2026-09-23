@@ -130,7 +130,11 @@ command for each, keep it beside the runbook, and every step below becomes liter
    the result must contain zero critical/high findings. If it does not, the immutable record remains
    truthful history with its exact inputs, the release stays visibly unhealthy, and repair begins
    from that observed finding rather than rewriting the record.
-10. **Check your unauthenticated surface** — one request per invariant your project declares.
+10. **Check your unauthenticated surface** — one request per invariant your project declares, and
+    one ANONYMOUS request to the app's root and to `/hub/`: each must be refused (401/403, or a
+    redirect to sign-in). An anonymous 200 fails the deploy unless the project has DECLARED that
+    surface public — a verifier that only ever sends credentials cannot tell an authenticated app
+    from an open one.
 11. **Done means named:** the recorded event carries the live sha. Release the per-target lease only
     after the canary, immutable deploy record, and post-record audit succeed (or the attempt has
     failed closed).

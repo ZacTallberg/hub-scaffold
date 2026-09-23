@@ -115,7 +115,7 @@ def _optional_auth_headers() -> dict[str, str]:
     try:
         return _auth_headers()
     except ValueError:
-        return {}          # reads are public; whoami simply reports no credential
+        return {}          # no credential: a read on a public board, else the Hub's 401 says why
 
 
 def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, str]:
