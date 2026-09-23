@@ -27,6 +27,11 @@ in silence::
       --text "the retry queue; requeue stalled items"         # needs directive:write
     python -m hub_core.client ack project:directive:0001 --agent worker-1
 
+A claim that stopped being true is retired, never deleted — the reason is appended, dated::
+
+    python -m hub_core.client retire project:gap:0007 --status closed       --addressed-by project:task:0042 --note "export now streams; measured 3 s"
+    python -m hub_core.client retire "the queue saturates at noon" --type note       --note "no longer true after the worker split"
+
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
@@ -413,6 +418,22 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     if arguments.note:
         payload["note"] = arguments.note
     return "ack-error", payload
+
+
+def _payload_retire(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments)}
+    target = arguments.target
+    if arguments.type:
+        payload.update({"type": arguments.type, "title": target})
+    else:
+        payload["id"] = target
+    for name in ("status", "note", "superseded_by"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if arguments.addressed_by:
+        payload["addressed_by"] = arguments.addressed_by
+    return "retire", payload
 
 
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -837,6 +858,20 @@ def _parser() -> argparse.ArgumentParser:
     ack_error.add_argument("--note")
     ack_error.add_argument("--reopen", action="store_true")
     ack_error.set_defaults(payload=_payload_ack_error)
+
+    retire = commands.add_parser(
+        "retire", help="retire or re-open a gap/note/directive/ADR/finding (reason required)")
+    retire.add_argument("target", help="the record id, or its exact title together with --type")
+    retire.add_argument("--type", help="the record type when TARGET is a title (gap, note, ...)")
+    retire.add_argument("--status", help="the new status; each type has a sensible default "
+                                          "except gap, which must be named")
+    retire.add_argument("--note", help="what retired it — appended with a dated stamp")
+    retire.add_argument("--addressed-by", action="append", default=[], dest="addressed_by",
+                        help="task id that closed a gap (required for closed/mitigated)")
+    retire.add_argument("--superseded-by", dest="superseded_by",
+                        help="the id of the record that replaced this one")
+    retire.add_argument("--agent")
+    retire.set_defaults(payload=_payload_retire)
 
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)

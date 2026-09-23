@@ -51,6 +51,9 @@ urlpatterns = [
     path("api/gap", hub_write.gap),
     path("api/feat", hub_write.feat),
     path("api/note", hub_write.note),
+    # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
+    # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
+    path("api/retire", hub_write.retire),
     path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),

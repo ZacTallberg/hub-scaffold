@@ -553,6 +553,65 @@ feat = _simple_writer("feat", "feat.upserted", name_field="name")
 note = _simple_writer("note", "note.created", name_field="title")
 
 
+@writer
+def retire(request, b):
+    """Retire (or re-open) one knowledge record: a gap, note, directive, ADR, or finding.
+
+    A record that can be FILED but never retired only grows, and a knowledge surface full of
+    claims that stopped being true is worse than an empty one. The lifecycle rules live in
+    ``hub_core.record_state``: each type moves only to a status its own schema enumerates, a
+    retirement needs a ``note`` (appended with a dated stamp, never written over the evidence),
+    and a closed/mitigated gap must name the work that closed it. The caller needs the target
+    type's ordinary ``<type>:write`` scope — retiring is writing that record.
+
+    Target by ``id``, or by ``type`` + exact ``title`` (the name the filer actually remembers).
+    """
+    from hub_core import record_state
+
+    agent = b.get("agent", "agent")
+    state = hub_app.current_state()
+    entities = state.get("entities", {})
+    eid = str(b.get("id") or "").strip()
+    ent = entities.get(eid) if eid else None
+    if ent is None and not eid and b.get("title") and b.get("type"):
+        want_type, want_title = str(b["type"]).strip(), str(b["title"]).strip().lower()
+        matches = [e for e in entities.values() if isinstance(e, dict)
+                   and e.get("type") == want_type
+                   and str(e.get("title") or e.get("name") or "").strip().lower() == want_title]
+        if len(matches) > 1:
+            return JsonResponse({"errors": [{"code": "ambiguous_title",
+                "msg": "several records share that title; pass the id",
+                "ids": sorted(m["id"] for m in matches)}]}, status=409)
+        ent = matches[0] if matches else None
+    if ent is None:
+        return JsonResponse({"errors": [{"code": "not_found",
+            "msg": "no such record: pass an existing id, or type + exact title"}]}, status=404)
+    otype = ent.get("type")
+    scope = f"{otype}:write"
+    if not request.hub_auth.allows(scope):
+        return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+                                          "subject": request.hub_auth.subject}]}, status=403)
+    addressed_by = b.get("addressed_by")
+    if isinstance(addressed_by, str):
+        addressed_by = [addressed_by]
+    try:
+        payload = record_state.plan_retirement(
+            ent, status=b.get("status"), note=b.get("note") or "", agent=agent,
+            addressed_by=addressed_by, superseded_by=b.get("superseded_by") or "")
+    except record_state.RetireRefused as refused:
+        return JsonResponse({"errors": [{"code": refused.code, "msg": str(refused)}]}, status=422)
+    if payload.get("status") == ent.get("status") and set(payload) == {"status"}:
+        return JsonResponse({"data": {"id": ent["id"], "version": ent.get("version"),
+                                      "status": ent.get("status"), "unchanged": True}})
+    resp, status = _append(otype, ent["id"], payload,
+                           expected_version=b.get("expected_version", ent.get("version")),
+                           agent=agent, idem=b.get("idem_key"), etype=f"{otype}.retired")
+    if status == 200:
+        resp["data"]["status"] = payload["status"]
+        resp["data"]["previous_status"] = ent.get("status")
+    return JsonResponse(resp, status=status)
+
+
 @writer(scope="deploy:write")
 def deploy(request, b):
     """Record one immutable, post-canary release closure.

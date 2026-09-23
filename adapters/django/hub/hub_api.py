@@ -17,6 +17,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
                       inbox as inbox_core, project, projections, telemetry, upcast, wip)
+from hub_core import record_state as _record_state
 from hub_core.canonical import content_hash
 from hub_core.text import preview
 
@@ -1477,10 +1478,13 @@ def search_json(request):
     terms = [t for t in re.split(r"[^a-z0-9._-]+", q) if t and t not in _SEARCH_STOP][:24]
     state, _ = _snapshot()
     hits = []
+    # One definition of a dead record (hub_core.record_state): its own status says the claim is
+    # no longer true, or a live record's `supersedes` names it. Both keep it out of the answer.
+    superseded = _record_state.superseded_ids(state["entities"])
     for ent in state["entities"].values():
         if not isinstance(ent, dict):
             continue
-        if ent.get("status") in ("superseded", "dropped", "rejected"):
+        if _record_state.is_retired(ent, superseded):
             continue
         title = str(ent.get("title") or ent.get("name") or "")
         body = str(ent.get("body_md") or ent.get("summary") or ent.get("decision_md") or
