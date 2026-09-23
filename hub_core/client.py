@@ -439,7 +439,9 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("every plan step is already done — use `finish`")
     target["done"] = True
     if arguments.note:
-        target["note"] = arguments.note[:600]
+        # Whole: a checkpoint note is what the next reader acts on, and a silent cut here
+        # reported success while dropping the end of it.
+        target["note"] = arguments.note
         target["note_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     # A MINIMAL delta, exactly like the claim seam's own in_progress append: the fold merges
     # payloads last-write-wins per key, so echoing the whole entity back would both trip the

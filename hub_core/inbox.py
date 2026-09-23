@@ -79,7 +79,9 @@ def question_items(state) -> list:
             "kind": "question",
             "id": eid,
             "from": asker or "a board member",
-            "title": _text(ent.get("title"), 300),
+            # A question's title IS the question: delivered whole (or visibly clipped past
+            # 4000 characters), never silently cut at 300.
+            "title": body_text(ent.get("title"), 4000),
             "body": body_text(ent.get("body_md")),
             "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
         })
@@ -112,7 +114,7 @@ def directive_items(state, agent: str) -> list:
             "kind": "answer" if answered else "directive",
             "id": eid,
             "from": _text(prov.get("agent") or "the operator", 60),
-            "title": _text(ent.get("title"), 300),
+            "title": body_text(ent.get("title"), 4000),
             "body": body_text(ent.get("body_md")),
             "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
             "answers": _text(answered, 120),

@@ -18,6 +18,7 @@ from django.views.decorators.http import require_GET, require_POST
 from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
                       inbox as inbox_core, project, projections, telemetry, upcast, wip)
 from hub_core.canonical import content_hash
+from hub_core.text import preview
 
 from . import delivery, hub_app, realtime
 
@@ -171,9 +172,11 @@ def _plan_progress(ent):
     # The last checkpoint note is the CONTEXT that turns "working on X" into "working on X,
     # last did Y" — the fact a peer needs to decide whether to coordinate, wait, or move on.
     noted = [s for s in plan if isinstance(s, dict) and s.get("note")]
-    return {"plan_done": done, "plan_total": total, "step": (str(step)[:70] if step else None),
+    # PREVIEWS, not cuts: the card line ends in an ellipsis when the note is longer, and the
+    # whole note is on the task itself.
+    return {"plan_done": done, "plan_total": total, "step": (preview(step, 70) if step else None),
             "plan_pct": (round(done * 100 / total) if total else None),
-            "last_note": (str(noted[-1].get("note"))[:90] if noted else None)}
+            "last_note": (preview(noted[-1].get("note"), 90) if noted else None)}
 
 
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
@@ -329,7 +332,7 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
     # and the cost of a question compounds for as long as it sits.
     for q in (asks or []):
         add(1, "open-question",
-            f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}", q.get("id"),
+            f"{q.get('from')} asks: {preview(q.get('title'), 120)}", q.get("id"),
             q.get("title"), route={"view": "overview", "focus": "asks"})
 
     # OVERDUE directives: `deadline` is documented as "surfaced, never enforced" — this is
@@ -359,7 +362,7 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
     for r in (error_unclaimed or [])[:5]:
         where = (r.get("context") or {}).get("app") or r.get("origin_app") or r.get("origin") or ""
         add(2, "error-unclaimed",
-            (f"[{where}] " if where else "") + str(r.get("message") or "")[:140],
+            (f"[{where}] " if where else "") + preview(r.get("message"), 140),
             None, str(r.get("source") or "error"),
             route={"view": "overview", "focus": "errors"})
 
@@ -573,7 +576,7 @@ def _fleet(events, state, inflight):
         last_ts.setdefault(ag, e.get("ts"))
         tr = trails.setdefault(ag, [])
         if len(tr) < 5:
-            tr.append({"action": action, "title": str(title)[:64], "ts": e.get("ts"),
+            tr.append({"action": action, "title": preview(title, 64), "ts": e.get("ts"),
                        "seq": e.get("seq")})
 
     # Live consoles per agent, from observed presence: an agent working WITHOUT a formal
@@ -1251,11 +1254,11 @@ def questions_json(request):
         row = {
             "id": eid, "asker": asker, "at": asked_at,
             "title": str(ent.get("title") or ""),
-            "context": str(ent.get("body_md") or "")[:1400],
+            "context": str(ent.get("body_md") or ""),
             "open": "open" in tags,
             "answered": bool(reply),
             "answer_id": (reply or {}).get("id", ""),
-            "answer": answer_body[:1800],
+            "answer": answer_body,
             "answer_by": str(answer_prov.get("agent") or "") if reply else "",
             "answer_at": answered_at,
             "acked": acked,
@@ -1468,9 +1471,9 @@ def search_json(request):
         elif q in hay_b:
             score += 3.0
         score += sum(1.5 for term in terms if term in hay_t)   # breadth of term coverage
-        hits.append({"id": ent.get("id"), "type": ent.get("type"), "title": title[:200],
+        hits.append({"id": ent.get("id"), "type": ent.get("type"), "title": title,
                      "status": ent.get("status") or ent.get("maturity") or "",
-                     "excerpt": body[:400], "score": round(score, 2)})
+                     "excerpt": preview(body, 400), "score": round(score, 2)})
     hits.sort(key=lambda h: h["score"], reverse=True)
     return JsonResponse({"data": hits[:limit],
                          "metadata": {"q": q, "terms": terms, "matched": len(hits)}})

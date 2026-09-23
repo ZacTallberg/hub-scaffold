@@ -1149,7 +1149,9 @@ def ask(request, b):
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     existing = state["entities"].get(eid)
-    payload = {"type": "note", "category": "context", "title": text[:300],
+    # The question is stored WHOLE. It used to be cut at 300 characters with no marker, so
+    # the operator answered the first half of a question and the asker never learned why.
+    payload = {"type": "note", "category": "context", "title": text,
                "asker": agent, "status": "standing", "tags": ["question", "open"],
                "body_md": str(b.get("context") or "")}
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
@@ -1196,7 +1198,7 @@ def answer(request, b):
     question_text = str(note_ent.get("title") or "")
     payload = {
         "type": "directive",
-        "title": ("Answer: %s" % question_text)[:300],
+        "title": "Answer: %s" % question_text,
         "body_md": text + "\n\n---\nIn answer to your question: " + question_text,
         "targets": [asker],
         "status": "active",
@@ -1256,7 +1258,7 @@ def answer(request, b):
         existing_lesson = (state.get("entities") or {}).get(lesson_id)
         lesson_payload = {
             "type": "note", "category": "method",
-            "title": (question_text or ("answer for " + asker))[:300],
+            "title": question_text or ("answer for " + asker),
             "body_md": text + "\n\n(Crystallized from a question asked by " + asker + ".)",
             "tags": ["pattern", "memory", "answered-question"],
             "status": "standing",
