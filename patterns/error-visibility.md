@@ -21,7 +21,8 @@ Forward only what belongs on a queue a human is expected to drain:
 - **server exceptions** (a 500 on a request path);
 - **background-job deaths** (the scheduler tick that raised, the worker loop that exited);
 - **worker-side operational failures** (a launcher that will not start, tooling that cannot
-  write, a client refused upstream — `agent-error`).
+  write, a client refused upstream — `agent-error`);
+- **failed CI jobs** (`ci-failure`), classified by what the job's own log says.
 
 Do NOT forward uncaught browser errors from your services' pages. A shared queue that fills
 with other people's stale-tab noise is a queue everyone learns to ignore — the Hub board's own
@@ -102,6 +103,22 @@ python -m hub_core.client app-error --app billing --kind job \
 python -m hub_core.client agent-error --agent worker-3 --source launcher \
   --message "wrapper exited 1 before claiming"
 ```
+
+A failed CI job forwards its log TAIL from the job itself (an `after_script` that runs only on
+failure), and the Hub decides what it means:
+
+```bash
+python -m hub_core.client ci-failure --project billing --job verify_deploy   --pipeline "$PIPELINE_ID" --ref "$REF" --sha "$SHA" --source "$PIPELINE_SOURCE"   --trace-file job.log            # add --deployless when the pipeline has no deploy stage
+```
+
+The row's severity follows the LOG, never the trigger. Pipeline metadata explains why a job
+ran; it never explains why it failed, and one job name that fails for two reasons will have
+the wrong reason confidently written over it. So a rollback is critical whatever the pipeline
+status said, a verifier that stopped at the deployed-commit assertion before any phase ran is a
+warning ("this run says nothing about the app"), a job whose own phases printed `[FAIL]` is an
+error naming the first one, and a log nothing recognises carries its first failure-shaped line
+rather than the runner's "Job failed" epitaph. Extend the markers in `hub_core/ci_trace.py` to
+the vocabulary your deploy scripts actually print.
 
 ## 3. Drain the queue, honestly
 

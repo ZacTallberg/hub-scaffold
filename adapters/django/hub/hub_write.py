@@ -1459,6 +1459,47 @@ def app_error(request, b):
 
 
 @writer(scope="error:report")
+def ci_failure(request, b):
+    """A failed CI job, classified by what its OWN LOG says (hub_core.ci_trace).
+
+    The CI job (an ``after_script`` on failure, or a forwarder) posts the tail of its log with
+    the pipeline's metadata; the hub classifies it — rollback / real / not_deployed / unclear /
+    unreadable — and records ONE operational row whose severity comes from the verdict, never
+    from the trigger: a rollback is critical whatever the pipeline status said, and a failure
+    on an api- or schedule-triggered run is not explained away by its trigger unless its log
+    shows it stopped before any phase ran. The raw log is never stored — only the classified
+    line — and a secret-shaped log is refused at the write seam like any other payload."""
+    from hub_core import ci_trace
+    project = re.sub(r"[^a-z0-9._-]", "", str(b.get("project") or "").strip().lower())[:80]
+    job = str(b.get("job") or "").strip()[:120]
+    if not project or not job:
+        return JsonResponse({"errors": [{"code": "need_project_and_job",
+            "msg": "project and job are required"}]}, status=400)
+    source = re.sub(r"[^a-z_]", "", str(b.get("source") or "").strip().lower())[:30]
+    verdict = ci_trace.classify(str(b.get("trace") or ""), source=source,
+                                deployless=bool(b.get("deployless")))
+    ref = str(b.get("ref") or "")[:120]
+    sha = str(b.get("sha") or "")[:64]
+    row = hub_app.record_error(
+        "ci.%s.%s" % (project, re.sub(r"[^a-z0-9_-]", "-", job.lower())[:60]),
+        ("%s failed%s: %s" % (job, (" on " + ref) if ref else "", verdict["note"]))[:800],
+        severity=verdict["severity"],
+        code="ci_" + verdict["verdict"],
+        details=("pipeline=%s job_id=%s source=%s deployless=%s verdict=%s detail=%s"
+                 % (str(b.get("pipeline") or "-")[:40], str(b.get("job_id") or "-")[:40],
+                    source or "-", bool(b.get("deployless")), verdict["verdict"],
+                    verdict["detail"] or "-"))[:2000],
+        context={"app": project, "component": "ci", "operation": job,
+                 "reason": verdict["verdict"], "release": sha,
+                 "url": str(b.get("url") or "")[:240]},
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"],
+                                  "verdict": verdict["verdict"], "detail": verdict["detail"],
+                                  "note": verdict["note"], "severity": verdict["severity"]}},
+                        status=201)
+
+
+@writer(scope="error:report")
 def agent_error(request, b):
     """Operational failures on a WORKER's side — a launcher that will not start, tooling
     that cannot write, a client refused upstream. Without this the operational stream

@@ -134,6 +134,18 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
          "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+    {"name": "report_ci_failure",
+     "description": "Report a failed CI job with the tail of its log. The hub classifies what the "
+                    "LOG says (rollback, real failure, stopped before deploying, unclear) and files "
+                    "one operational row whose severity follows that verdict, not the trigger.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": {"type": "string"}, "job": {"type": "string"},
+         "trace": {"type": "string", "description": "the job log tail"},
+         "pipeline": {"type": "string"}, "job_id": {"type": "string"},
+         "ref": {"type": "string"}, "sha": {"type": "string"},
+         "source": {"type": "string", "description": "push, schedule, api, ..."},
+         "deployless": {"type": "boolean"}, "url": {"type": "string"}},
+         "required": ["project", "job"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -318,6 +330,8 @@ def _call_tool(name, args, auth_headers):
         if args.get("note"):
             payload["note"] = args["note"]
         status, body = _seam("/hub/api/ack", payload, auth_headers)
+    elif name == "report_ci_failure":
+        status, body = _seam("/hub/api/ci-failure", dict(args), auth_headers)
     elif name == "search_board":
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},

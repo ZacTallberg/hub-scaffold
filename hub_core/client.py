@@ -29,7 +29,8 @@ in silence::
 
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
-error stream.
+error stream. `ci-failure` posts a failed CI job's log tail; the hub classifies it (rollback /
+real / not_deployed / unclear) by what the LOG says, never by the pipeline's trigger.
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
@@ -272,6 +273,25 @@ def _payload_app_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
         if value:
             payload[name] = value
     return "app-error", payload
+
+
+def _payload_ci_failure(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Post a failed job's log TAIL; the hub classifies it by what the log says."""
+    from hub_core import ci_trace
+    trace = ""
+    if arguments.trace_file:
+        stream = sys.stdin if arguments.trace_file == "-" else open(
+            arguments.trace_file, encoding="utf-8", errors="replace")
+        with stream:
+            trace = stream.read()[-ci_trace.TAIL_CHARS:]
+    payload: dict[str, Any] = {"project": arguments.project, "job": arguments.job, "trace": trace}
+    for name in ("pipeline", "job_id", "ref", "sha", "source", "url"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if arguments.deployless:
+        payload["deployless"] = True
+    return "ci-failure", payload
 
 
 def _payload_agent_error(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -612,6 +632,18 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("kind", "severity", "code", "details", "component", "operation", "path", "host"):
         app_error.add_argument("--" + name)
     app_error.set_defaults(payload=_payload_app_error)
+
+    ci_failure = commands.add_parser(
+        "ci-failure", help="report a failed CI job; the hub classifies its log tail")
+    ci_failure.add_argument("--project", required=True)
+    ci_failure.add_argument("--job", required=True)
+    ci_failure.add_argument("--trace-file", dest="trace_file",
+                            help="the job log (or - for stdin); only its tail is sent")
+    for name in ("pipeline", "job-id", "ref", "sha", "source", "url"):
+        ci_failure.add_argument("--" + name, dest=name.replace("-", "_"))
+    ci_failure.add_argument("--deployless", action="store_true",
+                            help="this pipeline carries no deploy stage")
+    ci_failure.set_defaults(payload=_payload_ci_failure)
 
     agent_error = commands.add_parser("agent-error",
                                       help="report a worker-side operational failure")
