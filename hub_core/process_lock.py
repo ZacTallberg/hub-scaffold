@@ -92,10 +92,35 @@ class ProcessFileLock:
         # Only age can break an empty/unrecognized lock.
         return time.time() - stat.st_mtime > self.LEGACY_STALE_S
 
+    def _busy_message(self, budget, where):
+        """Name the holder in the timeout, so a refusal carries its own diagnosis.
+
+        "runtime lock busy" says nothing about WHO held the lock or for how long, and those are
+        exactly what decide between a slow live holder, a dead one, and a recycled pid. Every
+        field is read off the lock file at the moment of giving up, best-effort.
+        """
+        pid = self._holder_pid()
+        try:
+            age = round(time.time() - self.path.stat().st_mtime, 1)
+        except OSError:
+            age = None
+        if pid == os.getpid():
+            holder = "this process (another thread)"
+        elif pid:
+            holder = f"pid {pid} ({'alive' if _pid_alive(pid) else 'dead'})"
+        else:
+            holder = "no pid recorded"
+        return (f"runtime lock busy: {self.path} -- waited {budget:g}s on the {where} lock; "
+                f"held by {holder}, lock file age {age}s, waiting pid {os.getpid()}")
+
     def __enter__(self):
-        self._thread_lock.acquire()
+        # ONE budget covers other threads in this process as well as other processes: an
+        # unbounded in-process acquire used to spend the whole wait before the file timer began.
+        budget = max(0.0, self.timeout)
+        deadline = time.monotonic() + budget
+        if not self._thread_lock.acquire(timeout=budget):
+            raise TimeoutError(self._busy_message(budget, where="thread"))
         if _DEPTH.get(self._key, 0) == 0:
-            deadline = time.monotonic() + self.timeout
             while True:
                 try:
                     fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -121,8 +146,9 @@ class ProcessFileLock:
                 except PermissionError:
                     pass  # Windows delete-pending window: ordinary contention.
                 if time.monotonic() >= deadline:
+                    message = self._busy_message(budget, where="file")
                     self._thread_lock.release()
-                    raise TimeoutError(f"runtime lock busy: {self.path}")
+                    raise TimeoutError(message)
                 time.sleep(0.005)
         _DEPTH[self._key] = _DEPTH.get(self._key, 0) + 1
         return self
