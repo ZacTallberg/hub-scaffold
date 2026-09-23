@@ -17,6 +17,7 @@ import re
 import secrets
 import time
 
+from . import atomic
 from .process_lock import ProcessFileLock
 
 
@@ -87,7 +88,7 @@ class CredentialRegistry:
             os.chmod(tmp, 0o600)
         except OSError:
             pass
-        os.replace(tmp, self.path)
+        atomic.replace(tmp, self.path)
 
     def issue(self, subject: str, scopes, ttl_s: int, *, issued_by: str) -> tuple[str, dict]:
         subject = str(subject or "").strip()

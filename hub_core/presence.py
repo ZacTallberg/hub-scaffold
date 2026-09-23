@@ -34,6 +34,7 @@ import os
 import time
 from pathlib import Path
 
+from . import atomic
 from .process_lock import ProcessFileLock
 
 SESSION_ACTIVE_S = 900          # a console that prompted within 15 minutes is a live console
@@ -125,7 +126,7 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
         if now - epoch(row.get("last_seen")) <= horizon:
             continue
         try:
-            os.replace(str(p), str(_retired_dir(hub_dir) / p.name))   # archive over delete
+            atomic.replace(p, _retired_dir(hub_dir) / p.name)   # archive over delete
             removed += 1
         except OSError:
             pass
@@ -189,9 +190,7 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 payload["sessions"] = {
                     k: v for k, v in sessions.items()
                     if isinstance(v, dict) and epoch(v.get("at")) >= cutoff}
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(tmp, p)
+            atomic.write_json(p, payload)
             # Self-cleaning under the same lock: the write that records a live seat retires
             # dead ones, so the panel is a picture of the CURRENT fleet.
             _prune_locked(hub_dir, now)
