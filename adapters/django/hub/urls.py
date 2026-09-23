@@ -61,6 +61,7 @@ urlpatterns = [
     # The operational error stream's ingest and queue actions.
     path("api/app-error", hub_write.app_error),
     path("api/agent-error", hub_write.agent_error),
+    path("api/ci-failure", hub_write.ci_failure),
     path("api/ack-error", hub_write.ack_error),
     path("api/clear-errors", hub_write.clear_errors),
     path("api/client-error", hub_api.client_error, name="client-error"),
