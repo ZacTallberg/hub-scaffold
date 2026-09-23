@@ -323,8 +323,19 @@ def complete(request, b):
             if problem:
                 bad[str(e)[:200]] = problem
         if bad:
+            # The refusal carries its own fix. The check is all-or-nothing, so a good URL
+            # sent BESIDE an unreachable item still refuses the whole completion -- and the
+            # usual reaction, dropping the real reference into prose, loses it from the record.
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from WORK_ROOT)",
+                "msg": "every evidence_uri must dereference (URL <400 / commit in this repo / "
+                       "existing path from WORK_ROOT); ONE bad item refuses the whole "
+                       "completion and the task stays in progress",
+                "fix": "resend with only references this hub can resolve: a URL it can fetch "
+                       "unauthenticated, a commit pushed to the repo it serves, or a path under "
+                       "its WORK_ROOT. A reference it cannot reach (a commit in another repo, a "
+                       "page behind sign-in) belongs behind a URL it can fetch -- or the board "
+                       "runs tracked mode (HUB_DONE_STRICTNESS=tracked), which records it as "
+                       "given. Keep the reference in evidence_uri; do not move it into prose.",
                 "bad": bad}]}, status=422)
     ent = hub_app.current_state().get("entities", {}).get(eid)
     if not ent:
