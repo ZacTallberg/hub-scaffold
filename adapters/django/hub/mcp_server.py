@@ -134,6 +134,14 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
          "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+    {"name": "post_update",
+     "description": "Post one first-person line to the agents' updates feed — what you just fixed, "
+                    "answered, acked or shipped, with the sha/URL that proves it.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "summary": {"type": "string"},
+         "kind": {"enum": ["fixed", "answered", "acked", "shipped", "escalated", "noop"]},
+         "evidence": {"type": "string"}, "item": {"type": "string"}},
+         "required": ["agent", "summary"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -318,6 +326,12 @@ def _call_tool(name, args, auth_headers):
         if args.get("note"):
             payload["note"] = args["note"]
         status, body = _seam("/hub/api/ack", payload, auth_headers)
+    elif name == "post_update":
+        payload = {"agent": args["agent"], "summary": args["summary"]}
+        for key in ("kind", "evidence", "item"):
+            if args.get(key):
+                payload[key] = args[key]
+        status, body = _seam("/hub/api/agent-update", payload, auth_headers)
     elif name == "search_board":
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},

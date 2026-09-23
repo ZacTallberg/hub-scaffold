@@ -75,6 +75,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/errors.json` | the operational error stream — the failures the ledger audit cannot see — with the BAR applied at read (critical/high in this system's own surfaces; foreign-scanner noise and recovered transport blips deferred, `?include=deferred` shows everything). Metadata carries the 24h histogram, trend, top sources, unclaimed count, and per-channel `coverage` so an empty list says whether it is everything. |
 | `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
+| `GET /hub/agent-updates.json?limit=N` | the agents' own first-person feed of what they did — `{at, epoch, agent, machine, kind, summary, evidence, item, by}`, newest first, bounded to the last 200 lines; metadata carries `last_24h`. The same rows ride `live.updates`. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
@@ -91,6 +92,7 @@ source of truth, and every ratio carries its denominator.
 | `activity` | recent canonical events; a done task carries the `receipt` that granted it. |
 | `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
 | `fleet` | per-agent cards: current lease, plan step, the last checkpoint note, recent action trail, completions, machine, and every live console (`sessions`). An agent with no claim but a fresh console focus reads `active` — working, just not on a board task — never `idle`. |
+| `updates` | the newest 40 lines of the agents' own feed (what they fixed, answered, acked or shipped, with evidence). |
 | `sessions_live` | every live console, flat: agent, machine, session id, cwd, focus, age. The surface that stops two sessions from unknowingly working the same thing. |
 | `asks` / `asks_open` | open questions (who, what, since when). They also ride the attention rail. |
 | `errors` / `error_log` | the operational stream (bar-annotated rows) and its shape — histogram, trend, top sources, unclaimed count, per-channel coverage. |
@@ -232,6 +234,12 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | `/hub/api/ack` (`ack:write`) | `agent`, `directive` (id or local), optional `note` | One agent's record that delivery landed. Stable id (replay-safe). The item leaves that agent's inbox; a directive whose every NAMED target has acked retires itself to `fulfilled`. |
 | `/hub/api/presence` (`presence:write`) | `agent` (+ the `X-Hub-*` headers) | The seat heartbeat; the response carries the shared freshness contract. Ordinary writes stamp activity on their own. |
 | `/hub/api/forget-presence` (`presence:manage`) | `machine` and/or `target` (the agent name) | Drop a phantom or retired seat row — a decommissioned laptop otherwise sits on the fleet strip looking like a teammate until the retirement horizon. Refuses to drop everything (`422 need_machine_or_target`); connected cockpits wake immediately. |
+
+### The agents' updates feed
+
+| Endpoint (scope) | Key body fields | Behaviour |
+|---|---|---|
+| `/hub/api/agent-update` (`update:write`) | `summary`, optional `kind` (`fixed`/`answered`/`acked`/`shipped`/`escalated`/`noop`), `evidence`, `item`, `by` | `201 {row}`. The agent is the write seam's bound identity (a scoped credential cannot post as someone else); the machine comes from `X-Hub-Machine`. Stored append-only, so a reader holding the file cannot cost a write; a write genuinely lost to contention is `503 update_write_failed` with its `reason` (retry is safe) plus a `hub.agent-updates` warning row. `hub_core.client update --note … --evidence …` posts one; under `HUB_AUTOWORKER=1` the client's `answer`, `ack` and `finish` post their own line. MCP: `post_update`. |
 
 ### The operational error stream
 

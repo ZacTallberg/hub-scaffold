@@ -1542,6 +1542,52 @@
     ]);
   }
 
+  /* ---- UPDATES: the agents' own first-person feed of what they DID ----
+     Chat-style, newest first, streamed over the same live tick as everything else. Evidence
+     that is a URL is a link; anything else (a sha, a path) is shown as code, never invented. */
+  var UPDATE_GLYPH = { fixed: "✓", shipped: "↑", answered: "↩", acked: "✓",
+                       escalated: "⤴", noop: "·" };
+  function updatesCard(rows) {
+    rows = rows || [];
+    var day = Date.now() / 1000 - 86400;
+    var fresh = rows.filter(function (u) { return (u.epoch || 0) >= day; }).length;
+    var body = el("div", { class: "card-body" });
+    if (!rows.length) {
+      body.appendChild(el("p", { class: "cell-sub", text:
+        "Nothing posted yet. An agent narrates a fix with the client (update --note … --evidence …); unattended agents post on answer, ack and finish by themselves." }));
+    }
+    var feed = el("ol", { class: "updates-feed", "aria-label": "agent updates, newest first" });
+    rows.slice(0, 12).forEach(function (u) {
+      var ev = String(u.evidence || "");
+      var evNode = !ev ? null : /^https?:\/\//i.test(ev)
+        ? el("a", { class: "update-ev", href: ev, target: "_blank", rel: "noopener noreferrer", text: ev })
+        : el("code", { class: "update-ev", text: ev });
+      feed.appendChild(el("li", { class: "update-bubble", "data-kind": u.kind || "fixed",
+                                  "data-focus-key": "upd:" + (u.epoch || "") + ":" + (u.agent || "") }, [
+        el("span", { class: "update-glyph", "aria-hidden": "true", text: UPDATE_GLYPH[u.kind] || "•" }),
+        el("div", { class: "update-body" }, [
+          el("div", { class: "update-meta" }, [
+            el("strong", { text: u.agent || "an agent" }),
+            u.machine ? el("span", { text: " · " + u.machine }) : null,
+            el("span", { text: " · " + (u.kind || "fixed") + (u.by ? " (" + u.by + ")" : "") + " · " }),
+            el("time", { class: "rel-time", datetime: u.at || "", "data-ts": u.at || "", text: relativeTime(u.at) })
+          ].filter(Boolean)),
+          el("p", { class: "update-summary", text: u.summary || "" }),
+          evNode
+        ].filter(Boolean))
+      ]));
+    });
+    if (rows.length) body.appendChild(feed);
+    return el("section", { class: "card updates-card", id: "updatesCard", "aria-labelledby": "updatesTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "updatesTitle" }, [icon("pulse"),
+          doc.createTextNode("Agent updates")]),
+        el("span", { class: "badge b-" + (fresh ? "pass" : "stale"), text: fresh + " in 24h" })
+      ]),
+      body
+    ]);
+  }
+
   function overviewHeading(kicker, title, copy) {
     return el("div", { class: "overview-heading" }, [
       el("span", { class: "overview-heading-kicker", text: kicker }),
@@ -1599,6 +1645,9 @@
     scroll.appendChild(overviewHeading("Outcome", "From completion to reality",
       "Follow delivered work through the branch, release, live state, and canonical event record."));
     scroll.appendChild(el("div", { class: "outcome-grid" }, [delivery, actCard].filter(Boolean)));
+    scroll.appendChild(overviewHeading("Narrative", "In the agents' own words",
+      "What each agent says it fixed, answered or shipped — with the evidence behind it."));
+    scroll.appendChild(el("div", { class: "narrative-grid" }, [updatesCard(L.updates)]));
 
     // audit card
     var auBody = el("div", { class: "card-body" });

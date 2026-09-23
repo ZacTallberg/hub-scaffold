@@ -27,6 +27,7 @@ urlpatterns = [
     path("errors.json", hub_api.errors_json, name="errors"),
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    path("agent-updates.json", hub_api.agent_updates_json, name="agent-updates"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -56,6 +57,7 @@ urlpatterns = [
     path("api/presence", hub_write.presence_ping),
     path("api/forget-presence", hub_write.forget_presence),
     # The operational error stream's ingest and queue actions.
+    path("api/agent-update", hub_write.agent_update),
     path("api/app-error", hub_write.app_error),
     path("api/agent-error", hub_write.agent_error),
     path("api/ack-error", hub_write.ack_error),
