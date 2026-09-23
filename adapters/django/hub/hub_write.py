@@ -1383,6 +1383,41 @@ def forget_presence(request, b):
     return JsonResponse({"data": {"machine": machine, "target": target, "forgotten": removed}})
 
 
+# ── The agents' own feed: what they DID, in their words ──
+
+@writer(scope="update:write")
+def agent_update(request, b):
+    """Post one first-person line to the updates feed: ``{summary, kind?, evidence?, item?}``.
+
+    The agent is bound by the write seam (a scoped credential's subject, never a body claim), so
+    an update can never be attributed to someone else; the machine comes from X-Hub-Machine. A
+    write lost to contention answers a RETRYABLE 503 naming the reason and records a warning row
+    — a lost narrative line is real data loss that must be visible, but not a defect to page on."""
+    from hub_core import updates as _updates
+    summary = str(b.get("summary") or "").strip()
+    if not summary:
+        return JsonResponse({"errors": [{"code": "need_summary"}]}, status=400)
+    agent = b.get("agent") or request.hub_auth.subject
+    row, reason = _updates.record(
+        hub_app.HUB_DIR, agent=agent, kind=str(b.get("kind") or "fixed"), summary=summary,
+        machine=request.headers.get("X-Hub-Machine") or str(b.get("machine") or ""),
+        evidence=str(b.get("evidence") or ""), item=str(b.get("item") or ""),
+        by=str(b.get("by") or ""))
+    if row is None:
+        try:
+            hub_app.record_error(
+                "hub.agent-updates", "an agent update was dropped: %s" % reason,
+                severity="warning", code="update_write_failed",
+                context={"component": "agent-updates", "agent": str(agent)[:120]})
+        except Exception:                                    # noqa: BLE001
+            pass
+        return JsonResponse({"errors": [{"code": "update_write_failed", "reason": reason,
+            "msg": "the updates feed was busy and this line was not appended; retry is safe"}]},
+            status=503)
+    hub_app._publish_realtime("updates.recorded")
+    return JsonResponse({"data": row}, status=201)
+
+
 # ── Operational error ingest: the surfaces the ledger audit cannot see ──
 
 @writer(scope="error:report")

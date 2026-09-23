@@ -27,6 +27,9 @@ in silence::
       --text "the retry queue; requeue stalled items"         # needs directive:write
     python -m hub_core.client ack project:directive:0001 --agent worker-1
 
+`update --note "..." --evidence <sha|url>` posts one first-person line to the agents' feed; under
+HUB_AUTOWORKER=1 the answer/ack/finish verbs post their own line automatically.
+
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
@@ -180,7 +183,7 @@ def _get(base: str, path: str, timeout: int = 30) -> dict[str, Any]:
 
 
 def _agent(arguments: argparse.Namespace) -> str:
-    return arguments.agent or os.environ.get("HUB_AGENT_ID") or "agent"
+    return getattr(arguments, "agent", None) or os.environ.get("HUB_AGENT_ID") or "agent"
 
 
 def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -273,6 +276,39 @@ def _payload_ack(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     if arguments.note:
         payload["note"] = arguments.note
     return "ack", payload
+
+
+def _payload_update(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """One first-person line on the agents' feed. `--evidence` MUST reach the row: a feed post
+    without the sha/url behind it is the one thing feed evidence exists to prevent."""
+    payload: dict[str, Any] = {"agent": _agent(arguments), "summary": arguments.note,
+                               "kind": arguments.kind}
+    if arguments.evidence:
+        payload["evidence"] = arguments.evidence
+    if arguments.item:
+        payload["item"] = arguments.item
+    payload["by"] = "autoworker" if _autoworker() else "human"
+    return "agent-update", payload
+
+
+def _autoworker() -> bool:
+    return os.environ.get("HUB_AUTOWORKER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _auto_update(base: str, arguments: argparse.Namespace, kind: str, summary: str,
+                 evidence: str = "", item: str = "") -> dict[str, Any] | None:
+    """The emit is MECHANICAL for unattended agents, so one cannot forget to narrate: under
+    HUB_AUTOWORKER=1 the answer/ack/finish verbs post their own feed line. An interactive person
+    running the same verb does not flood the feed. Fail-soft: narration never fails the verb."""
+    if not _autoworker():
+        return None
+    try:
+        return _post(base, "agent-update",
+                     {"agent": _agent(arguments), "kind": kind, "summary": summary[:4000],
+                      "evidence": evidence, "item": item, "by": "autoworker"},
+                     extra_headers=_presence_headers(arguments))
+    except (RuntimeError, ValueError) as error:
+        return {"feed_error": str(error)[:300]}
 
 
 def _payload_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -539,7 +575,10 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
         payload["verification_run"] = receipt
 
     result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
-    return {"completed": result,
+    feed = _auto_update(base, arguments, "fixed",
+                        f"Finished {entity.get('title') or arguments.task_id}: {arguments.accept_note}",
+                        evidence=(arguments.evidence or [""])[0], item=arguments.task_id)
+    return {"completed": result, **({"feed": feed} if feed else {}),
             **({"verification_run": receipt} if receipt else
                {"note": "no critical probe was declared — done stands on the real operation"})}
 
@@ -614,6 +653,17 @@ def _parser() -> argparse.ArgumentParser:
     ack.add_argument("--agent")
     ack.add_argument("--note")
     ack.set_defaults(payload=_payload_ack)
+
+    update = commands.add_parser("update",
+                                 help="post one first-person line to the agents' updates feed")
+    update.add_argument("--note", required=True, help="what you did, in your own words")
+    update.add_argument("--evidence", help="the sha / URL / path that proves it")
+    update.add_argument("--kind", choices=("fixed", "answered", "acked", "shipped", "escalated",
+                                           "noop"), default="fixed")
+    update.add_argument("--item", help="the board id this narrates (task, question, error)")
+    update.add_argument("--agent")
+    update.add_argument("--machine")
+    update.set_defaults(payload=_payload_update)
 
     presence = commands.add_parser("presence",
                                    help="seat heartbeat; sends X-Hub-* headers from env/flags")
@@ -730,6 +780,19 @@ def main() -> int:
         else:
             operation, payload = arguments.payload(arguments)
             result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+            if operation == "answer":
+                feed = _auto_update(base, arguments, "answered",
+                                    "Answered %s: %s" % (arguments.question_id, arguments.text),
+                                    item=arguments.question_id)
+            elif operation == "ack":
+                feed = _auto_update(base, arguments, "acked",
+                                    "Acknowledged %s%s" % (arguments.directive_id,
+                                                           (": " + arguments.note) if arguments.note else ""),
+                                    item=arguments.directive_id)
+            else:
+                feed = None
+            if feed:
+                result = {**result, "feed": feed}
     except (ValueError, RuntimeError) as error:
         print(str(error), file=sys.stderr)
         return 1

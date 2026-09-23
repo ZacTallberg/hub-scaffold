@@ -16,7 +16,8 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
 
 from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
-                      inbox as inbox_core, project, projections, telemetry, upcast, wip)
+                      inbox as inbox_core, project, projections, telemetry, upcast, updates,
+                      wip)
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
@@ -834,6 +835,9 @@ def _live_blocks(events, state, audit, deliv, cursor):
         # EVERY LIVE CONSOLE, flat: the surface that stops two sessions from unknowingly
         # working the same thing. The per-agent fleet cards roll these up.
         "sessions_live": sessions_live[:12],
+        # THE AGENTS' OWN FEED: what they did, in their words, newest first — rides the same
+        # push tick so a posted fix appears on every open board within a second.
+        "updates": updates.read(hub_dir, 40),
         "attention": _attention(state, audit, inflight, adher, deliv,
                                 asks=asks, error_unclaimed=error_unclaimed),
         "telemetry": telemetry.read_aggregate(hub_dir),
@@ -857,7 +861,7 @@ def _snapshot(served=None):
         # last append happened to capture.
         key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
                hub_app.presence_stamp(), errorlog.stamp(hub_app.HUB_DIR),
-               git_head, int(time.time() // 5))
+               updates.stamp(hub_app.HUB_DIR), git_head, int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
         events, state = _projected(s, cur)
@@ -912,6 +916,7 @@ def _snapshot(served=None):
             "errors": side_error_rows[:40],
             "error_log": side_error_meta,
             "sessions_live": side_sessions[:12],
+            "updates": updates.read(hub_dir, 40),
             "attention": _attention(state, audit, inflight, adher, deliv,
                                     asks=side_asks, error_unclaimed=side_unclaimed),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
@@ -1379,6 +1384,20 @@ def inbox_wait(request):
     return JsonResponse({"data": payload,
                          "metadata": {"agent": agent, "operator": _operator_agent(),
                                       "max_wait_s": inbox_core.MAX_WAIT_S}})
+
+
+@require_GET
+def agent_updates_json(request):
+    """The agents' first-person feed, newest first (``?limit=``, default 60, max 200)."""
+    try:
+        limit = max(1, min(int(request.GET.get("limit") or 60), updates.KEEP))
+    except (TypeError, ValueError):
+        limit = 60
+    rows = updates.read(hub_app.HUB_DIR, limit)
+    day = time.time() - 86400
+    return JsonResponse({"data": rows, "metadata": {
+        "count": len(rows), "last_24h": sum(1 for r in rows if (r.get("epoch") or 0) >= day),
+        "kinds": list(updates.KINDS)}})
 
 
 # ── The operational error stream, whoami, and board search ──
