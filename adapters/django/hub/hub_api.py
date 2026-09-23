@@ -980,13 +980,95 @@ def _etag(snap):
     return '"%s"' % content_hash(snap)
 
 
+# -- Input-state memo for the heavy JSON reads ------------------------------------------------
+#
+# hub.json and next.json were rebuilt per request: open the store (sqlite connect, ledger lock,
+# schema check), run `git rev-parse`, fingerprint leases, and then -- for hub.json -- hash and
+# re-serialize the whole snapshot BEFORE the ETag could even be compared. A 304 saved bytes,
+# never CPU, and a supervisor or several tabs asking the same question paid for it every time.
+#
+# The memo keys a view's BYTES on a stats-only fingerprint of what the view is built from, taken
+# without opening anything, and serves those bytes (or a 304) while the fingerprint holds and the
+# build is younger than the view's reuse cap. The cap bounds everything the stamps do not model:
+# time-only boundaries (not_before timers, rolling windows, a lease expiring with no file moving)
+# and a code landing that moves the git head. hub.json's cap equals the snapshot memo's own
+# five-second time bucket, so the memo adds no staleness the snapshot did not already allow.
+#
+# Two rules keep it honest. A build is remembered only if its inputs did not move WHILE it ran --
+# otherwise the bytes describe a state that no longer matches the key. And any stamp that cannot
+# be read yields None, which means "build", never "assume unchanged".
+MEMO_REUSE_S = {"hub": 5.0, "next": 10.0}
+_VIEW_MEMO: dict = {}
+_VIEW_MEMO_LOCK = threading.Lock()
+
+
+def _view_inputs():
+    """Stats-only fingerprint of the stores the heavy reads are built from.
+
+    The ledger contributes its SIZE, not its mtime: opening the store restamps the file's mtime,
+    while every append (and every heal) changes its size. Leases, presence, the error sidecars
+    and worker telemetry change with no ledger event, so each contributes its own stamp."""
+    import os as _os
+    try:
+        ledger = (hub_app.HUB_DIR / "events.jsonl").stat().st_size
+        claims = ()
+        if hub_app.CLAIMS.exists():
+            claims = tuple(sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size)
+                                  for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")))
+        return (ledger, claims, hub_app.presence_stamp(), errorlog.stamp(hub_app.HUB_DIR),
+                _telemetry_fp())
+    except OSError:
+        return None
+
+
+def _memo_hit(name, extra, sent_etag=None):
+    """Return (ready response or None, memo key or None) for one view at the current inputs."""
+    inputs = _view_inputs()
+    if inputs is None:
+        return None, None
+    key = (name, extra, inputs)
+    with _VIEW_MEMO_LOCK:
+        hit = _VIEW_MEMO.get(key)
+    if hit is None or time.monotonic() - hit[0] >= MEMO_REUSE_S[name]:
+        return None, key
+    _at, etag, body = hit
+    if etag and sent_etag == etag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = HttpResponse(body, content_type="application/json")
+    if etag:
+        resp["ETag"] = etag
+    resp["X-Hub-Memo"] = "hit"
+    return resp, key
+
+
+def _memo_store(key, resp, etag=None):
+    """Keep a 200 build only if its inputs did not move while it was built."""
+    if key is None or getattr(resp, "status_code", 0) != 200:
+        return
+    if key[2] != _view_inputs():
+        return
+    with _VIEW_MEMO_LOCK:
+        if len(_VIEW_MEMO) >= 32:
+            _VIEW_MEMO.clear()
+        _VIEW_MEMO[key] = (time.monotonic(), etag, resp.content)
+
+
 def hub_json(request):
-    _, snap = _snapshot(request.GET.get("served"))
+    served = request.GET.get("served")
+    sent = request.headers.get("If-None-Match")
+    hit, key = _memo_hit("hub", served, sent)
+    if hit is not None:
+        return hit
+    _, snap = _snapshot(served)
     etag = _etag(snap)
     # 304 on a matching If-None-Match: a reconnect re-ground or supervisor read gets an empty body
     # when nothing changed, instead of the full snapshot every time.
-    resp = HttpResponse(status=304) if request.headers.get("If-None-Match") == etag \
-        else JsonResponse(snap)
+    if sent == etag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = JsonResponse(snap)
+        _memo_store(key, resp, etag)
     resp["ETag"] = etag
     return resp
 
@@ -1167,6 +1249,25 @@ def live_events(request):
 
 
 def next_json(request):
+    """DISCOVER -- built once per input state and reused for at most MEMO_REUSE_S["next"].
+
+    A supervisor or a fleet of worker beacons asks this same question every heartbeat, and each
+    ask replayed the whole ledger. A lease that EXPIRES moves no file, so the reuse cap is what
+    bounds how late a stale reclaim appears; a claim or release rewrites the claims directory
+    and invalidates the memo at once. A 429 (saturated) answer is never remembered."""
+    try:
+        n = max(1, min(int(request.GET.get("n", "1")), 50))
+    except ValueError:
+        n = 1
+    hit, key = _memo_hit("next", n)
+    if hit is not None:
+        return hit
+    resp = _next_json_build(n)
+    _memo_store(key, resp)
+    return resp
+
+
+def _next_json_build(n):
     """DISCOVER: ranked unblocked tasks without a live lease, including stale reclaims.
 
     A worker's entrypoint — pull the top task, claim it, and complete the real operation. A receipt
@@ -1221,10 +1322,6 @@ def next_json(request):
                       for t in tasks
                       if t.get("status") == "todo" and flags.get(t["id"], {}).get("snoozed_until")),
                      key=lambda t: (t.get("not_before") or "", t["id"]))
-    try:
-        n = max(1, min(int(request.GET.get("n", "1")), 50))
-    except ValueError:
-        n = 1
     rows = [dict(t, available=True) for t in ready[:n]]
     return JsonResponse({"data": rows, "needs_spec": needs_spec[:n], "snoozed": snoozed[:n],
                          "metadata": {"available": len(ready), "unblocked": len(ready),

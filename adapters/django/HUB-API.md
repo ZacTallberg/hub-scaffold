@@ -90,6 +90,14 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
 unchanged, so an idle poll or a re-grounding pull costs an empty body.
 
+`hub.json` and `next.json` are **built once per input state**. A stats-only fingerprint of what
+they are built from (ledger size, the lease directory, presence, the error sidecars, telemetry) is
+taken before anything is opened; while it holds and the build is younger than the view's reuse cap
+(`hub.json` 5 s, matching the snapshot's own time bucket; `next.json` 10 s, which bounds how late
+an expired lease reappears as a stale reclaim), the cached bytes or a 304 are served without
+building a snapshot. Such responses carry `X-Hub-Memo: hit`. A build is remembered only if its
+inputs did not move while it ran, and an unreadable stamp always builds.
+
 ### The `live` block — what the cockpit reads
 
 Every key is derived from the same fold the rest of the snapshot uses; none of it is a second
