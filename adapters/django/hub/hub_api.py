@@ -16,7 +16,8 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
 
 from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
-                      inbox as inbox_core, project, projections, telemetry, upcast, wip)
+                      inbox as inbox_core, presence as _presence, project, projections,
+                      telemetry, upcast, wip)
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
@@ -148,6 +149,9 @@ def _inflight(state, stall_s=STALL_S):
         heartbeat_age = int(now - heartbeat) if heartbeat else None
         rows.append({
             "task": task, "agent": lease.get("agent"),
+            # The claiming console, when the client said which: what lets one of an agent's
+            # several live consoles — and only that one — show as holding this task.
+            "session": str(lease.get("session") or "")[:8],
             "title": ent.get("title") or task.rsplit(":", 1)[-1],
             "status": ent.get("status"), "age_s": age,
             "heartbeat_age_s": heartbeat_age,
@@ -583,7 +587,10 @@ def _fleet(events, state, inflight):
     # same thing.
     sessions_by_agent = {}
     try:
-        for s in hub_app.live_sessions():
+        # Each console carries the task IT claimed (presence.attribute_leases): certain when
+        # the lease names the claiming session, attributed for a legacy lease only when the
+        # agent has one live console. Never inferred from the directory a console stands in.
+        for s in _presence.attribute_leases(hub_app.live_sessions(), inflight or []):
             sessions_by_agent.setdefault(s["agent"], []).append(s)
     except Exception:                                        # noqa: BLE001 - never 500 the board
         sessions_by_agent = {}

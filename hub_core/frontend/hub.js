@@ -1037,6 +1037,10 @@
       kids.push(el("ul", { class: "agent-sessions" }, c.sessions.slice(0, 4).map(function (s) {
         return el("li", { class: "agent-sess" }, [
           el("span", { class: "sess-id", text: s.session || "?" }),
+          // Only the console that CLAIMED the task is marked as holding it; a sibling
+          // window standing in the same directory is not its owner.
+          s.task_id ? el("span", { class: "sess-held", title: "this console holds " + s.task_id,
+                                   text: "holds " + localId(s.task_id) }) : null,
           s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null,
           s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
           el("span", { class: "sess-age", text: s.age_s != null ? fmtAge(s.age_s) : "" })
@@ -1424,6 +1428,8 @@
       var consoles = c.sessions.map(function (sess) {
         return row((sess.session || "?") + (sess.machine ? " @ " + sess.machine : ""),
           el("div", null, [
+            sess.task_id ? el("div", { class: "cell-sub", text: "holds " + sess.task_id +
+              " (claimed from this console)" }) : null,
             sess.focus ? el("div", { class: "detail-prose", text: sess.focus }) : null,
             el("div", { class: "cell-sub", text: (sess.cwd || "") +
                (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") })
