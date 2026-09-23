@@ -40,6 +40,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import atomic
 from .process_lock import ProcessFileLock
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -184,9 +185,7 @@ def _compact_locked(hub_dir) -> None:
         if not path.exists() or path.stat().st_size <= MAX_BYTES:
             return
         rows = path.read_text(encoding="utf-8", errors="replace").splitlines()[-KEEP_ROWS:]
-        temp = path.with_suffix(".compact.tmp")
-        temp.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
-        os.replace(temp, path)
+        atomic.write_text(path, "\n".join(rows) + ("\n" if rows else ""))
     except OSError:
         return
 
@@ -243,8 +242,9 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
         Path(hub_dir).mkdir(parents=True, exist_ok=True)
         with ProcessFileLock(Path(hub_dir), name=".errors.lock", timeout=5):
             _compact_locked(hub_dir)
-            with _errors_path(hub_dir).open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+            atomic.append_line(_errors_path(hub_dir),
+                               json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n",
+                               newline="\n", fsync=False)
         _WRITE_FAILURE.pop(key, None)
     except Exception as exc:                                 # noqa: BLE001 - must not raise
         # Logging cannot raise into the failing request, but the board must not call a
@@ -334,9 +334,7 @@ def ack(hub_dir, fingerprint: str, actor: str = "", note: str = "") -> dict:
                 for stale in sorted(current, key=lambda k: current[k].get("at", "")
                                     )[:len(current) - KEEP_ROWS]:
                     current.pop(stale, None)
-            temp = _acked_path(hub_dir).with_suffix(".tmp")
-            temp.write_text(json.dumps(current), encoding="utf-8")
-            os.replace(temp, _acked_path(hub_dir))
+            atomic.write_json(_acked_path(hub_dir), current)
     except Exception:                                        # noqa: BLE001
         return {}
     return entry
@@ -352,9 +350,7 @@ def unack(hub_dir, fingerprint: str) -> bool:
             if fingerprint not in current:
                 return False
             current.pop(fingerprint)
-            temp = _acked_path(hub_dir).with_suffix(".tmp")
-            temp.write_text(json.dumps(current), encoding="utf-8")
-            os.replace(temp, _acked_path(hub_dir))
+            atomic.write_json(_acked_path(hub_dir), current)
         return True
     except Exception:                                        # noqa: BLE001
         return False
@@ -391,9 +387,7 @@ def clear(hub_dir, before_epoch=None, only_acked=False) -> dict:
                     removed += 1
                 else:
                     kept.append(line)
-            temp = path.with_suffix(".clear.tmp")
-            temp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-            os.replace(temp, path)
+            atomic.write_text(path, "\n".join(kept) + ("\n" if kept else ""))
     except Exception as exc:                                 # noqa: BLE001
         return {"removed": 0, "kept": 0, "reason": type(exc).__name__}
     return {"removed": removed, "kept": len(kept)}
