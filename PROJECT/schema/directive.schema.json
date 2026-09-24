@@ -20,6 +20,7 @@
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
+    "unattended": { "type": "boolean", "description": "True when an UNATTENDED run wrote this (an answer from an automated responder). The asker is told which kind of answer they got: it calibrates how much to double-check, and nobody should discover later that the operator who answered them was a machine." },
     "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }

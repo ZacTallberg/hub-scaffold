@@ -188,12 +188,12 @@ project key are renameable bindings; the rules are not.
   "$defs": {
     "id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack|held):[a-z0-9][a-z0-9._-]*$",
       "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
     },
     "idref": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack):[a-z0-9][a-z0-9._-]*$",
+      "pattern": "^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack|held):[a-z0-9][a-z0-9._-]*$",
       "description": "A machine-resolvable reference to another entity by id. The audit FAILS on any dangling idref."
     },
     "isoDate": { "type": "string", "format": "date-time" },
@@ -323,7 +323,7 @@ project key are renameable bindings; the rules are not.
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
-      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." } }, "required": ["step", "done"] },
+      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." }, "kind": { "enum": ["checkpoint", "pushed", "deployed", "handed_back", "lease_released", "reaped", "launcher_timeout", "claim_expired", "lifecycle"], "description": "What this row IS, so a reader never parses the note: checkpoint (work), pushed (the row names the commit it produced in `sha`), or a LIFECYCLE kind -- a row a scheduler wrote about its own run (hub_core.plan.LIFECYCLE_KINDS). Lifecycle rows are shown but never counted as work done." }, "lifecycle": { "type": "boolean", "description": "True on a row a scheduler wrote about its own run (a hand-back, a released lease, a reaped worker), never about the work. Every completeness counter leaves it out." }, "times": { "type": "integer", "minimum": 1, "description": "How many times this one lifecycle row has happened: a recurring hand-back is ONE row counting itself, not N identical rows." }, "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$", "description": "The commit this checkpoint produced (kind pushed). Structured, so a task's lineage to what is serving it never has to be inferred from prose." } }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
@@ -355,6 +355,10 @@ project key are renameable bindings; the rules are not.
     "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },
     "verified_by": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" }, "description": "Substantive result summaries from the completed real operation; >=1 required for done." },
     "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
+    "machine": { "type": "string", "maxLength": 120, "pattern": "^$|^[a-z0-9][a-z0-9._-]{0,119}$", "description": "MACHINE AFFINITY: the only machine that can do this task, because its input is there (a file in a person's downloads, a host-only share). A task with one is offered (next.json, take) only to a caller that declares that machine; a task without one is offered everywhere. Empty string clears it." },
+    "hop": { "type": "integer", "minimum": 0, "maximum": 9, "description": "ESCALATION DEPTH: how many unattended runs deep this task was raised (0/absent = a person or an attended session). An unattended caller may take a hop-1 task once more after a cooldown; hop 2 and beyond is a person's (hub_core.offer). Bounds agent-to-agent escalation chains." },
+    "project": { "type": "string", "maxLength": 81, "pattern": "^[a-z0-9][a-z0-9._-]{0,80}$", "description": "The project this task is ABOUT, when it is not the Hub's own repository. A commit sha offered as evidence, and a task's lineage, are resolved against this project's repository as well as the Hub's (HUB_PROJECT_REPOS / HUB_COMMIT_RESOLVER)." },
+    "assigned_to": { "type": "string", "maxLength": 64, "pattern": "^$|^[a-z0-9][a-z0-9._-]{0,63}$", "description": "AGENT AFFINITY: the agent this task was GIVEN to (POST /hub/api/hand). Until they claim it, the board shows them as its owner, their inbox carries it, and atomic pull (take) never hands it to anyone else. The lease still wins once somebody holds it: who is holding a task beats who was given it. Empty string clears the assignment." },
     "surfaced_by": { "$ref": "hub:common#/$defs/idref", "description": "The task/work during which this was scouted." },
     "source": { "type": "string", "description": "Where it came from, e.g. REVIEW-G3, CHARTER, RESEARCH-HISTORY." },
     "legacy_ref": { "type": "string", "description": "Pre-migration id, e.g. #V4.7 / A3." },
@@ -704,6 +708,7 @@ project key are renameable bindings; the rules are not.
     "tags": { "type": "array", "items": { "type": "string" } },
     "relates_to": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "task/adr/feat this came from or informs." },
     "asker": { "type": "string", "description": "For a note tagged `question`: who asked, stamped once by the ask endpoint. First-class on purpose — provenance.agent becomes whoever LAST touched the note (the answerer, after an answer), so deriving the asker from provenance mis-addresses every re-answered reply." },
+    "hop": { "type": "integer", "minimum": 0, "maximum": 9, "description": "For a question raised by an unattended run: how many unattended hops deep it is (absent/0 = a person or an attended session). Bounds agent-to-agent escalation chains." },
     "found_at": { "type": "string", "description": "when/where it was learned." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
@@ -737,6 +742,7 @@ project key are renameable bindings; the rules are not.
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
+    "unattended": { "type": "boolean", "description": "True when an UNATTENDED run wrote this (an answer from an automated responder). The asker is told which kind of answer they got: it calibrates how much to double-check, and nobody should discover later that the operator who answered them was a machine." },
     "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }

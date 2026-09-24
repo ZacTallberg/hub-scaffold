@@ -18,7 +18,10 @@ _KNOWN = {"task", "run", "adr", "feat", "gap", "cap", "deploy", "note",
           # named agents (an answer to a question is a directive with `answers`); an ack is
           # one agent's record that delivery landed. Both fold so the inbox, the board, and
           # the JSON API read one truth.
-          "directive", "ack"}
+          "directive", "ack",
+          # The promotion lane: a finished commit deliberately held back from live, ageing in
+          # public until it is promoted with evidence (adapters/django/hub/held.py).
+          "held"}
 # Statuses that count as "satisfied" for dependency purposes.
 _DONE = {"done", "closed", "shipped", "accepted", "extracted", "reusable", "proven"}
 # Dependency SATISFACTION additionally treats a dropped dep as terminally resolved, matching the
@@ -72,6 +75,7 @@ _EDGES = {
     "note": {"relates_to": "relates_to"},
     "directive": {"answers": "answers", "supersedes": "supersedes"},
     "ack": {"directive": "acks"},
+    "held": {"from_gap": "answers_gap"},
 }
 
 
