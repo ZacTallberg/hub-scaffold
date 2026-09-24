@@ -1,0 +1,60 @@
+{% load static %}<!doctype html>
+<html lang="en" data-app-shell>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  {# Theme is decided BEFORE first paint so there is no flash; shell.js seeds from this. #}
+  <script>
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem("app-theme"); } catch (e) {}
+      var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    })();
+  </script>
+  <link rel="stylesheet" href="{% static 'app_shell/shell.css' %}">
+  {% block head %}{% endblock %}
+</head>
+<body data-build="{{ build_id }}">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="app-header">
+    <a class="app-brand" href="{% block home_url %}/{% endblock %}">{{ app_name }}</a>
+    <nav class="app-nav" aria-label="Sections">{% block nav %}{% endblock %}</nav>
+    <div class="app-actions">
+      {% if shell.live %}
+      <span class="live-status" data-live-status aria-live="polite">
+        <span class="live-pip" aria-hidden="true"></span><span class="live-word" data-live-word>Connecting</span>
+      </span>
+      {% endif %}
+      {% if shell.palette %}<button class="btn btn-quiet" type="button" data-palette-open
+        aria-keyshortcuts="Control+K Meta+K">Jump to <kbd>Ctrl K</kbd></button>{% endif %}
+      <button class="btn btn-quiet" type="button" data-theme-toggle aria-label="Switch theme">Theme</button>
+      {% if gate_actor %}
+      <form method="post" action="{% url 'app_gate:logout' %}" class="app-account">
+        {% csrf_token %}
+        <span class="app-account-name">{{ gate_actor.username }}{% if gate_role %} · {{ gate_role }}{% endif %}</span>
+        <button class="btn btn-quiet" type="submit">Sign out</button>
+      </form>
+      {% endif %}
+    </div>
+  </header>
+
+  {% comment %} The body is pinned so the header stays put; <main> is the ONE scroller. Without it a page
+     taller than the window has no scrollbar, no wheel and no keyboard. {% endcomment %}
+  <main id="main" class="app-scroll" tabindex="-1">
+    {% block content %}{% endblock %}
+  </main>
+
+  {% if shell.toasts %}{% include "app_shell/_toasts.html" %}{% endif %}
+  {% if shell.palette %}{% include "app_shell/_palette.html" %}{% endif %}
+  {% if shell.drawer %}{% include "app_shell/_drawer.html" %}{% endif %}
+  {% if shell.confirm %}{% include "app_shell/_confirm.html" %}{% endif %}
+  {% if shell.live %}{% include "app_shell/_live.html" %}{% endif %}
+
+  {{ shell|json_script:"app-shell-caps" }}
+  <script src="{% static 'app_shell/shell.js' %}" defer></script>
+  {% if shell.prefetch %}<script src="{% static 'app_shell/prefetch.js' %}" defer></script>{% endif %}
+  {% block scripts %}{% endblock %}
+</body>
+</html>
