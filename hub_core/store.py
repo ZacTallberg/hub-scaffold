@@ -8,6 +8,7 @@ from the JSONL on init, so a crash between the JSONL append and the index commit
 """
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -251,7 +252,12 @@ class EventStore:
     def _init_db(self):
         c = self._db
         c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA busy_timeout=5000")
+        # 5000ms was shorter than a worst-case index rebuild under contention: while ONE
+        # store held the write lock to heal its index (a restart forces exactly that), every
+        # concurrent request needing the lock timed out and surfaced as a 500 "database is
+        # locked". A rebuild is bounded and single-holder, so a waiter should OUTLAST it; 30s
+        # stays under common proxy read timeouts, so a genuinely wedged lock still surfaces.
+        c.execute("PRAGMA busy_timeout=30000")
         c.execute(
             "CREATE TABLE IF NOT EXISTS events ("
             "seq INTEGER PRIMARY KEY, event_id TEXT, ts TEXT, aggregate TEXT, type TEXT,"
@@ -376,6 +382,11 @@ class EventStore:
         if (not torn) and self._index_count() == len(events) and (self._meta_get("chain_head") or "") == jsonl_head:
             self._stamp_jsonl_size()   # legacy db without the size meta: stamp so the O(tail) path takes over
             return
+        # WHY the fast path failed, captured before the rebuild makes the counts agree, so the
+        # rebuild marker below names its own trigger: torn = quarantined final line, count =
+        # index-count gap, head = chain-head mismatch.
+        rebuild_reason = ("torn" if torn else
+                          "count" if self._index_count() != len(events) else "head")
         c = self._db
         # BEGIN IMMEDIATE *before* the trigger drop, and the drop INSIDE that transaction.
         # The old shape dropped in autocommit and only then opened a DEFERRED transaction, which
@@ -409,11 +420,15 @@ class EventStore:
                     c.execute("DELETE FROM events")
                     c.execute("DELETE FROM heads")
                     c.execute("DELETE FROM idem")
-                    for ev in events:
-                        self._index_event(ev)
+                    started = time.monotonic()
+                    self._index_events_batch(events)
                     self._stamp_jsonl_size()
                     self._install_trigger()
                     c.execute("COMMIT")
+                    # NAME THE REBUILD in the service log: the next lock burst is then one
+                    # grep away from its trigger instead of a diagnosis session.
+                    print("LEDGER_INDEX_REBUILT events=%d took=%.3fs reason=%s"
+                          % (len(events), time.monotonic() - started, rebuild_reason))
                     return
             except sqlite3.IntegrityError as e:
                 try:
@@ -508,6 +523,33 @@ class EventStore:
             self._db.execute("INSERT OR REPLACE INTO idem(aggregate,idem_key,seq) VALUES(?,?,?)",
                              (ev["aggregate"], ev["idem_key"], ev["seq"]))
         self._db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chain_head',?)", (ev["hash"],))
+
+    def _index_events_batch(self, events):
+        """Index a whole chain in a few bulk statements instead of ~4 per event.
+
+        The heal used to run _index_event per row inside BEGIN IMMEDIATE, so the write lock was
+        held for time proportional to the ledger (seconds at a few thousand events on a slow
+        disk) — long enough for concurrent writers to exhaust busy_timeout. Row order is
+        preserved, so `heads` (INSERT OR REPLACE in seq order) still ends on each aggregate's
+        latest version and chain_head names the final event, exactly as the per-row path
+        leaves them. append() keeps the per-event path."""
+        c = self._db
+        c.executemany(
+            "INSERT INTO events(seq,event_id,ts,aggregate,type,base_version,result_version,"
+            "hash,prev_hash,idem_key,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [(ev["seq"], ev["event_id"], ev["ts"], ev["aggregate"], ev["type"],
+              ev["base_version"], ev["result_version"], ev["hash"], ev["prev_hash"],
+              ev.get("idem_key"), canonical(ev)) for ev in events])
+        c.executemany("INSERT OR REPLACE INTO heads(aggregate,version) VALUES(?,?)",
+                      [(ev["aggregate"], ev["result_version"]) for ev in events])
+        idem_rows = [(ev["aggregate"], ev["idem_key"], ev["seq"]) for ev in events
+                     if ev.get("idem_key")]
+        if idem_rows:
+            c.executemany("INSERT OR REPLACE INTO idem(aggregate,idem_key,seq) VALUES(?,?,?)",
+                          idem_rows)
+        if events:
+            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chain_head',?)",
+                      (events[-1]["hash"],))
 
     def head_version(self, aggregate) -> int:
         r = self._db.execute("SELECT version FROM heads WHERE aggregate=?", (aggregate,)).fetchone()
