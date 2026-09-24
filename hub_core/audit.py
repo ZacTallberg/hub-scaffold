@@ -364,6 +364,20 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
                                    "entity_type": gf.get("entity_type"),
                                    "signature": gf.get("signature")})
 
+    # 8. WHAT WAS ACTUALLY EVALUATED. An audit that examined nothing and found nothing prints the
+    #    same all-clear as one that examined everything and found nothing, and only the first is a
+    #    lie. The denominator rides on every result, and ZERO subjects (no entity, no adapter that
+    #    finished) is a named blocking finding rather than a PASS.
+    evaluated = {"entities": len(entities), "adapters_ran": len(adapter_report["ran"]),
+                 "adapters_requested": len(list(adapters or []))}
+    if not evaluated["entities"] and not evaluated["adapters_ran"]:
+        violations.append(_v(
+            "audit:nothing-evaluated", "high", "an audit evaluates at least one subject",
+            "0 entities and 0 of %d adapters evaluated" % evaluated["adapters_requested"],
+            "at least one entity or adapter evaluated", kind="probe",
+            remediation="seed the board (manage.py seedhub) or point the audit at the ledger that "
+                        "holds the project; an empty ledger has nothing to pass"))
+
     sev = {v["severity"] for v in violations}
     if "critical" in sev or "high" in sev:
         exit_code, ok = 2, False
@@ -375,12 +389,14 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     # THREE answers, not two. A run that could not finish its checks is INCONCLUSIVE — blocking like
     # a FAIL, because an unfinished audit is no licence to release, but named differently so nobody
     # goes hunting for a defect that was never actually observed.
-    incomplete = adapter_report["timed_out"] + adapter_report["not_started"]
+    incomplete = (adapter_report["timed_out"] + adapter_report["not_started"]
+                  or not (evaluated["entities"] or evaluated["adapters_ran"]))
     verdict = "INCONCLUSIVE" if incomplete else ("PASS" if ok else "FAIL")
     return {
         "ok": ok,
         "exit_code": exit_code,
         "verdict": verdict,
+        "evaluated": evaluated,
         "adapters": adapter_report,
         "violations": violations,
         "grandfathered": ledger,

@@ -116,6 +116,60 @@ Corollaries:
 
 ---
 
+## Gate hygiene — four rules the laws depend on
+
+**The gate runs inside the release lease.** The canary, the readiness check and the deploy record
+run in the same hold as the swap. A verify step queued as a separate job waits behind the next
+deploy for the same target, starves, and then verifies a different artifact than the one it was
+meant to. The record names the SHA the TARGET reports it is running (its own outcome/identity
+file), and an attempt whose outcome is not named — no SHA, no verdict — is refused, never recorded
+as a success.
+
+**The readiness payload is a contract between two programs.** The app emits it and the gate reads
+it; if either drifts, a healthy app fails its deploy or a broken one passes. Pin one shape:
+
+```json
+{"status": "ok" | "degraded", "application": "<slug>", "time": "<iso>",
+ "checks": [{"name": "database", "status": "ok", "detail": "..."}]}
+```
+
+- `checks` is a **list** of `{name, status, detail}`; a dict keyed by name reaches a list-reading
+  gate as one entry with no status.
+- `"ok"` is the only passing status. A MODE the app may run in (armed/unarmed, configured or not)
+  is reported as `"ok"` with the mode in `detail`; a mode spelled as its own status word reddens a
+  healthy deploy.
+- **Empty or missing `checks` fails at the gate** — a readiness that inspected nothing proves
+  nothing. Readiness must touch a real table: `SELECT 1` answers green on a database with no
+  tables. Liveness passes with the database down, so never gate on it.
+- 503 while not ready is the probe working (the error kit records it as a warning, not a fault).
+
+A reference emitter is `app-kit/kits/health/health.py`.
+
+**A dependency the app does not own is ADVISORY in its gate — narrowly, and loudly.** When an app
+embeds something another system serves (a hub-hosted banner or feed through a proxied path), that
+system's slow moment would otherwise fail every embedding app's deploy. Tolerate only a gateway
+502/504 on exactly that declared path, print a distinct marker (`ADVISORY_UPSTREAM_TOLERATED
+<path> <status>`) every time it is used, and keep 500/503 there and any failure on the app's own
+routes blocking. Exactly one declared prefix may be treated as that dependency's origin; anything
+else leaving the app's origin is still an escape.
+
+**A pre-mutation data snapshot prunes BEFORE it copies.** A deploy that snapshots the database
+before migrating must not be able to fill its own disk: "copy, then keep the newest N" stops
+pruning the moment a copy fails for lack of space, and every later deploy on that host then fails
+its snapshot and rolls back. So:
+
+1. prune to the retention count (small, e.g. 5) **first**, and discard incomplete husks;
+2. while the volume would fall below a free-space floor after the copy, remove the oldest; refuse
+   a copy that still cannot fit;
+3. derive the snapshot location per app (from the repository identity), so one app's snapshots
+   never evict another's; a fallback location on the same volume as the data keeps fewer copies;
+4. print a distinct outcome marker — `DB_SNAPSHOT_TAKEN`, `DB_SNAPSHOT_FAILED`,
+   `DB_SNAPSHOT_EXTERNAL` (the database lives elsewhere and is backed up by its owner) — so a
+   reader of the deploy log never has to infer which one happened.
+
+When deploys "do nothing" for several pushes in a row across several authors, read the deploy
+log's FIRST failing step before any code: simultaneous failures are one substrate.
+
 ## The shape of a compliant deploy script
 
 ```
@@ -127,7 +181,9 @@ build           $BUILD_CMD inside the worktree
 serialize       acquire a real per-target release lease; one front door has one release owner
 capacity        when the platform has a shared swap/import limit, hold its short release slot only
                 across that constrained boundary; builds and independent canaries remain parallel
+snapshot        prune-first, free-space-bounded data snapshot; print TAKEN|FAILED|EXTERNAL
 ship            $SHIP_CMD  (the only org-specific part; unique release-attempt log/identity)
+ready           read the readiness payload; every check "ok", checks non-empty
 canary          poll $LIVE_URL for "build-$SHA"; fail closed         (Law 3)
 bless           write "<sha> <url>" to the blessed-records dir       (Law 4; failure blocks)
 record          POST immutable {sha, served_sha:sha, tasks_closed:[done ids], at}; write runtime state
@@ -149,6 +205,10 @@ Anti-patterns this contract explicitly bans:
 - **Confusing identity and capacity leases** — the per-front-door lease protects correctness. A
   platform-wide slot is separate and exists only when the host exposes a shared import/swap limit;
   hold that slot for the constrained operation, not through unrelated builds or canaries.
+- **A verify job queued outside the release hold** — it starves behind the next deploy and then
+  checks a different artifact. Verify, readiness and record run inside the one lease.
+- **A shared dependency failing every embedding app's gate** — tolerate only its gateway statuses
+  on its one declared path, loudly; never widen that into "ignore upstream errors".
 - **Shared per-app or per-tag release logs** — every release attempt gets its own log/verdict
   identity. Reusing one pathname lets another attempt satisfy, truncate, or overwrite its observer,
   even when both attempts carry the same artifact tag.
