@@ -149,3 +149,26 @@ artifact: the older, slower swap may land last. A real per-target lease must spa
 blessing, and deploy-record append; per-attempt logs prevent cross-talk between observers. If a
 mutable app-scoped build setting also exists, acquire the lease before setting it and release it
 only after clearing your own value. Do not pretend a documented convention is mutual exclusion.
+
+## A crashed git leaves a lock the next deploy dies on
+
+When a deploy updates a checkout on the target host (fetch + reset), a git process killed mid-way
+leaves `.git/index.lock` behind, and every later deploy fails with "Unable to create index.lock:
+File exists" — git's own advice is to remove the file by hand, which an unattended pipeline cannot
+do, so the host keeps serving the previous commit until a person intervenes.
+
+Clear it before the reset, but only when it is provably abandoned, failing closed on each count:
+
+1. the deploy already holds the per-target release lease (step 4), so no sibling deploy can be
+   inside this checkout;
+2. NOTHING holds an open handle on the file (open it exclusively; a live git keeps its handle, so
+   the open fails) — on a platform without exclusive opens, check the process table for git in
+   that directory instead;
+3. the file is older than a grace window (60 s is ample: git writes and removes it in
+   milliseconds, so anything older crashed).
+
+Anything else is left exactly as it was and git fails with its own message. Each outcome names
+itself in the deploy log — for example `STALE_INDEX_LOCK_CLEARED`, `INDEX_LOCK_HELD`,
+`INDEX_LOCK_FRESH` — so a reader of a failed deploy knows which branch ran. Deleting a lock
+merely because it exists is the unsafe version: it corrupts the index under a git that is still
+working.
