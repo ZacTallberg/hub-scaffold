@@ -27,7 +27,9 @@
   const pages = new Set();
   let warming = false;
 
-  /* One count of work a person is waiting for. Every warm-up stands aside while it is > 0. */
+  /* One count of work a person is waiting for. Every warm-up stands aside while it is > 0.
+     shell.js raises it for its own fetches and for anything passed to AppShell.track(); the
+     htmx listeners below add htmx requests when htmx is present. */
   const busy = window.__appBusy = window.__appBusy || { count: 0 };
   document.addEventListener("htmx:beforeRequest", function (event) {
     const config = event.detail && event.detail.requestConfig;

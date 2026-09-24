@@ -22,5 +22,9 @@ requested. Raise the flag after closing and every deploy's own restart files a p
 must answer 200, and a gated app's anonymous root must redirect or refuse — `AUTH POSTURE FAILED`
 otherwise. Run it as the last step of a deploy.
 
+**The entry is imported from the app, not from the runner.** `--console` and `--svc-run` put the
+app root on `sys.path` before importing `entry` — the parent of `deploy/` when the manifest lives
+there, else the manifest's own folder — so no `PYTHONPATH` is needed.
+
 `--svc-run` is an optional adapter for a Windows service host (pywin32); the same supervision rule
 applies there.

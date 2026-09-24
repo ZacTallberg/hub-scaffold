@@ -22,8 +22,22 @@
     }
   })();
 
-  const Shell = { cap: CAP };
+  const Shell = Object.assign(window.AppShell || {}, { cap: CAP });
   window.AppShell = Shell;
+
+  /* ------------------------------------------------------------ busy count
+     One count of requests a person is waiting for, shared with prefetch.js: every warm-up stands
+     aside while it is > 0. Raised and lowered HERE, not only from htmx events, so the rule holds
+     in an app that never loads htmx. Shell.track(promise) counts any fetch an app issues itself. */
+  const busy = window.__appBusy = window.__appBusy || { count: 0 };
+  function track(promise) {
+    busy.count += 1;
+    let settled = false;
+    function done() { if (!settled) { settled = true; busy.count = Math.max(0, busy.count - 1); } }
+    Promise.resolve(promise).then(done, done);
+    return promise;
+  }
+  Shell.track = track;
 
   /* ---------------------------------------------------------------- theme */
   function armTheme() {
@@ -169,12 +183,12 @@
       let html;
       const warmed = Shell.takeWarm && Shell.takeWarm(url);
       try {
-        html = warmed ? await warmed : await fetchPartial(url, controller.signal);
+        html = warmed ? await warmed : await track(fetchPartial(url, controller.signal));
       } catch (error) {
         if (error.name === "AbortError") return;
         if (warmed) {
           /* A speculative request is only a hint: the deliberate click gets its own. */
-          try { html = await fetchPartial(url, controller.signal); }
+          try { html = await track(fetchPartial(url, controller.signal)); }
           catch (retry) { if (retry.name === "AbortError") return; }
         }
       }

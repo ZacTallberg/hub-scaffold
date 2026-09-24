@@ -229,6 +229,17 @@ def record() -> int:
         print(f"RECORD_REFUSED: no kits found under {KITS_DIR} -- a record of nothing is not a "
               "record")
         return 2
+    # A retirement pointer is an instruction `add` and `status` print to a person: it must name
+    # a kit that exists and can be vendored, or it sends them to nothing.
+    for name, k in kits.items():
+        target = k["replaced_by"]
+        if k["state"] != "retired" or not target:
+            continue
+        if target == name or target not in kits:
+            problems.append(f"{name}: replaced_by {target!r} is not a kit under {KITS_DIR.name}/")
+        elif kits[target]["state"] != "active":
+            problems.append(f"{name}: replaced_by {target!r} is {kits[target]['state']}, "
+                            "not an active kit")
     problems += doc_problems(kits)
     if problems:
         print(f"RECORD_REFUSED: {len(problems)} problem(s) -- fix them all, then record again:")

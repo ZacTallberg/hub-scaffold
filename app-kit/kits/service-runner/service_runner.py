@@ -153,6 +153,21 @@ def validate_manifest(payload: object) -> None:
                 raise ManifestError(f"{label}.env.APP_TRUSTED_PROXY must be one IP address") from exc
 
 
+def app_root(manifest: Path) -> Path:
+    """The directory the manifest's ``entry`` is imported from: the parent of ``deploy/`` when
+    the manifest lives there (the kit's layout), else the manifest's own directory. Running a
+    script puts the SCRIPT's directory on sys.path, not the app's, so without this the runner
+    only works when the caller happened to set PYTHONPATH."""
+    folder = manifest.resolve().parent
+    return folder.parent if folder.name == "deploy" else folder
+
+
+def _import_root(manifest: Path) -> None:
+    root = str(app_root(manifest))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
 def load_service(name: str, manifest: Path = DEFAULT_MANIFEST) -> dict:
     for service in read_manifest(manifest)["services"]:
         if service["name"] == name:
@@ -354,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = read_manifest(args.manifest)
             print(f"SERVICE_MANIFEST_OK services={len(payload['services'])}")
         elif args.console:
+            _import_root(args.manifest)
             run_console(load_service(args.console, args.manifest))
         elif args.verify:
             problems = verify(load_service(args.verify, args.manifest), args.base_url)
@@ -362,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             print("SERVICE_VERIFIED" if not problems else f"SERVICE_NOT_VERIFIED {len(problems)} problem(s)")
             return 0 if not problems else 1
         else:
+            _import_root(args.manifest)
             run_windows_service(load_service(args.svc_run, args.manifest))
     except Exception as exc:
         print(f"SERVICE_BLOCKED {type(exc).__name__}: {exc}", file=sys.stderr)
