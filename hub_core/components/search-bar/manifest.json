@@ -1,7 +1,7 @@
 {
   "name": "search-bar",
   "title": "Search bar",
-  "summary": "One search box any app links: a hairline field that submits to the app's own results page, an optional suggest-as-you-type panel from the app's own endpoint, a top match the app learned from what people actually opened, and an optional smart pass the app computes. Empty, unconfigured and failed are drawn as three different states.",
+  "what": "One search box any app links: a hairline field that submits to the app's own results page, an optional suggest-as-you-type panel from the app's own endpoint, a top match the app learned from what people actually opened, and an optional smart pass the app computes. Empty, unconfigured and failed are drawn as three different states.",
   "link": [
     "<link rel=\"stylesheet\" href=\"{hub}/components/search-bar/search-bar.css\">",
     "<script src=\"{hub}/components/search-bar/search-bar.js\"></script>"
