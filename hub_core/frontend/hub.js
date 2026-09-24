@@ -1041,6 +1041,9 @@
         // a task (a claim is never inferred from a directory), its state and focus.
         return el("li", { class: "agent-sess" + (s.state === "working" ? " is-working" : "") }, [
           el("span", { class: "sess-id", text: s.name || s.session || "?" }),
+          // Which agent runtime this console is (X-Hub-Runtime): two runtimes on one board
+          // coordinate differently, so the row says which one a message will land in.
+          s.runtime ? el("span", { class: "sess-rt", title: "agent runtime", text: s.runtime }) : null,
           s.project ? el("span", { class: "sess-cwd", title: s.cwd || "", text: s.project }) : (s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null),
           s.project ? el("span", { class: "badge " + (s.has_task ? "b-pass" : "b-warn"),
                                    title: s.has_task ? (s.task_title || s.task_id) : "this console holds no task for " + s.project,
@@ -1455,6 +1458,7 @@
       var consoles = c.sessions.map(function (sess) {
         return row((sess.session || "?") + (sess.machine ? " @ " + sess.machine : ""),
           el("div", null, [
+            sess.runtime ? el("span", { class: "sess-rt", title: "agent runtime", text: sess.runtime }) : null,
             sess.focus ? el("div", { class: "detail-prose", text: sess.focus }) : null,
             el("div", { class: "cell-sub", text: (sess.cwd || "") +
                (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") })

@@ -24,6 +24,8 @@ from . import hub_app
 
 
 _AUTH = ContextVar("hub_write_auth", default=None)
+# The request being written, so a refusal recorded deep in the append names its route.
+_REQUEST = ContextVar("hub_write_request", default=None)
 
 
 def _record_refusal(request, code, message):
@@ -132,9 +134,11 @@ def writer(fn=None, *, scope=None):
         hub_app.observe_presence(seat, request.headers)
         request.hub_auth = auth
         marker = _AUTH.set(auth)
+        req_marker = _REQUEST.set(request)
         try:
             response = fn(request, b, *a, **k)
         finally:
+            _REQUEST.reset(req_marker)
             _AUTH.reset(marker)
         response["X-Hub-Auth-Subject"] = auth.subject
         response["X-Hub-Auth-Mode"] = auth.mode
@@ -194,8 +198,9 @@ def _evidence_problem(ev):
 
 def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype):
     """Validate the MERGED entity, then append. Returns (response_dict, http_status)."""
-    state = hub_app.current_state(s)
-    existing = state["entities"].get(eid, {})
+    # The entity this write is about, from its own aggregate's events -- never a fold of the
+    # whole ledger (hub_app.entity_from_store).
+    existing = hub_app.entity_from_store(s, eid)
     # OCC: updating an existing entity REQUIRES expected_version (else concurrent writes lose).
     # None is allowed only on first-create. (store.py also skips its head check on None.)
     if existing and expected_version is None:
@@ -217,6 +222,9 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
         # BACK-PRESSURE, NOT A FAULT. The lock was held past the wait budget, so nothing was
         # appended — no line, no index row, no fsync. 503 + Retry-After (set by
         # LedgerBusyMiddleware) says exactly that to a caller that already retries writes.
+        req = _REQUEST.get()
+        hub_app.record_ledger_busy(getattr(req, "path", "") or f"append:{etype}",
+                                   getattr(req, "method", "POST"), busy.waited_s, busy)
         return ({"errors": [{"code": "busy", "msg": str(busy), "retry_after": 2}]}, 503)
     if ev.get("seq", 0) > before:
         hub_app.publish_event(ev)
@@ -261,7 +269,7 @@ def task(request, b):
         b.setdefault("status", "todo")
     else:
         eid = b["id"]
-        existing = hub_app.current_state().get("entities", {}).get(eid)
+        existing = hub_app.entity(eid) or None
         lease = hub_app._read_lease(eid)
         claimed = bool(lease and lease.get("expires", 0) > time.time())
         if existing and (existing.get("status") == "in_progress" or claimed):
@@ -324,7 +332,7 @@ def complete(request, b):
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
                 "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from WORK_ROOT)",
                 "bad": bad}]}, status=422)
-    ent = hub_app.current_state().get("entities", {}).get(eid)
+    ent = hub_app.entity(eid)
     if not ent:
         return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
     verified_version = ent.get("version")
