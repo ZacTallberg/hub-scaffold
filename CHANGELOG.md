@@ -14,6 +14,38 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### app-kit: a brand-free Django app kit that pairs with the hub
+
+A new top-level `app-kit/` for the apps a hub-coordinated team ships. Kits are vendored into an
+app, measured against a bar, and kept honest by two tools; nothing is always-on and there is no
+standing test suite.
+
+- **Kits.** `settings` (fail-closed posture, one fixed test posture, `TESTING` aliased so guards
+  never silently disarm, a model lane with no default host, and `envcheck`, which names every
+  missing or invalid production key in ONE throw instead of one per deploy); `gate` (deny by
+  default, owners admitted by name, a per-app roster on per-app tables, a role ladder, 401 JSON /
+  HX-Redirect / redirect by what the caller asked for, a roster command that refuses to leave the
+  app ownerless, boot checks including a migration-ledger collision on shared databases);
+  `shell` (declared capabilities — toasts, palette, live status, drawer, confirm, transitions,
+  intent-only prefetch — inert until declared; one keyboard-scrollable region; `[hidden]` always
+  wins); `health` (readiness fails on an unmigrated database); `service-runner` (strict
+  manifest with declared port bands; a requested stop is not a crash; `--verify` asserts the gate
+  posture); `assistant` (the 64-family canon as data, the coverage count, routing lanes that fail
+  open, a model-read turn plan, the correction belt, the three write models, a real-model probe,
+  and a generic core family whose rows always carry shown and total).
+- **The bar** (`app-kit/BAR.md`) and **`tools/app_audit.py`**: three-state applicability (a
+  half-present capability fails loudly), vendored code excluded from the app's own, declarations
+  echoed, `--count` derives the bar's size, `--rules` audits the bar itself, a run that measured
+  nothing exits 2, and every verdict says whether the checkout is behind its upstream.
+- **`tools/kits.py`**: `record` derives per-file and per-kit provenance and refuses — listing
+  every problem at once — a kit whose imports, static files or templates leave it, a multi-line
+  `{# #}` comment, or a doc that types the bar's size or disagrees with the rule table; `add`
+  vendors with provenance, refuses a stale checkout, a retired kit or an app's local edits
+  (`--force` keeps a backup) and restores the old copy if the swap fails; `status` reports
+  current / stale / edited / retired.
+- **`app-kit/example/`**: a small budget app assembled from the kits, forwarding server errors to
+  the hub's `app-error` stream.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

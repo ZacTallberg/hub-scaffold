@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "port_bands": [[8000, 8099]],
+  "services": [
+    {
+      "name": "budget-app",
+      "display_name": "Budget app (app-kit example)",
+      "runtime": "wsgi",
+      "entry": "config.wsgi:application",
+      "port": 8040,
+      "threads": 8,
+      "channel_timeout": 120,
+      "health_path": "/health/ready/",
+      "gate": "required",
+      "env": {"DJANGO_SETTINGS_MODULE": "config.settings"}
+    }
+  ]
+}

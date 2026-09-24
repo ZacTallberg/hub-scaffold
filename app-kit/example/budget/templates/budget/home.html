@@ -1,0 +1,43 @@
+{% extends "budget/base.html" %}
+{% load static %}
+{% block title %}{% if s.over %}{{ s.over }} of {{ s.total }} lines over budget{% else %}Budget lines{% endif %}{% endblock %}
+{% block content %}
+<div class="page">
+  <h1 class="page-title">{% if s.total == 0 %}No open budget lines yet{% elif s.over %}{{ s.over }} of {{ s.total }} open line{{ s.total|pluralize }} {{ s.over|pluralize:"is,are" }} over budget{% else %}All {{ s.total }} open line{{ s.total|pluralize }} within budget{% endif %}</h1>
+  <p class="page-lede">Read live from this app's database as of {{ s.as_of|date:"H:i" }} UTC.
+    Actuals measured for {{ s.measured }} of {{ s.total }} lines; a dash means not measured yet, never zero.
+    {% if s.archived %}{{ s.archived }} archived line{{ s.archived|pluralize }} not shown.{% endif %}
+    <a href="{% url 'budget:method' %}">How each number is counted</a>.</p>
+  {% if s.sample %}<p class="notice" role="note"><strong>Sample data.</strong> These lines were loaded by <code>manage.py budget_sample</code> to demonstrate the kit; they are not real figures.</p>{% endif %}
+  {% if archived_now %}<p class="notice notice-ok" role="status">Archived {{ archived_now }} over-budget line{{ archived_now|pluralize }}. Each is recorded in its history and can be reopened.</p>{% endif %}
+
+  {% if s.over %}
+  <form method="post" action="{% url 'budget:archive_over' %}" class="card review"
+        data-confirm="{% if s.over == 1 %}Archive the one over-budget line? It leaves{% else %}Archive all {{ s.over }} over-budget lines? They leave{% endif %} the open list. Reversible, and recorded in each line's history."
+        data-confirm-label="Archive {{ s.over }}">
+    {% csrf_token %}
+    <input type="hidden" name="expected_count" value="{{ s.over }}">
+    <span>Review: {{ s.over }} line{{ s.over|pluralize }} over budget.</span>
+    <button class="btn btn-primary" type="submit">Archive {{ s.over }} approved</button>
+  </form>
+  {% endif %}
+
+  <div class="card">
+    <table class="data-table" aria-describedby="rows-caption">
+      <caption id="rows-caption" class="sr-only">Open budget lines</caption>
+      <thead><tr><th scope="col">Line</th><th scope="col">Team</th><th scope="col">Status</th>
+        <th scope="col" class="num">Planned</th><th scope="col" class="num">Actual</th><th scope="col" class="num">Variance</th></tr></thead>
+      <tbody id="line-rows" data-poll="{% url 'budget:rows' %}" data-fp="{{ fp }}">
+        {% include "budget/_rows_body.html" %}
+      </tbody>
+    </table>
+  </div>
+  {% if archived %}
+  <details class="card archived">
+    <summary>{{ archived|length }} archived line{{ archived|length|pluralize }} (can be reopened)</summary>
+    <ul>{% for line in archived %}<li><a href="{% url 'budget:line' line.code %}" data-drawer-url="{% url 'budget:line' line.code %}" data-drawer-title="{{ line.code }} {{ line.title }}">{{ line.code }}</a> <span class="muted">{{ line.title }}</span></li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="{% static 'budget/rows.js' %}" defer></script>{% endblock %}

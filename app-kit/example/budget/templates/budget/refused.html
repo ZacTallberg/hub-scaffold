@@ -1,0 +1,9 @@
+{% extends "budget/base.html" %}
+{% block title %}Nothing was archived{% endblock %}
+{% block content %}
+<div class="page">
+  <h1 class="page-title">Nothing was archived: you reviewed {{ expected }} line{{ expected|pluralize }}, and {{ found }} {{ found|pluralize:"is,are" }} over budget now</h1>
+  <p class="page-lede">The list changed between your look and your click, so the apply refused rather than acting on lines you did not see. The refusal is recorded.</p>
+  <p><a class="btn btn-primary" href="{% url 'budget:home' %}">Review again</a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% for line in lines %}
+<tr>
+  <td><a href="{% url 'budget:line' line.code %}" data-drawer-url="{% url 'budget:line' line.code %}" data-drawer-title="{{ line.code }} {{ line.title }}">{{ line.code }}</a> <span class="muted">{{ line.title }}</span></td>
+  <td>{{ line.team }}</td>
+  <td><span class="pill pill-{{ line.status }}">{{ line.get_status_display }}</span></td>
+  <td class="num">{{ line.planned|floatformat:"2g" }}</td>
+  <td class="num">{% if line.actual is None %}<span title="not measured yet">&mdash;</span>{% else %}{{ line.actual|floatformat:"2g" }}{% endif %}</td>
+  <td class="num">{% if line.variance is None %}&mdash;{% else %}{{ line.variance|floatformat:"2g" }}{% endif %}</td>
+</tr>
+{% empty %}
+<tr><td colspan="6"><div class="empty-state">Nothing to review yet: there are no open budget lines. Load the labelled sample with <code>manage.py budget_sample</code>, or add lines through the admin of your real app.</div></td></tr>
+{% endfor %}
