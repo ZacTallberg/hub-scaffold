@@ -146,6 +146,27 @@ TOOLS = [
          "source": {"type": "string", "description": "push, schedule, api, ..."},
          "deployless": {"type": "boolean"}, "url": {"type": "string"}},
          "required": ["project", "job"]}},
+    {"name": "list_components",
+     "description": "Standard components and app skeletons. Asked to build a standard app, or to "
+                    "apply components to one? Read the skeleton: its applied rows carry each "
+                    "component's CURRENT get/entry, in dependency order, and name anything missing.",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"enum": ["component", "skeleton"]}}}},
+    {"name": "register_component",
+     "description": "Register (or update, with expected_version) a standard component or an app "
+                    "skeleton in the capability graph.",
+     "inputSchema": {"type": "object", "properties": {
+         "name": {"type": "string"}, "kind": {"enum": ["component", "skeleton"]},
+         "maturity": {"enum": ["concept", "prototype", "proven", "reusable", "extracted"]},
+         "what": {"type": "string"}, "when": {"type": "string"}, "get": {"type": "string"},
+         "entry": {"type": "string"}, "delivery": {"enum": ["copy", "hosted", "package"]},
+         "hosted_at": {"type": "string"}, "exemplar": {"type": "string"},
+         "default": {"type": "boolean"},
+         "depends_on": {"type": "array", "items": {"type": "string"}},
+         "applies": {"type": "array", "items": {"type": "string"}},
+         "applies_all": {"type": "boolean"},
+         "expected_version": {"type": "integer"}},
+         "required": ["name", "kind"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -330,6 +351,13 @@ def _call_tool(name, args, auth_headers):
         if args.get("note"):
             payload["note"] = args["note"]
         status, body = _seam("/hub/api/ack", payload, auth_headers)
+    elif name == "list_components":
+        query = {"kind": args["kind"]} if args.get("kind") else {}
+        status, body = _seam("/hub/components.json", query, auth_headers, method="get")
+    elif name == "register_component":
+        payload = dict(args)
+        payload.setdefault("maturity", "proven")
+        status, body = _seam("/hub/api/capability", payload, auth_headers)
     elif name == "report_ci_failure":
         status, body = _seam("/hub/api/ci-failure", dict(args), auth_headers)
     elif name == "search_board":

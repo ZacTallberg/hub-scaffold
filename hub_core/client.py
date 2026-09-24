@@ -30,7 +30,9 @@ in silence::
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream. `ci-failure` posts a failed CI job's log tail; the hub classifies it (rollback /
-real / not_deployed / unclear) by what the LOG says, never by the pipeline's trigger.
+real / not_deployed / unclear) by what the LOG says, never by the pipeline's trigger. `components`
+and `capability` read and register the standard components and app skeletons a new app starts
+from.
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
@@ -360,6 +362,37 @@ def _run_search(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, f"search.json?q={quote(arguments.query)}&limit={arguments.limit}")
 
 
+def _run_components(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    suffix = f"?kind={quote(arguments.kind)}" if arguments.kind else ""
+    return _get(base, "components.json" + suffix)
+
+
+def _payload_capability(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Register (or, with --expected-version, update) a capability — including a standard
+    component or an app skeleton."""
+    payload: dict[str, Any] = {"agent": _agent(arguments), "name": arguments.name,
+                               "maturity": arguments.maturity}
+    for name in ("kind", "what", "when", "get", "entry", "delivery", "hosted_at", "exemplar",
+                 "iface"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if arguments.cap_local:
+        payload["local"] = arguments.cap_local
+    for name in ("depends_on", "applies", "adopters"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if arguments.default:
+        payload["default"] = True
+    if arguments.applies_all:
+        payload["applies_all"] = True
+    if arguments.expected_version is not None:
+        payload["expected_version"] = arguments.expected_version
+    return "capability", payload
+
+
 def _run_questions(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "questions.json")
 
@@ -677,6 +710,35 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
     search.set_defaults(runner=_run_search)
+
+    components = commands.add_parser(
+        "components", help="standard components and app skeletons, resolved on this read")
+    components.add_argument("--kind", help="component | skeleton")
+    components.set_defaults(runner=_run_components)
+
+    capability = commands.add_parser(
+        "capability", help="register a capability, standard component, or app skeleton")
+    capability.add_argument("--name", required=True)
+    capability.add_argument("--kind", help="component | skeleton | service | python_module | ...")
+    capability.add_argument("--maturity", default="proven",
+                            help="concept | prototype | proven | reusable | extracted")
+    capability.add_argument("--agent")
+    for name in ("what", "when", "get", "entry", "delivery", "hosted-at", "exemplar", "iface"):
+        capability.add_argument("--" + name, dest=name.replace("-", "_"))
+    # NOT dest="local": that attribute is main()'s "no Hub URL needed" switch.
+    capability.add_argument("--local", dest="cap_local",
+                            help="the id's local part (default: slug of --name)")
+    capability.add_argument("--depends-on", dest="depends_on", action="append",
+                            help="a capability id this must come after (repeatable)")
+    capability.add_argument("--applies", action="append",
+                            help="skeleton: a component id it applies, in order (repeatable)")
+    capability.add_argument("--adopters", action="append", help="an app that carries it")
+    capability.add_argument("--applies-all", dest="applies_all", action="store_true",
+                            help="skeleton: take every component, ordered by depends_on")
+    capability.add_argument("--default", action="store_true")
+    capability.add_argument("--expected-version", dest="expected_version", type=int,
+                            help="required to update an existing capability")
+    capability.set_defaults(payload=_payload_capability)
 
     questions = commands.add_parser("questions",
                                     help="every question with waits, lanes, and reply times")
