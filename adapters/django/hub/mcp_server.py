@@ -141,6 +141,28 @@ TOOLS = [
          "query": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
          "required": ["query"]}},
+    {"name": "seat_distribution",
+     "description": "Is every seat running what this hub publishes? Per-seat artifact grades; "
+                    "offline seats are named and never graded as drift; the verdict states what "
+                    "it did not grade.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "built_by_person",
+     "description": "What each person built, derived from the ledger (completed tasks, releases, "
+                    "authored gaps/feats/ADRs/decisions/notes), machines folded into their person.",
+     "inputSchema": {"type": "object", "properties": {
+         "person": {"type": "string", "description": "narrow to one identity"}}}},
+    {"name": "record_entity",
+     "description": "Create or amend a gap/feat/note/adr/decision/capability through its versioned "
+                    "upsert; the current version is read first and one lost race is retried.",
+     "inputSchema": {"type": "object", "properties": {
+         "type": {"enum": ["gap", "feat", "note", "adr", "decision", "capability"]},
+         "fields": {"type": "object"}, "agent": {"type": "string"}},
+         "required": ["type", "fields"]}},
+    {"name": "ci_events",
+     "description": "The raw CI deliveries behind a CI row (credential needs ci:read).",
+     "inputSchema": {"type": "object", "properties": {
+         "pipeline": {"type": "string"}, "job": {"type": "string"},
+         "project": {"type": "string"}, "limit": {"type": "integer"}}}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -322,6 +344,31 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
                              auth_headers, method="get")
+    elif name == "seat_distribution":
+        status, body = _seam("/hub/distribution.json", {}, auth_headers, method="get")
+    elif name == "built_by_person":
+        query = {"person": args["person"]} if args.get("person") else {}
+        status, body = _seam("/hub/built.json", query, auth_headers, method="get")
+    elif name == "ci_events":
+        query = {k: args[k] for k in ("pipeline", "job", "project", "limit") if args.get(k)}
+        status, body = _seam("/hub/ci-events.json", query, auth_headers, method="get")
+    elif name == "record_entity":
+        fields = dict(args.get("fields") or {})
+        if args.get("agent"):
+            fields.setdefault("agent", args["agent"])
+        path = "/hub/api/" + args["type"]
+        if fields.get("id"):
+            _entity, version = _entity_version(fields["id"])
+            if version is not None:
+                fields["expected_version"] = version
+        status, body = _seam(path, fields, auth_headers)
+        errs = (body.get("errors") or [{}]) if isinstance(body, dict) else [{}]
+        current = next((e.get("current") for e in errs if isinstance(e, dict)
+                        and e.get("current") is not None), None)
+        if status in (409, 428) and current is not None:
+            # One lost optimistic-concurrency race is retried with the version the refusal
+            # named; a second miss is a live race and is returned as-is.
+            status, body = _seam(path, dict(fields, expected_version=current), auth_headers)
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

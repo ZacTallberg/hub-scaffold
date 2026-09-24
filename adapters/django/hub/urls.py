@@ -27,6 +27,10 @@ urlpatterns = [
     path("errors.json", hub_api.errors_json, name="errors"),
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    # Seat convergence and derived per-person output (same catch-all rule as above).
+    path("distribution.json", hub_api.distribution_json, name="distribution"),
+    path("built.json", hub_api.built_json, name="built"),
+    path("ci-events.json", hub_api.ci_events_json, name="ci-events"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -60,6 +64,8 @@ urlpatterns = [
     path("api/agent-error", hub_write.agent_error),
     path("api/ack-error", hub_write.ack_error),
     path("api/clear-errors", hub_write.clear_errors),
+    # CI results: gated by the CI webhook secret, not an agent credential (the sender is CI).
+    path("api/ci-event", hub_write.ci_event, name="ci-event"),
     path("api/client-error", hub_api.client_error, name="client-error"),
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
