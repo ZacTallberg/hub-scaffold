@@ -93,6 +93,7 @@ def queue(state, now: float | None = None) -> list:
                "reachable": e.get("reachable") or "",
                "unpushed_reason": e.get("unpushed_reason") or "",
                "local_path": e.get("local_path") or "",
+               "hub_saw": e.get("hub_saw") or "",
                "from_gap": e.get("from_gap") or "",
                "agent": str(prov.get("agent") or "").lower(),
                "held_at": held_at,
@@ -114,6 +115,9 @@ def detail(row: dict) -> str:
                    " -- it is in " + where if where else "", reason, rebuild))
     else:
         text = "%s. Before it can go live: %s" % (reason, rebuild)
+        if row.get("hub_saw") == "local_only":
+            text = ("Pushed on the holder's word only: the Hub found it on a local disk and on "
+                    "no remote-tracking branch. " + text)
     if row.get("from_gap"):
         text += " (answers %s)" % row["from_gap"]
     return text[:400]
@@ -144,17 +148,25 @@ def validate_hold(b: dict) -> tuple:
 
 
 def reachability(attested: bool, confirmed, unpushed_reason: str) -> tuple:
-    """``(reachable, error)`` from the client's attestation, the resolver's True/False/None and
-    an optional recorded exception. Refuses a commit nobody else could fetch unless the caller
-    SAYS why it is on no remote."""
-    if (confirmed is False or (confirmed is None and not attested)) and not unpushed_reason:
-        known = ("the Hub's commit resolver does not have it" if confirmed is False else
-                 "the Hub could not ask whether it is pushed, and the caller did not attest it")
+    """``(reachable, error)`` from the client's attestation, the resolver's FETCHABILITY verdict
+    (True on a server / False on a local disk only / None could not tell) and an optional
+    recorded exception.
+
+    Only ``True`` confirms. A commit the Hub finds on a local disk and on no remote-tracking ref
+    is NOT confirmed -- the Hub's own tracking refs may be stale, so a client that ran
+    ``git branch -r --contains`` may still attest it -- and without an attestation or a recorded
+    unpushed_reason it is refused: a commit nobody else could fetch is what this record exists
+    to prevent."""
+    if confirmed is not True and not attested and not unpushed_reason:
+        known = ("the Hub sees this commit on a local disk and on NO remote-tracking branch, "
+                 "and the caller did not attest it is pushed" if confirmed is False else
+                 "the Hub could not confirm any server has it, and the caller did not attest it")
         return None, ("sha_not_pushed",
                       "%s. A commit that exists only in one worktree is what this record exists "
                       "to prevent: push it to a parking branch and hold it again. If the "
                       "repository has nowhere safe to park it, hold it with an unpushed_reason, "
                       "which records the exception instead of hiding it." % known)
-    if unpushed_reason and not (attested or confirmed):
+    if confirmed is not True and not attested:
         return "unpushed", None
-    return ("both" if (attested and confirmed) else ("resolver" if confirmed else "client")), None
+    return ("both" if (attested and confirmed is True) else
+            ("resolver" if confirmed is True else "client")), None
