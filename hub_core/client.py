@@ -208,13 +208,38 @@ def _optional_auth_headers() -> dict[str, str]:
         return {}          # reads are public; whoami simply reports no credential
 
 
+def _repo_of(path: str) -> str:
+    """The repository a directory sits in, named by its top-level folder, or "" when it is
+    in none. Read from the filesystem (a .git entry up the tree), never guessed from the
+    path's spelling, so a console parked in a workspace root reports no repo at all."""
+    try:
+        here = os.path.abspath(path)
+        while True:
+            if os.path.exists(os.path.join(here, ".git")):
+                return os.path.basename(here.rstrip("\\/")) or ""
+            parent = os.path.dirname(here)
+            if parent == here:
+                return ""
+            here = parent
+    except (OSError, ValueError):
+        return ""
+
+
 def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, str]:
     """The observed-presence headers every write may carry. Environment first, flags win —
-    the board's live-console view is only as true as what the seats send."""
+    the board's live-console view is only as true as what the seats send.
+
+    The cwd and the repo are sent as ONE fact: the hub applies the repo that accompanies a
+    cwd, and treats a missing repo beside a cwd as "this directory is in no repository".
+    HUB_FILES (comma-separated) is the console's recently touched files; the hub stamps it
+    on arrival and ages it out, so a stale list never outlives the work it described."""
+    cwd = os.environ.get("HUB_CWD") or os.getcwd()
     values = {
         "X-Hub-Machine": os.environ.get("HUB_MACHINE", ""),
         "X-Hub-Session": os.environ.get("HUB_SESSION_ID", ""),
-        "X-Hub-Cwd": os.environ.get("HUB_CWD") or os.getcwd(),
+        "X-Hub-Cwd": cwd,
+        "X-Hub-Repo": os.environ.get("HUB_REPO") or _repo_of(cwd),
+        "X-Hub-Files": os.environ.get("HUB_FILES", ""),
         "X-Hub-Focus": os.environ.get("HUB_FOCUS", ""),
     }
     if arguments is not None:

@@ -294,7 +294,17 @@ def _errors_block():
     return rows, metadata, unclaimed
 
 
-def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_unclaimed=None):
+def _host_disk():
+    """The hub's own drive, measured (cached) -- never allowed to break a snapshot."""
+    try:
+        from hub_core import hostdisk
+        return hostdisk.reading(hub_app.HUB_DIR)
+    except Exception as exc:                                 # noqa: BLE001
+        return {"state": "unmeasured", "error": str(exc)[:200]}
+
+
+def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_unclaimed=None,
+               disk=None):
     """The consolidated 'Needs the operator' rail: every signal a human (or a spec pass) must act
     on, unioned from sources otherwise scattered across tabs and the audit JSON — a poison-blocked
     task, a stuck worker, a dep that can never be satisfied, governance amber, blocked work,
@@ -321,6 +331,15 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
             add(1, "consequential-failure",
                 (t.get("last_failure") or {}).get("note") or "failure requires operator authority",
                 t["id"], t.get("title"))
+
+    # THE HUB'S OWN DISK. Below the warning threshold every append, snapshot and backup on
+    # this drive is one busy hour from failing -- and each failure would otherwise surface as
+    # a different, misleading symptom. Named here while there is still room to act.
+    if disk and disk.get("state") in ("warn", "critical"):
+        from hub_core import hostdisk
+        add(0 if disk["state"] == "critical" else 2, "host-disk-low", hostdisk.describe(disk),
+            None, "%.1f GB free on %s" % (disk.get("free_gb") or 0.0,
+                                           disk.get("drive") or "the hub's drive"))
 
     for r in (inflight or []):
         if r.get("stalled"):
@@ -811,6 +830,7 @@ def _live_blocks(events, state, audit, deliv, cursor):
     adher = adherence.score(events, state, leases=inflight)
     hub_dir = hub_app.HUB_DIR
     asks, error_rows, error_meta, error_unclaimed, sessions_live = _live_side_blocks(state)
+    disk = _host_disk()
     return {
         "transport": "event-stream",
         "realtime": hub_app.realtime_info(),
@@ -837,8 +857,11 @@ def _live_blocks(events, state, audit, deliv, cursor):
         # EVERY LIVE CONSOLE, flat: the surface that stops two sessions from unknowingly
         # working the same thing. The per-agent fleet cards roll these up.
         "sessions_live": sessions_live[:12],
+        # The hub's own drive: always reported with its numbers, a condition only below
+        # the thresholds (hub_core.hostdisk).
+        "host_disk": disk,
         "attention": _attention(state, audit, inflight, adher, deliv,
-                                asks=asks, error_unclaimed=error_unclaimed),
+                                asks=asks, error_unclaimed=error_unclaimed, disk=disk),
         "telemetry": telemetry.read_aggregate(hub_dir),
         "cost": cost.cost_block(hub_dir, state),
         "wip": hub_app.wip_status(len(inflight)),
@@ -884,6 +907,7 @@ def _snapshot(served=None):
         hub_dir = hub_app.HUB_DIR
         side_asks, side_error_rows, side_error_meta, side_unclaimed, side_sessions = \
             _live_side_blocks(state)
+        side_disk = _host_disk()
         live = {
             "transport": "event-stream",
             "realtime": hub_app.realtime_info(),
@@ -915,8 +939,10 @@ def _snapshot(served=None):
             "errors": side_error_rows[:40],
             "error_log": side_error_meta,
             "sessions_live": side_sessions[:12],
+            "host_disk": side_disk,
             "attention": _attention(state, audit, inflight, adher, deliv,
-                                    asks=side_asks, error_unclaimed=side_unclaimed),
+                                    asks=side_asks, error_unclaimed=side_unclaimed,
+                                    disk=side_disk),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
             # aggregate, never a bespoke side-channel field.
             "telemetry": telemetry.read_aggregate(hub_dir),

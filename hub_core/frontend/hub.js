@@ -584,7 +584,8 @@
     "open-question": "Open question", "error-unclaimed": "Unclaimed error",
     "delivery-unmeasured-landing": "Landing unknown",
     "delivery-unmeasured-release": "Release unknown",
-    "delivery-unmeasured-live": "Live state unknown"
+    "delivery-unmeasured-live": "Live state unknown",
+    "host-disk-low": "Disk low"
   };
   var ATTN_TONE = {
     "board-drained": "fail", "stalled-lease": "warn", "dangling-dep": "warn",
@@ -592,7 +593,7 @@
     "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
     "open-question": "warn", "error-unclaimed": "fail",
     "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
-    "delivery-unmeasured-live": "warn"
+    "delivery-unmeasured-live": "warn", "host-disk-low": "fail"
   };
   function attentionItem(it) {
     var tone = ATTN_TONE[it.kind] || "info";
@@ -1037,7 +1038,12 @@
       kids.push(el("ul", { class: "agent-sessions" }, c.sessions.slice(0, 4).map(function (s) {
         return el("li", { class: "agent-sess" }, [
           el("span", { class: "sess-id", text: s.session || "?" }),
-          s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null,
+          // Where it stands: the repository when the directory is in one, otherwise the
+          // directory itself. The hub moves the two together, so a console that left a repo
+          // stops being attributed to it; the recent-files hint ages out on the server.
+          s.cwd ? el("span", { class: "sess-cwd",
+            title: s.cwd + ((s.files || []).length ? "\n" + s.files.length + " recent file(s): " + s.files.join(", ") : ""),
+            text: s.repo ? s.repo : s.cwd }) : null,
           s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
           el("span", { class: "sess-age", text: s.age_s != null ? fmtAge(s.age_s) : "" })
         ].filter(Boolean));
@@ -1195,6 +1201,14 @@
      "answered" and "delivered" are different facts. Lanes and a 14-day strip answer "are we
      keeping up" without counting rows. */
   var ANSWER_ECHO = "\n\n---\nIn answer to your question:";
+  // A card line is a PREVIEW of text stored whole: cut at a word boundary and say so with an
+  // ellipsis, never a silent mid-word slice that reads as the complete sentence.
+  function clip(text, n) {
+    var t = String(text == null ? "" : text);
+    if (t.length <= n) return t;
+    var cut = t.slice(0, n - 1), sp = cut.lastIndexOf(" ");
+    return (sp > n * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s.,;:]+$/, "") + "\u2026";
+  }
   function askThreads() {
     var acksByDirective = {};
     (D.acks || []).forEach(function (a) {
@@ -1244,24 +1258,28 @@
     return threads;
   }
   function askThread(t) {
+    // A thread the hub no longer tags open and nobody answered was settled some other way
+    // (withdrawn, superseded, resolved in a note): finished business. Reading it as "answered —
+    // awaiting the asker's ack" claimed a reply that does not exist.
     var stateLbl = t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
+                 : !t.answered ? "settled without a reply"
                  : !t.acked ? "answered — awaiting the asker's ack"
                  : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
     var kids = [
       el("span", { class: "ask-head" }, [
         el("span", { class: "ask-from", text: t.asker || "someone" }),
-        el("span", { class: "ask-state" + (t.open ? " is-open" : t.acked ? " is-closed" : " is-answered"),
+        el("span", { class: "ask-state" + (t.open ? " is-open" : (t.acked || !t.answered) ? " is-closed" : " is-answered"),
                      text: stateLbl }),
         el("time", { class: "rel-time ask-age", datetime: t.askedAt || "", "data-ts": t.askedAt || "",
                      text: relativeTime(t.askedAt) })
       ]),
       el("span", { class: "ask-title", text: t.title })
     ];
-    if (t.context) kids.push(el("span", { class: "ask-body", text: String(t.context).slice(0, 220) }));
+    if (t.context) kids.push(el("span", { class: "ask-body", text: clip(t.context, 220) }));
     if (t.answered && t.answer) {
       kids.push(el("span", { class: "ask-answer" }, [
         el("span", { class: "ask-answer-by", text: (t.answerBy || "the operator") + " replied" }),
-        el("span", { class: "ask-answer-text", text: String(t.answer).slice(0, 300) })
+        el("span", { class: "ask-answer-text", text: clip(t.answer, 300) })
       ]));
     }
     var node = el("button", { class: "ask-item" + (t.open ? "" : " is-settled"), type: "button",
@@ -1299,6 +1317,11 @@
     var open = threads.filter(function (t) { return t.open; });
     var awaiting = threads.filter(function (t) { return t.answered && !t.acked && !t.open; });
     var closed = threads.length - open.length - awaiting.length;
+    // Closed is two different facts: answered-and-delivered, and settled with NO reply
+    // (withdrawn, superseded). Folding the second into "every question is answered" claimed
+    // replies that were never written.
+    var settled = threads.filter(function (t) { return !t.open && !t.answered; }).length;
+    var delivered = closed - settled;
     var body = el("div", { class: "card-body" });
     // Per-asker lanes: who is blocked, how badly — the rows that change a decision first.
     var lanes = {};
@@ -1326,11 +1349,13 @@
       if (!open.length && !awaiting.length) {
         body.appendChild(el("div", { class: "attn-clear" }, [
           el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
-          doc.createTextNode(" Every question is answered and delivered" +
-            (closed ? " (" + closed + " closed)" : "") + ".")
+          doc.createTextNode(delivered && !settled ? " Every question is answered and delivered (" + delivered + " closed)."
+            : " Nothing is waiting: " + [delivered ? delivered + " answered and delivered" : "",
+                settled ? settled + " settled without a reply" : ""].filter(Boolean).join(", ") + ".")
         ]));
       } else if (closed) {
-        body.appendChild(el("p", { class: "cell-sub", text: closed + " closed thread" + (closed === 1 ? "" : "s") + " not shown." }));
+        body.appendChild(el("p", { class: "cell-sub", text: closed + " closed thread" + (closed === 1 ? "" : "s") + " not shown" +
+          (settled ? " (" + settled + " settled without a reply)" : "") + "." }));
       }
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
         "Ask with the client (python -m hub_core.client ask); answering is ONE verb that replies to the asker AND retires the question." }));
@@ -1642,14 +1667,24 @@
     var fm = failureModes(L.failure_modes);
 
     function ci(label, val) { return el("span", { class: "ci" }, [doc.createTextNode(label + " "), el("code", { text: val == null ? "—" : String(val) })]); }
+    // COHERENCE CLAIMS ONLY WHAT IT MEASURED. `coherent` is true when the stamped sha equals
+    // HEAD and the served sha was either probed and equal OR never probed. A green "coherent"
+    // over an unprobed served sha claimed the live site matches — the one thing not checked.
+    var unprobed = ["repo", "deploy", "served_sha"].filter(function (k) { return b[k] == null || b[k] === ""; })
+      .map(function (k) { return k === "served_sha" ? "served" : k; });
+    var partial = b.coherent === true && unprobed.indexOf("served") >= 0;
     var coCard = el("section", { class: "card" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title" }, [icon("rocket"), doc.createTextNode("Build coherence")]),
-        el("span", { class: "badge b-" + (b.coherent === true ? "pass" : (b.coherent === false ? "fail" : "stale")),
-                     text: b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unmeasured") })]),
+        el("span", { class: "badge b-" + (partial ? "stale" : b.coherent === true ? "pass" : (b.coherent === false ? "fail" : "stale")),
+                     title: partial ? "stamped sha equals HEAD; the served sha was not probed" : null,
+                     text: partial ? "stamp = HEAD" : b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unmeasured") })]),
       el("div", { class: "card-body" }, [el("div", { class: "coherence-strip" }, [
         ci("repo", b.repo), ci("deploy", b.deploy), ci("stamped sha", b.sha), ci("HEAD", b.head), ci("served", b.served_sha)
-      ])])
+      ]), unprobed.length ? el("p", { class: "cell-sub", style: "margin-top:8px",
+        text: "Not reported: " + unprobed.join(", ") + (partial
+          ? " — the stamped sha matches HEAD, and nothing here says the live site serves it."
+          : ".") }) : null].filter(Boolean))
     ]);
 
     var adherence = adherenceCard(L.adherence);
@@ -1672,6 +1707,18 @@
   }
 
   /* ============================ MODAL ============================ */
+  // Evidence is either a LIST of references or a sentence. A list is shown one reference per
+  // line (String(list) ran them together with commas); prose is shown as the words it is,
+  // never counted as if each character were a reference.
+  function evidenceNode(ev) {
+    if (Array.isArray(ev)) {
+      if (!ev.length) return "—";
+      return el("ul", { class: "evidence-list" }, ev.map(function (item) {
+        return el("li", null, [el("code", { text: String(item) })]);
+      }));
+    }
+    return String(ev);
+  }
   function row(label, valNode) { return el("div", { class: "detail-row" }, [el("div", { class: "detail-label", text: label }), valNode && valNode.nodeType ? el("div", { class: "detail-value" }, [valNode]) : el("div", { class: "detail-value", text: String(valNode) })]); }
   function rowMono(label, val) { return el("div", { class: "detail-row" }, [el("div", { class: "detail-label", text: label }), el("div", { class: "detail-value mono", text: val == null ? "—" : String(val) })]); }
   function section(title, ic, rows) { return el("div", { class: "detail-section" }, [el("div", { class: "detail-section-title" }, [icon(ic), doc.createTextNode(title)])].concat(rows.filter(Boolean))); }
@@ -1713,7 +1760,7 @@
       r.summary ? row("Summary", r.summary) : null,
       r.acceptance ? row("Acceptance", r.acceptance) : null,
       r.source ? row("Source", r.source) : null,
-      r.evidence_uri ? row("Evidence", r.evidence_uri) : null,
+      r.evidence_uri ? row("Evidence", evidenceNode(r.evidence_uri)) : null,
       r.needs ? row("Needs", r.needs) : null,
       r.build ? rowMono("Build", r.build) : null,
       r.sha ? rowMono("SHA", r.sha) : null,

@@ -2111,3 +2111,7 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .err-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
 .err-details { font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); }
 .deadline-overdue { color: var(--fail-solid, #e5484d); font-weight: 700; font-size: 11.5px; }
+
+/* Evidence references, one per line (a sentence of evidence renders as plain prose). */
+.evidence-list { margin: 0; padding-left: 16px; }
+.evidence-list li { overflow-wrap: anywhere; }

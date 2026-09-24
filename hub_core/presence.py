@@ -24,6 +24,16 @@ Rules this module holds, each paid for in production on the origin system:
 * SELF-RETIRE, ARCHIVE OVER DELETE. A machine that stopped reporting keeps its row forever
   otherwise, and the fleet panel slowly becomes a museum. Rows unseen past the horizon move
   to _retired/ (evidence is never lost) and reappear the instant the machine checks in again.
+* WHERE A CONSOLE STANDS IS ONE FACT. The working directory and the repository it sits in
+  describe the same place, so a report that names a cwd names the repo WITH it -- empty
+  included. "Empty never clobbers" applied field by field kept a console's old repo for its
+  whole life once it moved to a directory with no repository (a client omits an empty
+  header), and the board went on attributing it to work that had ended days earlier. A
+  report that names no cwd still never clobbers either.
+* A FILE LIST IS A SNAPSHOT, NOT A STATE. Clients report the files a console touched
+  recently and omit the list when there are none, so a stored list would otherwise live for
+  ever and keep pairing consoles on edits from days ago. Every list carries the time it was
+  reported (files_at) and reads as empty once it is older than FILES_FRESH_S.
 * PRESENCE MUST NEVER BREAK A REQUEST. Every write path swallows I/O errors.
 """
 
@@ -40,6 +50,8 @@ from .process_lock import ProcessFileLock
 
 SESSION_ACTIVE_S = 900          # a console that prompted within 15 minutes is a live console
 SESSION_KEEP_S = 1800           # a console quiet longer than this is closed, and is pruned
+FILES_FRESH_S = 900             # a reported file list older than this is history, not current work
+MAX_FILES = 24                  # a console's recent-files list is a hint, never an inventory
 _PRUNE_INTERVAL_S = 900         # walk the presence dir at most this often on the write path
 
 
@@ -138,11 +150,43 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
     return removed
 
 
+def parse_files(raw) -> list | None:
+    """A reported file list from a header value (comma/newline separated) or a list. None
+    means NOT REPORTED (keep what is stored); an empty list is a report of no files."""
+    if raw is None:
+        return None
+    items = raw if isinstance(raw, (list, tuple)) else str(raw).replace(chr(10), ",").split(",")
+    out = []
+    for item in items:
+        text = str(item or "").strip().replace("\\", "/")[:240]
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= MAX_FILES:
+            break
+    return out
+
+
+def fresh_files(session: dict, now: float | None = None) -> list:
+    """The session's file list if it is still current, else []. A list with no stamp was
+    written before stamps existed and cannot be dated, so it is treated as history too."""
+    now = time.time() if now is None else now
+    stamp = epoch((session or {}).get("files_at"))
+    if not stamp or now - stamp > FILES_FRESH_S:
+        return []
+    files = (session or {}).get("files")
+    return [str(f) for f in files] if isinstance(files, list) else []
+
+
 def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: str = "",
-            focus: str = "", heartbeat: bool = False) -> None:
+            focus: str = "", repo: str | None = None, files=None,
+            heartbeat: bool = False) -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine).
-    A heartbeat stamps heartbeat_at; anything else stamps activity_at. Never raises."""
+    A heartbeat stamps heartbeat_at; anything else stamps activity_at. Never raises.
+
+    `cwd` and `repo` move together: when a cwd is reported, the repo becomes whatever
+    accompanied it (None or "" alike mean "this directory is in no repository"). `files`
+    None means the list was not reported; a list (even empty) replaces it and is stamped."""
     agent = (agent or "").strip().lower()
     if not agent:
         return
@@ -180,13 +224,24 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 prior = sessions.get(sid) if isinstance(sessions.get(sid), dict) else {}
                 # A heartbeat carries no prompt, so it must not blank the last known focus —
                 # keep the prior one until a new prompt replaces it (merge-never-clobber).
-                sessions[sid] = {
-                    "cwd": (cwd or "").strip()[:400] or prior.get("cwd", ""),
+                place = (cwd or "").strip()[:400]
+                row = {
+                    "cwd": place or prior.get("cwd", ""),
+                    # WHERE A CONSOLE STANDS IS ONE FACT: a report naming a cwd names the repo
+                    # with it, empty included; only a report with no cwd leaves both alone.
+                    "repo": (str(repo or "").strip()[:200] if place
+                             else prior.get("repo", "")),
                     # A focus line is display text, so an overlong one is a PREVIEW (it ends in
                     # an ellipsis) rather than a silent cut mid-word.
                     "focus": preview(focus, 500) or prior.get("focus", ""),
                     "at": now,
                 }
+                reported = parse_files(files)
+                if reported is not None:
+                    row["files"], row["files_at"] = reported, now
+                elif isinstance(prior.get("files"), list):
+                    row["files"], row["files_at"] = prior["files"], prior.get("files_at")
+                sessions[sid] = row
                 # A console quiet past the keep window is closed. Without pruning this list
                 # only grows and ends up reporting every window ever opened.
                 cutoff = now - SESSION_KEEP_S
@@ -247,7 +302,8 @@ def read(hub_dir) -> dict:
             entry.setdefault("machine", name)
             sess = r.get("sessions")
             entry["sessions"] = sorted(
-                ({"id": k, "cwd": (v or {}).get("cwd", ""),
+                ({"id": k, "cwd": (v or {}).get("cwd", ""), "repo": (v or {}).get("repo", ""),
+                  "files": fresh_files(v or {}),
                   "focus": (v or {}).get("focus", ""), "at": epoch((v or {}).get("at"))}
                  for k, v in (sess or {}).items() if isinstance(v, dict)),
                 key=lambda s: s.get("at") or 0, reverse=True) if isinstance(sess, dict) else []
@@ -310,6 +366,9 @@ def live_sessions(hub_dir, now: float | None = None) -> list:
                 out.append({"agent": agent, "machine": m.get("machine") or "",
                             "session": str(s.get("id") or "")[:8],
                             "cwd": preview(s.get("cwd"), 120),
+                            "repo": str(s.get("repo") or ""),
+                            # Already aged by read(): a list older than FILES_FRESH_S is [].
+                            "files": list(s.get("files") or []),
                             "focus": preview(s.get("focus"), 160),
                             "age_s": round(now - at)})
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)

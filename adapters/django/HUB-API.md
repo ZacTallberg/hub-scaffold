@@ -48,8 +48,13 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
   Search first (`GET /hub/search.json?q=…`) — an ask the board already has is refused with the
   matching ids, and the guard fails OPEN so a search outage never silences a real question.
 - **Optional presence headers on any write** — `X-Hub-Machine`, `X-Hub-Session`, `X-Hub-Cwd`,
-  `X-Hub-Focus` — feed the board's live-console view; `POST /hub/api/presence` is the seat
-  heartbeat between tasks. An authenticated write refreshes your observed seat automatically.
+  `X-Hub-Repo`, `X-Hub-Files`, `X-Hub-Focus` — feed the board's live-console view;
+  `POST /hub/api/presence` is the seat heartbeat between tasks. An authenticated write refreshes
+  your observed seat automatically. `X-Hub-Cwd` and `X-Hub-Repo` are ONE fact: a report that
+  names a cwd sets the repo to whatever accompanies it, and a missing repo header beside a cwd
+  means "this directory is in no repository" (a report with no cwd changes neither).
+  `X-Hub-Files` (comma-separated recent files) replaces the stored list only when sent, is
+  stamped on arrival, and reads as empty once older than 15 minutes.
 
 ## READ endpoints (GET, public)
 
@@ -91,7 +96,7 @@ source of truth, and every ratio carries its denominator.
 | `activity` | recent canonical events; a done task carries the `receipt` that granted it. |
 | `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
 | `fleet` | per-agent cards: current lease, plan step, the last checkpoint note, recent action trail, completions, machine, and every live console (`sessions`). An agent with no claim but a fresh console focus reads `active` — working, just not on a board task — never `idle`. |
-| `sessions_live` | every live console, flat: agent, machine, session id, cwd, focus, age. The surface that stops two sessions from unknowingly working the same thing. |
+| `sessions_live` | every live console, flat: agent, machine, session id, cwd, repo, recent files (empty once older than 15 minutes), focus, age. The surface that stops two sessions from unknowingly working the same thing. |
 | `asks` / `asks_open` | open questions (who, what, since when). They also ride the attention rail. |
 | `errors` / `error_log` | the operational stream (bar-annotated rows) and its shape — histogram, trend, top sources, unclaimed count, per-channel coverage. |
 | `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. Readiness comes from actionable acceptance and dependencies, never from the presence of a test command. |
@@ -99,6 +104,7 @@ source of truth, and every ratio carries its denominator.
 | `dag` | critical path length, widest frontier, layer widths, the critical `path` itself, and the min-makespan `eta_tasks` for the fleet actually present. `acyclic: false` means the numbers are a floor, not a schedule. |
 | `progress` | done/total/pct plus MONOTONIC signals — `completed_total`, `last_1h`, `last_24h`, and a per-bucket `spark`. A ratio alone does not climb when the fleet discovers work as fast as it finishes it. |
 | `delivery` | Per-task accepted-operation proof / `landed` / `deployed` / `live`. For ordinary done work, required `verified_by` plus `evidence_uri` is its proof; only a task that explicitly declares a critical `verification_command` additionally needs a matching exit-0 transient receipt. Production delivery is the exact immutable deploy closure (`sha == served_sha`, task in `tasks_closed`) matching this running artifact's normalized build SHA; Git ancestry is optional legacy/source enrichment. |
+| `host_disk` | the drive holding the hub's own ledger: host, drive, `total_gb`, `free_gb`, `free_pct`, thresholds and `state` (`ok`/`warn`/`critical`/`unmeasured`). Always reported; cached 120 s. Below `HUB_DISK_WARN_GB` (default 15) a `host-disk-low` item joins the attention rail, ranked most-urgent below `HUB_DISK_CRITICAL_GB` (default 8). |
 | `attention` | the ranked "needs the operator" rail. |
 | `worker_health` | receipt outcomes and completions per seat, with denominators. |
 | `failure_modes` | what KIND of refusal the fleet keeps hitting, plus the unclassified count. |
