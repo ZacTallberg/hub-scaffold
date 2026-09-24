@@ -141,6 +141,10 @@ Find the last deploy the canary confirmed, and prefer a shared source (the board
 file, so it does not matter which clone is rolling back. Then repeat steps 3–9 with that sha.
 A rollback moves the target backwards, which an ordinary push refuses — force is required and
 deliberate. If the last-good sha IS the failed sha, stop: re-shipping it cannot help.
+Report the rollback itself to the board (`python -m hub_core.client ci-report --kind deploy
+--status rolled_back --sha <rejected> --restored-sha <running>`): the release record can only say
+"ok", and a host running code the pipeline rejected must be a critical row until a person closes
+it. `patterns/deploy-hardening.md` lists the step failures that roll back good builds.
 
 ## Concurrency — the honest limit
 
