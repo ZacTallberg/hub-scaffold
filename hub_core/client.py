@@ -79,6 +79,46 @@ def _auth_headers() -> dict[str, str]:
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
 
 
+def _safe_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Header values http.client can actually put on the wire.
+
+    It encodes them as LATIN-1, so one non-ASCII character -- an em dash in a focus line, a
+    curly quote, an accented machine name -- raises UnicodeEncodeError BEFORE a byte is sent.
+    Every address then fails identically, which reads exactly like the Hub being down. These
+    values are telemetry about the session, so transliterating what will not fit is right: the
+    request survives and the header stays readable."""
+    out: dict[str, str] = {}
+    for key, value in (headers or {}).items():
+        text = "" if value is None else str(value)
+        try:
+            text.encode("latin-1")
+        except UnicodeEncodeError:
+            text = text.encode("ascii", "replace").decode("ascii")
+        out[str(key)] = text
+    return out
+
+
+def _unattended_headers() -> dict[str, str]:
+    """An UNATTENDED run says so on every request (HUB_UNATTENDED=1, set by its launcher), with
+    the escalation depth its launcher gave it (HUB_RESPONDER_HOP). The Hub stamps what the run
+    raises with that depth, stamps its answers as unattended, and offers it only what an
+    unattended run may take (hub_core.offer). An attended session sends nothing."""
+    if os.environ.get("HUB_UNATTENDED", "").strip() not in ("1", "true", "yes"):
+        return {}
+    try:
+        hop = max(1, int(os.environ.get("HUB_RESPONDER_HOP") or 1))
+    except ValueError:
+        hop = 1
+    return {"X-Hub-Unattended": "1", "X-Hub-Hop": str(hop)}
+
+
+def _local_fault(base: str, error: UnicodeError) -> RuntimeError:
+    """A request this machine could not BUILD never reached the Hub: say so in its own words,
+    never 'unreachable' -- that tells the caller its writes are queueing while the Hub is fine."""
+    return RuntimeError(f"local request fault (the Hub at {base} was never asked): "
+                        f"{type(error).__name__}: {str(error)[:160]}")
+
+
 def _post(base: str, operation: str, payload: dict[str, Any],
           extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     headers = {
@@ -89,17 +129,20 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         # adopter to name its own operational client at the edge.
         "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
         **_auth_headers(),
+        **_unattended_headers(),
         **(extra_headers or {}),
     }
     request = urllib.request.Request(
         f"{base}/api/{operation}",
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers=headers,
+        headers=_safe_headers(headers),
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
+    except UnicodeError as error:
+        raise _local_fault(base, error) from error
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         try:
@@ -138,13 +181,17 @@ def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, 
 def _get(base: str, path: str, timeout: int = 30) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{base}/{path.lstrip('/')}",
-        headers={"Accept": "application/json",
-                 "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
-                 **_optional_auth_headers()},
+        headers=_safe_headers({"Accept": "application/json",
+                               "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT",
+                                                            DEFAULT_USER_AGENT),
+                               **_optional_auth_headers(),
+                               **_unattended_headers()}),
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+    except UnicodeError as error:
+        raise _local_fault(base, error) from error
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         try:
@@ -175,6 +222,12 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         payload["plan"] = [
             {"step": step, "done": False} for step in arguments.plan_item
         ]
+    if getattr(arguments, "only_on", None):
+        # MACHINE AFFINITY: this task's input exists on one machine, so only a worker there is
+        # offered it (hub_core.offer). Not --machine: that flag is the WRITER's presence.
+        payload["machine"] = arguments.only_on.strip().lower()
+    if getattr(arguments, "project", None):
+        payload["project"] = arguments.project.strip().lower()
     return "task", payload
 
 
@@ -213,6 +266,19 @@ def _payload_complete(arguments: argparse.Namespace) -> tuple[str, dict[str, Any
     if arguments.expected_version is not None:
         payload["expected_version"] = arguments.expected_version
     return "complete", payload
+
+
+def _payload_hand(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """GIVE a task to a named agent. `--to` is the recipient; the writer stays you."""
+    to = (arguments.to or "").strip().lower()
+    me = _agent(arguments).strip().lower()
+    if to and to == me:
+        raise ValueError(f"hand: {to} is you — handing gives a task to someone else; to work it "
+                         f"yourself run `start {arguments.task_id}`")
+    payload = {"id": arguments.task_id, "to": to, "agent": _agent(arguments)}
+    if getattr(arguments, "only_on", None) is not None:
+        payload["machine"] = arguments.only_on.strip().lower()
+    return "hand", payload
 
 
 def _payload_ask(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -290,6 +356,82 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     if arguments.note:
         payload["note"] = arguments.note
     return "ack-error", payload
+
+
+def _payload_hold(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Record a finished commit deliberately NOT live yet, so it ages in public.
+
+    The client that holds the repository attests the commit is fetchable -- ``git branch -r
+    --contains <sha>`` names a remote branch -- and the Hub also asks its own resolver. A commit
+    on no remote needs --unpushed-reason: it is allowed, never silently."""
+    import subprocess
+    sha = arguments.sha.strip().lower()
+    attested, where = False, ""
+    try:
+        run = subprocess.run(["git", "branch", "-r", "--contains", sha], capture_output=True,
+                             text=True, timeout=15)
+        remotes = [line.strip() for line in run.stdout.splitlines() if line.strip()]
+        attested = run.returncode == 0 and bool(remotes)
+        where = remotes[0] if remotes else ""
+    except (OSError, subprocess.SubprocessError):
+        attested = False
+    payload: dict[str, Any] = {"agent": _agent(arguments), "repo": arguments.repo,
+                               "sha": sha, "reason": arguments.reason,
+                               "rebuild": arguments.rebuild, "attested": attested}
+    if arguments.branch or where:
+        payload["branch"] = arguments.branch or where.split("/", 1)[-1]
+    if arguments.gap:
+        payload["from_gap"] = arguments.gap
+    if arguments.unpushed_reason:
+        payload["unpushed_reason"] = arguments.unpushed_reason
+        payload["local_path"] = os.getcwd()
+    if arguments.title:
+        payload["title"] = arguments.title
+    return "held", payload
+
+
+def _payload_promote(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments), "repo": arguments.repo,
+                               "sha": arguments.sha.strip().lower(),
+                               "evidence": arguments.evidence}
+    if arguments.note:
+        payload["note"] = arguments.note
+    return "held/promote", payload
+
+
+def _payload_abandon(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    return "held/abandon", {"agent": _agent(arguments), "repo": arguments.repo,
+                            "sha": arguments.sha.strip().lower(), "reason": arguments.reason}
+
+
+def _run_held(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    return _get(base, "held.json" + (f"?repo={quote(arguments.repo)}" if arguments.repo else ""))
+
+
+def _run_lineage(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """A task traced hop by hop to what is serving it: the commits it recorded (`step --sha`),
+    the verified deploy that carries one, the first release to carry it, and whether what is
+    serving now still contains it. Every hop that cannot be established says unknown and why."""
+    payload = _get(base, f"task/{_task_local(arguments.task_id)}.json?lineage=1")
+    return (payload.get("data") or {}).get("lineage") or payload
+
+
+def _payload_item_claim(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Claim a non-task item (a question, an error fingerprint) for ONE machine, so two
+    machines never spend a session on the same thing. The same machine re-claims idempotently."""
+    machine = arguments.machine or os.environ.get("HUB_MACHINE") or ""
+    if not machine:
+        raise ValueError("item-claim needs --machine (or HUB_MACHINE): a claim is per machine")
+    payload: dict[str, Any] = {"agent": _agent(arguments), "item": arguments.item,
+                               "machine": machine}
+    if arguments.release:
+        payload["release"] = True
+    return "item-claim", payload
+
+
+def _run_item_claims(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _get(base, "item-claims.json")
 
 
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -395,8 +537,14 @@ def _run_reground(base: str | None, arguments: argparse.Namespace) -> dict[str, 
 
 def _run_next(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """DISCOVER: the top ready tasks, with needs-spec and snoozed reported honestly beside
-    them. Answers 429 body verbatim at WIP saturation — a refusal, never silence."""
-    return _get(base, f"next.json?n={max(1, int(arguments.n))}")
+    them. Answers 429 body verbatim at WIP saturation — a refusal, never silence. Work given to
+    somebody else by name is left out for the calling agent."""
+    from urllib.parse import quote
+    who = arguments.agent or os.environ.get("HUB_AGENT_ID") or ""
+    where = arguments.machine or os.environ.get("HUB_MACHINE") or ""
+    return _get(base, f"next.json?n={max(1, int(arguments.n))}"
+                      + (f"&agent={quote(who)}" if who else "")
+                      + (f"&machine={quote(where)}" if where else ""))
 
 
 def _run_start(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -412,6 +560,11 @@ def _run_start(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
             "charter": ({"sha256": sha, "carry": "pass to `finish --charter-sha`"} if sha else
                         {"present": False,
                          "note": "no charter core here — the finish regrounding gate is not in force"})}
+
+
+#: Mirrors hub_core.plan.LIFECYCLE_KINDS: rows a scheduler wrote about its own run.
+_LIFECYCLE_KINDS = frozenset({"handed_back", "lease_released", "reaped", "launcher_timeout",
+                              "claim_expired", "lifecycle"})
 
 
 def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -434,13 +587,21 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
         if target is None:
             raise RuntimeError(f"no plan step matches {wanted!r}")
     else:
-        target = next((s for s in plan if not s.get("done")), None)
+        # A lifecycle row (a hand-back the hub wrote) is never the next piece of work.
+        target = next((s for s in plan if not s.get("done")
+                       and not (s.get("lifecycle") is True or s.get("kind") in _LIFECYCLE_KINDS)),
+                      None)
         if target is None:
             raise RuntimeError("every plan step is already done — use `finish`")
     target["done"] = True
     if arguments.note:
         target["note"] = arguments.note[:600]
         target["note_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    if getattr(arguments, "sha", None):
+        # The commit this checkpoint produced, as a FIELD: a task's lineage to what is serving
+        # it is then read, never inferred from prose (hub_core.lineage).
+        target["sha"] = arguments.sha.strip().lower()
+        target["kind"] = "pushed"
     # A MINIMAL delta, exactly like the claim seam's own in_progress append: the fold merges
     # payloads last-write-wins per key, so echoing the whole entity back would both trip the
     # status guards and clobber concurrent field changes this client never read.
@@ -450,9 +611,11 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     if token:
         body["token"] = token
     result = _post(base, "task", body, extra_headers=_presence_headers(arguments))
-    done = sum(1 for s in plan if s.get("done"))
+    work = [s for s in plan
+            if not (s.get("lifecycle") is True or s.get("kind") in _LIFECYCLE_KINDS)]
+    done = sum(1 for s in work if s.get("done"))
     return {"updated": result, "step": target.get("step"),
-            "progress": f"{done}/{len(plan)}"}
+            "progress": f"{done}/{len(work)}"}
 
 
 def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -536,6 +699,11 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--touch", action="append", default=[])
     create.add_argument("--plan-item", action="append", default=[])
     create.add_argument("--agent")
+    create.add_argument("--only-on", dest="only_on",
+                        help="MACHINE AFFINITY: only this machine can do the task (its input is "
+                             "there); only a worker declaring it is offered the task")
+    create.add_argument("--project", help="the project this task is about, when it is not the "
+                                          "Hub's own repository (its commits count as evidence)")
     create.set_defaults(payload=_payload_create)
 
     claim = commands.add_parser("claim", help="claim a task and receive its fencing token")
@@ -543,6 +711,68 @@ def _parser() -> argparse.ArgumentParser:
     claim.add_argument("--agent")
     claim.add_argument("--ttl-s", type=int)
     claim.set_defaults(payload=_payload_claim)
+
+    hand = commands.add_parser("hand", help="give a task to a named agent (--to \"\" clears it)")
+    hand.add_argument("task_id")
+    hand.add_argument("--to", required=True,
+                      help="the RECIPIENT; --agent stays who is writing")
+    hand.add_argument("--agent")
+    hand.add_argument("--only-on", dest="only_on",
+                      help="also set MACHINE AFFINITY (\"\" clears it)")
+    hand.set_defaults(payload=_payload_hand)
+
+    hold = commands.add_parser("hold", help="record a finished commit held back from live, so "
+                                            "it ages in public until promoted with evidence")
+    hold.add_argument("repo", help="the project path a reader can fetch, e.g. team/budget-app")
+    hold.add_argument("sha")
+    hold.add_argument("--reason", required=True, help="why it may not go live yet")
+    hold.add_argument("--rebuild", required=True,
+                      help="what must be rebuilt/re-indexed and PROVEN before it can go live")
+    hold.add_argument("--branch", help="the remote branch it was parked on")
+    hold.add_argument("--gap", help="the gap id this commit answers")
+    hold.add_argument("--unpushed-reason", dest="unpushed_reason",
+                      help="why this commit is on NO remote (recorded, marked ON ONE DISK ONLY)")
+    hold.add_argument("--title")
+    hold.add_argument("--agent")
+    hold.set_defaults(payload=_payload_hold)
+
+    promote = commands.add_parser("promote", help="free a held commit: the rebuild ran, here is "
+                                                  "the proof")
+    promote.add_argument("repo")
+    promote.add_argument("sha")
+    promote.add_argument("--evidence", required=True,
+                         help="the pipeline, sha or URL of the rebuild that actually ran")
+    promote.add_argument("--note", help="what the rebuild did, with its counts")
+    promote.add_argument("--agent")
+    promote.set_defaults(payload=_payload_promote)
+
+    abandon = commands.add_parser("abandon", help="close a hold without promoting it (a decision "
+                                                  "that states its reason)")
+    abandon.add_argument("repo")
+    abandon.add_argument("sha")
+    abandon.add_argument("--reason", required=True)
+    abandon.add_argument("--agent")
+    abandon.set_defaults(payload=_payload_abandon)
+
+    held = commands.add_parser("held", help="the promotion queue: what is held, oldest first")
+    held.add_argument("--repo")
+    held.set_defaults(runner=_run_held)
+
+    lineage = commands.add_parser("lineage", help="trace a task hop by hop to what is serving it")
+    lineage.add_argument("task_id")
+    lineage.set_defaults(runner=_run_lineage)
+
+    item_claim = commands.add_parser("item-claim", help="claim a question/error item for ONE "
+                                                        "machine (one responder per item)")
+    item_claim.add_argument("item", help="the item id (a question note id, an error fingerprint)")
+    item_claim.add_argument("--machine")
+    item_claim.add_argument("--release", action="store_true",
+                            help="give the claim back (only the holding machine may)")
+    item_claim.add_argument("--agent")
+    item_claim.set_defaults(payload=_payload_item_claim)
+
+    item_claims = commands.add_parser("item-claims", help="every live item claim")
+    item_claims.set_defaults(runner=_run_item_claims)
 
     heartbeat = commands.add_parser("heartbeat", help="renew a held task lease")
     heartbeat.add_argument("task_id")
@@ -657,6 +887,10 @@ def _parser() -> argparse.ArgumentParser:
     # The worker loop: next -> start -> step -> finish (+ reground after compaction).
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")
     nxt.add_argument("--n", type=int, default=1)
+    nxt.add_argument("--agent", help="the calling agent (default HUB_AGENT_ID); hides work "
+                                     "given to somebody else")
+    nxt.add_argument("--machine", help="the calling machine (default HUB_MACHINE); work only "
+                                       "another machine can do is left out")
     nxt.set_defaults(runner=_run_next)
 
     reground = commands.add_parser("reground",
@@ -676,6 +910,8 @@ def _parser() -> argparse.ArgumentParser:
     step.add_argument("--agent")
     step.add_argument("--step", help="step text fragment or 1-based index; default = first undone")
     step.add_argument("--note", help="what actually happened at this checkpoint")
+    step.add_argument("--sha", help="the commit this checkpoint produced (recorded as a field; "
+                                    "`lineage` traces it to what is serving)")
     step.add_argument("--lease-token", dest="lease_token",
                       help="the held lease's fencing token (or HUB_LEASE_TOKEN)")
     step.add_argument("--machine")
