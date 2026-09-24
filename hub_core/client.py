@@ -31,6 +31,11 @@ in silence::
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
 
+Knowledge rides it too (hub_core/client_knowledge.py): `share` a lesson, record a `finding`,
+`method`, `review` or `gap`, `recall` one record in full, and wire `prompt-context --hook` into an
+agent harness's prompt hook so the board's knowledge, ranked for what the console is doing,
+arrives before each prompt.
+
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
     python -m hub_core.client next                       # top ready + needs-spec + snoozed
@@ -654,6 +659,11 @@ def _parser() -> argparse.ArgumentParser:
                                  help="what the hub resolves your credential and headers to")
     whoami.set_defaults(runner=_run_whoami)
 
+    # Knowledge: share/finding/method/review/gap, recall, related, capabilities, the per-prompt
+    # knowledge block, the local mirror, and overlap adjudication (hub_core/client_knowledge.py).
+    from . import client_knowledge
+    client_knowledge.register(commands)
+
     # The worker loop: next -> start -> step -> finish (+ reground after compaction).
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")
     nxt.add_argument("--n", type=int, default=1)
@@ -712,8 +722,11 @@ def main() -> int:
         return 1
     except KeyboardInterrupt:
         return 0
+    if result is None:              # the runner printed its own human-readable output
+        return 0
+    code = int(result.pop("_exit", 0) or 0) if isinstance(result, dict) else 0
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return code
 
 
 if __name__ == "__main__":
