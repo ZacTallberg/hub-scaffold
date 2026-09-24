@@ -75,6 +75,10 @@ loss of the complete board is acceptable.
    `hubaudit`, retain its receipt, and delete the disposable restored copy before commit.
 5. Start serving only after the actual restored board matches the pre-loss record.
 
+Automated snapshots taken before a migration or deploy must prune BEFORE they copy and stay under
+a free-space floor, or the first full disk stops the pruning and fails every later deploy; see
+`patterns/deploy-contract.md` → "Gate hygiene".
+
 `events.db` may be deleted from an offline restored copy; the EventStore rebuilds it from
 `events.jsonl`. Do not “repair” JSONL manually. A non-final malformed line is treated as corruption;
 an incomplete final line is quarantined by truncating to the last complete event when the store

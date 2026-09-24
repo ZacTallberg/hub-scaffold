@@ -1,0 +1,43 @@
+{% comment %}One row per distinct failure; the evidence (source, page, stack) is IN the row.{% endcomment %}
+<div class="card">
+  {% for r in rows %}
+  <details>
+    <summary>
+      <span class="dot {{ r.severity }}" aria-hidden="true"></span>
+      <span class="row-main">
+        <span class="row-head">
+          <span class="chip {% if r.severity == 'critical' %}crit{% endif %}">{{ r.severity }} · {{ r.get_kind_display }}</span>
+          {% if r.status %}<span class="chip mono">{{ r.status }}</span>{% endif %}
+          <span class="chip" title="occurrences — one problem, not one event">×{{ r.count }}</span>
+          {% if not r.is_open %}<span class="chip ok">resolved by {{ r.resolved_by|default:"—" }}</span>{% endif %}
+          <span class="when">last {{ r.last_seen|timesince }} ago · first {{ r.first_seen|timesince }} ago</span>
+        </span>
+        <span class="msg">{{ r.message|truncatechars:200 }}</span>
+        <span class="where">
+          {% if r.source %}<span class="mono">{{ r.source|truncatechars:90 }}</span>{% endif %}
+          {% if r.page_url %} · on <span class="mono">{{ r.page_url|truncatechars:60 }}</span>{% endif %}
+          {% if r.actor %} · {{ r.actor }}{% endif %}
+        </span>
+      </span>
+    </summary>
+    <div class="body">
+      {% if r.stack %}<pre>{{ r.stack }}</pre>
+      {% else %}<p class="muted">No stack was captured for this kind of failure — the message, source and page above are everything the reporter had.</p>{% endif %}
+      {% if r.user_agent %}<p class="muted" style="font-size:11px">{{ r.user_agent|truncatechars:140 }}</p>{% endif %}
+      {% if r.is_open %}
+      <form method="post" action="{% url 'errors_resolve' r.pk %}" style="margin-top:12px">
+        {% csrf_token %}
+        <button class="btn" type="submit">Mark resolved</button>
+        <span class="muted" style="font-size:11px">A recurrence re-opens it automatically — a claim the app can falsify, not a delete.</span>
+      </form>
+      {% endif %}
+    </div>
+  </details>
+  {% empty %}
+  <div class="empty">
+    <p><strong>Nothing is failing.</strong></p>
+    <p class="muted">Capture is wired on every surface. An empty table means nothing has fired, not that nobody is watching — the forwarding line above says whether the hub would hear about it.</p>
+  </div>
+  {% endfor %}
+</div>
+{% if shown >= 200 %}<p class="muted" style="font-size:11px">Showing the 200 most recent — narrow with <code>?kind=</code> or read them all with <code>manage.py errors --json</code>.</p>{% endif %}
