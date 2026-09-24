@@ -63,6 +63,8 @@ HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
+# HUB_SNAPSHOT_HEAD_ROWS = 60          # larger collections ride hub.json as a head; 0 = never
+# HUB_LIVE_STREAMS_MAX = 3             # concurrent WSGI board streams per process; 0 = no cap
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling

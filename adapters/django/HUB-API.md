@@ -56,17 +56,17 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | Endpoint | Returns |
 |---|---|
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`. The running identity comes from the artifact's pre-build `HUB_BUILD_STAMP`; optional `?served=<sha>` adds an external comparison and a mismatch is explicit. |
-| `GET /hub/hub.json` | Full snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. |
+| `GET /hub/hub.json` | Snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. `collection_counts` is exact for every collection; `partial` names each collection served as a HEAD (see below). |
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
 | `GET /hub/audit.json` | the computed audit: `{ok, exit_code, counts, violations[]}`. exit_code 0=pass, 3=warn, 2=violation. |
 | `GET /hub/graph.json` | dependency edges + dangling references. |
-| `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note, directive, ack`. |
+| `GET /hub/<type>.json` | a WHOLE collection as `{data, count, cursor, metadata}`, rows in exactly the snapshot's shape — type is the singular (`task, run, adr, feat, gap, cap, deploy, note, directive, ack`) or the snapshot key (`tasks`, `notes`, …). Conditional on a per-collection tag (304 when unchanged). |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
 | `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
-| `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. |
+| `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. On the thread-holding (WSGI) path at most `HUB_LIVE_STREAMS_MAX` streams (default 3; 0 = unlimited) are open per process; a stream past the cap receives one `busy` frame `{reason, limit, retry_ms}` (jittered 8–20 s) and closes — the board treats that as capacity, not a transport failure, shows "Waiting for a live slot" and reconnects after `retry_ms`. ASGI streams hold no worker thread and are not capped. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
 | `GET /hub/delta.json?since=<seq>` | Reconnect/recovery form of the cumulative patch: `{changed[], removed[], cursor, audit, live}`. The normal connected path receives this payload inside SSE and does not call this endpoint. `since >= head` still returns refreshed live blocks for lease-only truth; a `cursor.seq` below your `since` means the head regressed—fall back to a full snapshot. |
 | `GET /hub/questions.json` | every question with the numbers the feed is about: per-row `open/answered/acked` plus `waiting_seconds`/`reply_seconds`, and metadata with the longest wait (and who), median reply time, per-asker lanes, and a 14-day asked/answered strip. "Answered" and "delivered" are different facts; only the asker's ack closes the loop. |
@@ -77,8 +77,24 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
 
-`GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
-unchanged, so an idle poll or a re-grounding pull costs an empty body.
+`GET /hub/hub.json` (and `GET /hub/?format=json`) answer **304** when the caller already holds the
+current tag, so an idle poll or a re-grounding pull costs an empty body. The tag is WEAK (`W/"…"`):
+it hashes the whole board with the clock-derived fields (`generated_at`, every `age_s`/`idle_s`)
+removed plus a five-minute bucket, because those fields change on every rebuild and made two reads
+of an unchanged board carry different tags. The caller's last tag is accepted from any of three
+carriers — `If-None-Match`, `X-Hub-ETag`, or `?etag=` — because a proxy in front of an adopting
+host may drop or rewrite `If-None-Match`; the board's own client sends all three. Responses carry
+the tag in both `ETag` and `X-Hub-ETag`.
+
+**Snapshot heads.** A collection larger than `HUB_SNAPSHOT_HEAD_ROWS` (default 60; 0 disables)
+is served on the wire as a head: every row that is still LIVE (open tasks, active directives, open
+questions, open/investigating gaps) plus the newest of the rest by `provenance.updated_at`.
+`partial[<key>] = true` names it and `collection_counts[<key>]` stays exact. The board fetches the
+whole list from `GET /hub/<type>.json` after first paint (tasks first, then the open tab, then the
+rest one at a time) and merges every later snapshot into it by id, so a head never shrinks a tab.
+The head exists only on the wire: every server-side derivation — the attention rail, counts,
+search, the MCP tools — reads the whole cached snapshot, so no derived number is computed over a
+head. A client of `hub.json` that needs a whole collection reads `partial` and fetches it.
 
 ### The `live` block — what the cockpit reads
 
