@@ -43,7 +43,11 @@ from a working multi-project system. Nothing here names any specific person, hos
   that keeps failures in its own log can only be debugged from a shell on its host), and
   **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
-  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
+  the barren ladder it climbs when a cycle produces nothing), the **unattended responder**
+  (`unattended-responder.md` + `python -m hub_core.unattended`: one bounded Claude Code or Codex
+  session per board item, outcome read from the board, hand-back with proof, lane faults never
+  charged, hop-bounded escalation), and **doctrine publish** (`doctrine-publish.md`). None runs
+  unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook
