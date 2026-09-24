@@ -42,7 +42,14 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     # ... your middleware ...
+    # Early, before any read gate: a busy ledger answers 503 + Retry-After on every hub path,
+    # reads included, and records a WARNING row instead of a 5xx defect.
+    "hub.middleware.RouteTimingMiddleware",   # per-route latency for /hub/perf.json + the rail
+    "hub.middleware.LedgerBusyMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",   # optional: no-store on dynamic HTML after deploys
+    # The visibility veil (after your auth middleware, so request.user is known). A no-op until
+    # PROJECT/facets.json declares hidden facets; see HUB-API.md "Visibility".
+    "hub.veil.VeilMiddleware",
 ]
 
 # The literal-realtime transport is served by an ASGI process server.
@@ -63,6 +70,21 @@ HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
+# HUB_LEDGER_WAIT_S = 30               # request wait for the ledger lock before 503 busy
+# Addressed delivery (all optional):
+# HUB_ASK_STUCK_S = 7200               # an open ask this old is STUCK on the board and the rail
+# HUB_ASK_UNSTICK_S = 14400            # ...and past this it reaches EVERY console's inbox
+# HUB_HUMAN_GATE_PATTERN = r"approv"   # regex over an ask's title+body: a gate only a person
+#                                      # can satisfy (never widened; also the `human-only` tag)
+# HUB_GATE_RESOLVER = "your_project.gates.satisfied"  # text -> evidence the approval landed;
+#                                      # CACHE-ONLY: it runs inside every inbox fold
+# HUB_INBOX_WAITERS_MAX = 4            # held long-polls per process (env var)
+# HUB_SLOW_ROUTE_MS = 8000             # worst-window p95 that puts a route on the rail (env var)
+# HUB_VEIL_ANONYMOUS_TIER = "contributor"  # tier of an unauthenticated reader once facets exist
+# HUB_VEIL_USER_TIER = "member"        # tier of a signed-in site user
+# HUB_MAINTAIN_URL = "https://docs.example.com/runbooks/client-repair"  # navbar "Update Core
+#                                      # Systems": the manual repair pass for a machine whose own
+#                                      # update loop has not converged (hidden when unset)
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling
