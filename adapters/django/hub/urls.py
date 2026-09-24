@@ -30,6 +30,7 @@ urlpatterns = [
     path("errors.json", R(hub_api.errors_json), name="errors"),
     path("search.json", R(hub_api.search_json), name="search"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
+    path("components.json", R(hub_api.components_json), name="components"),
     path("dag.graphml", R(hub_api.dag_graphml), name="dag-graphml"),
     path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
     path("<str:type>.json", R(hub_api.type_json)),
