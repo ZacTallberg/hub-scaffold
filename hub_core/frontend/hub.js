@@ -585,7 +585,8 @@
     "open-question": "Open question", "error-unclaimed": "Unclaimed error",
     "delivery-unmeasured-landing": "Landing unknown",
     "delivery-unmeasured-release": "Release unknown",
-    "delivery-unmeasured-live": "Live state unknown"
+    "delivery-unmeasured-live": "Live state unknown",
+    "host-disk-low": "Disk low"
   };
   var ATTN_TONE = {
     "board-drained": "fail", "stalled-lease": "warn", "dangling-dep": "warn",
@@ -593,7 +594,7 @@
     "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
     "open-question": "warn", "error-unclaimed": "fail",
     "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
-    "delivery-unmeasured-live": "warn"
+    "delivery-unmeasured-live": "warn", "host-disk-low": "fail"
   };
   function attentionItem(it) {
     var tone = ATTN_TONE[it.kind] || "info";
@@ -1038,7 +1039,12 @@
       kids.push(el("ul", { class: "agent-sessions" }, c.sessions.slice(0, 4).map(function (s) {
         return el("li", { class: "agent-sess" }, [
           el("span", { class: "sess-id", text: s.session || "?" }),
-          s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null,
+          // Where it stands: the repository when the directory is in one, otherwise the
+          // directory itself. The hub moves the two together, so a console that left a repo
+          // stops being attributed to it; the recent-files hint ages out on the server.
+          s.cwd ? el("span", { class: "sess-cwd",
+            title: s.cwd + ((s.files || []).length ? "\n" + s.files.length + " recent file(s): " + s.files.join(", ") : ""),
+            text: s.repo ? s.repo : s.cwd }) : null,
           s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
           el("span", { class: "sess-age", text: s.age_s != null ? fmtAge(s.age_s) : "" })
         ].filter(Boolean));
@@ -1196,6 +1202,14 @@
      "answered" and "delivered" are different facts. Lanes and a 14-day strip answer "are we
      keeping up" without counting rows. */
   var ANSWER_ECHO = "\n\n---\nIn answer to your question:";
+  // A card line is a PREVIEW of text stored whole: cut at a word boundary and say so with an
+  // ellipsis, never a silent mid-word slice that reads as the complete sentence.
+  function clip(text, n) {
+    var t = String(text == null ? "" : text);
+    if (t.length <= n) return t;
+    var cut = t.slice(0, n - 1), sp = cut.lastIndexOf(" ");
+    return (sp > n * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s.,;:]+$/, "") + "\u2026";
+  }
   function askThreads() {
     var acksByDirective = {};
     (D.acks || []).forEach(function (a) {
@@ -1245,24 +1259,28 @@
     return threads;
   }
   function askThread(t) {
+    // A thread the hub no longer tags open and nobody answered was settled some other way
+    // (withdrawn, superseded, resolved in a note): finished business. Reading it as "answered —
+    // awaiting the asker's ack" claimed a reply that does not exist.
     var stateLbl = t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
+                 : !t.answered ? "settled without a reply"
                  : !t.acked ? "answered — awaiting the asker's ack"
                  : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
     var kids = [
       el("span", { class: "ask-head" }, [
         el("span", { class: "ask-from", text: t.asker || "someone" }),
-        el("span", { class: "ask-state" + (t.open ? " is-open" : t.acked ? " is-closed" : " is-answered"),
+        el("span", { class: "ask-state" + (t.open ? " is-open" : (t.acked || !t.answered) ? " is-closed" : " is-answered"),
                      text: stateLbl }),
         el("time", { class: "rel-time ask-age", datetime: t.askedAt || "", "data-ts": t.askedAt || "",
                      text: relativeTime(t.askedAt) })
       ]),
       el("span", { class: "ask-title", text: t.title })
     ];
-    if (t.context) kids.push(el("span", { class: "ask-body", text: String(t.context).slice(0, 220) }));
+    if (t.context) kids.push(el("span", { class: "ask-body", text: clip(t.context, 220) }));
     if (t.answered && t.answer) {
       kids.push(el("span", { class: "ask-answer" }, [
         el("span", { class: "ask-answer-by", text: (t.answerBy || "the operator") + " replied" }),
-        el("span", { class: "ask-answer-text", text: String(t.answer).slice(0, 300) })
+        el("span", { class: "ask-answer-text", text: clip(t.answer, 300) })
       ]));
     }
     var node = el("button", { class: "ask-item" + (t.open ? "" : " is-settled"), type: "button",
@@ -1300,6 +1318,11 @@
     var open = threads.filter(function (t) { return t.open; });
     var awaiting = threads.filter(function (t) { return t.answered && !t.acked && !t.open; });
     var closed = threads.length - open.length - awaiting.length;
+    // Closed is two different facts: answered-and-delivered, and settled with NO reply
+    // (withdrawn, superseded). Folding the second into "every question is answered" claimed
+    // replies that were never written.
+    var settled = threads.filter(function (t) { return !t.open && !t.answered; }).length;
+    var delivered = closed - settled;
     var body = el("div", { class: "card-body" });
     // Per-asker lanes: who is blocked, how badly — the rows that change a decision first.
     var lanes = {};
@@ -1327,11 +1350,13 @@
       if (!open.length && !awaiting.length) {
         body.appendChild(el("div", { class: "attn-clear" }, [
           el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
-          doc.createTextNode(" Every question is answered and delivered" +
-            (closed ? " (" + closed + " closed)" : "") + ".")
+          doc.createTextNode(delivered && !settled ? " Every question is answered and delivered (" + delivered + " closed)."
+            : " Nothing is waiting: " + [delivered ? delivered + " answered and delivered" : "",
+                settled ? settled + " settled without a reply" : ""].filter(Boolean).join(", ") + ".")
         ]));
       } else if (closed) {
-        body.appendChild(el("p", { class: "cell-sub", text: closed + " closed thread" + (closed === 1 ? "" : "s") + " not shown." }));
+        body.appendChild(el("p", { class: "cell-sub", text: closed + " closed thread" + (closed === 1 ? "" : "s") + " not shown" +
+          (settled ? " (" + settled + " settled without a reply)" : "") + "." }));
       }
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
         "Ask with the client (python -m hub_core.client ask); answering is ONE verb that replies to the asker AND retires the question." }));
@@ -1427,7 +1452,12 @@
           el("div", null, [
             sess.focus ? el("div", { class: "detail-prose", text: sess.focus }) : null,
             el("div", { class: "cell-sub", text: (sess.cwd || "") +
-               (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") })
+               (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") }),
+            viewerMay("history") && sess.session ? el("button", {
+              class: "chat-open", type: "button",
+              "data-key": "chat:" + c.agent + ":" + sess.session,
+              onclick: function () { openHistory(c.agent, sess.machine || "", sess.session); }
+            }, "Chat history") : null
           ].filter(Boolean)));
       });
       body.appendChild(el("div", { class: "detail-grid one" }, [section("Live consoles", "pulse", consoles)]));
@@ -1450,6 +1480,101 @@
     // exactly this dialog, and a stale answer here is the duplicate-work bug it exists to stop.
     _openModalLive = { kind: "agent", key: c.agent };
     openModal(role, c.agent, "agent", "users", body);
+  }
+
+  /* ---- CONSOLE CHAT HISTORY (operator only) ----
+     The server decides, per request, which gated surfaces THIS viewer may open and publishes
+     only that fact (meta hub-viewer); the page never holds a credential. The dialog reads one
+     console's stored turns oldest to newest, folds each run of tool calls into one line, and
+     re-reads on the board's own repaint no more often than every 20 s — with the file's ETag,
+     so an unchanged console costs a 304. */
+  var VIEWER_CAPS = (function () {
+    var m = doc.querySelector('meta[name="hub-viewer"]');
+    return ((m && m.getAttribute("content")) || "").split(/\s+/).filter(Boolean);
+  })();
+  function viewerMay(cap) { return VIEWER_CAPS.indexOf(cap) >= 0; }
+  var HISTORY_REFRESH_MS = 20000;
+  var _history = null;
+  var CHAT_ROLE = { user: "Person", assistant: "Assistant", tool: "Tool", event: "Event" };
+  function chatTime(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000);
+    return isNaN(d.getTime()) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+  function historyBody(doc_) {
+    var body = el("div", { class: "chat-log" });
+    if (!doc_ || doc_.state === "not_uploaded" || !(doc_.turns || []).length) {
+      body.appendChild(el("div", { class: "callout" }, [
+        el("div", { text: "Nothing uploaded for this console yet. Histories arrive from the workstation's uploader (history-push) at most once a minute." })]));
+      return body;
+    }
+    var meta = [];
+    if (doc_.title) meta.push(doc_.title);
+    if (doc_.cwd) meta.push(doc_.cwd);
+    meta.push(fmtInt(doc_.served) + " of " + fmtInt(doc_.turn_count) + " turns shown" +
+              (doc_.earlier_not_served ? " (" + fmtInt(doc_.earlier_not_served) + " earlier not shown)" : ""));
+    if (doc_.trimmed) meta.push("older turns were trimmed by the per-console cap");
+    body.appendChild(el("div", { class: "cell-sub chat-meta", text: meta.join("  ·  ") }));
+    var turns = doc_.turns, i = 0;
+    while (i < turns.length) {
+      var t = turns[i];
+      if (t.role === "tool") {
+        var run = [];
+        while (i < turns.length && turns[i].role === "tool") { run.push(turns[i]); i++; }
+        body.appendChild(el("details", { class: "chat-tools" }, [
+          el("summary", { text: run.length === 1 ? run[0].text : run.length + " tool calls — " + run[0].text }),
+          run.length > 1 ? el("ul", null, run.map(function (x) { return el("li", { class: "mono", text: x.text }); })) : null
+        ]));
+        continue;
+      }
+      body.appendChild(el("div", { class: "chat-turn chat-" + t.role }, [
+        el("div", { class: "chat-head" }, [
+          el("span", { class: "chat-role", text: CHAT_ROLE[t.role] || t.role }),
+          el("span", { class: "cell-sub", text: chatTime(t.ts) })]),
+        el("div", { class: t.role === "event" ? "cell-sub" : "detail-prose", text: t.text })
+      ]));
+      i++;
+    }
+    return body;
+  }
+  function loadHistory(h, render) {
+    var q = "history.json?agent=" + encodeURIComponent(h.agent) + "&session=" + encodeURIComponent(h.session) +
+            (h.machine ? "&machine=" + encodeURIComponent(h.machine) : "");
+    var headers = { Accept: "application/json" };
+    if (h.etag) headers["If-None-Match"] = h.etag;
+    h.fetchedAt = Date.now();
+    return timedFetch(q, { credentials: "same-origin", cache: "no-store", headers: headers })
+      .then(function (response) {
+        if (response.status === 304) return null;
+        if (response.status === 404) throw new Error("not available to this viewer (404)");
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        h.etag = response.headers.get("ETag") || "";
+        return response.json();
+      })
+      .then(function (payload) { if (payload) { h.doc = payload.data; render(); } })
+      .catch(function (err) { h.error = String(err && err.message || err); render(); });
+  }
+  function renderHistory(liveRefresh) {
+    var h = _history; if (!h) return;
+    var body = h.error ? el("div", { class: "callout fail" }, [el("div", { text: "Could not read this console's history: " + h.error })])
+                       : historyBody(h.doc);
+    var subtitle = h.agent + (h.machine ? " @ " + h.machine : "") + "  ·  " + h.session;
+    if (!liveRefresh) {
+      _openModalLive = { kind: "history", key: h.agent + ":" + h.session };
+      openModal("info", "Chat history", subtitle, "users", body);
+      return;
+    }
+    refreshModal("info", "Chat history", subtitle, "users", body);
+    if (h.doc && !h.landed) {                           // first arrival: newest at the bottom,
+      h.landed = true;                                  // like the console; later refreshes keep
+      var log = doc.getElementById("modalBody");        // wherever the reader has scrolled to
+      if (log) log.scrollTop = log.scrollHeight;
+    }
+  }
+  function openHistory(agent, machine, session) {
+    _history = { agent: agent, machine: machine, session: session, doc: null, etag: "", error: "" };
+    renderHistory(false);
+    loadHistory(_history, function () { renderHistory(true); });
   }
 
   /* ---- ERRORS: the operational stream the ledger audit cannot see ----
@@ -1643,14 +1768,24 @@
     var fm = failureModes(L.failure_modes);
 
     function ci(label, val) { return el("span", { class: "ci" }, [doc.createTextNode(label + " "), el("code", { text: val == null ? "—" : String(val) })]); }
+    // COHERENCE CLAIMS ONLY WHAT IT MEASURED. `coherent` is true when the stamped sha equals
+    // HEAD and the served sha was either probed and equal OR never probed. A green "coherent"
+    // over an unprobed served sha claimed the live site matches — the one thing not checked.
+    var unprobed = ["repo", "deploy", "served_sha"].filter(function (k) { return b[k] == null || b[k] === ""; })
+      .map(function (k) { return k === "served_sha" ? "served" : k; });
+    var partial = b.coherent === true && unprobed.indexOf("served") >= 0;
     var coCard = el("section", { class: "card" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title" }, [icon("rocket"), doc.createTextNode("Build coherence")]),
-        el("span", { class: "badge b-" + (b.coherent === true ? "pass" : (b.coherent === false ? "fail" : "stale")),
-                     text: b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unmeasured") })]),
+        el("span", { class: "badge b-" + (partial ? "stale" : b.coherent === true ? "pass" : (b.coherent === false ? "fail" : "stale")),
+                     title: partial ? "stamped sha equals HEAD; the served sha was not probed" : null,
+                     text: partial ? "stamp = HEAD" : b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unmeasured") })]),
       el("div", { class: "card-body" }, [el("div", { class: "coherence-strip" }, [
         ci("repo", b.repo), ci("deploy", b.deploy), ci("stamped sha", b.sha), ci("HEAD", b.head), ci("served", b.served_sha)
-      ])])
+      ]), unprobed.length ? el("p", { class: "cell-sub", style: "margin-top:8px",
+        text: "Not reported: " + unprobed.join(", ") + (partial
+          ? " — the stamped sha matches HEAD, and nothing here says the live site serves it."
+          : ".") }) : null].filter(Boolean))
     ]);
 
     var adherence = adherenceCard(L.adherence);
@@ -1667,12 +1802,82 @@
       el("div", { class: "integrity-grid" }, integrityCards)
     ]);
     scroll.appendChild(integrity);
+    scroll.appendChild(componentsCard());
 
     pane.appendChild(scroll);
     return pane;
   }
 
+  /* ---- HOSTED COMPONENTS: what this hub serves to the apps around it ----
+     Read once per page load from components/ (presentation files, not ledger state, so it does
+     not ride the event stream). Versions are MEASURED from the served bytes and adopters are
+     the apps OBSERVED loading a component, so the card never claims a version or an adopter
+     the hub did not see. Loading, failure and "hosts nothing" are three different states. */
+  var COMPONENTS_STATE = { status: "idle", rows: [], error: "" };
+  function componentsBody() {
+    var body = el("div", { class: "card-body" });
+    var st = COMPONENTS_STATE;
+    if (st.status === "idle" || st.status === "loading") {
+      body.appendChild(el("p", { class: "cell-sub", text: "Loading the hosted components\u2026" }));
+    } else if (st.status === "failed") {
+      body.appendChild(el("div", { class: "callout warn" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
+        el("div", { text: "Could not read components/: " + st.error })]));
+    } else if (!st.rows.length) {
+      body.appendChild(el("p", { class: "cell-sub", text: "This hub hosts no components. Add one under hub_core/components/<name>/." }));
+    } else {
+      st.rows.forEach(function (c) {
+        var users = Object.keys(c.used_by || {});
+        body.appendChild(el("div", { class: "comp-row" }, [
+          el("div", { class: "comp-head" }, [
+            el("strong", { text: c.title || c.name }),
+            el("code", { class: "comp-ver", title: "hash of the served files", text: c.name + " \u00b7 " + c.version })
+          ]),
+          c.what ? el("p", { class: "cell-sub comp-what", text: clip(c.what, 220) }) : null,
+          el("p", { class: "cell-sub", text: (c.files || []).length + " file(s)" + (c.props ? " \u00b7 per-app properties" : "") +
+            " \u00b7 " + (users.length ? "loaded by " + users.join(", ") : "no app observed loading it yet") })
+        ].filter(Boolean)));
+      });
+    }
+    return body;
+  }
+  function componentsCard() {
+    var st = COMPONENTS_STATE;
+    var card = el("section", { class: "card comp-card", id: "componentsCard", "aria-labelledby": "componentsTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "componentsTitle" }, [icon("stack"), doc.createTextNode("Hosted components")]),
+        el("span", { class: "badge b-" + (st.status === "failed" ? "warn" : "info"),
+          text: st.status === "ready" ? String(st.rows.length) : st.status === "failed" ? "unreadable" : "loading" })
+      ]),
+      componentsBody()
+    ]);
+    if (st.status === "idle") {
+      st.status = "loading";
+      timedFetch("components/", { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (b) { st.status = "ready"; st.rows = b.data || []; })
+        .catch(function (e) { st.status = "failed"; st.error = String(e && e.message || e); })
+        .then(function () {
+          var old = doc.getElementById("componentsCard");
+          if (old && old.parentNode) old.parentNode.replaceChild(componentsCard(), old);
+        });
+    }
+    return card;
+  }
+
   /* ============================ MODAL ============================ */
+  // Evidence is either a LIST of references or a sentence. A list is shown one reference per
+  // line (String(list) ran them together with commas); prose is shown as the words it is,
+  // never counted as if each character were a reference.
+  function evidenceNode(ev) {
+    if (Array.isArray(ev)) {
+      if (!ev.length) return "—";
+      return el("ul", { class: "evidence-list" }, ev.map(function (item) {
+        return el("li", null, [el("code", { text: String(item) })]);
+      }));
+    }
+    return String(ev);
+  }
   function row(label, valNode) { return el("div", { class: "detail-row" }, [el("div", { class: "detail-label", text: label }), valNode && valNode.nodeType ? el("div", { class: "detail-value" }, [valNode]) : el("div", { class: "detail-value", text: String(valNode) })]); }
   function rowMono(label, val) { return el("div", { class: "detail-row" }, [el("div", { class: "detail-label", text: label }), el("div", { class: "detail-value mono", text: val == null ? "—" : String(val) })]); }
   function section(title, ic, rows) { return el("div", { class: "detail-section" }, [el("div", { class: "detail-section-title" }, [icon(ic), doc.createTextNode(title)])].concat(rows.filter(Boolean))); }
@@ -1714,7 +1919,7 @@
       r.summary ? row("Summary", r.summary) : null,
       r.acceptance ? row("Acceptance", r.acceptance) : null,
       r.source ? row("Source", r.source) : null,
-      r.evidence_uri ? row("Evidence", r.evidence_uri) : null,
+      r.evidence_uri ? row("Evidence", evidenceNode(r.evidence_uri)) : null,
       r.needs ? row("Needs", r.needs) : null,
       r.build ? rowMono("Build", r.build) : null,
       r.sha ? rowMono("SHA", r.sha) : null,
@@ -1877,6 +2082,12 @@
     var m = doc.getElementById("universalModal");
     if (!m || !m.classList.contains("show")) return;
     var L = live(), fresh = null;
+    if (_openModalLive.kind === "history") {
+      if (_history && Date.now() - (_history.fetchedAt || 0) >= HISTORY_REFRESH_MS) {
+        loadHistory(_history, function () { renderHistory(true); });
+      }
+      return;
+    }
     if (_openModalLive.kind === "agent") {
       fresh = (L.fleet || []).filter(function (c) { return c.agent === _openModalLive.key; })[0];
       if (fresh) { openAgentDetail(fresh, true); return; }

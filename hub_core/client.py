@@ -27,6 +27,19 @@ in silence::
       --text "the retry queue; requeue stalled items"         # needs directive:write
     python -m hub_core.client ack project:directive:0001 --agent worker-1
 
+A claim that stopped being true is retired, never deleted — the reason is appended, dated::
+
+    python -m hub_core.client retire project:gap:0007 --status closed \
+      --addressed-by project:task:0042 --note "export now streams; measured 3 s"
+    python -m hub_core.client retire "the queue saturates at noon" --type note \
+      --note "no longer true after the worker split"
+
+Console chat histories (off unless the hub enables them; see hub_core/histories.py)::
+
+    python -m hub_core.client history-push --agent alice --follow   # workstation uploader
+    python -m hub_core.client history --agent alice                 # list consoles
+    python -m hub_core.client history --agent alice --session 3f2a  # read one
+
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
@@ -35,6 +48,16 @@ Knowledge rides it too (hub_core/client_knowledge.py): `share` a lesson, record 
 `method`, `review` or `gap`, `recall` one record in full, and wire `prompt-context --hook` into an
 agent harness's prompt hook so the board's knowledge, ranked for what the console is doing,
 arrives before each prompt.
+
+Services to the apps around the hub::
+
+    python -m hub_core.client components                         # hosted UI components
+    python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
+    python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
+    python -m hub_core.client profile --person alice --set theme=dark
+    python -m hub_core.client profile --person alice --app budget-app --set ui=110   # one app only
+    python -m hub_core.client profile --person alice --star budget-app
+    python -m hub_core.client agent-ask --question "..." --person alice --app budget-app
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
@@ -84,6 +107,28 @@ def _auth_headers() -> dict[str, str]:
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
 
 
+def _decode_success(status: int, raw: bytes) -> dict[str, Any]:
+    """A successful write's body, or an honest account of why there is none to quote.
+
+    An endpoint that answers 2xx with an empty (or non-JSON) body used to crash the decode or,
+    in sibling tools, print a line of Nones -- a success that reads as a non-event, which is
+    exactly what invites a re-run and a duplicate write. The hub is the authority; this line
+    says only what the transport knows.
+    """
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return {"accepted": True, "status": status,
+                "note": "the hub accepted the write and returned no body, so there is no id or "
+                        "version to quote -- read the board to see the result; do not re-run it"}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"accepted": True, "status": status,
+                "note": "the hub answered 2xx with a body that is not JSON (a proxy page?) -- "
+                        "the write may not have reached the hub; read the board before re-running",
+                "body_head": text[:200]}
+
+
 def _post(base: str, operation: str, payload: dict[str, Any],
           extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     headers = {
@@ -104,16 +149,84 @@ def _post(base: str, operation: str, payload: dict[str, Any],
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            return _decode_success(response.status, response.read())
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         try:
             body: Any = json.loads(detail)
         except json.JSONDecodeError:
             body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+        raise HubRefused(error.code, body) from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+
+
+class HubRefused(RuntimeError):
+    """The hub answered and said no (HTTP 4xx/5xx). Its message is the refusal body, as JSON,
+    so the existing callers that print str(error) keep printing the same thing."""
+
+    def __init__(self, status: int, body: Any):
+        super().__init__(json.dumps({"status": status, "response": body}))
+        self.status = status
+        self.body = body
+
+    def codes(self) -> list[str]:
+        errors = self.body.get("errors") if isinstance(self.body, dict) else None
+        return [str(e.get("code")) for e in (errors or []) if isinstance(e, dict)]
+
+
+def _evidence_problems(evidence: list[str]) -> list[str]:
+    """Evidence is a REFERENCE -- a URL, a commit sha, a path -- so it is one token. Prose
+    always contains whitespace and never dereferences; refusing it here puts the error in front
+    of the writer, in one edit, instead of after a round trip."""
+    return [item for item in evidence if not str(item).strip() or len(str(item).split()) > 1]
+
+
+def _evidence_help(error: "HubRefused") -> str:
+    """Turn an evidence_unresolvable refusal into the exact re-run, item by item."""
+    bad, fix = {}, ""
+    for entry in ((error.body or {}).get("errors") or []) if isinstance(error.body, dict) else []:
+        if isinstance(entry, dict):
+            bad.update(entry.get("bad") or {})
+            fix = fix or str(entry.get("fix") or "")
+    lines = ["  --> ONE unresolvable --evidence item refuses the WHOLE completion: nothing was",
+             "      recorded and the task is still in progress."]
+    for item, why in list(bad.items())[:6]:
+        lines.append("      %s  (%s)" % (item, why))
+    if fix:
+        lines.append("      " + fix)
+    return "\n".join(lines)
+
+
+def _note_refused_finish(base: str, arguments: argparse.Namespace, error: Exception) -> None:
+    """Write a REFUSED completion onto the task, so it is as visible as one that landed.
+
+    A refusal printed to stderr is loud to whoever is at the terminal and invisible to everyone
+    else: the board goes on showing an in-progress task with a claim on it and no hint that its
+    holder tried to close it and was told no -- precisely what an unattended worker leaves
+    behind. Best-effort by construction: the original refusal always propagates unchanged, and a
+    failure to annotate is announced rather than swallowed.
+    """
+    import datetime as _dt
+    reason = str(error).replace("\n", " ")
+    try:
+        entity = _fetch_task(base, arguments.task_id)
+        plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
+        plan.append({"step": "finish REFUSED -- task still in progress", "done": False,
+                     "note": "the hub refused the completion, so this task is NOT done: " + reason,
+                     "note_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+        body: dict[str, Any] = {"id": entity["id"], "plan": plan, "agent": _agent(arguments),
+                                "expected_version": entity.get("version")}
+        token = getattr(arguments, "lease_token", None) or os.environ.get("HUB_LEASE_TOKEN")
+        if token:
+            body["token"] = token
+        _post(base, "task", body, extra_headers=_presence_headers(arguments))
+        print("NOTE: the refusal is recorded on %s as an open plan step." % entity["id"],
+              file=sys.stderr)
+    except Exception as annotate_error:                          # noqa: BLE001
+        print("NOTE: could not record the refused finish on the board (%s: %s) -- the task "
+              "reads in progress with no reason attached; say why with `step --note`."
+              % (type(annotate_error).__name__, str(annotate_error)[:200]), file=sys.stderr)
 
 
 def _optional_auth_headers() -> dict[str, str]:
@@ -123,13 +236,38 @@ def _optional_auth_headers() -> dict[str, str]:
         return {}          # reads are public; whoami simply reports no credential
 
 
+def _repo_of(path: str) -> str:
+    """The repository a directory sits in, named by its top-level folder, or "" when it is
+    in none. Read from the filesystem (a .git entry up the tree), never guessed from the
+    path's spelling, so a console parked in a workspace root reports no repo at all."""
+    try:
+        here = os.path.abspath(path)
+        while True:
+            if os.path.exists(os.path.join(here, ".git")):
+                return os.path.basename(here.rstrip("\\/")) or ""
+            parent = os.path.dirname(here)
+            if parent == here:
+                return ""
+            here = parent
+    except (OSError, ValueError):
+        return ""
+
+
 def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, str]:
     """The observed-presence headers every write may carry. Environment first, flags win —
-    the board's live-console view is only as true as what the seats send."""
+    the board's live-console view is only as true as what the seats send.
+
+    The cwd and the repo are sent as ONE fact: the hub applies the repo that accompanies a
+    cwd, and treats a missing repo beside a cwd as "this directory is in no repository".
+    HUB_FILES (comma-separated) is the console's recently touched files; the hub stamps it
+    on arrival and ages it out, so a stale list never outlives the work it described."""
+    cwd = os.environ.get("HUB_CWD") or os.getcwd()
     values = {
         "X-Hub-Machine": os.environ.get("HUB_MACHINE", ""),
         "X-Hub-Session": os.environ.get("HUB_SESSION_ID", ""),
-        "X-Hub-Cwd": os.environ.get("HUB_CWD") or os.getcwd(),
+        "X-Hub-Cwd": cwd,
+        "X-Hub-Repo": os.environ.get("HUB_REPO") or _repo_of(cwd),
+        "X-Hub-Files": os.environ.get("HUB_FILES", ""),
         "X-Hub-Focus": os.environ.get("HUB_FOCUS", ""),
     }
     if arguments is not None:
@@ -297,6 +435,52 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     return "ack-error", payload
 
 
+def _payload_retire(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments)}
+    target = arguments.target
+    if arguments.type:
+        payload.update({"type": arguments.type, "title": target})
+    else:
+        payload["id"] = target
+    for name in ("status", "note", "superseded_by"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if arguments.addressed_by:
+        payload["addressed_by"] = arguments.addressed_by
+    return "retire", payload
+
+
+def _run_history_push(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Upload this workstation's new console turns (see hub_core.transcripts for what is sent)."""
+    import time as _time
+
+    from . import transcripts
+
+    agent = _agent(arguments)
+    headers = _presence_headers(arguments)
+
+    def post(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return _post(base, operation, payload, extra_headers=headers)
+
+    result = transcripts.push(post, agent, force=not arguments.follow)
+    if not arguments.follow:
+        return result
+    while True:                                   # a notifier-style loop; Ctrl-C ends it
+        print(json.dumps(result, sort_keys=True), flush=True)
+        _time.sleep(max(15, arguments.interval))
+        result = transcripts.push(post, agent)
+
+
+def _run_history(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {key: value for key, value in (("agent", arguments.agent),
+                                             ("machine", arguments.machine),
+                                             ("session", arguments.session),
+                                             ("limit", arguments.limit)) if value}
+    return _get(base, "history.json" + ("?" + urlencode(query) if query else ""))
+
+
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
     return _get(base, f"inbox.json?agent={quote(arguments.agent)}")
@@ -351,6 +535,100 @@ def _run_questions(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
 def _run_whoami(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "whoami.json")
+
+
+# ── Services to the apps around the hub: hosted components, per-app component properties,
+# one app's slice of the board, a person's cross-app preferences, the brokered agent ──
+
+def _pairs(items: list[str] | None) -> dict[str, Any]:
+    """`key=value` flags into a dict; a value that parses as JSON (a number, a list) is used as
+    that JSON, otherwise as the literal string."""
+    out: dict[str, Any] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError("expected key=value, got %r" % item)
+        key, value = item.split("=", 1)
+        try:
+            out[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key.strip()] = value
+    return out
+
+
+def _run_components(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _get(base, "components/")
+
+
+def _run_component_props(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read one app's component properties, or REPLACE them with --set component.key=value
+    (a full set: properties not named return to their defaults, so current values are read
+    first and the named ones laid over them)."""
+    from urllib.parse import quote
+    current = _get(base, f"components/props/{quote(arguments.app)}.json")
+    if not arguments.set:
+        return current
+    props = {c: dict(v) for c, v in (current.get("props") or {}).items()}
+    for dotted, value in _pairs(arguments.set).items():
+        if "." not in dotted:
+            raise ValueError("name the property as component.key, got %r" % dotted)
+        component, key = dotted.split(".", 1)
+        props.setdefault(component, {})[key] = value
+    return _post(base, "component-props", {"app": arguments.app, "props": props,
+                                           "agent": _agent(arguments)})
+
+
+def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {"app": arguments.app}
+    if arguments.name:
+        query["name"] = arguments.name
+    return _get(base, "app-feed.json?" + urlencode(query))
+
+
+def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read or change one person's preferences, as the app that signed them in.
+
+    `--set key=value` merges everywhere; with `--app <slug>` it sets that app's override
+    instead, and `--clear-app` puts that app back on the everywhere-values. `--star` /
+    `--unstar` edit the starred apps (a list that replaces, so the current one is read first).
+    With no change it reads, including the apps the person can reach and, with --app, what that
+    app resolves to. Needs profile:read / profile:write."""
+    from urllib.parse import urlencode
+    query = {"person": arguments.person}
+    if arguments.app:
+        query["app"] = arguments.app
+    path = "profile?" + urlencode(query)
+    change: dict[str, Any] = _pairs(arguments.set)
+    if arguments.app and (change or arguments.clear_app):
+        change = {"apps": {arguments.app: {} if arguments.clear_app else change}}
+    elif arguments.clear_app:
+        raise ValueError("--clear-app needs --app <slug>")
+    if arguments.star or arguments.unstar:
+        current = _get(base, "api/profile?" + urlencode({"person": arguments.person}))
+        starred = list(((current.get("data") or {}).get("prefs") or {}).get("starred") or [])
+        starred = [s for s in starred if s not in (arguments.unstar or [])]
+        starred += [s for s in (arguments.star or []) if s not in starred]
+        change["starred"] = starred
+    if change:
+        return _post(base, path, {"prefs": change})
+    return _get(base, "api/" + path)
+
+
+def _run_agent_ask(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {"question": arguments.question}
+    for name in ("person", "app", "conversation_id"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    return _post(base, "agent/ask", payload)
+
+
+def _run_agent_history(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {"person": arguments.person, "scope": arguments.scope}
+    if arguments.app:
+        query["app"] = arguments.app
+    return _get(base, "api/agent/history?" + urlencode(query))
 
 
 # ── The worker LOOP: next -> start -> step -> finish, with compaction-proof regrounding ──
@@ -444,7 +722,9 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("every plan step is already done — use `finish`")
     target["done"] = True
     if arguments.note:
-        target["note"] = arguments.note[:600]
+        # Whole: a checkpoint note is what the next reader acts on, and a silent cut here
+        # reported success while dropping the end of it.
+        target["note"] = arguments.note
         target["note_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     # A MINIMAL delta, exactly like the claim seam's own in_progress append: the fold merges
     # payloads last-write-wins per key, so echoing the whole entity back would both trip the
@@ -471,6 +751,11 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
       on the worker, through hub_core.verifier's hardening (argv-form, scrubbed env, exfil
       refusal), and submits the typed receipt. A non-zero exit refuses the completion.
     """
+    malformed = _evidence_problems(arguments.evidence)
+    if malformed:
+        raise ValueError("evidence is a reference (a URL, a commit sha, a path), so it is one "
+                         "token with no spaces; put prose in --accept-note. Not a reference: "
+                         + "; ".join(repr(item) for item in malformed))
     entity = _fetch_task(base, arguments.task_id)
     current = _charter_sha()
     charter_note = ""
@@ -520,7 +805,13 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
                     "output_tail": output[-2000:].decode("utf-8", errors="replace")}
         payload["verification_run"] = receipt
 
-    result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
+    try:
+        result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
+    except HubRefused as refusal:
+        _note_refused_finish(base, arguments, refusal)
+        if "evidence_unresolvable" in refusal.codes():
+            raise RuntimeError(str(refusal) + "\n" + _evidence_help(refusal)) from refusal
+        raise
     return {"completed": result,
             **({"verification_run": receipt} if receipt else
                {"note": "no critical probe was declared — done stands on the real operation"})}
@@ -634,6 +925,37 @@ def _parser() -> argparse.ArgumentParser:
     ack_error.add_argument("--reopen", action="store_true")
     ack_error.set_defaults(payload=_payload_ack_error)
 
+    retire = commands.add_parser(
+        "retire", help="retire or re-open a gap/note/directive/ADR/finding (reason required)")
+    retire.add_argument("target", help="the record id, or its exact title together with --type")
+    retire.add_argument("--type", help="the record type when TARGET is a title (gap, note, ...)")
+    retire.add_argument("--status", help="the new status; each type has a sensible default "
+                                          "except gap, which must be named")
+    retire.add_argument("--note", help="what retired it — appended with a dated stamp")
+    retire.add_argument("--addressed-by", action="append", default=[], dest="addressed_by",
+                        help="task id that closed a gap (required for closed/mitigated)")
+    retire.add_argument("--superseded-by", dest="superseded_by",
+                        help="the id of the record that replaced this one")
+    retire.add_argument("--agent")
+    retire.set_defaults(payload=_payload_retire)
+
+    history_push = commands.add_parser(
+        "history-push", help="upload this workstation's new console turns (history:write scope)")
+    history_push.add_argument("--agent")
+    history_push.add_argument("--machine")
+    history_push.add_argument("--follow", action="store_true",
+                              help="keep uploading; at most one upload per interval")
+    history_push.add_argument("--interval", type=int, default=60)
+    history_push.set_defaults(runner=_run_history_push)
+
+    history = commands.add_parser(
+        "history", help="list stored consoles, or read one console's turns (history:read scope)")
+    history.add_argument("--agent")
+    history.add_argument("--machine")
+    history.add_argument("--session")
+    history.add_argument("--limit", type=int)
+    history.set_defaults(runner=_run_history)
+
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)
     inbox.set_defaults(runner=_run_inbox)
@@ -663,6 +985,45 @@ def _parser() -> argparse.ArgumentParser:
     # knowledge block, the local mirror, and overlap adjudication (hub_core/client_knowledge.py).
     from . import client_knowledge
     client_knowledge.register(commands)
+    components = commands.add_parser("components",
+                                     help="the hosted UI components: versions, files, adopters")
+    components.set_defaults(runner=_run_components)
+
+    cprops = commands.add_parser("component-props",
+                                 help="one app's component properties; --set comp.key=value replaces them")
+    cprops.add_argument("--app", required=True, help="the app slug")
+    cprops.add_argument("--set", action="append", metavar="COMPONENT.KEY=VALUE")
+    cprops.add_argument("--agent")
+    cprops.set_defaults(runner=_run_component_props)
+
+    feed = commands.add_parser("app-feed", help="one app's slice of the board (checklist, announcements)")
+    feed.add_argument("--app", required=True)
+    feed.add_argument("--name", help="the app's display name, matched as well as the slug")
+    feed.set_defaults(runner=_run_app_feed)
+
+    prof = commands.add_parser("profile",
+                               help="a person's cross-app preferences; --set key=value merges (profile:write)")
+    prof.add_argument("--person", required=True)
+    prof.add_argument("--set", action="append", metavar="KEY=VALUE")
+    prof.add_argument("--app", help="scope --set to this app's override, and resolve for it")
+    prof.add_argument("--clear-app", action="store_true",
+                      help="with --app: put that app back on the everywhere-values")
+    prof.add_argument("--star", action="append", metavar="SLUG")
+    prof.add_argument("--unstar", action="append", metavar="SLUG")
+    prof.set_defaults(runner=_run_profile)
+
+    ask_agent = commands.add_parser("agent-ask", help="ask the brokered agent (agent:ask)")
+    ask_agent.add_argument("--question", required=True)
+    ask_agent.add_argument("--person")
+    ask_agent.add_argument("--app")
+    ask_agent.add_argument("--conversation-id", dest="conversation_id")
+    ask_agent.set_defaults(runner=_run_agent_ask)
+
+    agent_hist = commands.add_parser("agent-history", help="a person's past agent conversations (agent:history)")
+    agent_hist.add_argument("--person", required=True)
+    agent_hist.add_argument("--app")
+    agent_hist.add_argument("--scope", choices=["app", "all"], default="app")
+    agent_hist.set_defaults(runner=_run_agent_history)
 
     # The worker loop: next -> start -> step -> finish (+ reground after compaction).
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")
@@ -716,7 +1077,23 @@ def main() -> int:
             result = arguments.runner(base, arguments)
         else:
             operation, payload = arguments.payload(arguments)
-            result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+            if operation == "complete":
+                malformed = _evidence_problems(payload.get("evidence_uri") or [])
+                if malformed:
+                    raise ValueError("evidence is a reference (a URL, a commit sha, a path), so "
+                                     "it is one token with no spaces; put prose in "
+                                     "--accept-note. Not a reference: "
+                                     + "; ".join(repr(item) for item in malformed))
+            try:
+                result = _post(base, operation, payload,
+                               extra_headers=_presence_headers(arguments))
+            except HubRefused as refusal:
+                if operation == "complete":
+                    _note_refused_finish(base, arguments, refusal)
+                    if "evidence_unresolvable" in refusal.codes():
+                        raise RuntimeError(str(refusal) + "\n" + _evidence_help(refusal)) \
+                            from refusal
+                raise
     except (ValueError, RuntimeError) as error:
         print(str(error), file=sys.stderr)
         return 1
