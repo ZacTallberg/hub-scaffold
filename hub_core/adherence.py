@@ -165,7 +165,8 @@ def score(events, state, leases=(), now=None, stall_s=STALL_S, stale_s=STALE_S):
     still, no_plan = [], 0
     for lease in leases:
         ent = entities.get(lease.get("task")) or {}
-        plan = ent.get("plan") or []
+        # A lifecycle row (a hand-back) is not a step this run advanced.
+        plan = [s for s in (ent.get("plan") or []) if isinstance(s, dict) and not s.get("lifecycle")]
         if not plan:
             no_plan += 1
             continue

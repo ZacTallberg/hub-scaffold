@@ -165,15 +165,26 @@ def _plan_progress(ent):
     0->100 as the worker steps through it instead of flipping binary at done. plan_pct is None
     when the task carries no plan (nothing to show yet, which is not the same as no progress)."""
     plan = ent.get("plan") or []
-    total = len(plan)
-    done = sum(1 for s in plan if isinstance(s, dict) and s.get("done"))
-    step = next((s.get("step") for s in plan if isinstance(s, dict) and not s.get("done")), None)
+    # A LIFECYCLE row (a hand-back) is shown, never counted: counted as a done step it made a
+    # task read MORE finished each time a run died on it.
+    work = [s for s in plan if isinstance(s, dict) and not s.get("lifecycle")]
+    total = len(work)
+    done = sum(1 for s in work if s.get("done"))
+    step = next((s.get("step") for s in work if not s.get("done")), None)
     # The last checkpoint note is the CONTEXT that turns "working on X" into "working on X,
     # last did Y" — the fact a peer needs to decide whether to coordinate, wait, or move on.
     noted = [s for s in plan if isinstance(s, dict) and s.get("note")]
+    handed = _handed_back_count(plan)
     return {"plan_done": done, "plan_total": total, "step": (str(step)[:70] if step else None),
             "plan_pct": (round(done * 100 / total) if total else None),
-            "last_note": (str(noted[-1].get("note"))[:90] if noted else None)}
+            "last_note": (str(noted[-1].get("note"))[:90] if noted else None),
+            "handed_back": handed}
+
+
+def _handed_back_count(plan):
+    """Runs that ended with this task unfinished (the hand-back row's own count)."""
+    return sum(int(s.get("times") or 1) for s in (plan or [])
+               if isinstance(s, dict) and s.get("kind") == "handed_back")
 
 
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
@@ -1016,7 +1027,20 @@ def entity_json(request, type, local):
     if not ent:
         raise Http404("no entity %s" % eid)
     flags = state.get("flags", {}).get(eid, {})
-    return JsonResponse({"data": {**ent, **flags}})
+    data = {**ent, **flags}
+    if type == "task":
+        # WHO HOLDS IT, and whether it can be taken — read off the live lease, never a guess.
+        # An unattended launcher reads this to tell "somebody is on it" from "a run that ended
+        # left it in progress" (readiness.stale_reclaim: resume it) without trying a claim.
+        # The fencing token never leaves the claims directory.
+        lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
+        data["holder"] = ({"agent": lease.get("agent"),
+                           "expires_in_s": max(0, int(lease.get("expires", 0) - time.time())),
+                           "last_heartbeat": lease.get("last_heartbeat", lease.get("claimed"))}
+                          if lease else None)
+        data["readiness"] = flow.classify(ent, flags, lease)
+        data["handed_back"] = _handed_back_count(ent.get("plan"))
+    return JsonResponse({"data": data})
 
 
 def graph_json(request):

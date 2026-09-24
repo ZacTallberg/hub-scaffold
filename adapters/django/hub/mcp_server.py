@@ -98,6 +98,15 @@ TOOLS = [
          "id": {"type": "string"}, "agent": {"type": "string"},
          "lease_token": {"type": "string"}},
          "required": ["id", "agent", "lease_token"]}},
+    {"name": "hand_back_task",
+     "description": "A run is ending with its task unfinished: return it to todo with ONE "
+                    "self-counting hand-back row (shown on the task, never counted as a done "
+                    "step) and release the fenced lease, so the board stops reading it as in flight.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "lease_token": {"type": "string"},
+         "note": {"type": "string", "description": "why the run ended unfinished; what is left"}},
+         "required": ["id", "agent", "lease_token", "note"]}},
     {"name": "fail_task",
      "description": "Atomically record a real failure, return the lease, and create or reuse routed repair work.",
      "inputSchema": {"type": "object", "properties": {
@@ -121,7 +130,9 @@ TOOLS = [
                     "pass anyway=true for a genuinely different question.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "question": {"type": "string"},
-         "context": {"type": "string"}, "anyway": {"type": "boolean"}},
+         "context": {"type": "string"}, "anyway": {"type": "boolean"},
+         "hop": {"type": "integer", "minimum": 0, "maximum": 9,
+                 "description": "unattended runs only: the HUB_RESPONDER_HOP your launcher set"}},
          "required": ["agent", "question"]}},
     {"name": "check_inbox",
      "description": "What is addressed to this agent right now — directives aimed at it and the "
@@ -287,6 +298,11 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/release", {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
         }, auth_headers)
+    elif name == "hand_back_task":
+        status, body = _seam("/hub/api/hand-back", {
+            "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
+            "note": args["note"],
+        }, auth_headers)
     elif name == "fail_task":
         payload = {"id": args["id"], "agent": args["agent"],
                    "token": args["lease_token"], "signature": args["signature"],
@@ -306,7 +322,7 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/complete", payload, auth_headers)
     elif name == "ask_operator":
         payload = {"agent": args["agent"], "question": args["question"]}
-        for key in ("context", "anyway"):
+        for key in ("context", "anyway", "hop"):
             if args.get(key):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/ask", payload, auth_headers)

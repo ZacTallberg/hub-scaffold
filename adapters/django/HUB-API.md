@@ -61,7 +61,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/audit.json` | the computed audit: `{ok, exit_code, counts, violations[]}`. exit_code 0=pass, 3=warn, 2=violation. |
 | `GET /hub/graph.json` | dependency edges + dangling references. |
 | `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note, directive, ack`. |
-| `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). |
+| `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). A task also carries `holder` (`{agent, expires_in_s, last_heartbeat}` of the live lease, or `null`; the fencing token never leaves the claims directory), `readiness` (the same classification as `next.json`, so `stale_reclaim:true` tells a launcher "a run that ended left this in progress" without attempting a claim) and `handed_back` (runs that ended with it unfinished). |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
@@ -131,6 +131,21 @@ cohort. Success returns the task, lease token, and a routing summary. `409 no_co
 returns structured exclusion reasons; `422 bad_worker_profile` identifies a malformed declaration.
 Missing worker facts never satisfy explicit requirements, while `/hub/next.json` remains the
 unfiltered canonical ready rail.
+
+### Hand-back: a run ended with its task unfinished
+
+`POST /hub/api/hand-back` (`task:release`) with `id`, `token` (the fencing token), `agent`, and a
+`note` (1..600 characters: why the run ended unfinished, what is left). Under the lease lock the
+hub proves the lease (token, subject, agent), requires the task to be `in_progress`
+(`409 not_in_progress` otherwise), returns it to `todo`, and replaces any earlier hand-back row
+with ONE plan row `{kind: "handed_back", lifecycle: true, times: N}` re-appended at the end; then
+it releases the lease. Response: `{ok, task, handed_back: N, lease_released, version}`.
+`lifecycle` rows are shown on the task and never counted as done steps by any progress surface.
+`release` alone returns the lease and leaves the task `in_progress` (a resumable
+`stale_reclaim`); hand-back is the whole transition a launcher performs at teardown. Client:
+`python -m hub_core.client hand-back <task> --lease-token … --note …`; MCP: `hand_back_task`.
+`claim` and `start` append each granted lease to the file named by `HUB_RUN_LEASES` when it is
+set, which is how a launcher later proves which leases its run held.
 
 ### Durable AgentRun lifecycle
 
@@ -226,7 +241,7 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 
 | Endpoint (scope) | Key body fields | Behaviour |
 |---|---|---|
-| `/hub/api/ask` (`ask:write`) | `agent` (the asker), `question`, optional `context`, `relates_to[]`, `anyway` | Mints a note tagged `question`+`open` carrying its `asker` in a STABLE field (provenance is rewritten by answering, so deriving the asker from it mis-addresses every re-answered reply). Id keyed on the wording — a retry updates, never twins. Refuses `409 duplicate_question` with the matching ids when the board already has it (open, answered, or crystallized); pass `anyway:true` for a genuinely different question. The guard fails OPEN: a search outage never silences a real ask. |
+| `/hub/api/ask` (`ask:write`) | `agent` (the asker), `question`, optional `context`, `relates_to[]`, `anyway`, `hop` | Mints a note tagged `question`+`open` carrying its `asker` in a STABLE field (provenance is rewritten by answering, so deriving the asker from it mis-addresses every re-answered reply). Id keyed on the wording — a retry updates, never twins. Refuses `409 duplicate_question` with the matching ids when the board already has it (open, answered, or crystallized); pass `anyway:true` for a genuinely different question. The guard fails OPEN: a search outage never silences a real ask. `hop` (integer 0..9, else `422 bad_hop`) is the escalation depth of a question raised by an unattended run — set by the process from `HUB_RESPONDER_HOP`, never by the model — and the inbox carries it with the question's `age_s`, so a responder retakes a hop-1 escalation once after a cooldown and leaves hop 2 to a person (`patterns/unattended-responder.md`). |
 | `/hub/api/answer` (`directive:write`) | `question` (id or local), `text`, optional `crystallize:true` | ONE verb: mints/updates the answer **directive** targeted at the asker (idempotent per question — re-answering updates in place) AND retires the question (`open`→`answered`). `data.question_still_open:true` flags a retire that failed. `crystallize` additionally mints a standing knowledge note the duplicate-ask guard will match — OPT-IN, because most answers are one-offs and minting indiscriminately taxes the knowledge surface to remember something true for one afternoon. |
 | `/hub/api/directive` (`directive:write`) | Create: `title`, `body_md`, optional `targets[]` (default `["all"]`), `remediation_cmd`, `deadline`; update: `id` + `expected_version` | An operator instruction addressed to named agents. `directive:write` is an authority tier above ordinary board writes — the shared-root credential holds it; issue it to a worker credential only deliberately. |
 | `/hub/api/ack` (`ack:write`) | `agent`, `directive` (id or local), optional `note` | One agent's record that delivery landed. Stable id (replay-safe). The item leaves that agent's inbox; a directive whose every NAMED target has acked retires itself to `fulfilled`. |

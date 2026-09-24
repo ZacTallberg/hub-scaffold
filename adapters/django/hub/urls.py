@@ -47,6 +47,8 @@ urlpatterns = [
     path("api/take", hub_write.take),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
+    # A run that ended with its task unfinished: back to todo with ONE self-counting row.
+    path("api/hand-back", hub_write.hand_back),
     # The ask/answer loop and the directive plane (delivery closed by acks).
     path("api/ask", hub_write.ask),
     path("api/answer", hub_write.answer),

@@ -16,6 +16,7 @@
     "tags": { "type": "array", "items": { "type": "string" } },
     "relates_to": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "task/adr/feat this came from or informs." },
     "asker": { "type": "string", "description": "For a note tagged `question`: who asked, stamped once by the ask endpoint. First-class on purpose — provenance.agent becomes whoever LAST touched the note (the answerer, after an answer), so deriving the asker from provenance mis-addresses every re-answered reply." },
+    "hop": { "type": "integer", "minimum": 0, "maximum": 9, "description": "For a question raised by an unattended run: how many unattended hops deep it is (absent/0 = a person or an attended session). Bounds agent-to-agent escalation chains." },
     "found_at": { "type": "string", "description": "when/where it was learned." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
