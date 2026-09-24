@@ -75,9 +75,19 @@ close, do not sit on the lane — a wait is not free while another item is queue
 Short on time or unable to finish, the session puts its work on a `responder-wip/<slug>` branch,
 pushes it, records it, and escalates. Whatever happens, the launcher posts a terminal update on
 the board for EVERY outcome (tagged `automated`, so it is telemetry rather than an item addressed
-to a person), naming any uncommitted files the session left in the workspace. It never commits
-them: only the session knew which files were its own. A duplicate line is far cheaper than a
-silent abandonment.
+to a person) — including the early exits that never start a session (`stood-down`, `lane-full`,
+`unverified`, `exhausted`). It names the uncommitted files THIS session left: the launcher snapshots the
+workspace's dirty files (status plus content digest) before launch and reports only what
+changed, so an earlier run's leftovers are never blamed on a later one. It never commits them:
+only the session knew which files were its own. The session's last words are relayed with
+terminal colour codes stripped and any other control byte written as a visible `\xNN`, because
+the write seam refuses raw control characters and the one note that makes an abandonment visible
+must never be the note that is refused. A duplicate line is far cheaper than a silent
+abandonment.
+
+A **review gate** (`client review`, MCP `record kind=review`) is a question only a person may
+answer. It is tagged `review`; `find_work` counts it under `review_gates_left_for_a_person` and
+never launches for it, `resolve_item` refuses it, and the charter forbids answering one.
 
 ## Errors are problems: claim, fix, resolve
 

@@ -359,7 +359,7 @@ def _payload_review(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
                                "context": (arguments.context or "") +
                                           ("\n\nThis is a human gate: nothing it covers ships "
                                            "until a person answers."),
-                               "anyway": True}
+                               "anyway": True, "review": True}
     if arguments.relates_to:
         payload["relates_to"] = arguments.relates_to
     return "ask", payload

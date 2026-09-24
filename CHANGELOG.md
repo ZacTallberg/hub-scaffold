@@ -41,8 +41,13 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   presenting credential's `facet:*` scopes; hidden blocks leave no trace and a malformed fence
   hides rather than leaks (`hub_core/facets.py`, `HUB_DOCTRINE_FILES`).
 - **Control characters are refused at the write seam** (`422 control_chars`, naming field and
-  offset): a lost `` in a Windows path would otherwise publish an invisible BEL into the
-  append-only ledger. The error-report scope is exempt.
+  offset): a lost `\a` in a Windows path would otherwise publish an invisible BEL into the
+  append-only ledger. The error-report scope is exempt. Doctrine read from disk gets the same
+  check (`503 control_chars`), and relayed machine output (a responder's last words) is
+  neutralized first (`textguard.neutralize`) so the backstop note is never itself refused.
+- **Fixes after review.** Near-miss or mixed-case fence markers now hide rather than leak; a
+  review gate is tagged `review` and never taken by an unattended responder; the responder posts
+  a note on every early exit too (stood-down, lane-full, unverified, exhausted) and names only the files its own session left dirty.
 - **Coordination doctrine** for many consoles on one board — crossover kinds, what deliberately
   does not fire, one owner plus one integrator, reuse verification —
   `patterns/multi-agent-coordination.md`.
