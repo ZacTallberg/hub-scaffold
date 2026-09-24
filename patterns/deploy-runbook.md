@@ -88,6 +88,37 @@ command for each, keep it beside the runbook, and every step below becomes liter
      may trigger a rollback.
    - **UNVERIFIED** — you could not read an identity at all, or read one you cannot place.
      Containment is unknown. **Do not roll back on an unknown** — say so and stop for a human.
+
+   **Every post-release probe runs at the coldest moment there is.** It fires seconds after the
+   release restarted the service, so its first read pays for the whole warm-up (a large board
+   snapshot measured 14–26 s cold and ~1.5 s warm). A single 30 s attempt at that moment measures
+   cache temperature and reports it as a dead app. So each post-release probe (the board page, a
+   heavy JSON feed, a rendered-page pass):
+   - gets a small bounded number of attempts on a generous per-attempt timeout (three at 60 s is
+     a reasonable start), with a short pause between them;
+   - **prints the elapsed time of every attempt**, and a `SLOW` line above a threshold (10 s) — a
+     bigger timeout on its own trades a false red for a silent regression; printed latency keeps a
+     creeping endpoint audible;
+   - still fails, with every attempt's timing attached, when the endpoint genuinely never answers.
+
+   **A headless rendered-page pass has two waits, and one deadline must cover both.** Navigation
+   does not report until it COMMITS (response headers arrive); only then does the load event
+   follow. A harness that bounds the load event at 30 s but leaves the navigate call on its socket's
+   10 s default fails every slow first byte without ever reaching the budget you set. Run
+   commit + load under ONE deadline, print `NAVIGATED path=<path> commit=<s> load=<s>` (the path
+   only — never a query string that may carry a grant), name which half timed out, and allow one
+   retry of the whole pass after a short pause.
+
+   **A wrapper that forwards arguments must prove it forwarded them.** A retry wrapper added to a
+   rendered-page pass once splatted a variable that the shell treats as a reserved automatic name
+   (always empty), so the harness ran with NO arguments against its own default base URL — turning
+   a flaky red into a deterministic one. Have the harness print its effective base URL and mode as
+   its first line, so a dropped flag reads as plumbing, not as a broken page.
+
+   **Assert the property, not the label.** A rendered-page check that requires a literal heading
+   ("Message") fails the day the copy becomes "Newest message", on a dialog that opened and showed
+   the right row. Assert structure (the dialog opens and carries the row) and accept either
+   vocabulary; stay fail-closed so the check still fails when the row is genuinely gone.
 6. **Retract the stamp** (if you set one). A persistent build-identity setting means any later
    out-of-band rebuild bakes a now-stale identity with no canary behind it. Clear ONLY the stamp
    you set: read it first and leave it alone if it names someone else's sha, or you will disarm a
@@ -123,7 +154,15 @@ command for each, keep it beside the runbook, and every step below becomes liter
    ```
 
    The writer refuses mismatched SHAs, unknown/non-done task ids, duplicate task ids, and attempts
-   to rewrite an existing SHA's proof. An exact retry is idempotent. This immutable closure plus
+   to rewrite an existing SHA's proof. An exact retry is idempotent — which is what makes it safe
+   to **retry this post against a cold hub**, and you should: the record is posted seconds after a
+   restart, a single short timeout there silently loses it, and a lost record costs the board its
+   rollback target and its attribution while the pipeline stays green. `python -m hub_core.client
+   deploy --sha <sha> --served-sha <sha> --task <id> ...` does exactly this: growing per-attempt
+   timeouts (20 s, 45 s, 90 s by default), one `DEPLOY_RECORD_RETRY` line per transport failure,
+   and never a retry of a refusal (a 4xx is the Hub's verdict, not the network's). An attempt that
+   landed but whose reply was lost comes back as `idempotent: true` on the next try, not as a
+   second record or a false failure. This immutable closure plus
    the running artifact identity makes every named task immediately `live` without Git or a
    polling cycle. A deploy nobody recorded did not happen as far as the board is concerned.
 9. **Read the authenticated audit once more.** The closure must have removed `closure_pending` and
@@ -138,6 +177,30 @@ command for each, keep it beside the runbook, and every step below becomes liter
 11. **Done means named:** the recorded event carries the live sha. Release the per-target lease only
     after the canary, immutable deploy record, and post-record audit succeed (or the attempt has
     failed closed).
+
+## Protecting durable data across a release
+
+If a release step can disturb a file the Hub or the app depends on (a checkout reset that sits
+beside the ledger, a migration that rewrites a database), copy it to a vault first; the copy is what
+a rollback restores. Two rules keep that protection cheap enough to run on every release and
+impossible to erode:
+
+- **Skip bytes that did not change — and check BEFORE the prune.** An append-only ledger whose
+  length and write time equal the newest vault entry is already in the vault, verbatim. A SQLite
+  database is unchanged only when the main file AND its `-wal` and `-shm` side files all match
+  (length alone is not enough: a same-size page rewrite changes content without changing size).
+  Print what stands in for the skipped copy (`LEDGER_BACKUP_CURRENT`, `DB_SNAPSHOT_CURRENT`
+  naming the entry) — a silent skip and a protection that never ran leave identical logs. Run the
+  check before pruning: a prune that keeps `retain - 1` assumes a new copy is about to join, and
+  skipping after it would erode the vault one release at a time.
+- **Prune (or check free space) before you write, never only after a successful write.** A prune
+  that runs only after a successful copy never runs again once the disk is full — every copy then
+  fails, every release that depends on the snapshot rolls back, and the only evidence is a
+  snapshot-failed line deep in each job log. A fallback vault on the same disk as the data it
+  protects keeps fewer copies than the real one.
+- **Count lines lazily.** Streaming a large ledger through a shell pipeline as one object per line
+  to print a count costs more than the copy; use a lazy line enumerator, and count blank lines the
+  same way on both sides of any before/after comparison.
 
 ## Rollback
 

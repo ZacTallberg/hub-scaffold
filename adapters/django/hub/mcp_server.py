@@ -146,6 +146,18 @@ TOOLS = [
          "source": {"type": "string", "description": "push, schedule, api, ..."},
          "deployless": {"type": "boolean"}, "url": {"type": "string"}},
          "required": ["project", "job"]}},
+    {"name": "record_deploy",
+     "description": "Record one verified release AFTER the front-door canary observed its sha. "
+                    "Immutable and idempotent by sha: an exact repeat answers idempotent, a "
+                    "changed proof for the same sha is refused. tasks_closed names the done tasks "
+                    "this release carries (an empty list is allowed).",
+     "inputSchema": {"type": "object", "properties": {
+         "sha": {"type": "string"},
+         "served_sha": {"type": "string", "description": "what the canary observed; must equal sha"},
+         "tasks_closed": {"type": "array", "items": {"type": "string"}},
+         "at": {"type": "string"}, "method": {"type": "string"}, "build": {"type": "string"},
+         "audit_ok": {"type": "boolean"}},
+         "required": ["sha", "served_sha", "tasks_closed"]}},
     {"name": "list_components",
      "description": "Standard components and app skeletons. Asked to build a standard app, or to "
                     "apply components to one? Read the skeleton: its applied rows carry each "
@@ -360,6 +372,8 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/capability", payload, auth_headers)
     elif name == "report_ci_failure":
         status, body = _seam("/hub/api/ci-failure", dict(args), auth_headers)
+    elif name == "record_deploy":
+        status, body = _seam("/hub/api/deploy", dict(args), auth_headers)
     elif name == "search_board":
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
