@@ -24,11 +24,17 @@ Rules this module holds, each paid for in production on the origin system:
   Host header) is recorded as a warning and flagged external, so a suppressed repeat
   reports the same severity its written sibling did and can never crowd the top of the
   stream.
+* A CHANGE OF SEVERITY IS A NEW FACT. The throttle folds a repeat into the prior write only
+  at the SAME severity: a service that demotes a class (error -> warning) gets a row at the
+  new severity instead of lending its occurrences to the old error row.
+* AN ACK IS BOUNDED BY ITS OWN TIME. It covers the occurrences at or before the moment it was
+  given; a recurrence after it is a new event nobody accepted and surfaces again. is_acked()
+  is the one predicate every reader shares, and it fails OPEN toward visible.
 * A TRACE IS KEPT FOR ITS END. Details keep a head AND a tail — the exception line and the
   frame that raised live at the bottom — and the cause line rides on the row itself.
-* ACK COLLAPSES, NEVER DELETES, AND COVERS ONLY WHAT IT SAW. An ack suppresses occurrences
-  at or before it; a recurrence after it is a new event nobody accepted and surfaces again.
-  A clear is bounded by AGE or by ACK, never "everything".
+* ACK COLLAPSES, NEVER DELETES; a clear is bounded by AGE or by ACK, never "everything" —
+  a clear must never be the operation that destroys evidence of a failure nobody has
+  looked at. only_acked is a RESTRICTION: an age bound beside it narrows the acked set.
 * AN EMPTY LIST MUST SAY WHETHER IT IS EVERYTHING. coverage() names each channel that CAN
   report and whether it is live, quiet (reported before) or has NEVER reported — never and
   quiet are different facts and must not share a word — plus what is out of scope.
@@ -525,16 +531,31 @@ def coverage(rows, hub_dir=None) -> dict:
 # tab that briefly could not reach its server, an <img> that 404'd, the board's own fetch
 # timeout, a fetch the BROWSER cancelled (navigation, Stop, a discarded tab — each engine
 # words it differently). Recorded, counted, queryable, never queued.
+# Every blip alternative is anchored at BOTH ends: the message must be the transport wording
+# and nothing else, so a real fault that merely BEGINS with the phrase ("The operation was
+# aborted because the store is corrupt") still queues. A bare AbortError is the BROWSER
+# cancelling a fetch (a navigation, Stop, a frozen tab); the board's own fetch timeout aborts
+# with a NAMED reason ("Hub did not answer <path> within N seconds"), accepted bare or with the
+# TimeoutError:/AbortError: prefix a reporter adds when it writes String(err).
 _ABORT = (r"(AbortError: )?(The user aborted a request|The operation was aborted|"
-          r"signal is aborted without reason|Fetch is aborted)")
-_BLIP = re.compile(r"^(HTTP 5|HTTP 0|Failed to fetch|NetworkError|Load failed|"
-                   r"Live stream unavailable|Realtime stream unavailable|"
-                   r"Hub did not answer .+ within \d+ seconds|" + _ABORT + r")", re.I)
-_WRAPPED_TRANSPORT = r"(TypeError: )?(Failed to fetch|NetworkError[^()]*|Load failed)$"
-_APP_BLIP = re.compile(r"^(resource failed to load: |network error on |htmx:sendError|"
-                       r"Failed to fetch|NetworkError|Load failed|"
-                       r"request failed: [A-Z]+ \S* - " + _WRAPPED_TRANSPORT + r"|"
-                       r"live stream failed: " + _WRAPPED_TRANSPORT + r"|" + _ABORT + r")", re.I)
+          r"signal is aborted without reason|Fetch is aborted)\.?")
+_BARE_TRANSPORT = r"(TypeError: )?(Failed to fetch|NetworkError[^()]*|Load failed)\.?"
+# A 5xx/0 status line and a stream-unavailable notice are statuses, not wordings of a fault,
+# so they keep their prefix form; everything a real fault could start with is end-anchored.
+_BLIP = re.compile(r"^(HTTP (5\d\d|0)\b.*|(Live|Realtime) stream unavailable\b.*|"
+                   + _BARE_TRANSPORT + r"|"
+                   r"((TimeoutError|AbortError): )?Hub did not answer \S+ within \d+ seconds\.?|"
+                   + _ABORT + r")$", re.I)
+# A SERVICE's browser reporter (app.<slug>.browser) wraps the same no-response failure in its
+# own words first — "request failed: GET <path> - Failed to fetch", "live stream failed:
+# TypeError: Failed to fetch" — so the wrapped forms are listed too. Still anchored at the END of
+# the bare transport text: a reporter that says "(2 consecutive background attempts, no
+# response)" is describing a SUSTAINED outage, and that row still queues. A resource that failed
+# to load and an htmx send error name only the resource, so they keep their prefix form.
+_APP_BLIP = re.compile(r"^(resource failed to load: .*|network error on \S+|htmx:sendError\b.*|"
+                       + _BARE_TRANSPORT + r"|"
+                       r"request failed: [A-Z]+ \S* - " + _BARE_TRANSPORT + r"|"
+                       r"live stream failed: " + _BARE_TRANSPORT + r"|" + _ABORT + r")$", re.I)
 # A service's own POSITIVE CONTROL is not work: an error-visibility self-test fires one real
 # error per channel, each carrying a fresh token, to prove the path. patterns/error-visibility.md
 # names the token shape; the bar keys on it so a passing probe never queues as a defect.
@@ -592,7 +613,7 @@ def passes_bar(row) -> tuple:
                 ref, (" (%s)" % how) if how else "", (" (%s)" % who) if who else "")
     if src.startswith("browser.") and _BLIP.match(msg):
         return False, "transport blip that recovered"
-    if src.startswith("app.") and _APP_BLIP.match(msg):
+    if src.startswith("app.") and src.endswith(".browser") and _APP_BLIP.match(msg):
         return False, "browser transport blip in the service: counted, not queued"
     if src.startswith("app.") and _SELFTEST_TOKEN.search(msg):
         return False, "error self-test positive-control probe: counted, not queued"
@@ -788,9 +809,11 @@ def read(hub_dir, limit=READ_LIMIT) -> tuple[list, dict]:
                 row["occurrences_folded"] = folded
         acked = read_acked(hub_dir)
         for row in rows:
-            mark = acked.get(row.get("fingerprint"))
-            if mark and is_acked(row, acked):
-                row["acked"] = mark
+            # Only the occurrences the ack actually covered. A recurrence after it is a NEW
+            # event: a signature-only mute once hid eight of nine live rows of a different
+            # root cause behind a days-old ack whose note claimed "0 recurrences since".
+            if is_acked(row, acked):
+                row["acked"] = acked[row.get("fingerprint")]
         metadata = {
             "available": failure is None,
             "retention": KEEP_ROWS,
@@ -814,27 +837,40 @@ def read_acked(hub_dir) -> dict:
     return _read_json(_acked_path(hub_dir))
 
 
-def is_acked(row: dict, acked: dict) -> bool:
-    """Is THIS occurrence acknowledged? An ack suppresses only occurrences AT OR BEFORE its
-    own timestamp; a recurrence after it is a new event nobody accepted. Fails open toward
-    VISIBLE: an ack or a row with no usable time suppresses nothing."""
-    mark = (acked or {}).get(row.get("fingerprint"))
-    if not mark:
+ACK_SKEW_S = 2.0
+
+
+def is_acked(row: dict, acked: dict | None = None, hub_dir=None) -> bool:
+    """Is THIS occurrence acknowledged? An ack covers only rows AT OR BEFORE its own
+    timestamp; a recurrence after it re-surfaces, because nobody accepted it. The single
+    predicate behind the row's `acked` mark, the unclaimed count every reader shares, and the
+    only_acked clear — so the board, the API and an agent can never disagree about a row.
+
+    Fails OPEN toward VISIBLE: an ack with no readable time, or a row with none, mutes
+    nothing. A real error wrongly hidden is worse than a handled one shown twice."""
+    if acked is None:
+        acked = read_acked(hub_dir) if hub_dir is not None else {}
+    mark = acked.get(row.get("fingerprint"))
+    if not isinstance(mark, dict):
         return False
     ack_at = _epoch(mark.get("at"))
     if ack_at == float("-inf"):
         return False
-    row_at = _epoch(row.get("epoch") or row.get("ts"))
+    row_at = _epoch(row.get("epoch") if row.get("epoch") not in (None, "") else row.get("ts"))
     if row_at == float("-inf"):
         return False
+    # A recurrence the throttle FOLDED into this row after the ack is still a new event.
     row_at = max(row_at, float(row.get("last_occurrence") or 0))
-    return row_at <= ack_at + 2.0          # clock jitter between the row and the ack
+    # The ack is written after the row it accepts; allow clock jitter and rounding so an
+    # accepted row never leaks back as "new".
+    return row_at <= ack_at + ACK_SKEW_S
 
 
 def ack(hub_dir, fingerprint: str, actor: str = "", note: str = "") -> dict:
-    """Acknowledge one error SIGNATURE. Acking is not deleting: the rows stay in the stream
-    and stay countable — they just stop competing for attention with failures nobody has
-    looked at yet. Returns {} on failure so a caller can report honestly."""
+    """Acknowledge one error SIGNATURE, up to NOW. Acking is not deleting: the rows stay in
+    the stream and stay countable — they just stop competing for attention with failures
+    nobody has looked at yet. A recurrence after this moment is not covered (is_acked).
+    Returns {} on failure so a caller can report honestly."""
     fingerprint = _clean(fingerprint, 32)
     if not fingerprint:
         return {}
@@ -895,7 +931,12 @@ def clear(hub_dir, before_epoch=None, only_acked=False) -> dict:
                     removed += 1          # malformed rows are not evidence of anything
                     continue
                 old = before_epoch is None or float(row.get("epoch") or 0) < float(before_epoch)
-                drop = (is_acked(row, acked) and old) if only_acked else old
+                if only_acked:
+                    # is_acked, not membership: a recurrence after the ack is NOT acked, so
+                    # an only_acked clear must never delete the rows the ack keeps visible.
+                    drop = is_acked(row, acked) and old
+                else:
+                    drop = old
                 if drop:
                     removed += 1
                 else:

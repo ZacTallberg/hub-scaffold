@@ -38,8 +38,9 @@ to the console that asked.
 HUB_AUTOWORKER=1 the answer/ack/finish verbs post their own line automatically.
 
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
-HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
-error stream. `ci-failure` posts a failed CI job's log tail; the hub classifies it (rollback /
+HUB_SESSION_ID, or flags), `app-error` / `agent-error` / `ack-error` feed the operational
+error stream, and `errors --include deferred|all` reads the raw stream back with the queue's own
+counts first (what is on the queue, what is unclaimed, and what the bar held back). `ci-failure` posts a failed CI job's log tail; the hub classifies it (rollback /
 real / not_deployed / unclear) by what the LOG says, never by the pipeline's trigger. `deploy`
 records a verified release and survives a cold hub (growing timeouts, retried only because the
 record is idempotent by sha). `components` and `capability` read and register the standard
@@ -1798,6 +1799,45 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
             "chars": len(context)}
 
 
+def _stream_age(seconds) -> str:
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return "-"
+    if seconds < 60:
+        return "<1m"
+    hours, rest = divmod(seconds, 3600)
+    return "%dh%02dm" % (hours, rest // 60) if hours else "%dm" % (rest // 60)
+
+
+def _run_errors_stream(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read the operational error stream. COUNT THE QUEUE, NOT THE LISTING: the summary is
+    taken from each row's own `bar` verdict and the server's queue counts, whatever this call
+    asked to list — a listing that includes deferred rows must never print them as unclaimed
+    work. The remainder the bar held back is named on its own line."""
+    from urllib.parse import urlencode
+    query = {k: v for k, v in (("app", arguments.app), ("include", arguments.include)) if v}
+    payload = _get(base, "errors.json" + ("?" + urlencode(query) if query else ""))
+    meta = payload.get("metadata") or {}
+    rows = payload.get("data") or []
+    listed_off = sum(1 for r in rows if r.get("bar") == "deferred")
+    summary = ["%d on the queue%s: %d unclaimed, %d claimed -- oldest unclaimed %s"
+               % (int(meta.get("on_board") or 0),
+                  (" for " + meta["app"]) if meta.get("app") else "",
+                  int(meta.get("unclaimed") or 0), int(meta.get("claimed") or 0),
+                  _stream_age(meta.get("oldest_unclaimed_s")))]
+    deferred = int(meta.get("deferred") or 0)
+    if deferred:
+        summary.append("  + %d below the bar (counted, kept, not queued -- nobody is expected "
+                       "to work these)%s" % (deferred, "" if listed_off else
+                                             "; --include deferred lists them"))
+    if meta.get("available") is False:
+        summary.append("  ! the error store is IMPAIRED (%s) -- quiet here is not healthy"
+                       % (meta.get("reason") or "write failure"))
+    for line in summary:
+        print(line, file=sys.stderr)
+    return {"summary": summary, **payload}
+
+
 def _run_search(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
     return _get(base, f"search.json?q={quote(arguments.query)}&limit={arguments.limit}")
@@ -1884,7 +1924,10 @@ def _problem_line(p: dict[str, Any]) -> str:
 def _run_errors(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """The QUEUE, folded into problems (never raw rows): --mine (owned by or held by me),
     --app <slug>, --all (include what the bar holds back), --resolved; --trace <p-id> prints
-    one problem with its full stored trace (head AND tail)."""
+    one problem with its full stored trace (head AND tail). --include deferred|all reads the
+    raw error stream instead, with the queue's own counts first."""
+    if getattr(arguments, "include", None):
+        return _run_errors_stream(base, arguments)
     from urllib.parse import quote
     if arguments.trace:
         pid = _problem_id(arguments.trace)
@@ -3054,6 +3097,9 @@ def _parser() -> argparse.ArgumentParser:
     errors.add_argument("--resolved", action="store_true", help="include resolved problems")
     errors.add_argument("--trace", metavar="P_ID", help="one problem with its full stored trace")
     errors.add_argument("--json", action="store_true", help="also return the problem objects")
+    errors.add_argument("--include", choices=("deferred", "all"),
+                        help="read the RAW stream instead (queue counts first), also listing "
+                             "the rows the bar held back")
     errors.set_defaults(runner=_run_errors)
 
     resolve = commands.add_parser("resolve", help="resolve a problem: ack every row behind it "

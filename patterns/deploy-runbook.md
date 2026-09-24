@@ -247,6 +247,34 @@ Report the rollback itself to the board (`python -m hub_core.client ci-report --
 "ok", and a host running code the pipeline rejected must be a critical row until a person closes
 it. `patterns/deploy-hardening.md` lists the step failures that roll back good builds.
 
+## Rolling restarts — the health wait between services
+
+When one release restarts several processes in turn (web workers, a background runner), the
+next restart waits until the previous process answers its liveness path. Three things about that
+wait each turned a good release into a failed one on the system this pattern came from:
+
+- **Size the ceiling from a measured restart under load, not a round number.** A process that
+  answered in seconds when idle took over a minute to answer its own liveness check after a
+  restart under load; a 60 s ceiling turned that good deploy into a rollback, and a rollback that
+  also exceeds the ceiling fails outright and leaves the host on neither version. Measure the
+  worst restart you have seen, then give the wait comfortable room above it (120 s there).
+- **Probe with a plain HTTP client, not a shell's convenience cmdlet.** A console-oriented web
+  cmdlet threw an internal-state error on EVERY attempt when run by a CI runner with no console
+  attached, while the same call passed interactively and the service was answering. The deploy
+  and its restore both failed that way. Use the platform's bare HTTP client with redirects OFF
+  (a 302 to a sign-in page is "not healthy", never a pass), no proxy, a short per-attempt timeout,
+  and dispose it. On failure, record the exception TYPE and its inner cause, not only the message:
+  a runner-only fault has to be diagnosable from the job log alone.
+- **The liveness path must not be redirected.** The probe calls `http://127.0.0.1:<port>/...`
+  directly — no proxy, no `X-Forwarded-Proto`. An HTTPS redirect (`SECURE_SSL_REDIRECT`) answers it
+  with a 301 to an https URL the app server cannot serve, so a healthy process reads as unhealthy
+  on every restart. Exempt exactly the liveness path (`adapters/django/MOUNTING.md`).
+
+One honest limit: if the liveness answer names a commit read from a stamp the deploy wrote BEFORE
+the restart, the OLD process reports the new commit too, and the wait cannot tell old code from
+new. Report an identity the running code loaded at import (a marker baked into the artifact),
+never one the deploy just wrote beside it.
+
 ## Concurrency — the honest limit
 
 Two agents releasing one front door can overwrite each other even when identity travels inside the
