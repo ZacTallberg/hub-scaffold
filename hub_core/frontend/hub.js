@@ -1509,7 +1509,9 @@
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
         "Claim a signature with POST api/ack-error {fingerprint} — acking collapses it off the queue without deleting the rows." }));
     }
-    var deferred = rows.length - onBar.length;
+    // The server's count of what the bar held back — the queue's own number, whatever subset
+    // this snapshot happened to carry.
+    var deferred = meta.deferred != null ? meta.deferred : rows.length - onBar.length;
     if (deferred > 0) {
       body.appendChild(el("p", { class: "cell-sub", text:
         deferred + " row" + (deferred === 1 ? "" : "s") + " below the bar (foreign clients, warnings, recovered blips) — never dropped; errors.json?include=deferred shows them." }));
@@ -1526,7 +1528,10 @@
         covWrap.appendChild(el("span", {
           class: "err-cov-chip" + (c.silent ? " is-silent" : " is-live"),
           title: c.wired || c.key,
-          text: c.label + (c.silent ? " — silent" : " · " + c.rows)
+          // The AGE is in the text, not only a colour: a channel that last reported days ago
+          // is not the same evidence as one that reported a minute ago.
+          text: c.label + (c.silent ? " — silent" : " · " + c.rows
+            + (c.age_s != null ? " · last " + fmtAge(c.age_s) + " ago" : ""))
         }));
       });
       body.appendChild(covWrap);
@@ -2324,7 +2329,14 @@
   function timedFetch(url, options) {
     if (!global.AbortController) return fetch(url, options);
     var controller = new global.AbortController();
-    var timer = setTimeout(function () { controller.abort(); }, 9000);
+    // Abort with a NAMED reason: a bare AbortError can then only mean the browser cancelled
+    // the request (navigation, Stop, a discarded tab), and the error bar defers both shapes as
+    // transport blips instead of queueing a cancelled poll as a board failure.
+    var timer = setTimeout(function () {
+      var reason = new Error("Hub did not answer " + String(url).split("?")[0] + " within 9 seconds");
+      reason.name = "TimeoutError";
+      try { controller.abort(reason); } catch (e) { controller.abort(); }
+    }, 9000);
     options = Object.assign({}, options || {}, { signal: controller.signal });
     return fetch(url, options).then(function (response) {
       clearTimeout(timer); return response;
