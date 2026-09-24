@@ -26,7 +26,8 @@
         "author": { "type": "string" },
         "agent": { "type": "string", "description": "Agent id that last mutated this entity." },
         "model_version": { "type": "string" },
-        "session_id": { "type": "string" }
+        "session_id": { "type": "string" },
+        "seq": { "type": "integer", "minimum": 0, "description": "Ledger sequence of the event that last changed this entity, stamped by the fold — the cursor a mirror (/hub/knowledge/since) pages by." }
       },
       "required": ["created_at"]
     },

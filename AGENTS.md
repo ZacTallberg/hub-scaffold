@@ -121,9 +121,10 @@ disposable `verification-closer` only for a rare critical boundary.
   host, …), reading real output at each step. There is deliberately no deploy script to fill in —
   a script encodes one environment's assumptions and then rots silently against the platform it
   drives. The contract it must satisfy is fixed; the mechanism is yours.
-- **Optional entity types (Findings, Lessons, Decisions-log)** — generic and reusable, but kept OUT of
-  the minimal base. Add them via `campaigns/augment-hub.md` if you want them; they're an intended
-  extension, not a gap.
+- **Separate entity TYPES for Findings, Lessons, Decisions-log** — kept OUT of the minimal base.
+  Lessons, findings, methods and reviews ride the base `note` type, distinguished by a kind tag,
+  through their own verbs (`/hub/api/lesson|finding|method|review`, `patterns/knowledge-retrieval.md`).
+  Promote one to its own type via `campaigns/augment-hub.md` only if you need a distinct schema.
 - **No LICENSE** — none, by choice (public repo → viewable but all-rights-reserved; add a permissive
   license only if a teammate needs to legally reuse it).
 
