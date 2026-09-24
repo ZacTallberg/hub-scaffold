@@ -147,7 +147,7 @@ Unset or failing: nothing listed.
   then Django's default, and only then any suffix match.
 - **Glyphs versus host resets.** Every `<svg>` carries its size, fill and stroke as presentation
   attributes, re-asserted with `!important` on an enumerated class, so a host's `svg { fill:
-  currentColor }` cannot turn outlines into blobs. One stroke icon set for everything.
+  currentColor }` cannot turn outlines into solid fills. One stroke icon set for everything.
 - **Placement under zoom.** With `zoom` on `<html>`, rectangles are in zoomed pixels and fixed
   `left/top` are zoomed again; every anchor placement divides by the zoom or lands 10% off.
 - **An "empty" verdict must not be a one-way door.** The slot is re-measured with its own hidden
