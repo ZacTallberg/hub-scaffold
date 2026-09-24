@@ -63,10 +63,16 @@ Both follow one shape — **the hub authenticates the app, the app vouches for t
     reader's browser  ->  the app's own gated endpoint (its bridge)
                       ->  /hub/api/...   with the APP's scoped credential and ?person=<name>
 
-- `/hub/api/profile` holds a person's theme, motion, text size, UI scale, agent placement and
-  mark (initials, or a small PNG/JPEG/WebP data URL; SVG refused). Closed sets; out-of-range
-  values are dropped and reported. Mutable per-person state lives in `HUB_DIR/profiles.json`,
-  not the ledger.
+- `/hub/api/profile` holds a person's theme, motion, text size, UI scale, reading face, agent
+  placement, sidebar state, help switches, starred apps and mark (initials, or a small
+  PNG/JPEG/WebP data URL; SVG refused). Closed sets; out-of-range values are dropped and
+  reported. Any page key (and the agent placement) can also be set for ONE app under
+  `prefs.apps.<slug>`; `?app=<slug>` answers `resolved`, the values that app should draw. The
+  GET lists the apps the person can reach (`HUB_APPS` joined with the adopter's `HUB_REACH`
+  seam). Mutable per-person state lives in `HUB_DIR/profiles.json`, not the ledger. When the
+  hub shares an origin with the site that signs people in, the same route also answers the
+  person's own browser through the adopter's `HUB_PERSON` resolver (CSRF-checked, never naming
+  anyone else) — that is how the shared banner (`patterns/app-banner.md`) reaches it.
 - `/hub/api/agent/*` forwards questions to one agent service with the **one** agent key the hub
   holds (`HUB_AGENT_URL`, `HUB_AGENT_KEY`, `HUB_AGENT_CONTEXT`, `HUB_AGENT_LABEL`,
   `HUB_AGENT_TIMEOUT_S`, `HUB_AGENT_TLS_VERIFY`). Apps never hold it, so there is one credential
