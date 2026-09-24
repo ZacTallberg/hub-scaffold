@@ -151,8 +151,12 @@ The wrapped rule is anchored at the END of the transport text on purpose. A back
 fails ONCE is a blip; one that fails several times in a row is an outage, and the reporter should
 say so — `live stream failed: TypeError: Failed to fetch (2 consecutive background attempts, no
 response)` — which does NOT match and therefore queues. Abort your own timeouts with a named reason
-(`Hub did not answer <path> within N seconds`, as the board does) so a bare `AbortError` can only
-mean the browser cancelled the request.
+(`Hub did not answer <path> within N seconds`, as the board's `timedFetch` does) so a bare
+`AbortError` can only mean the browser cancelled the request; the bar accepts that wording bare or
+as `String(err)` writes it (`TimeoutError: Hub did not answer …`). Every rule is anchored at BOTH
+ends: the message must be the transport wording and nothing more, so `The operation was aborted
+because the store is corrupt` is a fault and queues. Report the wording verbatim — do not append
+context to a blip you want deferred; put context in `context`, not `message`.
 
 ## 6. Show each service its own recent errors
 

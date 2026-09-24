@@ -22,11 +22,14 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   narrows the stream and every count to one service. Reachable as `python -m hub_core.client
   errors [--app] [--include deferred]` (queue summary first, below-bar remainder named) and the
   MCP `read_errors` tool.
-- **The bar recognises more transport blips.** A bare browser `AbortError` (every engine's
-  wording), the board's own named timeout, and a service reporter's once-wrapped no-response
-  (`request failed: GET … - Failed to fetch`, `live stream failed: TypeError: Failed to fetch`)
-  are deferred; the wrapped rule is anchored at the end so a "N consecutive attempts" outage
-  still queues. The board's fetch timeout now aborts with a named reason.
+- **The bar recognises more transport blips, and only the blip itself.** A browser cancellation
+  (`AbortError` in every engine's wording), a named fetch timeout (`Hub did not answer <path>
+  within N seconds`, bare or as `TimeoutError: …`), and a service reporter's once-wrapped
+  no-response (`request failed: GET … - Failed to fetch`, `live stream failed: TypeError: Failed
+  to fetch`) are deferred. Every fault-shaped wording is anchored at both ends, so a message that
+  merely begins with the phrase (`The operation was aborted because …`) or reports a sustained
+  outage (`… (2 consecutive background attempts, no response)`) still queues. The board's fetch
+  timeout aborts with that named reason; the board does not itself forward fetch failures.
 - **Acks are time-bounded.** An ack covers the occurrences at or before it; a recurrence is
   unacked again (`errorlog.is_acked`, shared by the row mark, the counts and `only_acked` clears,
   failing open toward visible). A change of severity writes its own row instead of folding into
