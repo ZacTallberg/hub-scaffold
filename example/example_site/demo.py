@@ -2,7 +2,11 @@
 
 ``/demo/budget-app/`` and ``/demo/reporting/`` are what an adopting app's page looks like: it
 links ``/hub/components/banner/*``, declares its pages once, and marks a few key things with
-``data-ab-info``. ``/demo/access.json`` is a reference implementation of the People and
+``data-ab-info``. ``/demo/reporting/`` also shows an app that HAD a header when it adopted the
+banner: it links the hub-hosted ``header-takeover`` (the old header named in ``data-replaces``,
+duplicate controls and drawer rows folded, ``hide_custom`` read from the hub's component
+properties) and ``search-bar`` (answered by ``/demo/<slug>/suggest.json``, the app's own
+endpoint). ``/demo/access.json`` is a reference implementation of the People and
 Permissions contract the banner speaks (patterns/app-banner.md), with its guards on the SERVER:
 nobody demotes, deactivates or removes themselves, and the last admin cannot be removed.
 
@@ -118,6 +122,14 @@ def page(request, slug="budget-app"):
     admin = [{"label": "Cost centres", "href": here + "#cost-centres", "icon": "list",
               "info": "The cost centres this app knows, and who owns each."}]
     profile = [{"label": "My forecasts", "href": here + "#mine", "icon": "user", "sub": "3 open"}]
+    legacy = slug == "reporting"
+    help_rows = []
+    if legacy:
+        # What an app that already had its own menus tends to declare: rows the banner also draws.
+        admin += [{"label": "People and Permissions", "href": here + "#people", "icon": "users"},
+                  {"label": "People and permissions", "href": here + "#people-old", "icon": "users"}]
+        help_rows = [{"label": "Guided tour", "id": "legacy-tour"},
+                     {"label": "Read me", "href": here + "#readme"}]
     attrs = {
         "data-app": slug, "data-app-name": app["name"], "data-app-sub": app["sub"],
         "data-version": app["version"], "data-home": here, "data-hub": "/hub",
@@ -126,16 +138,45 @@ def page(request, slug="budget-app"):
         "data-access-url": "/demo/access.json" if slug == "budget-app" else "",
         "data-signout": "/demo/signout/",
     }
+    if legacy:
+        attrs["data-replaces"] = ".legacy-head"
+        attrs["data-props"] = "/hub/components/props/%s.json" % slug
     mount_attrs = " ".join('%s="%s"' % (k, html.escape(str(v), quote=True)) for k, v in attrs.items() if v)
 
     def island(name, value):
         return '<script type="application/json" data-ab="%s">%s</script>' % (
             name, json.dumps(value).replace("<", "\\u003c"))
 
+    help_island = island("help", help_rows) if help_rows else ""
+    if legacy:
+        search = (
+            '<div id="app-search" data-action="%s" data-app="%s" data-app-name="%s" data-value="%s" '
+            'data-suggest-url="/demo/%s/suggest.json" data-sources="packs, variances, exports">'
+            '<form data-search-fallback action="%s" method="get"><input type="search" name="q" '
+            'aria-label="Search"></form></div>'
+            '<script src="/hub/components/search-bar/search-bar.js"></script>'
+            % (here, slug, html.escape(app["name"], quote=True),
+               html.escape(request.GET.get("q", ""), quote=True), slug, here))
+        slot = (search + '<button class="app-btn" type="button">New pack</button>'
+                '<button class="app-btn" type="button">Your apps</button>'
+                '<button class="app-btn" type="button" id="legacy-export">Export</button>')
+        legacy_head = ('<header class="legacy-head" style="display:flex;gap:10px;align-items:center;'
+                       'padding:8px 20px;border-bottom:1px solid rgba(127,127,127,.3)">'
+                       '<b>Reporting (old header)</b><a href="#settings">Settings</a>'
+                       '<button class="app-btn" type="button">Refresh packs</button>'
+                       '<a href="/demo/signout/">Sign out</a></header>')
+        search_css = '<link rel="stylesheet" href="/hub/components/search-bar/search-bar.css">'
+        takeover_js = '<script src="/hub/components/header-takeover/header-takeover.js" defer></script>'
+    else:
+        slot = ('<button class="app-btn" type="button" data-ab-info="Start a new forecast for next '
+                'month from this month&#39;s actuals." data-ab-info-title="New forecast">New forecast</button>')
+        legacy_head = search_css = takeover_js = ""
+
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(app['name'])} - example</title>
 <link rel="stylesheet" href="/hub/components/banner/banner.css">
+{search_css}
 <style>
   body {{ margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #f6f7f9; color: #1d2230; }}
   html[data-theme="dark"] body {{ background: #111521; color: #e3e7ef; }}
@@ -148,9 +189,10 @@ def page(request, slug="budget-app"):
 </style></head>
 <body data-csrf="{html.escape(get_token(request), quote=True)}">
 <header id="app-banner" {mount_attrs}>
-  {island("nav", nav)}{island("admin", admin)}{island("profile", profile)}
-  <div data-ab-slot><button class="app-btn" type="button" data-ab-info="Start a new forecast for next month from this month's actuals." data-ab-info-title="New forecast">New forecast</button></div>
+  {island("nav", nav)}{island("admin", admin)}{island("profile", profile)}{help_island}
+  <div data-ab-slot>{slot}</div>
 </header>
+{legacy_head}
 <main>
   <h1 style="margin:0">Spend is 4% under forecast this month</h1>
   <p style="margin:4px 0 0;opacity:.75">An example page for the shared banner. Signed in as <b>{html.escape(person or 'nobody')}</b>.</p>
@@ -161,8 +203,43 @@ def page(request, slug="budget-app"):
   </div>
 </main>
 <script src="/hub/components/banner/banner.js" defer></script>
+{takeover_js}
 </body></html>"""
     return HttpResponse(body)
+
+
+#: What the demo apps can be searched for: the app's own index, which a real app would query.
+_SEARCHABLE = {
+    "reporting": [
+        ("Packs", "Monthly pack", "September, awaiting sign-off", "#monthly"),
+        ("Packs", "Quarterly pack", "Q3, published", "#quarterly"),
+        ("Variances", "Travel variance", "12% over forecast", "#variance-travel"),
+        ("Variances", "Software variance", "4% under forecast", "#variance-software"),
+        ("Exports", "Export to spreadsheet", "every pack, one sheet per section", "#exports"),
+    ],
+}
+
+
+def suggest(request, slug):
+    """The search-bar suggest contract (hub_core/components/search-bar/manifest.json), answered
+    from the demo app's own index. An app with no index says `unconfigured`, never "no results"."""
+    _debug_only()
+    rows = _SEARCHABLE.get(slug)
+    if rows is None:
+        return JsonResponse({"ok": False, "reason": "unconfigured",
+                             "error": "this demo app has no search index"})
+    q = (request.GET.get("q") or "").strip().lower()
+    groups: dict = {}
+    for group, title, meta, anchor in rows:
+        if q and q not in (title + " " + meta + " " + group).lower():
+            continue
+        groups.setdefault(group, []).append({"title": title, "meta": meta,
+                                             "url": "/demo/%s/%s" % (slug, anchor),
+                                             "ref": "%s:%s" % (slug, anchor.lstrip("#"))})
+    return JsonResponse({"ok": True, "total": sum(len(v) for v in groups.values()),
+                         "groups": [{"key": k.lower(), "title": k, "rows": v} for k, v in groups.items()],
+                         "popular": ["monthly pack", "travel variance"],
+                         "placeholder": "Search packs, variances and exports", "smart": False})
 
 
 def _now() -> str:

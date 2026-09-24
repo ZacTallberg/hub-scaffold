@@ -1,7 +1,7 @@
 {
   "name": "header-takeover",
   "title": "Header takeover",
-  "summary": "A companion to the shared banner: hides (never removes) the header an app names in data-replaces and names the reachable controls that went dark, warns when the banner sits on top of a header nobody declared, hides app copies of controls the banner is really drawing (data-ab-superseded, or automatically in the slot, with data-ab-keep as the written escape hatch), and lets an operator take an app's own control off the band (hide_custom).",
+  "what": "A companion to the shared banner: hides (never removes) the header an app names in data-replaces and names the reachable controls that went dark, warns when the banner sits on top of a header nobody declared, hides app copies of controls the banner is really drawing (data-ab-superseded, or automatically in the slot, with data-ab-keep as the written escape hatch), and lets an operator take an app's own control off the band (hide_custom).",
   "link": [
     "<script src=\"{hub}/components/header-takeover/header-takeover.js\" defer></script>"
   ],
@@ -23,7 +23,7 @@
     "A duplicate is hidden only while the banner is drawing its counterpart, checked per control and asked twice.",
     "An app's own search box is kept when the standard search bar is not mounted.",
     "hide_custom is a person's decision, reversible on every pass, scoped to the banner's slot.",
-    "Deduplicating the banner's own sidebar rows is the banner's job, not this companion's."
+    "The drawer keeps one Guided tour, one About this app and one People and Permissions: an app's island copy is hidden while the banner draws its own, and a repeated app row keeps its first copy; each drop is reported."
   ],
   "props": [
     {"key": "hide_custom", "label": "Take an app's own control off the band", "type": "list", "max": 80, "max_items": 12,

@@ -28,6 +28,14 @@
         mounted would leave that app with no way to search. data-ab-keep="<why>" keeps one and
         prints the reason, because the next reader of that markup must know which case it is.
 
+     5. ONE OF EACH IN THE DRAWER. The banner draws its own Guided tour, About this app (the
+        read-me) and, for admins, People and Permissions; an app that ALSO lists one of those in its
+        `profile` / `admin` / `help` island gets two rows that do one thing. The app's copy is hidden
+        while the banner's own row is drawn (the banner's rows are the buttons without an id or
+        href; an app's island rows carry one or the other), and an app row repeated with no banner
+        counterpart keeps its first copy. Each drop is reported once, naming the row. The drawer is
+        rebuilt every time it opens, so this runs on every rebuild.
+
    And one removal that is a PERSON's, never a rule: the `hide_custom` component property (one
    control name or #id per line) takes an app's own control off the band for everyone on that app,
    reversibly, scoped to the slot and nowhere else.
@@ -230,6 +238,56 @@
     }
   }
 
+  /* ------------------------------------------------ (5) one of each in the drawer */
+
+  var DRAWER_ROLES = { tour: true, about: true, people: true };
+
+  function dedupeDrawer(drawer) {
+    var rows = [].slice.call(drawer.querySelectorAll(".ab-row"));
+    var owned = {}, seen = {};
+    rows.forEach(function (row) {
+      var role = roleOf(row);
+      // The banner's own rows are buttons with neither an id nor an href; island rows carry one.
+      if (DRAWER_ROLES[role] && row.tagName === "BUTTON" && !row.id && !row.closest("form")) owned[role] = row;
+    });
+    rows.forEach(function (row) {
+      var role = roleOf(row);
+      if (!DRAWER_ROLES[role] || owned[role] === row) return;
+      var label = nameOf(row).slice(0, 60);
+      if (row.closest("[data-ab-keep]")) return;
+      if (owned[role]) {
+        hide(row, "data-ab-duplicate");
+        report("sidebar", label, "hidden", "Hid the app's drawer row \"" + label + "\": the banner already draws " +
+               role + " there.", "info");
+      } else if (seen[role]) {
+        hide(row, "data-ab-duplicate");
+        report("sidebar", label, "hidden", "Hid a second drawer row for " + role + " (\"" + label +
+               "\"); the first one is kept.", "info");
+      } else {
+        seen[role] = row;
+      }
+    });
+    // A section left with nothing visible loses its heading too.
+    [].forEach.call(drawer.querySelectorAll(".ab-sec"), function (sec) {
+      var live = [].some.call(sec.querySelectorAll(".ab-row"), function (r) { return r.getAttribute("data-ab-duplicate") !== "1"; });
+      if (live) unhide(sec, "data-ab-duplicate"); else hide(sec, "data-ab-duplicate");
+    });
+  }
+
+  function watchDrawer() {
+    var drawer = doc.querySelector(".ab-drawer");
+    if (!drawer || drawer.getAttribute("data-ht-watched")) return;
+    drawer.setAttribute("data-ht-watched", "1");
+    var busy = false;
+    var obs = new MutationObserver(function () {
+      if (busy) return;
+      busy = true;
+      try { dedupeDrawer(drawer); } finally { busy = false; obs.takeRecords(); }
+    });
+    obs.observe(drawer, { childList: true, subtree: true });
+    dedupeDrawer(drawer);
+  }
+
   /* ------------------------------------------------------------- properties */
 
   function takeProps(all) {
@@ -258,12 +316,18 @@
         .catch(function () {});
     }
     pass();
+    watchDrawer();
     // ASKED TWICE: panels that arrive over the wire after the first draw are only there later.
-    setTimeout(pass, 1500);
+    setTimeout(function () { pass(); watchDrawer(); }, 1500);
     doc.documentElement.setAttribute("data-header-takeover", VERSION);
   }
 
-  var m = banner();
-  if (m && m.getAttribute("data-ab-ready")) start();
-  else doc.addEventListener("app-banner:ready", start, { once: true });
+  var started = false;
+  function startOnce() { if (!started && banner() && banner().getAttribute("data-ab-ready")) { started = true; start(); } }
+  doc.addEventListener("app-banner:ready", startOnce);
+  startOnce();
+  // Loaded before the banner's mount existed (an async or head script): try again once the
+  // document is parsed, and once more after load, before concluding there is no banner.
+  if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", startOnce, { once: true });
+  win.addEventListener("load", startOnce, { once: true });
 })();

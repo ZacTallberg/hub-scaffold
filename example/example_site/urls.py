@@ -33,5 +33,6 @@ urlpatterns = [
     # Two example adopting apps wearing the shared banner (DEBUG only; see demo.py).
     path("demo/access.json", demo.access_json),
     path("demo/signout/", demo.signout),
+    path("demo/<slug:slug>/suggest.json", demo.suggest),
     path("demo/<slug:slug>/", demo.page),
 ]

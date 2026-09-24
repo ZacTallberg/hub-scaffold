@@ -34,8 +34,14 @@ A companion to the banner for apps that already had a header when they adopted i
   your apps, sign out, the tour, the theme, search) is hidden, checked per control and asked twice.
   `data-ab-keep="<why>"` keeps one and prints the reason. An app's own search box is kept while
   the standard search bar is not mounted.
-- `hide_custom` (a component property an operator sets) takes an app's own control off the band,
-  reversibly, scoped to the slot.
+- The drawer keeps ONE Guided tour, ONE About this app and ONE People and Permissions: an app's
+  `profile` / `admin` / `help` island row that repeats a row the banner draws is hidden (a repeated
+  app row with no banner counterpart keeps its first copy), and a section left empty loses its
+  heading. It re-runs on every drawer rebuild.
+- `hide_custom` (a component property an operator sets with `POST /hub/api/component-props`,
+  `client component-props --app <slug> --set 'header-takeover.hide_custom=["Export"]'`, or the MCP tool
+  `set_component_props`) takes an app's own control off the band, reversibly, scoped to the slot.
+  Pages read it from `GET /hub/components/props/<slug>.json` via `data-props` on the mount.
 
 Every outcome is a console line and an `app-banner:duplicate` event, so an app's error visibility
 can carry it.
