@@ -162,7 +162,9 @@ command for each, keep it beside the runbook, and every step below becomes liter
    timeouts (20 s, 45 s, 90 s by default), one `DEPLOY_RECORD_RETRY` line per transport failure,
    and never a retry of a refusal (a 4xx is the Hub's verdict, not the network's). An attempt that
    landed but whose reply was lost comes back as `idempotent: true` on the next try, not as a
-   second record or a false failure. This immutable closure plus
+   second record or a false failure. `at` is when the record was made, not part of the proof, so
+   a re-run job that posts the same release again later is answered idempotent with the first
+   `at` rather than refused. This immutable closure plus
    the running artifact identity makes every named task immediately `live` without Git or a
    polling cycle. A deploy nobody recorded did not happen as far as the board is concerned.
 9. **Read the authenticated audit once more.** The closure must have removed `closure_pending` and

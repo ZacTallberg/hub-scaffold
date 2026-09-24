@@ -155,7 +155,8 @@ TOOLS = [
          "sha": {"type": "string"},
          "served_sha": {"type": "string", "description": "what the canary observed; must equal sha"},
          "tasks_closed": {"type": "array", "items": {"type": "string"}},
-         "at": {"type": "string"}, "method": {"type": "string"}, "build": {"type": "string"},
+         "at": {"type": "string", "description": "UTC record time; stamped now when omitted"},
+         "method": {"type": "string"}, "build": {"type": "string"},
          "audit_ok": {"type": "boolean"}},
          "required": ["sha", "served_sha", "tasks_closed"]}},
     {"name": "list_components",
@@ -373,7 +374,13 @@ def _call_tool(name, args, auth_headers):
     elif name == "report_ci_failure":
         status, body = _seam("/hub/api/ci-failure", dict(args), auth_headers)
     elif name == "record_deploy":
-        status, body = _seam("/hub/api/deploy", dict(args), auth_headers)
+        payload = dict(args)
+        if not payload.get("at"):
+            # The record needs `at`; a caller following this tool's schema may omit it.
+            import datetime
+            payload["at"] = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        status, body = _seam("/hub/api/deploy", payload, auth_headers)
     elif name == "search_board":
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
