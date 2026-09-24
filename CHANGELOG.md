@@ -14,6 +14,54 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Errors become owned problems; every service says whether it can be seen
+
+- **Problems.** `GET /hub/problems.json` folds the error stream into the thing somebody fixes
+  — one problem per (project, job), (app, kind, normalized message) or (agent, component,
+  code) — with state (unclaimed / in flight / escalated / resolved), a CONSOLE as holder,
+  count, recency and the lifted cause line. `api/problem/claim|resolve|release|escalate`:
+  another live console's claim is refused naming it (`take` displaces on the record), resolve
+  acks every row behind a problem with the root cause, a recurrence reopens it, and a
+  diagnosed problem can be parked on an open ask or task until that closes. Fresh unclaimed
+  problems are delivered to their owners' inbox (critical at once, error after 10 min, the
+  operator after 30). Board: a Problems card with a detail view carrying the stored trace
+  and the exact commands.
+- **The stream tells the truth about itself.** Channels are live, quiet or NEVER reported
+  (a durable per-channel and per-service record, not the retained window); the throttle holds
+  across worker processes (locked sidecar, fails open); per-occurrence ids and a forwarder's
+  "[+N more]" suffix no longer split one cause; traces keep head AND tail (32 KB) with the
+  exception line lifted into `cause`; an ack covers only what it saw. The read-time bar also
+  holds back self-test tokens, synthetic proof rows, branch-ref CI runs, closed blind windows
+  and WSGI wake-up blips — counted and listed, never queued. `errors.json` takes `?app=` and
+  `?limit=`.
+- **CI in one neutral shape.** `api/ci-event` records failed jobs as problems and stamps
+  passes; a job's failures are retired only by that job passing later on the same ref.
+- **Every service, observed?** `app_health.json` and a board card give each service a verdict
+  from evidence (observed / partial / dark / unbuilt) with the gap named, its agent-chat
+  channel, and bounded liveness probes of declared `health_url`s (`HUB_APPS`). An unwritable
+  seen-store becomes an hourly error instead of a silent "never". `doctor.json?app=` reads one
+  service as BLOCKED or WAITING.
+- **Crossovers.** `overlap.json` compares live consoles (project, files edited in the last ten
+  minutes, focus, held task, claimed problems) and tells only the two concerned — file,
+  problem, task, project subtree/subject, or a shared system from `HUB_OVERLAP_SYSTEMS` —
+  once per side, with how to reach the other and a proposed split. Presence carries project,
+  files, console name and unattended; leases carry the claiming console; focus lines are
+  scrubbed of email addresses.
+- **Delivery honesty.** Directives can be pinned to a machine or a live console (by session
+  or name; a console that is not live is refused). One `ack` routes any id by its type and a
+  fingerprint ack refuses ids that are not fingerprints. The board reports its own uncaught
+  errors with a same-origin path/line/col.
+- **Machines.** A scoped credential can un-enroll itself (`api/leave`, `--dry-run`),
+  `enroll/status.json` answers active/revoked/expired, and `check-env --report` files each
+  NEEDS A PERSON line as that machine's problem. The client remembers a blind window (hub
+  unreachable) across restarts and reports it on the next success, graded by what was lost.
+- **Back-pressure is not a fault.** `LedgerBusyMiddleware` answers a held ledger lock with 503
+  + Retry-After and a warning row, and absorbs a view's own self-described busy 503, so
+  neither becomes a red problem; real-fault 503s keep their row.
+- Every capability is reachable from the client, the MCP endpoint (`list_problems`,
+  `claim_problem`, `resolve_problem`, `release_problem`, `escalate_problem`, `app_health`,
+  `diagnose_app`, `check_crossovers`, `ack_item`) and, where it reads, the board.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

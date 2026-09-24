@@ -124,10 +124,76 @@ TOOLS = [
          "context": {"type": "string"}, "anyway": {"type": "boolean"}},
          "required": ["agent", "question"]}},
     {"name": "check_inbox",
-     "description": "What is addressed to this agent right now — directives aimed at it and the "
-                    "answer to its own question. Ack what you have acted on.",
+     "description": "What is addressed to this agent right now — directives aimed at it, the "
+                    "answer to its own question, fresh unclaimed problems it owns, and crossovers "
+                    "with other live consoles it has not been told. Pass machine/session to "
+                    "receive deliveries pinned to this computer or console. Ack what you acted on.",
      "inputSchema": {"type": "object", "properties": {
-         "agent": {"type": "string"}}, "required": ["agent"]}},
+         "agent": {"type": "string"}, "machine": {"type": "string"},
+         "session": {"type": "string"}}, "required": ["agent"]}},
+    {"name": "ack_item",
+     "description": "Acknowledge ANY addressed id, routed by its own type: a crossover (ov-...) "
+                    "is recorded as seen, a problem (p-<12 hex>) is RESOLVED with the note as "
+                    "its root cause, a directive/answer is acked, and a 16-hex error signature "
+                    "the directive store does not know is acked as a signature.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "id": {"type": "string"},
+         "note": {"type": "string"}, "evidence": {"type": "string"}},
+         "required": ["agent", "id"]}},
+    {"name": "list_problems",
+     "description": "The operational error stream FOLDED into problems — one per thing somebody "
+                    "fixes, with state (unclaimed / in_flight / escalated / resolved), holder, "
+                    "count, recency and cause. include=all adds what the read-time bar holds "
+                    "back (with the reason); id=<p-id> returns one with its full stored trace.",
+     "inputSchema": {"type": "object", "properties": {
+         "include": {"enum": ["", "resolved", "all"]}, "app": {"type": "string"},
+         "id": {"type": "string"}}}},
+    {"name": "claim_problem",
+     "description": "Put this console's name on a problem BEFORE digging, so no other console "
+                    "duplicates the work. Another live console's claim is refused naming the "
+                    "holder; take=true displaces it on the record.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "problem": {"type": "string"},
+         "note": {"type": "string"}, "take": {"type": "boolean"},
+         "session": {"type": "string"}, "machine": {"type": "string"},
+         "name": {"type": "string"}}, "required": ["agent", "problem"]}},
+    {"name": "resolve_problem",
+     "description": "Resolve a problem: acknowledge every row behind it at once and record the "
+                    "ROOT CAUSE and evidence where the next person will look. A recurrence "
+                    "afterwards reopens it.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "problem": {"type": "string"},
+         "note": {"type": "string"}, "evidence": {"type": "string"},
+         "session": {"type": "string"}}, "required": ["agent", "problem", "note"]}},
+    {"name": "release_problem",
+     "description": "Hand a claimed (or reopened-under-you) problem back to the queue.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "problem": {"type": "string"}},
+         "required": ["agent", "problem"]}},
+    {"name": "escalate_problem",
+     "description": "Park a DIAGNOSED problem on the open ask or task it is waiting for; it "
+                    "leaves the unclaimed queue until that blocker closes.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "problem": {"type": "string"},
+         "blocked_on": {"type": "string"}, "note": {"type": "string"}},
+         "required": ["agent", "problem", "blocked_on"]}},
+    {"name": "app_health",
+     "description": "Every service and whether its failures can REACH the board: observed / "
+                    "partial / dark / unbuilt, with each gap named as an observation. An empty "
+                    "problem list for a dark service means nothing.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "diagnose_app",
+     "description": "One service diagnosed from evidence: its health row, OPEN problems "
+                    "(resolved ones listed apart as history), and BLOCKED vs WAITING.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string"}}, "required": ["app"]}},
+    {"name": "check_crossovers",
+     "description": "Crossovers between this console and other live consoles (same file, "
+                    "problem, task, project subtree or subject), each with who, what they are "
+                    "on, how to reach them and a proposed split. Without agent/session: the "
+                    "whole roster and every pair.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "session": {"type": "string"}}}},
     {"name": "ack_directive",
      "description": "Record that a directive/answer was delivered to this agent; it leaves the "
                     "inbox, and a directive acked by every named target retires itself.",
@@ -234,6 +300,33 @@ def _seam(path, payload, auth_headers, method="post"):
         return response.status_code, {"raw": response.content.decode("utf-8", "replace")[:500]}
 
 
+def _ack_item(args, auth_headers):
+    """The same id-type routing the CLI's `ack` does, over the same seams."""
+    import re
+    item = str(args.get("id") or "").strip()
+    agent = args["agent"]
+    if item.startswith("ov-"):
+        return _seam("/hub/api/overlap/seen", {"agent": agent, "ids": [item]}, auth_headers)
+    m = re.fullmatch(r"(?:problem:)?(p-[0-9a-f]{12})", item.lower())
+    if m:
+        if not args.get("note"):
+            return 422, {"errors": [{"code": "need_note",
+                                     "msg": "a problem is closed by resolving it: pass note "
+                                            "(the root cause) and evidence"}]}
+        return _seam("/hub/api/problem/resolve",
+                     {"agent": agent, "problem": m.group(1), "note": args["note"],
+                      "evidence": args.get("evidence") or ""}, auth_headers)
+    payload = {"agent": agent, "directive": item}
+    if args.get("note"):
+        payload["note"] = args["note"]
+    status, body = _seam("/hub/api/ack", payload, auth_headers)
+    unknown = status == 404 and "unknown_directive" in json.dumps(body)
+    if unknown and re.fullmatch(r"[0-9a-f]{16}", item.lower()):
+        return _seam("/hub/api/ack-error", {"agent": agent, "fingerprint": item.lower(),
+                                            "note": args.get("note") or ""}, auth_headers)
+    return status, body
+
+
 def _tool_result(status, body):
     return {
         "resultType": "complete",
@@ -311,8 +404,26 @@ def _call_tool(name, args, auth_headers):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/ask", payload, auth_headers)
     elif name == "check_inbox":
-        status, body = _seam("/hub/inbox.json", {"agent": args["agent"]}, auth_headers,
-                             method="get")
+        query = {"agent": args["agent"]}
+        for key in ("machine", "session"):
+            if args.get(key):
+                query[key] = args[key]
+        status, body = _seam("/hub/inbox.json", query, auth_headers, method="get")
+    elif name == "ack_item":
+        status, body = _ack_item(args, auth_headers)
+    elif name == "list_problems":
+        query = {k: args[k] for k in ("include", "app", "id") if args.get(k)}
+        status, body = _seam("/hub/problems.json", query, auth_headers, method="get")
+    elif name in ("claim_problem", "resolve_problem", "release_problem", "escalate_problem"):
+        payload = {k: v for k, v in args.items() if v not in (None, "")}
+        status, body = _seam("/hub/api/problem/" + name.split("_", 1)[0], payload, auth_headers)
+    elif name == "app_health":
+        status, body = _seam("/hub/app_health.json", {}, auth_headers, method="get")
+    elif name == "diagnose_app":
+        status, body = _seam("/hub/doctor.json", {"app": args["app"]}, auth_headers, method="get")
+    elif name == "check_crossovers":
+        query = {k: args[k] for k in ("agent", "session") if args.get(k)}
+        status, body = _seam("/hub/overlap.json", query, auth_headers, method="get")
     elif name == "ack_directive":
         payload = {"agent": args["agent"], "directive": args["directive"]}
         if args.get("note"):
