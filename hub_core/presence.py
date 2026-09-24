@@ -136,11 +136,52 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
     return removed
 
 
+#: Session fields a client MAY report beyond cwd/focus, each bounded. Kind/run/subject tell an
+#: unattended run from a person's console; project/files feed the crossover detector; the digest
+#: fields (phase .. last_result) are what a supervisor distilled from the session's own activity,
+#: so the board can say "idle 12 min, last did X" instead of stamping every open window "active".
+SESSION_FIELDS = {"kind": 16, "run": 64, "subject": 120, "subject_title": 160, "project": 80,
+                  "runtime": 16, "phase": 16, "doing": 180, "narration": 220,
+                  "last_result": 60, "outcome": 24, "state": 16}
+SESSION_NUMBERS = ("started", "ended", "bounded_s", "doing_at")
+UNATTENDED_KINDS = ("responder", "scheduled", "autoworker", "unattended")
+UNATTENDED_RECAP_S = 1800       # a finished run stays visible as a recap this long, then goes
+
+
+def _clean_session_extra(extra) -> dict:
+    """Bound and type every optional session field; unknown keys are dropped, never stored."""
+    extra = extra if isinstance(extra, dict) else {}
+    out = {}
+    for key, limit in SESSION_FIELDS.items():
+        value = extra.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()[:limit]
+    for key in SESSION_NUMBERS:
+        try:
+            value = float(extra.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            out[key] = value
+    for key, limit, cap in (("files", 160, 12), ("targets", 60, 4)):
+        value = extra.get(key)
+        if isinstance(value, str):
+            value = value.split(",")
+        if isinstance(value, list):
+            out[key] = [str(v).strip()[:limit] for v in value if str(v).strip()][:cap]
+    if "files" in out:
+        out["files_at"] = time.time()
+    return out
+
+
 def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: str = "",
-            focus: str = "", heartbeat: bool = False) -> None:
+            focus: str = "", heartbeat: bool = False, extra: dict | None = None,
+            client: str = "") -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine).
-    A heartbeat stamps heartbeat_at; anything else stamps activity_at. Never raises."""
+    A heartbeat stamps heartbeat_at; anything else stamps activity_at. ``extra`` carries the
+    optional session fields (SESSION_FIELDS); ``client`` the reporting client's version, kept
+    per machine so a seat running an older client than the hub serves is visible. Never raises."""
     agent = (agent or "").strip().lower()
     if not agent:
         return
@@ -178,17 +219,30 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 prior = sessions.get(sid) if isinstance(sessions.get(sid), dict) else {}
                 # A heartbeat carries no prompt, so it must not blank the last known focus —
                 # keep the prior one until a new prompt replaces it (merge-never-clobber).
-                sessions[sid] = {
+                merged = {k: v for k, v in prior.items()
+                          if k in SESSION_FIELDS or k in SESSION_NUMBERS
+                          or k in ("files", "files_at", "targets")}
+                fresh = _clean_session_extra(extra)
+                merged.update(fresh)
+                merged.update({
                     "cwd": (cwd or "").strip()[:200] or prior.get("cwd", ""),
                     "focus": (focus or "").strip()[:180] or prior.get("focus", ""),
                     "at": now,
-                }
+                })
+                if fresh.get("doing") or fresh.get("phase"):
+                    merged["doing_at"] = now
+                sessions[sid] = merged
                 # A console quiet past the keep window is closed. Without pruning this list
-                # only grows and ends up reporting every window ever opened.
+                # only grows and ends up reporting every window ever opened. A finished
+                # unattended run is kept for its recap window, measured from when it ENDED.
                 cutoff = now - SESSION_KEEP_S
                 payload["sessions"] = {
                     k: v for k, v in sessions.items()
-                    if isinstance(v, dict) and epoch(v.get("at")) >= cutoff}
+                    if isinstance(v, dict)
+                    and max(epoch(v.get("at")), epoch(v.get("ended"))) >= cutoff}
+            if client:
+                payload["client"] = str(client).strip()[:64]
+                payload["client_at"] = now
             tmp = p.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload), encoding="utf-8")
             os.replace(tmp, p)
@@ -245,8 +299,8 @@ def read(hub_dir) -> dict:
             entry.setdefault("machine", name)
             sess = r.get("sessions")
             entry["sessions"] = sorted(
-                ({"id": k, "cwd": (v or {}).get("cwd", ""),
-                  "focus": (v or {}).get("focus", ""), "at": epoch((v or {}).get("at"))}
+                (dict(v, id=k, cwd=v.get("cwd", ""), focus=v.get("focus", ""),
+                      at=epoch(v.get("at")))
                  for k, v in (sess or {}).items() if isinstance(v, dict)),
                 key=lambda s: s.get("at") or 0, reverse=True) if isinstance(sess, dict) else []
             machines.append(entry)
@@ -290,28 +344,108 @@ def device_state(row: dict, now: float | None = None) -> dict:
     }
 
 
+def session_kind(s: dict) -> str:
+    """``attended`` for a person's console; otherwise the unattended lane that started it. A
+    separate axis from state: a finished run is still unattended, an idle person still a person."""
+    kind = str((s or {}).get("kind") or "").strip().lower()
+    return kind if kind in UNATTENDED_KINDS else "attended"
+
+
+def _phrase(seconds) -> str:
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return "%d s" % seconds
+    if seconds < 3600:
+        return "%d min" % (seconds // 60)
+    return "%d h" % (seconds // 3600)
+
+
 def live_sessions(hub_dir, now: float | None = None) -> list:
-    """Every ACTIVE console across the fleet, newest first: agent, machine, session id,
-    cwd, focus, age. The per-agent roll-up keeps one focus per name and turns the rest into
-    a count; this is the flat per-console view, so each session can see its siblings — the
-    surface that stops two consoles from unknowingly working the same thing."""
+    """Every live console across the fleet, newest first: agent, machine, session id, cwd,
+    focus, age, and what it is DOING. The per-agent roll-up keeps one focus per name and turns
+    the rest into a count; this is the flat per-console view, so each session can see its
+    siblings — the surface that stops two consoles from unknowingly working the same thing.
+
+    State is honest: ``working`` while the console acted in the last two minutes, else ``idle``
+    with ``activity`` reading "idle 12 min, last did …" — a window that is merely OPEN is not a
+    console that is working. An unattended run that ENDED stays listed as ``done`` for
+    UNATTENDED_RECAP_S (how it ended is the point), aged from when it ended, and never rides its
+    last "working" stamp back into the live list."""
     now = time.time() if now is None else now
     out = []
     for agent, seen in read(hub_dir).items():
         for m in seen.get("machines") or []:
             for s in m.get("sessions") or []:
                 at = epoch(s.get("at"))
-                if not s.get("focus") and not s.get("cwd"):
+                kind = session_kind(s)
+                ended = epoch(s.get("ended"))
+                finished = kind != "attended" and (bool(ended) or s.get("state") == "done")
+                if not s.get("focus") and not s.get("cwd") and kind == "attended":
                     continue
-                if not at or (now - at) > SESSION_ACTIVE_S:
+                if finished:
+                    anchor = ended or at
+                    if not anchor or (now - anchor) > UNATTENDED_RECAP_S:
+                        continue
+                elif s.get("state") == "gone" or not at or (now - at) > SESSION_ACTIVE_S:
                     continue
+                idle_for = round(now - at) if at else None
+                if finished:
+                    state = "done"
+                elif s.get("state") == "waiting":
+                    state = "waiting"
+                else:
+                    state = "working" if idle_for is not None and idle_for < 120 else "idle"
+                did = str(s.get("doing") or s.get("narration") or s.get("focus") or "")[:120]
+                if state == "idle":
+                    activity = "idle %s%s" % (_phrase(idle_for), (", last did " + did) if did else "")
+                elif state == "done":
+                    activity = "finished %s ago%s" % (
+                        _phrase(now - (ended or at)),
+                        (" — " + str(s.get("outcome"))) if s.get("outcome") else "")
+                else:
+                    activity = did or state
+                files_at = epoch(s.get("files_at"))
                 out.append({"agent": agent, "machine": m.get("machine") or "",
                             "session": str(s.get("id") or "")[:8],
                             "cwd": str(s.get("cwd") or "")[:64],
                             "focus": str(s.get("focus") or "")[:100],
-                            "age_s": round(now - at)})
+                            "project": str(s.get("project") or "")[:80],
+                            # A file list older than the activity window is history, not a
+                            # crossover: pairing on edits from days ago is noise.
+                            "files": (list(s.get("files") or [])[:12]
+                                      if files_at and now - files_at <= SESSION_ACTIVE_S else []),
+                            "kind": kind, "unattended": kind != "attended",
+                            "run": str(s.get("run") or "")[:64],
+                            "subject": str(s.get("subject") or "")[:120],
+                            "subject_title": str(s.get("subject_title") or "")[:160],
+                            "runtime": str(s.get("runtime") or "")[:16],
+                            "phase": str(s.get("phase") or "")[:16],
+                            "doing": str(s.get("doing") or "")[:180],
+                            "narration": str(s.get("narration") or "")[:220],
+                            "last_result": str(s.get("last_result") or "")[:60],
+                            "targets": list(s.get("targets") or [])[:4],
+                            "outcome": str(s.get("outcome") or "")[:24],
+                            "started": epoch(s.get("started")) or None,
+                            "ended": ended or None,
+                            "bounded_s": int(epoch(s.get("bounded_s"))) or None,
+                            "state": state, "finished": finished, "activity": activity,
+                            "idle_for_s": idle_for,
+                            "age_s": round(now - (ended if finished and ended else at))})
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
     return out
+
+
+def split(rows: list) -> dict:
+    """``{"attended", "unattended", "finished"}`` from one list of console rows. ``unattended``
+    is exactly the runs that are LIVE (working, idle or waiting); an ended run is a recap in
+    ``finished``, never a row in the live section. Live runs sort working first, then newest."""
+    attended = [r for r in rows or [] if not r.get("unattended")]
+    rest = [r for r in rows or [] if r.get("unattended")]
+    finished = [r for r in rest if r.get("finished")]
+    unattended = [r for r in rest if not r.get("finished")]
+    unattended.sort(key=lambda r: (0 if r.get("state") == "working" else 1, r.get("age_s") or 0))
+    finished.sort(key=lambda r: r.get("age_s") or 0)
+    return {"attended": attended, "unattended": unattended, "finished": finished}
 
 
 def attribute_leases(sessions: list, leases: list) -> list:
