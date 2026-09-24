@@ -323,9 +323,34 @@ project key are renameable bindings; the rules are not.
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
-      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." } }, "required": ["step", "done"] },
+      "items": { "type": "object", "additionalProperties": false, "properties": {
+        "step": { "type": "string" }, "done": { "type": "boolean" },
+        "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." },
+        "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." },
+        "kind": { "enum": ["checkpoint", "pushed", "deployed", "handed_back", "lease_released", "reaped", "launcher_timeout", "claim_expired", "lifecycle"], "description": "What this checkpoint IS, so no reader parses prose: pushed (names the commit in `sha`, optionally its pipeline), deployed (a verified deploy made that commit live), and the lifecycle kinds a SCHEDULER writes about its own run (handed_back, lease_released, reaped, launcher_timeout, claim_expired, lifecycle) — shown, but never counted toward 'N of N done'." },
+        "lifecycle": { "type": "boolean", "description": "True on a row a scheduler wrote about its own run, never about the work; counters leave it out of completeness." },
+        "times": { "type": "integer", "minimum": 1, "description": "How many times this one lifecycle row happened (a recurring hand-back is ONE row counting itself)." },
+        "auto": { "type": "boolean", "description": "A placeholder grown to reach a numbered step nobody declared; excluded from the plan's denominator until somebody reports on it." },
+        "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$", "description": "The commit this checkpoint is about." },
+        "pipeline_id": { "type": "string", "pattern": "^[0-9]{1,12}$", "description": "The CI pipeline that built `sha`." },
+        "pipeline_url": { "type": "string", "maxLength": 300 }
+      }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
+    "unattended": { "type": "boolean", "description": "Offered to unattended workers (GET /hub/next.json?unattended=1) in priority order, P0-P2 only. Never true on a decision: a decision is a person's call, and asking for it is refused." },
+    "project": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$", "description": "The consuming app or component this task is about; its annotated feed is GET /hub/project/<project>/tasks.json." },
+    "decision": { "type": "object", "additionalProperties": false, "description": "What a PERSON decided on a work_kind=decision task (POST /hub/api/task/decide). Absent while the decision is still waiting.", "properties": {
+      "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+      "decided_by": { "type": "string", "minLength": 1 },
+      "decided_at": { "type": "string" },
+      "then": { "enum": ["file", "close"] },
+      "followup": { "$ref": "hub:common#/$defs/idref" } }, "required": ["text", "decided_by", "decided_at", "then"] },
+    "auto_close": { "type": "object", "additionalProperties": false, "description": "What a verified deploy's automatic close did with this task: closed, or refused and why — so a task waiting on a close that cannot fire says so.", "properties": {
+      "state": { "enum": ["closed", "refused"] },
+      "why": { "type": "string", "maxLength": 200 },
+      "sha": { "type": "string", "maxLength": 40 },
+      "deploy": { "type": "string" },
+      "at": { "type": "string" } }, "required": ["state"] },
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
     "poison_blocked": { "type": "boolean", "description": "The circuit breaker opened after repeated failing receipts; the task is withheld from the queue until an exit-0 receipt clears it, so a broken task cannot consume the whole fleet in a retry storm." },
     "poison_reason": { "type": "string", "description": "Why the circuit breaker opened, surfaced verbatim on the attention rail." },
@@ -366,7 +391,7 @@ project key are renameable bindings; the rules are not.
     { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 }, "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["verified_by", "evidence_uri"] } },
     { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } },
     { "if": { "properties": { "work_kind": { "enum": ["product", "verification"] } }, "required": ["work_kind"] }, "then": { "properties": { "acceptance": { "minLength": 1 } }, "required": ["acceptance"] } },
-    { "if": { "properties": { "work_kind": { "const": "decision" } }, "required": ["work_kind"] }, "then": { "properties": { "decided_by": { "type": "array", "minItems": 1 } }, "required": ["decided_by"] } },
+    { "if": { "properties": { "work_kind": { "const": "decision" }, "status": { "const": "done" } }, "required": ["work_kind", "status"] }, "then": { "anyOf": [ { "properties": { "decided_by": { "type": "array", "minItems": 1 } }, "required": ["decided_by"] }, { "required": ["decision"] } ] } },
     { "if": { "properties": { "work_kind": { "const": "research" } }, "required": ["work_kind"] }, "then": { "properties": { "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["evidence_uri"] } }
   ]
 }
