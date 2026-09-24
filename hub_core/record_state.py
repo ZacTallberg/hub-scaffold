@@ -29,7 +29,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-DEAD_STATUS = ("superseded", "dropped", "rejected", "retracted", "stale")
+#: ``removed`` is a feature that no longer exists: describing it as current would be false.
+DEAD_STATUS = ("superseded", "dropped", "rejected", "retracted", "stale", "removed")
 
 #: Per type: the statuses a retirement call may set, the status it sets when none is named, the
 #: statuses that RE-OPEN (and so need no reason), and the text field the dated reason is appended

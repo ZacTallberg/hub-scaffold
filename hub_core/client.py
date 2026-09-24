@@ -76,6 +76,11 @@ succeeds afterwards reports it (agent-error `hub_unreachable_span`) - graded err
 was stranded inside it or a console was working through it, warning otherwise - so a gap in what
 the hub saw is itself on record.
 
+Knowledge rides it too (hub_core/client_knowledge.py): `share` a lesson, record a `finding`,
+`method`, `review` or `gap`, `recall` one record in full, and wire `prompt-context --hook` into an
+agent harness's prompt hook so the board's knowledge, ranked for what the console is doing,
+arrives before each prompt.
+
 Services to the apps around the hub::
 
     python -m hub_core.client components                         # hosted UI components
@@ -3711,6 +3716,11 @@ def _parser() -> argparse.ArgumentParser:
     ci_events.add_argument("--limit", type=int)
     ci_events.set_defaults(runner=_run_ci_events)
 
+    # Knowledge: share/finding/method/review/gap, recall, related, capabilities, the per-prompt
+    # knowledge block, the local mirror, and overlap adjudication (hub_core/client_knowledge.py).
+    # Registered LAST: it extends `recall` and `prompt-context` rather than shadowing them.
+    from . import client_knowledge
+    client_knowledge.register(commands)
     for sub in commands.choices.values():
         sub.allow_abbrev = False
     return parser
@@ -3786,6 +3796,8 @@ def main() -> int:
         return 1
     except KeyboardInterrupt:
         return 0
+    if result is None:              # the runner printed its own human-readable output
+        return 0
     converged = _maybe_converge()
     if converged and isinstance(result, dict):
         result["client_converge"] = converged
@@ -3801,8 +3813,9 @@ def main() -> int:
     if isinstance(result, dict) and set(result) == {"text"}:
         print(result["text"])
         return 0
+    code = int(result.pop("_exit", 0) or 0) if isinstance(result, dict) else 0
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return code
 
 
 if __name__ == "__main__":

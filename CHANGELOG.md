@@ -353,6 +353,68 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   channel is only caught by a second independent record. `deploy-runbook.md` gains rolling-restart
   health waits; the example site exempts the liveness path from an opt-in `SECURE_SSL_REDIRECT`.
 
+### Knowledge: record it by kind, find it by meaning, deliver it before each prompt
+
+- **Record verbs.** `POST /hub/api/lesson`, `finding`, `method`, `review` (and the existing
+  `gap`) with matching client verbs (`share`, `finding`, `method`, `review`, `gap`) and MCP
+  tools (`share_lesson`, `record_knowledge`, `record_gap`). A lesson is ADMITTED and tagged with
+  what it may duplicate or correct (`related`, `related_partial`) — never refused for
+  resemblance, because a correction is near-identical text; an identical live rule returns
+  `duplicate_of` and writes nothing; `supersedes` retires the target on every surface.
+  `client adjudicate` settles the tags (rules first, then any OpenAI-compatible judge model),
+  never guesses, and exits 2 when judging is owed and no model is configured.
+- **Search that finds what it should.** `search.json` is BM25F (fielded, IDF + length
+  normalized) over every live record that is knowledge rather than traffic — inter-agent
+  messages and restated questions are out, answered asks are in — fused convexly with an
+  optional dense channel (`HUB_EMBED_*`, `manage.py semantic_index`, CSLS hub penalty, vectors
+  in a sidecar beside the ledger). The corpus is built once per ledger head; `timing_ms` per
+  stage; a `<memory-partial>` notice appears exactly when something could not be seen, and an
+  empty result says it is about the words used. `related.json` gives neighbours by vocabulary
+  and by meaning. `manage.py retrieval_eval` measures every configuration on the board's own
+  answered asks with held-out splits.
+- **Per-prompt knowledge.** `guidance.json?focus=` ranks the knowledge index by what a console
+  is doing (or states that it is in standing order and why); `client prompt-context --hook`
+  renders it for an agent harness's prompt hook with a per-session receipt, a 9,500-character
+  ceiling and a readable overflow file. `/hub/knowledge/since` is a cursor feed (put / revoke /
+  reset, ETag + 304) that `client knowledge-sync` mirrors into a local file; the fold stamps
+  `provenance.seq` for it.
+- **A capability catalog published from another repository** (`HUB_CAPABILITY_*`), read at one
+  resolved commit, refused when incomplete, cached, and merged with ledger `cap`s so one
+  capability under two spellings counts once (`capabilities.json`, client `capabilities`, MCP
+  `list_capabilities`).
+- **Board.** A Knowledge tab: ranked search with the partiality notice (shareable as
+  `?tab=knowledge&q=…`) and the agent abilities grouped by kind, collapsed by default; the
+  record drawer shows tier, verification date/check, and overlap suspicions with their verdicts.
+- `client recall <id|phrase>` prints one record in full with its overlap block; a title that
+  merely contains a colon is searched, not fetched as an id, and a refused id prints as a
+  failure, never as "nothing matches".
+- Without an embedder, a console's focus still ranks the index — by its WORDS, and the block
+  says so — instead of every prompt getting the same standing order. A title-only row whose record
+  the session already holds is not re-sent; a row upgraded from title to full text is.
+- `client adjudicate` fills whichever overlap basis a write could not run (the lexical one
+  declines on a board too small to weigh terms), and a basis that still cannot run leaves the
+  record untouched rather than re-versioning every waiting lesson on every pass.
+- Search and `capabilities.json` share one rule for "the catalog already names this ledger
+  capability"; `metadata.scored` is the denominator of what is shown.
+- Components: `search-bar` (one search box any app links; suggest, learned top match, an
+  app-computed smart pass, three distinct failure states) and `header-takeover` (the banner
+  hides the header an app names, warns about one it did not, hides duplicate controls only
+  while it draws their counterpart, keeps one tour / read-me / People and Permissions row in the
+  drawer, and reads `hide_custom` from `/hub/components/props/<slug>.json`), both served from
+  `/hub/components/` — `patterns/app-search-and-header-takeover.md`. The example's
+  `/demo/reporting/` page adopts both, with its own suggest endpoint.
+- A record written since the last `semantic_index` run is ranked by its wording at full weight
+  instead of as "meaning = 0", so a just-written exact match ranks first before it is indexed
+  (it had ranked below records sharing none of its words).
+- One definition of a retired record (`hub_core/record_state`, now including `removed`) serves
+  search, the prompt index, the mirror feed and the overlap tagger alike.
+- Table tabs say when their collection last changed ("newest 4m ago"), with a `snapshot` badge
+  once nothing has been written for a week. `client gap` and MCP `record_gap` take a `note`
+  like the other record verbs.
+- A secret-shape check no longer refuses a documented placeholder containing spaces
+  (`TOKEN=<supplied by the deploy>`).
+- Patterns: `knowledge-retrieval.md`, `vendored-app-kits.md`, and stale `index.lock` recovery in
+  `deploy-runbook.md`.
 ### App services, honest write outcomes, and a cockpit that reports only what it measured
 
 - **The hub serves the apps around it** (`patterns/app-services.md`). Hosted UI components at
