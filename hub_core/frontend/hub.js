@@ -1565,18 +1565,18 @@
     var activity = L.activity || [];
 
     scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip, L.attention));
-    scroll.appendChild(overviewHeading("Now", "Execution and intervention",
-      "See who is advancing work and the decisions that can change throughput immediately."));
-    scroll.appendChild(el("div", { class: "operations-grid" }, [
-      fleetView(L.fleet, L.worker_health), attentionRail(L.attention)
-    ]));
-
-    // The ask/answer loop and the operational stream, side by side: who is blocked on a
-    // fact, and what is broken — the two queues that must never sit unread.
-    scroll.appendChild(overviewHeading("Signals", "Questions and failures",
-      "A blocked person and an unclaimed failure are the two most expensive things a board can let sit."));
-    scroll.appendChild(el("div", { class: "operations-grid" }, [
-      asksCard(), errorsCard(L.errors, L.error_log)
+    scroll.appendChild(overviewHeading("Now", "Execution, questions and failures",
+      "Who is advancing work, who is blocked on a fact, and what is broken — one glance, not three."));
+    // ONE live cluster. Who is working, who needs a human and what is broken are read
+    // together, so the asks/errors pair sits in the same grid DIRECTLY under the agent cards
+    // (column 1, row 2) instead of after the grid: as a sibling below it, it started only
+    // after the grid's tallest column — the attention rail — and a long rail pushed the
+    // problems a screen away from the people. The rail spans both rows beside them without
+    // sizing either (see .live-cluster in shell.css).
+    scroll.appendChild(el("div", { class: "operations-grid live-cluster" }, [
+      fleetView(L.fleet, L.worker_health),
+      attentionRail(L.attention),
+      el("div", { class: "signals-duo" }, [asksCard(), errorsCard(L.errors, L.error_log)])
     ]));
 
     var dc = dagCard(L.dag);
