@@ -162,9 +162,11 @@ def _inflight(state, stall_s=STALL_S):
             "expires_in_s": max(0, int(lease.get("expires", 0) - now)),
             "last_heartbeat": heartbeat,
             "stalled": bool(heartbeat_age is not None and heartbeat_age > stall_s),
-            **(liveness.holder(roster, lease, now) if roster is not None else
+            **(liveness.holder(roster, lease, now, grace_s=hub_app.gone_grace_s())
+               if roster is not None else
                {"holder_session": lease.get("session"), "holder_machine": lease.get("machine"),
-                "holder_state": liveness.UNPROVABLE, "holder_gone_s": None}),
+                "holder_state": liveness.UNPROVABLE, "holder_gone_s": None,
+                "holder_frees_in_s": None}),
             **_plan_progress(ent),
         })
     rows.sort(key=lambda r: (r.get("age_s") or 0), reverse=True)
@@ -254,7 +256,8 @@ def _errors_block():
     # the safe direction.
     from hub_core import item_claims
     try:
-        claims = item_claims.live(hub_app.HUB_DIR, now)
+        claims = item_claims.live(hub_app.HUB_DIR, now, roster=hub_app.roster(),
+                                  grace_s=hub_app.gone_grace_s())
     except Exception:                                        # noqa: BLE001
         claims = {}
     in_flight = 0
@@ -840,7 +843,8 @@ def _live_side_blocks(state):
     # A question a machine has claimed is IN FLIGHT, not waiting on nobody (hub_core.item_claims).
     try:
         from hub_core import item_claims
-        claims = item_claims.live(hub_app.HUB_DIR)
+        claims = item_claims.live(hub_app.HUB_DIR, roster=hub_app.roster(),
+                                  grace_s=hub_app.gone_grace_s())
         for q in asks:
             if q.get("id") in claims:
                 q["claimed_by"] = claims[q["id"]]
@@ -1511,9 +1515,14 @@ def item_claims_json(request):
     """Every live per-machine item claim (hub_core.item_claims): which machine is on which
     question or error fingerprint, for how long, and when the claim releases on its own."""
     from hub_core import item_claims
-    rows = item_claims.live(hub_app.HUB_DIR)
+    try:
+        roster = hub_app.roster()
+    except Exception:                                        # noqa: BLE001 - unprovable, not gone
+        roster = None
+    rows = item_claims.live(hub_app.HUB_DIR, roster=roster, grace_s=hub_app.gone_grace_s())
     return JsonResponse({"data": rows, "count": len(rows),
-                         "metadata": {"ttl_s": item_claims.TTL_S}})
+                         "metadata": {"ttl_s": item_claims.TTL_S,
+                                      "gone_grace_s": hub_app.gone_grace_s()}})
 
 
 @require_GET

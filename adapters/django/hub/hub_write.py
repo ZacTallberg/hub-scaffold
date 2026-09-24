@@ -735,6 +735,15 @@ def claim(request, b):
         status = ent.get("status")
         flags = state.get("flags", {}).get(eid, {})
         live = hub_app.leases()
+        # A lease whose console is provably GONE past its grace holds nothing (hub_core.liveness):
+        # it neither blocks this task nor counts against its agent or the WIP ceiling. hub_app.claim
+        # applies the same verdict and records whom the new lease took over from.
+        if any(lease.get("session") for lease in live):
+            roster_ = hub_app.roster()
+            live = [lease for lease in live
+                    if not (lease.get("session") and lease.get("session") !=
+                            (request.headers.get("X-Hub-Session") or "") and
+                            hub_app.lease_verdict(lease, roster_)["released"])]
         existing = next((lease for lease in live if lease.get("task") == eid), None)
         same_lease = bool(
             existing and existing.get("agent") == agent and
@@ -751,8 +760,22 @@ def claim(request, b):
                                              "msg": "configured WIP ceiling reached"}]}, status=429)
         verdict = flow.classify(ent, flags, existing)
         if not same_lease and not verdict["available"]:
-            return JsonResponse({"errors": [{"code": verdict["state"],
-                                             "msg": verdict["reason"]}]}, status=409)
+            error = {"code": verdict["state"], "msg": verdict["reason"]}
+            if verdict["state"] == "leased" and existing:
+                # Say WHEN it frees: a gone holder's lease is released once its grace runs out,
+                # a live or unprovable one only by its clock.
+                v = hub_app.lease_verdict(existing)
+                frees = (v["frees_in_s"] if v["state"] == "gone" else
+                         max(0, int(float(existing.get("expires") or 0) - time.time())))
+                error.update({"holder_session": existing.get("session"),
+                              "holder_state": v["state"], "gone_s": v["gone_s"],
+                              "frees_in_s": frees})
+                error["msg"] += ("; its console %s is GONE (not seen for %ds) and the claim "
+                                 "frees itself in %ds" % (existing.get("session"), v["gone_s"],
+                                                          frees)
+                                 if v["state"] == "gone" else
+                                 "; the lease frees itself in %ds unless renewed" % frees)
+            return JsonResponse({"errors": [error]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
@@ -1103,19 +1126,35 @@ def item_claim(request, b):
         return JsonResponse({"errors": [{"code": "need_item_and_machine",
             "msg": "item (a question id or error fingerprint) and machine are required"}]},
             status=400)
+    session = str(b.get("session") or request.headers.get("X-Hub-Session") or "").strip()
+    try:
+        roster = hub_app.roster()
+    except Exception:                                        # noqa: BLE001 - unprovable, not gone
+        roster = None
     try:
         granted, row = item_claims.claim(hub_app.HUB_DIR, item, machine,
                                          b.get("agent") or request.hub_auth.subject,
-                                         release=b.get("release") is True)
+                                         release=b.get("release") is True, session=session,
+                                         roster=roster, grace_s=hub_app.gone_grace_s())
     except ValueError as exc:
         return JsonResponse({"errors": [{"code": "bad_claim", "msg": str(exc)}]}, status=400)
     if not granted:
-        return JsonResponse({"errors": [{"code": "claimed_elsewhere",
-            "msg": "%s claimed it %ds ago; it releases in %ds unless renewed"
-                   % (row.get("machine") or "another machine", row.get("age_s") or 0,
-                      row.get("releases_in_s") or 0)}],
-            "data": {"holder": row.get("machine"), "agent": row.get("agent"),
-                     "age_s": row.get("age_s"), "releases_in_s": row.get("releases_in_s")}},
+        who = row.get("machine") or "another machine"
+        if row.get("session"):
+            who += " (console %s)" % row["session"]
+        if row.get("holder_state") == "gone":
+            msg = ("%s is GONE (not seen for %ds); the claim frees itself in %ds -- claim again "
+                   "then" % (who, row.get("gone_s") or 0, row.get("frees_in_s") or 0))
+        else:
+            msg = ("%s claimed it %ds ago; it releases in %ds unless renewed"
+                   % (who, row.get("age_s") or 0, row.get("releases_in_s") or 0))
+        return JsonResponse({"errors": [{"code": "claimed_elsewhere", "msg": msg}],
+            "data": {"holder": row.get("machine"), "holder_session": row.get("session"),
+                     "agent": row.get("agent"), "age_s": row.get("age_s"),
+                     "releases_in_s": row.get("releases_in_s"),
+                     "holder_state": row.get("holder_state"), "gone_s": row.get("gone_s"),
+                     "frees_in_s": (row.get("frees_in_s") if row.get("holder_state") == "gone"
+                                    else row.get("releases_in_s"))}},
             status=409)
     hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
                               released=bool(row.get("released")))

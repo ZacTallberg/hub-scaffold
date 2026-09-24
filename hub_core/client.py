@@ -425,6 +425,9 @@ def _payload_item_claim(arguments: argparse.Namespace) -> tuple[str, dict[str, A
         raise ValueError("item-claim needs --machine (or HUB_MACHINE): a claim is per machine")
     payload: dict[str, Any] = {"agent": _agent(arguments), "item": arguments.item,
                                "machine": machine}
+    session = getattr(arguments, "session", None) or os.environ.get("HUB_SESSION_ID") or ""
+    if session:
+        payload["session"] = session     # the console that holds it, so a GONE one can release
     if arguments.release:
         payload["release"] = True
     return "item-claim", payload
@@ -769,6 +772,9 @@ def _parser() -> argparse.ArgumentParser:
     item_claim.add_argument("--release", action="store_true",
                             help="give the claim back (only the holding machine may)")
     item_claim.add_argument("--agent")
+    item_claim.add_argument("--session", help="the console holding it (default HUB_SESSION_ID); "
+                                              "a claim whose console is provably gone frees "
+                                              "itself after the grace")
     item_claim.set_defaults(payload=_payload_item_claim)
 
     item_claims = commands.add_parser("item-claims", help="every live item claim")

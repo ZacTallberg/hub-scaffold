@@ -271,7 +271,9 @@
             + (lease.holder_session ? " · console " + String(lease.holder_session).slice(0, 8) : "")
             + (lease.holder_machine ? " on " + lease.holder_machine : "")
             + (gone ? " · that console has been gone " + fmtAge(lease.holder_gone_s)
-                      + "; the lease frees itself when it expires"
+                      + (lease.holder_frees_in_s != null
+                         ? "; the task is handed back in " + fmtAge(lease.holder_frees_in_s)
+                         : "; the lease frees itself when it expires")
                : lease.holder_state === "unprovable" && lease.holder_session
                  ? " · liveness unprovable (its machine is not reporting)" : "");
           return el("td", { class: "col-pickup" }, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : "") + (gone ? " is-gone" : ""),
@@ -1356,8 +1358,15 @@
     });
     return threads;
   }
+  // An item claim whose console is GONE is not in flight: say so, and when it frees itself.
+  function claimLabel(c) {
+    if (c && c.holder_state === "gone") {
+      return "holder gone on " + c.machine + " · frees in " + fmtAge(c.frees_in_s || 0);
+    }
+    return "in flight on " + (c && c.machine);
+  }
   function askThread(t) {
-    var stateLbl = t.open && t.claimedBy ? "in flight on " + t.claimedBy.machine
+    var stateLbl = t.open && t.claimedBy ? claimLabel(t.claimedBy)
                  : t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
                  : !t.acked ? "answered — awaiting the asker's ack"
                  : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
@@ -1616,7 +1625,7 @@
             where ? el("span", { class: "err-where", text: where }) : null,
             el("time", { class: "rel-time err-age", datetime: r.ts || "", "data-ts": r.ts || "", text: relativeTime(r.ts) }),
             el("span", { class: "err-claim", text: r.acked ? ("claimed by " + ((r.acked || {}).by || "someone"))
-              : r.claimed_by ? ("in flight on " + r.claimed_by.machine) : "unclaimed" })
+              : r.claimed_by ? claimLabel(r.claimed_by) : "unclaimed" })
           ].filter(Boolean)),
           el("span", { class: "err-msg", text: r.message || "" }),
           el("span", { class: "err-meta mono", text: (r.source || "") + " · " + (r.fingerprint || "")
