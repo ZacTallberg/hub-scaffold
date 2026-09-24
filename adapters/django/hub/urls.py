@@ -27,6 +27,11 @@ urlpatterns = [
     path("errors.json", hub_api.errors_json, name="errors"),
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    # Operator attention (owner, fix, values, age), the live consoles with their crossovers,
+    # and one project's annotated task feed (ETag/304) — same catch-all rule as above.
+    path("attention.json", hub_api.attention_json, name="attention"),
+    path("consoles.json", hub_api.consoles_json, name="consoles"),
+    path("project/<str:slug>/tasks.json", hub_api.project_tasks_json, name="project-tasks"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -47,6 +52,13 @@ urlpatterns = [
     path("api/take", hub_write.take),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
+    # Letting go of a task: back to the queue for an unattended worker (hand) or just released
+    # (unclaim) — including a lease an orphaned console of the same agent still holds.
+    path("api/hand", hub_write.hand),
+    path("api/unclaim", hub_write.unclaim),
+    # A person decides a decision task (file the build task / close / reply); agents are refused.
+    path("api/task/decide", hub_write.decide_task),
+    path("api/overlap-seen", hub_write.overlap_seen),
     # The ask/answer loop and the directive plane (delivery closed by acks).
     path("api/ask", hub_write.ask),
     path("api/answer", hub_write.answer),

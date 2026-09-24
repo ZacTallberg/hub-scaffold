@@ -66,9 +66,53 @@ _CHECKPOINT_FIELDS.update({
 
 TOOLS = [
     {"name": "board_next",
-     "description": "Pull the readiness rail: top ready tasks plus work that needs specification.",
+     "description": "Pull the readiness rail: top ready tasks plus work that needs specification. "
+                    "`unattended: true` returns only the unattended lane (marked tasks, P0-P2, never a decision).",
      "inputSchema": {"type": "object", "properties": {
-         "n": {"type": "integer", "description": "how many rows (default 3)"}}}},
+         "n": {"type": "integer", "description": "how many rows (default 3)"},
+         "unattended": {"type": "boolean"}}}},
+    {"name": "create_task",
+     "description": "File a task. `unattended` offers it to unattended workers (P0-P2); `decision` makes it a "
+                    "person's call, delivered to the deciders and never to an unattended worker. Pass the same "
+                    "`idem_key` on a retry to get the first record back instead of a duplicate.",
+     "inputSchema": {"type": "object", "properties": {
+         "title": {"type": "string"}, "acceptance": {"type": "string"}, "agent": {"type": "string"},
+         "priority": {"enum": ["P0", "P1", "P2", "P3"]}, "project": {"type": "string"},
+         "unattended": {"type": "boolean"}, "decision": {"type": "boolean"},
+         "idem_key": {"type": "string"}},
+         "required": ["title", "acceptance", "agent"]}},
+    {"name": "hand_task",
+     "description": "Hand a task back to the queue for an unattended worker (todo, unattended, lease released). "
+                    "Without a lease token it releases only a lease an orphaned console of the same agent holds.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"}, "lease_token": {"type": "string"},
+         "note": {"type": "string"}}, "required": ["id", "agent"]}},
+    {"name": "unclaim_task",
+     "description": "Let go of a task (lease released, in-progress back to todo); same orphaned-lease remedy as hand_task.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"}, "lease_token": {"type": "string"},
+         "note": {"type": "string"}}, "required": ["id", "agent"]}},
+    {"name": "recall_task",
+     "description": "A task's joined row: status, holder (live or abandoned), run, pushed/deployed commits, "
+                    "hand-backs, checkpoints and evidence — what a peer needs before picking it up.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "decide_task",
+     "description": "Decide a decision task: then=file (mint the build task), close, or reply (a question back; "
+                    "stays open). Only a named decider's own credential may; agents are refused.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "decision": {"type": "string"},
+         "then": {"enum": ["file", "close", "reply"]}}, "required": ["id", "decision", "then"]}},
+    {"name": "board_attention",
+     "description": "What needs a person: each condition with who acts, the exact fix, its values and how long it has stood.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "board_consoles",
+     "description": "Live consoles (attended, unattended runs, finished recaps) and crossovers between them; "
+                    "`session` returns the signals addressed to that console with peer evidence and a suggested split.",
+     "inputSchema": {"type": "object", "properties": {"session": {"type": "string"}}}},
+    {"name": "project_tasks",
+     "description": "One project's annotated task feed: open tasks plus those finished in the last 14 days.",
+     "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}},
+                     "required": ["project"]}},
     {"name": "spec_task",
      "description": "Give needs-spec work concrete acceptance; probes are reserved for rare critical boundaries.",
      "inputSchema": {"type": "object", "properties": {
@@ -110,6 +154,27 @@ TOOLS = [
          "consequential": {"type": "boolean"},
          "evidence": {"type": "array", "items": {"type": "string"}}},
          "required": ["id", "agent", "lease_token", "signature", "note"]}},
+    {"name": "step_task",
+     "description": "Record a checkpoint on a task: mark a plan step done with what actually happened. "
+                    "Pass `sha` (+ `pipeline_id`/`pipeline_url`) to record a typed `pushed` checkpoint naming "
+                    "the commit — the record a verified deploy later closes the task against. A planless task "
+                    "takes the note as a new checkpoint; a number past the end grows uncounted placeholders.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "lease_token": {"type": "string", "description": "required while the task is leased"},
+         "step": {"type": "string", "description": "1-based number or text fragment; default first undone"},
+         "note": {"type": "string"},
+         "kind": {"type": "string", "description": "checkpoint (default), pushed, deployed, or a lifecycle kind"},
+         "sha": {"type": "string"}, "pipeline_id": {"type": "string"},
+         "pipeline_url": {"type": "string"}},
+         "required": ["id", "agent"]}},
+    {"name": "plan_task",
+     "description": "Declare or extend a task's checklist; existing steps keep their state.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "lease_token": {"type": "string"},
+         "steps": {"type": "array", "items": {"type": "string"}}},
+         "required": ["id", "agent", "steps"]}},
     {"name": "finish_task",
      "description": "Complete the board work contract after its real operation succeeds.",
      "inputSchema": {"type": "object", "properties": {
@@ -256,11 +321,68 @@ def _run_update(args, action, auth_headers):
     return _seam("/hub/api/run/update", payload, auth_headers)
 
 
+def _plan_write(args, auth_headers, mutate, attempts=3):
+    """Read the task, apply `mutate(plan) -> plan`, write it through the ordinary task seam
+    under OCC, and re-apply on a version race — the same bounded retry the client's
+    `_task_write` uses, so a checkpoint never dead-letters on a race it could simply redo."""
+    status, body = 404, {"errors": [{"code": "not_found", "msg": args["id"]}]}
+    for _attempt in range(attempts):
+        entity, version = _entity_version(args["id"])
+        if entity is None or entity.get("type") != "task":
+            return 404, {"errors": [{"code": "not_found", "msg": args["id"]}]}
+        try:
+            plan = mutate(entity.get("plan") or [])
+        except ValueError as exc:
+            return 422, {"errors": [{"code": "bad_step", "msg": str(exc)}]}
+        payload = {"id": args["id"], "agent": args["agent"], "expected_version": version,
+                   "plan": plan}
+        if args.get("lease_token"):
+            payload["token"] = args["lease_token"]
+        status, body = _seam("/hub/api/task", payload, auth_headers)
+        codes = {e.get("code") for e in (body.get("errors") or []) if isinstance(e, dict)}
+        if status not in (409, 428) or not codes & {"conflict", "precondition_required"}:
+            break
+    return status, body
+
+
 def _call_tool(name, args, auth_headers):
     """Return ``(standard_tool_result, newly_created_run_or_none)``."""
     if name == "board_next":
-        status, body = _seam("/hub/next.json", {"n": int(args.get("n", 3))}, auth_headers,
-                             method="get")
+        query = {"n": int(args.get("n", 3))}
+        if args.get("unattended"):
+            query["unattended"] = "1"
+        status, body = _seam("/hub/next.json", query, auth_headers, method="get")
+    elif name == "create_task":
+        payload = {k: args[k] for k in ("title", "acceptance", "agent", "priority", "project",
+                                        "idem_key") if args.get(k)}
+        if args.get("decision"):
+            payload["work_kind"] = "decision"
+        elif args.get("unattended"):
+            payload["unattended"] = True
+        status, body = _seam("/hub/api/task", payload, auth_headers)
+    elif name in ("hand_task", "unclaim_task"):
+        payload = {"id": args["id"], "agent": args["agent"]}
+        if args.get("lease_token"):
+            payload["token"] = args["lease_token"]
+        if args.get("note"):
+            payload["note"] = args["note"]
+        status, body = _seam("/hub/api/" + ("hand" if name == "hand_task" else "unclaim"),
+                             payload, auth_headers)
+    elif name == "recall_task":
+        local = str(args["id"]).rsplit(":", 1)[-1]
+        status, body = _seam("/hub/task/%s.json" % local, {}, auth_headers, method="get")
+    elif name == "decide_task":
+        status, body = _seam("/hub/api/task/decide", {"id": args["id"], "decision": args["decision"],
+                                                      "then": args["then"]}, auth_headers)
+    elif name == "board_attention":
+        status, body = _seam("/hub/attention.json", {}, auth_headers, method="get")
+    elif name == "board_consoles":
+        query = {"session": args["session"]} if args.get("session") else {}
+        status, body = _seam("/hub/consoles.json", query, auth_headers, method="get")
+    elif name == "project_tasks":
+        from urllib.parse import quote
+        status, body = _seam("/hub/project/%s/tasks.json" % quote(str(args["project"]), safe=""),
+                             {}, auth_headers, method="get")
     elif name == "spec_task":
         entity, version = _entity_version(args["id"])
         if entity is None:
@@ -302,6 +424,29 @@ def _call_tool(name, args, auth_headers):
         if args.get("evidence") is not None:
             payload["evidence_uri"] = args["evidence"]
         status, body = _seam("/hub/api/fail", payload, auth_headers)
+    elif name == "step_task":
+        import datetime as _dt
+        from hub_core import checkpoints as _cp
+        at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        kind = args.get("kind") or ("pushed" if args.get("sha") else "checkpoint")
+        status, body = _plan_write(args, auth_headers, lambda plan: _cp.apply_step(
+            plan, step=args.get("step"), note=args.get("note") or "", kind=kind,
+            sha=args.get("sha") or "", pipeline_id=args.get("pipeline_id") or "",
+            pipeline_url=args.get("pipeline_url") or "", at=at)[0])
+    elif name == "plan_task":
+        steps = [str(x).strip() for x in (args.get("steps") or []) if str(x).strip()]
+
+        def extend(plan):
+            if not steps:
+                raise ValueError("steps must name at least one step")
+            rows = [dict(x) for x in plan if isinstance(x, dict)]
+            have = {str(x.get("step") or "").strip().lower() for x in rows}
+            for step in steps:
+                if step.lower() not in have:
+                    rows.append({"step": step[:200], "done": False})
+                    have.add(step.lower())
+            return rows
+        status, body = _plan_write(args, auth_headers, extend)
     elif name == "finish_task":
         payload = {"id": args["id"], "agent": args["agent"],
                    "token": args["lease_token"], "accept_note": args["note"],

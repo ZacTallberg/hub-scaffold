@@ -218,6 +218,26 @@ def _git_head():
     return head or _running_sha()
 
 
+def git_is_ancestor(sha, deployed):
+    """The VCS ancestry seam deploy-driven task closure asks: is commit ``sha`` contained in
+    build ``deployed``? True/False when the repository at WORK_ROOT can answer, None when it
+    cannot (no git, a shallow or foreign clone, an unknown object) — which the caller reports as
+    UNCHECKED, never as "no". An adopter whose production image carries no repository points
+    HUB_VCS_ANCESTRY at "none" (always None) or wires its own forge API in place of this."""
+    if str(_dj_setting("HUB_VCS_ANCESTRY", os.environ.get("HUB_VCS_ANCESTRY", "git"))).lower() == "none":
+        return None
+    try:
+        r = subprocess.run(["git", "-C", str(WORK_ROOT), "merge-base", "--is-ancestor",
+                            str(sha), str(deployed)], capture_output=True, timeout=10)
+    except Exception:                                        # noqa: BLE001
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    return None
+
+
 def _build_stamp_path() -> Path:
     return BASE_DIR / _dj_setting("HUB_BUILD_STAMP", "build_sha.txt")
 
@@ -749,18 +769,31 @@ from hub_core import presence as _presence
 _PRESENCE_PUBLISH = {"stamp": None, "at": 0.0}
 
 
-def observe_presence(agent, headers, *, heartbeat=False):
-    """Refresh the caller's presence row from optional X-Hub-* headers, then wake connected
-    cockpits — throttled, because presence rides every write and the wake-up plane must not
-    carry one signal per request. Fail-soft end to end: presence must never break a write."""
+#: Optional session headers a client may send on any write, mapped to presence session fields.
+_SESSION_HEADERS = {"X-Hub-Project": "project", "X-Hub-Files": "files",
+                    "X-Hub-Session-Kind": "kind", "X-Hub-Run": "run", "X-Hub-Subject": "subject",
+                    "X-Hub-Runtime": "runtime"}
+
+
+def observe_presence(agent, headers, *, heartbeat=False, extra=None):
+    """Refresh the caller's presence row from optional X-Hub-* headers (and, from the presence
+    ping, a body digest of what the session is doing), then wake connected cockpits — throttled,
+    because presence rides every write and the wake-up plane must not carry one signal per
+    request. X-Hub-Client-Version is the reporting client's own version, kept per machine so a
+    seat on an older client than this hub serves is visible. Fail-soft end to end: presence must
+    never break a write."""
     try:
+        fields = {name: headers.get(header) for header, name in _SESSION_HEADERS.items()
+                  if headers.get(header)}
+        fields.update(extra or {})
         _presence.observe(
             HUB_DIR, agent,
             machine=headers.get("X-Hub-Machine") or "",
             session=headers.get("X-Hub-Session") or "",
             cwd=headers.get("X-Hub-Cwd") or "",
             focus=headers.get("X-Hub-Focus") or "",
-            heartbeat=heartbeat)
+            heartbeat=heartbeat, extra=fields,
+            client=headers.get("X-Hub-Client-Version") or "")
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
         if stamp != _PRESENCE_PUBLISH["stamp"] and now - _PRESENCE_PUBLISH["at"] >= 2.0:
