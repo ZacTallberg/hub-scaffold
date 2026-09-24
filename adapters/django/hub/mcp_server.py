@@ -141,6 +141,21 @@ TOOLS = [
          "query": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
          "required": ["query"]}},
+    {"name": "report_app_error",
+     "description": "Put a satellite service's failure on the operational error stream, attributed "
+                    "to the APP: a server exception, a background-job death, or a fault inside an "
+                    "agentic chat loop (kind=agent; send thread/turn/tool, never the prompt). "
+                    "Needs a token with error:report.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string", "description": "the service's slug"},
+         "message": {"type": "string"},
+         "kind": {"type": "string", "description": "server|background|django|data|other|agent|"
+                                                   "js|promise|http|stream (default server)"},
+         "severity": {"enum": ["info", "warning", "error", "critical"]},
+         "code": {"type": "string"}, "details": {"type": "string"},
+         "component": {"type": "string"}, "operation": {"type": "string"},
+         "path": {"type": "string"}, "host": {"type": "string"}},
+         "required": ["app", "message"]}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -322,6 +337,11 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
                              auth_headers, method="get")
+    elif name == "report_app_error":
+        payload = {key: args[key] for key in ("app", "message", "kind", "severity", "code",
+                                              "details", "component", "operation", "path",
+                                              "host") if args.get(key)}
+        status, body = _seam("/hub/api/app-error", payload, auth_headers)
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

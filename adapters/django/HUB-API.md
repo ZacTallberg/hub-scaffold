@@ -72,7 +72,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/questions.json` | every question with the numbers the feed is about: per-row `open/answered/acked` plus `waiting_seconds`/`reply_seconds`, and metadata with the longest wait (and who), median reply time, per-asker lanes, and a 14-day asked/answered strip. "Answered" and "delivered" are different facts; only the asker's ack closes the loop. |
 | `GET /hub/inbox.json?agent=<name>` | what is addressed to that agent right now — directives aimed at it, the answer to its own question, and (for the operator, `HUB_OPERATOR_AGENT`) every open question. `{items[], fingerprint, count}`. |
 | `GET /hub/inbox/wait?agent=<name>&fp=<fingerprint>&wait=<s>` | **long-poll**: returns the moment the addressed set differs from `fp` (≤25s, bounded waiter pool — past the ceiling it answers immediately with `degraded:true`, an honest poll). A supervisor loop spends its sleep blocked here; that is the mechanism behind "an ask reaches the operator in about a second". The FINGERPRINT of the addressed set, not the event cursor, decides a wake — unrelated board traffic never trains anyone to ignore the channel. |
-| `GET /hub/errors.json` | the operational error stream — the failures the ledger audit cannot see — with the BAR applied at read (critical/high in this system's own surfaces; foreign-scanner noise and recovered transport blips deferred, `?include=deferred` shows everything). Metadata carries the 24h histogram, trend, top sources, unclaimed count, and per-channel `coverage` so an empty list says whether it is everything. |
+| `GET /hub/errors.json` | the operational error stream — the failures the ledger audit cannot see — with the BAR applied at read (critical/high in this system's own surfaces; foreign-scanner noise and recovered transport blips deferred, `?include=deferred` shows everything). Metadata carries the 24h histogram, trend, top sources, unclaimed count, and per-channel `coverage` so an empty list says whether it is everything. `coverage.forwarders` lists each satellite whose forwarder sent its startup arming row (`state` armed or degraded, `age_s`) — only an armed satellite's silence means nothing failed. A row whose `details` hold a traceback also carries `cause`, the trace's final `ExceptionType: message` line; oversized details keep head and tail with the gap stated. |
 | `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
@@ -237,11 +237,11 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 
 | Endpoint (scope) | Key body fields | Behaviour |
 |---|---|---|
-| `/hub/api/app-error` (`error:report`) | `app` (slug), `message`, optional `kind`, `severity`, `code`, `details`, `component`, `operation`, `path`, `host` | `201 {fingerprint}` — a satellite service's server exception/job death, attributed to the APP. Forward only what belongs on a queue a human drains. |
+| `/hub/api/app-error` (`error:report`) | `app` (slug), `message`, optional `kind` (`server`, `background`, `django`, `data`, `other`, `agent`, `js`, `promise`, `http`, `stream`, `forwarder`), `severity` (`info`/`warning`/`error`/`critical`), `code`, `details`, `component`, `operation`, `path`, `host` | `201 {fingerprint}` — a satellite service's failure, attributed to the APP (`app.<slug>.<kind>`). No `agent` field: the scoped token names the sender. `severity: info` with `code: app_forwarder_armed` is the forwarder's startup row — recorded, listed under `coverage.forwarders`, never on the bar. See `patterns/error-visibility.md`. |
 | `/hub/api/agent-error` (`error:report`) | `agent`, `message`, optional `source`, `severity`, `details`, `machine` | `201 {fingerprint}` — a worker-side operational failure, so the stream covers more than the hub's own host. |
 | `/hub/api/ack-error` (`error:manage`) | `fingerprint`, optional `note`; or `fingerprint` + `reopen:true` | Ack collapses the signature off the queue without deleting rows; reopening a never-acked signature is `409 not_acked`, not a 200 over an untouched row. |
 | `/hub/api/clear-errors` (`error:manage`) | `older_than_hours` and/or `only_acked:true` | Bounded by AGE or ACK, never "everything"; `only_acked` is a restriction (an unacked row never drops, however old). Unbounded is `400 need_bound`. |
-| `/hub/api/client-error` (same-origin CSRF) | `source`, `message`, optional `severity`, `code` | Bounded browser diagnostics from the board itself; rows are held below the read-time bar by default. |
+| `/hub/api/client-error` (same-origin CSRF) | `source`, `message`, optional `severity`, `code`, `operation` | Bounded browser diagnostics from the board itself: its uncaught exceptions and unhandled rejections (non-`Error` reasons described, teardown/offline/self-aborts silent, capped per page). A recovered transport blip is deferred by the bar; an uncaught board exception is this system's own defect and stays on it. The board reads the CSRF cookie named by `<meta name="csrf-cookie">` (rendered from `CSRF_COOKIE_NAME`) at send time, so a token rotated at sign-in does not 403 an open board. |
 
 The sending half — LOGGING handlers for the host app, a bounded fail-soft forwarder for
 satellite services — is `patterns/error-visibility.md`; wire it before the first feature.
@@ -281,6 +281,15 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 An actively held claim and a stale heartbeat are the exceptions: they return `{ok:false, reason:…}`
 with status 409. A wrong method returns Django's 405 response, and missing read entities use Django's ordinary
 404 response. Treat a refusal as guidance—fix its cause rather than retrying blindly.
+
+**Transport failures are not answers.** `python -m hub_core.client` retries only the transport:
+three attempts, pausing 5 s then 10 s, each announced as `HUB_CLIENT_RETRY attempt=… detail=…` on
+stderr. Reads retry every transport failure. A write retries only what provably never arrived
+(connection refused, name resolution) or a gateway 503; a timed-out or reset write may have landed,
+so the client stops and says "read it back before retrying". A 502/503/504 whose body is not the
+hub's JSON envelope is the proxy in front of the hub speaking — reported as *unreachable*, never as
+the hub's answer. Any HTTP answer from the hub itself (404, 409, 422, 500 …) is returned at once and
+never retried: retrying an answer only repeats it.
 
 ## Worked example (the full loop, curl)
 

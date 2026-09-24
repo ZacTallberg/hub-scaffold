@@ -235,7 +235,7 @@ def _errors_block():
     rows, metadata = errorlog.read(hub_app.HUB_DIR)
     now = time.time()
     buckets = [0] * 24
-    severities = {"critical": 0, "error": 0, "warning": 0}
+    severities = {"critical": 0, "error": 0, "warning": 0, "info": 0}
     sources, external, on_bar_n, unclaimed = {}, 0, 0, []
     for row in rows:
         ok, why = _error_bar(row)

@@ -26,6 +26,11 @@ Rules this module holds, each paid for in production on the origin system:
   as coverage.
 * A BROKEN STORE MUST NOT READ AS A QUIET ONE. A failed write marks the read surface
   impaired instead of silently returning fewer rows.
+* A TRACEBACK IS KEPT FOR ITS END. The exception type, its message and the frame that
+  raised sit at the bottom of a trace; a head-first cut keeps the banner and throws the
+  cause away. Details keep BOTH ends and state the gap, and the cause line rides the row.
+* "INFO" IS A REAL LEVEL, NEVER WORK. A satellite forwarder's arming row proves its chain
+  end to end; it is recorded, counted and shown under coverage, and never passes the bar.
 """
 
 from __future__ import annotations
@@ -42,8 +47,18 @@ from pathlib import Path
 
 from .process_lock import ProcessFileLock
 
-MAX_BYTES = 2 * 1024 * 1024
+MAX_BYTES = 8 * 1024 * 1024
 KEEP_ROWS = 600
+#: Compaction keeps the newest rows up to this share of MAX_BYTES, so a store of large
+#: traces does not re-compact on every write once it crosses the ceiling.
+COMPACT_TO = 0.75
+#: A real trace is 1-4 KB; 32 KB holds a deep chained one. Longer keeps head AND tail.
+DETAILS_LIMIT = 32000
+DETAILS_HEAD = 4000
+SEVERITIES = ("info", "warning", "error", "critical")
+#: The code a satellite forwarder's startup row carries (see patterns/error-visibility.md).
+ARM_CODE = "app_forwarder_armed"
+ARM_THROTTLE_S = 60
 READ_LIMIT = 120
 THROTTLE_S = 900
 _LAST_SEEN_MAX = 2000
@@ -80,6 +95,31 @@ def _clean(value, limit=800) -> str:
     text = _BEARER.sub("Bearer [REDACTED]", text)
     text = _URL_SECRET.sub(r"\1[REDACTED]", text)
     return text[:limit]
+
+
+def fit_details(value, limit=DETAILS_LIMIT) -> str:
+    """Redacted details that keep both ends of an oversized traceback and say what was
+    dropped, so a spliced trace is never read as a whole one."""
+    text = _clean(value, limit=1_000_000)
+    if len(text) <= limit:
+        return text
+    tail = limit - DETAILS_HEAD
+    return "%s\n... %d characters elided ...\n%s" % (
+        text[:DETAILS_HEAD], len(text) - DETAILS_HEAD - tail, text[-tail:])
+
+
+#: Lines that are never the cause: the banner, chaining sentences, frame headers, carets.
+_TRACE_NOISE = ("Traceback (most recent", "The above exception", "During handling",
+                'File "', "^", "~", "|", "...")
+
+
+def cause_of(details) -> str:
+    """The line a reader needs first: a traceback ends on "ExceptionType: message"."""
+    for line in reversed(str(details or "").splitlines()):
+        line = line.strip()
+        if line and not line.startswith(_TRACE_NOISE):
+            return _clean(line, 600)
+    return ""
 
 
 def _context(value) -> dict:
@@ -155,6 +195,8 @@ NOT_COVERED = (
     "Process stdout/stderr before logging starts (a boot crash) never reaches here.",
     "A worker with no network path to the hub fails locally and appears only if it "
     "reports after reconnecting.",
+    "A satellite that never sent its startup arming row is unconfigured or unreachable; "
+    "only an armed forwarder's silence means nothing failed.",
 )
 
 
@@ -175,7 +217,35 @@ def coverage(rows) -> dict:
             # what a reader needs in order to judge an empty card for themselves.
             "silent": not seen,
         })
-    return {"channels": out, "window_rows": len(rows), "not_covered": list(NOT_COVERED)}
+    return {"channels": out, "window_rows": len(rows), "not_covered": list(NOT_COVERED),
+            "forwarders": forwarders(rows, now)}
+
+
+def forwarders(rows, now=None) -> list:
+    """Each satellite whose forwarder ARMED inside the window: the newest arming row per app.
+
+    A satellite's "no rows" cannot tell "nothing has failed" from "its forwarder is not
+    configured". One delivered arming row per serving process separates the two, and a row
+    that says a producer failed to arm (sent at error severity) is not a healthy boot."""
+    now = time.time() if now is None else now
+    newest: dict = {}
+    for r in rows:
+        if r.get("code") != ARM_CODE:
+            continue
+        app = str(r.get("origin_app") or (r.get("context") or {}).get("app") or "")
+        if not app:
+            continue
+        epoch = float(r.get("epoch") or 0)
+        if app not in newest or epoch > newest[app]["epoch"]:
+            newest[app] = {"app": app, "epoch": epoch,
+                           "state": "armed" if r.get("severity") == "info" else "degraded",
+                           "machine": r.get("origin_machine") or "",
+                           "message": r.get("message") or ""}
+    out = []
+    for item in sorted(newest.values(), key=lambda i: i["app"]):
+        item["age_s"] = int(now - item.pop("epoch"))
+        out.append(item)
+    return out
 
 
 def _compact_locked(hub_dir) -> None:
@@ -183,7 +253,13 @@ def _compact_locked(hub_dir) -> None:
     try:
         if not path.exists() or path.stat().st_size <= MAX_BYTES:
             return
-        rows = path.read_text(encoding="utf-8", errors="replace").splitlines()[-KEEP_ROWS:]
+        rows, budget = [], int(MAX_BYTES * COMPACT_TO)
+        for line in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()):
+            budget -= len(line.encode("utf-8", errors="replace")) + 1
+            if budget < 0 or len(rows) >= KEEP_ROWS:
+                break
+            rows.append(line)
+        rows.reverse()
         temp = path.with_suffix(".compact.tmp")
         temp.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
         os.replace(temp, path)
@@ -200,14 +276,14 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
     clean_source = _clean(source or "runtime", 120)
     clean_code = _clean(code or "runtime_error", 120)
     clean_message = _clean(message or "Unspecified operational error")
-    clean_details = _clean(details, 2000)
+    clean_details = fit_details(details)
     fingerprint = hashlib.sha256(
         f"{clean_source}\0{clean_code}\0{clean_message}".encode("utf-8", errors="replace")
     ).hexdigest()[:16]
     row = {
         "ts": datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z"),
         "epoch": round(now, 3),
-        "severity": severity if severity in {"warning", "error", "critical"} else "error",
+        "severity": severity if severity in SEVERITIES else "error",
         "source": clean_source,
         "code": clean_code,
         "message": clean_message,
@@ -219,6 +295,9 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
     row.update(_origin(clean_source, ctx))
     if clean_details:
         row["details"] = clean_details
+        cause = cause_of(clean_details)
+        if cause and cause != clean_message:
+            row["cause"] = cause
     if str(clean_source).lower().startswith(_EXTERNAL_NOISE):
         # Classified BEFORE the throttle, so a suppressed repeat reports the same severity
         # its written sibling did.
@@ -226,7 +305,11 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
         row["external"] = True
     seen_map = _LAST_SEEN.setdefault(key, {})
     seen = seen_map.get(fingerprint)
-    if seen and (now - seen[0]) < THROTTLE_S:
+    # An arming row is once per serving process by construction; throttling it for the full
+    # window would leave the forwarders row showing a stale age -- or a stale "degraded" state
+    # after a healthy re-arm. A short window still bounds a crash-looping service.
+    window = ARM_THROTTLE_S if clean_code == ARM_CODE else THROTTLE_S
+    if seen and (now - seen[0]) < window:
         seen_map[fingerprint] = (seen[0], seen[1] + 1)
         row["suppressed_since"] = seen[1] + 1
         return row
@@ -415,6 +498,34 @@ def stamp(hub_dir) -> tuple:
     return size, mtime
 
 
+#: A readiness probe refusing traffic during warm-up is the probe WORKING.
+PROBE_PATHS = ("/health/ready/", "/health/live/", "/health/ready", "/health/live")
+#: A view that ANSWERS 502/504 is reporting its upstream, not itself. 503 is excluded: a
+#: view answering 503 outside a probe path is this app saying IT is unavailable.
+UPSTREAM_STATUSES = frozenset({502, 504})
+
+
+def designed_degradation(log_record) -> str:
+    """Why a django.request record is designed degradation rather than an app fault, or "".
+
+    Keyed on the record's status and request path, never its message, and only for a status
+    a view ANSWERED -- a raised exception is always a fault. The row is still written, as a
+    warning: an upstream that stays down shows as a count that climbs, below the bar."""
+    if getattr(log_record, "name", "") != "django.request":
+        return ""
+    exc_info = getattr(log_record, "exc_info", None)
+    if exc_info and exc_info[0] is not None:
+        return ""
+    status = getattr(log_record, "status_code", None)
+    request = getattr(log_record, "request", None)
+    path = str(getattr(request, "path_info", "") or getattr(request, "path", "") or "")
+    if status == 503 and path.endswith(PROBE_PATHS):
+        return "readiness probe refusing traffic"
+    if status in UPSTREAM_STATUSES:
+        return "handled upstream %s" % status
+    return ""
+
+
 class HubErrorHandler(logging.Handler):
     """Logging handler that records ERROR+ without exposing args or request bodies. Wire it
     on django.request (or any logger) with the hub dir:
@@ -435,12 +546,15 @@ class HubErrorHandler(logging.Handler):
             details = ""
             if log_record.exc_info:
                 details = "".join(traceback.format_exception(*log_record.exc_info))
+            degraded = designed_degradation(log_record)
             record(
                 self.hub_dir, log_record.name, log_record.getMessage(),
-                severity="critical" if log_record.levelno >= logging.CRITICAL else "error",
+                severity=("warning" if degraded else
+                          "critical" if log_record.levelno >= logging.CRITICAL else "error"),
                 code=getattr(log_record, "code", None) or log_record.levelname.lower(),
                 details=details,
-                context={"component": getattr(log_record, "module", "")},
+                context={"component": getattr(log_record, "module", ""),
+                         **({"reason": degraded} if degraded else {})},
             )
         except Exception:
             self.handleError(log_record)
