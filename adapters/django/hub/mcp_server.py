@@ -283,6 +283,52 @@ TOOLS = [
          "kind": {"enum": ["fixed", "answered", "acked", "shipped", "escalated", "noop"]},
          "evidence": {"type": "string"}, "item": {"type": "string"}},
          "required": ["agent", "summary"]}},
+    {"name": "report_ci_failure",
+     "description": "Report a failed CI job with the tail of its log. The hub classifies what the "
+                    "LOG says (rollback, real failure, stopped before deploying, unclear) and files "
+                    "one operational row whose severity follows that verdict, not the trigger.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": {"type": "string"}, "job": {"type": "string"},
+         "trace": {"type": "string", "description": "the job log tail"},
+         "pipeline": {"type": "string"}, "job_id": {"type": "string"},
+         "ref": {"type": "string"}, "sha": {"type": "string"},
+         "source": {"type": "string", "description": "push, schedule, api, ..."},
+         "deployless": {"type": "boolean"}, "url": {"type": "string"}},
+         "required": ["project", "job"]}},
+    {"name": "record_deploy",
+     "description": "Record one verified release AFTER the front-door canary observed its sha. "
+                    "Immutable and idempotent by sha: an exact repeat answers idempotent, a "
+                    "changed proof for the same sha is refused. tasks_closed names the done tasks "
+                    "this release carries (an empty list is allowed).",
+     "inputSchema": {"type": "object", "properties": {
+         "sha": {"type": "string"},
+         "served_sha": {"type": "string", "description": "what the canary observed; must equal sha"},
+         "tasks_closed": {"type": "array", "items": {"type": "string"}},
+         "at": {"type": "string", "description": "UTC record time; stamped now when omitted"},
+         "method": {"type": "string"}, "build": {"type": "string"},
+         "audit_ok": {"type": "boolean"}},
+         "required": ["sha", "served_sha", "tasks_closed"]}},
+    {"name": "list_components",
+     "description": "Standard components and app skeletons. Asked to build a standard app, or to "
+                    "apply components to one? Read the skeleton: its applied rows carry each "
+                    "component's CURRENT get/entry, in dependency order, and name anything missing.",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"enum": ["component", "skeleton"]}}}},
+    {"name": "register_component",
+     "description": "Register (or update, with expected_version) a standard component or an app "
+                    "skeleton in the capability graph.",
+     "inputSchema": {"type": "object", "properties": {
+         "name": {"type": "string"}, "kind": {"enum": ["component", "skeleton"]},
+         "maturity": {"enum": ["concept", "prototype", "proven", "reusable", "extracted"]},
+         "what": {"type": "string"}, "when": {"type": "string"}, "get": {"type": "string"},
+         "entry": {"type": "string"}, "delivery": {"enum": ["copy", "hosted", "package"]},
+         "hosted_at": {"type": "string"}, "exemplar": {"type": "string"},
+         "default": {"type": "boolean"},
+         "depends_on": {"type": "array", "items": {"type": "string"}},
+         "applies": {"type": "array", "items": {"type": "string"}},
+         "applies_all": {"type": "boolean"},
+         "expected_version": {"type": "integer"}},
+         "required": ["name", "kind"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -613,6 +659,23 @@ def _call_tool(name, args, auth_headers):
             if args.get(key):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/agent-update", payload, auth_headers)
+    elif name == "list_components":
+        query = {"kind": args["kind"]} if args.get("kind") else {}
+        status, body = _seam("/hub/components.json", query, auth_headers, method="get")
+    elif name == "register_component":
+        payload = dict(args)
+        payload.setdefault("maturity", "proven")
+        status, body = _seam("/hub/api/capability", payload, auth_headers)
+    elif name == "report_ci_failure":
+        status, body = _seam("/hub/api/ci-failure", dict(args), auth_headers)
+    elif name == "record_deploy":
+        payload = dict(args)
+        if not payload.get("at"):
+            # The record needs `at`; a caller following this tool's schema may omit it.
+            import datetime
+            payload["at"] = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        status, body = _seam("/hub/api/deploy", payload, auth_headers)
     elif name == "search_board":
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},

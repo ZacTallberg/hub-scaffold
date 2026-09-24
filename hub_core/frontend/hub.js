@@ -172,7 +172,7 @@
     { key: "adrs", label: "ADRs", icon: "branch", pick: function (d) { return d.adrs || []; }, type: "adr", cols: COLS_ADR() },
     { key: "feats", label: "Features", icon: "package", pick: function (d) { return d.feats || []; }, type: "feat", cols: COLS_FEAT() },
     { key: "gaps", label: "Gaps", icon: "warning", pick: function (d) { return d.gaps || []; }, type: "gap", cols: COLS_GAP() },
-    { key: "caps", label: "Capabilities", icon: "stack", pick: function (d) { return d.caps || []; }, type: "cap", cols: COLS_CAP() },
+    { key: "caps", label: "Capabilities", icon: "stack", pick: function (d) { return d.caps || []; }, type: "cap", cols: COLS_CAP(), build: buildCapsTab },
     { key: "deploys", label: "Deploys", icon: "rocket", pick: function (d) { return d.deploys || []; }, type: "deploy", cols: COLS_DEPLOY() },
     { key: "notes", label: "Findings", icon: "stack", pick: function (d) { return d.notes || []; }, type: "note", cols: COLS_NOTE() },
     { key: "directives", label: "Directives", icon: "bolt", pick: function (d) { return d.directives || []; }, type: "directive", cols: COLS_DIRECTIVE() },
@@ -537,6 +537,85 @@
   }
   function buildTaskTab(tab) { return buildTableTab(tab); }
 
+  /* The Capabilities view leads with the STANDARD COMPONENTS and APP SKELETONS, read from
+     components.json — resolved by the server on every read, so a skeleton always shows each
+     component's CURRENT get/entry and names what it is missing or cannot order. The client never
+     re-derives that resolution; it re-reads when the capability set changes. */
+  function buildCapsTab(tab) {
+    var pane = buildTableTab(tab);
+    var panel = el("section", { class: "catalog-panel", "aria-label": "Standard components and app skeletons" });
+    var area = pane.querySelector(".content-area");
+    if (area) area.insertBefore(panel, area.firstChild); else pane.appendChild(panel);
+    tab._catalog = panel;
+    refreshCatalog(tab, true);
+    return pane;
+  }
+  function capsSignature() {
+    return (D.caps || []).map(function (c) { return c.id + "@" + c.version; }).join(",");
+  }
+  function refreshCatalog(tab, force) {
+    if (!tab._catalog) return;
+    var sig = capsSignature();
+    if (!force && sig === tab._catalogSig) return;
+    tab._catalogSig = sig;
+    getJSON("components.json").then(function (payload) {
+      renderCatalog(tab._catalog, (payload && payload.data) || {});
+    }, function (error) {
+      tab._catalogSig = null;                               // the next change retries
+      var retry = el("button", { class: "text-action", type: "button", text: "Retry" });
+      retry.addEventListener("click", function () { refreshCatalog(tab, true); });
+      tab._catalog.textContent = "";
+      tab._catalog.appendChild(el("div", { class: "callout warn" }, [
+        el("div", { text: "Components could not be read (" + ((error && error.message) || "unknown error") + ")." }), retry]));
+    });
+  }
+  function renderCatalog(panel, data) {
+    var comps = data.components || [], skels = data.skeletons || [];
+    var fresh = el("section");
+    if (!comps.length && !skels.length) {
+      fresh.appendChild(el("div", { class: "empty-state" }, [icon("tray"), el("p", {
+        text: "No standard components or app skeletons registered yet. Register one with " +
+              "`python -m hub_core.client capability --kind component` (or the register_component MCP tool)." })]));
+    }
+    if (comps.length) {
+      fresh.appendChild(el("h3", { text: "Standard components \u00b7 " + comps.length }));
+      fresh.appendChild(el("div", { class: "catalog-grid" }, comps.map(function (c) {
+        var card = el("button", { class: "catalog-item", type: "button", "data-entity-id": c.id,
+                                  "data-record-version": String(c.version) }, [
+          el("strong", { text: c.name || localId(c.id) }),
+          el("span", { class: "cell-sub", text: [c["delivery"] ? c["delivery"] : null, c["default"] ? "default" : null,
+                                                 (c.depends_on || []).length ? "after " + c.depends_on.map(localId).join(", ") : null]
+                                                .filter(Boolean).join(" \u00b7 ") || (c.maturity || "") }),
+          c.what ? el("span", { class: "cell-sub", text: c.what }) : null
+        ].filter(Boolean));
+        card.addEventListener("click", function () { openById(c.id); });
+        return card;
+      })));
+    }
+    if (skels.length) {
+      fresh.appendChild(el("h3", { text: "App skeletons \u00b7 " + skels.length }));
+      fresh.appendChild(el("div", { class: "catalog-grid" }, skels.map(function (k) {
+        var steps = el("ol", { class: "catalog-steps" }, (k.applied || []).map(function (a) {
+          return el("li", { class: a.found ? "" : "is-missing",
+                            text: (a.name || localId(a.id)) + (a.found ? (a["delivery"] ? " \u2014 " + a["delivery"] : "") : " \u2014 not a registered component") });
+        }));
+        var card = el("button", { class: "catalog-item", type: "button", "data-entity-id": k.id,
+                                  "data-record-version": String(k.version) }, [
+          el("strong", { text: (k.name || localId(k.id)) + (k["default"] ? " (default)" : "") }),
+          el("span", { class: "cell-sub", text: k.applies_all ? "every component, in dependency order"
+                                                               : (k.applied || []).length + " components, in the order given" }),
+          steps,
+          (k.missing || []).length ? el("div", { class: "catalog-warn", text: "Missing: " + k.missing.map(localId).join(", ") }) : null,
+          (k.order_problems || []).length ? el("div", { class: "catalog-warn", text: "Order unproven: " + k.order_problems.join("; ") }) : null
+        ].filter(Boolean));
+        card.addEventListener("click", function () { openById(k.id); });
+        return card;
+      })));
+    }
+    if (global.HubSurface) global.HubSurface.reconcile(panel, fresh, true);
+    else { panel.textContent = ""; while (fresh.firstChild) panel.appendChild(fresh.firstChild); }
+  }
+
   /* The LIVE STAGE: the handful of tasks a worker is holding right now, as cards with their plan
      step and lease age. A table row cannot carry a moving sub-progress bar legibly, and the tasks
      in flight are the ones an operator is actually watching. */
@@ -593,8 +672,11 @@
   }
 
   function renderRows(tab) {
-    var tb = tab._tbody; if (!tb) return;
-    tb.textContent = "";
+    var attached = tab._tbody; if (!attached) return;
+    // Build detached, then RECONCILE into the attached body by record identity: unchanged rows
+    // keep their DOM (focus, hover, an in-progress keyboard walk), changed ones patch in place.
+    var tb = global.HubSurface ? el("tbody") : attached;
+    if (tb === attached) tb.textContent = "";
     var rows = tab.rows.slice();
     if (tab._sortIdx != null) {
       var c = tab.cols[tab._sortIdx], dir = tab._sortDir;
@@ -615,15 +697,17 @@
       }
       shown++;
       var tr = el("tr", { id: tab.type + "-" + localId(r.id), tabindex: "0", "data-hub-row": "",
-        "data-entity-id": r.id, role: "button", "aria-label": (r.title || r.name || localId(r.id)) });
+        "data-entity-id": r.id, "data-record-version": String(r.version == null ? "" : r.version),
+        role: "button", "aria-label": (r.title || r.name || localId(r.id)) });
       tab.cols.forEach(function (c) {
         var cell = c.cell(r);
         cell.setAttribute("data-label", c.label);
         if (c.cls) c.cls.split(/\s+/).forEach(function (name) { if (name) cell.classList.add(name); });
         tr.appendChild(cell);
       });
-      tr.addEventListener("click", function () { openEntity(tab.type, r); });
-      tr.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEntity(tab.type, r); } });
+      // A reconciled row outlives this render, so its handlers read the CURRENT record by id.
+      tr.addEventListener("click", function () { openEntity(tab.type, BY_ID[r.id] || r); });
+      tr.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEntity(tab.type, BY_ID[r.id] || r); } });
       tr.addEventListener("focus", function () { activate(tab.key); });
       tb.appendChild(tr);
     });
@@ -632,6 +716,7 @@
         el("div", { class: "empty-state" }, [icon("tray"), el("p", { text: (q || tab._facet) ? "No " + tab.label.toLowerCase() + " match the current filter — clear it to see all." : "No " + tab.label.toLowerCase() + " yet." })])
       ])]));
     }
+    if (tb !== attached) global.HubSurface.reconcile(attached, tb, true);
     if (tab._count) tab._count.textContent = String(shown);
   }
 
@@ -2128,7 +2213,7 @@
     var rec = BY_ID[id];
     var t = (String(id).split(":")[1]) || type;
     var c = el("span", { class: "badge chip-link", title: id, text: localId(id) });
-    if (rec) c.addEventListener("click", function (e) { e.stopPropagation(); openEntity(t, rec); });
+    c.addEventListener("click", function (e) { e.stopPropagation(); openById(id); });
     return c;
   }
   function chipRow(ids, type) {
@@ -2141,7 +2226,51 @@
   // a fleet seat). Those rows live in the live block rather than BY_ID, so they need their own
   // handle to stay current — the dialog contract is about the reader, not the storage.
   var _openModalLive = null;
+  // Full records fetched from <type>/<local>.json, keyed by id. The snapshot row is a
+  // projection; the dialog reads the whole record and keeps it across live refreshes until the
+  // snapshot carries a NEWER version (then the stale copy is dropped and re-read).
+  var _fullRecords = {};
+  function withFull(r) {
+    var full = r && _fullRecords[r.id];
+    if (!full) return r;
+    if (r.version != null && full.version != null && full.version < r.version) {
+      delete _fullRecords[r.id];
+      return r;
+    }
+    return Object.assign({}, full, r);
+  }
+  function recordUrl(id) {
+    var parts = String(id).split(":");
+    return encodeURIComponent(parts[1] || "") + "/" + encodeURIComponent(localId(id)) + ".json";
+  }
+  function readRecord(id) {
+    return getJSON(recordUrl(id)).then(function (payload) {
+      var data = payload && payload.data;
+      if (!data || data.id !== id) throw new Error("the record answered without its own id");
+      _fullRecords[id] = data;
+      return data;
+    });
+  }
+  /* Open any record by id, in the snapshot or not. A record the snapshot does not carry (an old
+     deep link, a relationship to something outside the projection) is read from its own
+     endpoint; a failed read says so, with a retry, instead of the click doing nothing. */
+  function openById(id) {
+    var type = String(id).split(":")[1] || "";
+    var rec = BY_ID[id];
+    if (rec) { openEntity(type, rec); return; }
+    var body = el("div", { class: "callout info", role: "status", text: "Reading " + id + "\u2026" });
+    _openModalEntity = null;
+    openModal("info", localId(id), id, "info", body);
+    readRecord(id).then(function (data) { openEntity(type, data); }, function (error) {
+      var retry = el("button", { class: "text-action", type: "button", text: "Retry" });
+      retry.addEventListener("click", function () { openById(id); });
+      refreshModal("fail", localId(id), id, "warning", el("div", { class: "callout warn" }, [
+        el("div", { text: "This record could not be read: " + ((error && error.message) || "unknown error") + "." }),
+        retry]));
+    });
+  }
   function openEntity(type, r, liveRefresh) {
+    r = withFull(r);
     var role = type === "deploy" ? (r.audit_ok ? "pass" : "fail") : roleOf(type, r.status || r.maturity);
     var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket", directive: "bolt", held: "stack" }[type] || "info";
     var title = r.title || r.name || (r.number != null ? ("ADR " + r.number) : localId(r.id));
@@ -2272,6 +2401,27 @@
       if (r[f]) body.appendChild(el("div", { class: "detail-grid one" }, [section(f.replace("_md", "").replace(/^./, function (c) { return c.toUpperCase(); }), "info", [el("div", { class: "detail-prose", text: r[f] })])]));
     });
 
+    var S = global.HubSurface, surfaceCtx = {
+      open: openById,
+      title: function (id) { var x = BY_ID[id]; return x ? (x.title || x.name || localId(id)) : localId(id); }
+    };
+    if (S && Array.isArray(r.plan) && r.plan.length) {
+      var cp = S.checkpoints(r.plan, surfaceCtx);
+      body.appendChild(el("div", { class: "detail-grid one" }, [section(
+        "Checkpoints \u00b7 " + cp.done + " of " + cp.total + " reported complete", "checks", [cp.node])]));
+    }
+    // Every field the sections above did not render, so a field added to a schema later is
+    // visible the day it is written, not the day someone remembers to add a row for it.
+    if (S) {
+      var rest = S.fields(r, ["legacy_ref", "status", "severity", "maturity", "phase", "priority",
+        "number", "summary", "acceptance", "source", "evidence_uri", "needs", "build", "sha", "at",
+        "targets", "deadline", "remediation_cmd", "tasks", "deps", "deps_unmet", "addressed_by",
+        "implements", "adrs", "decided_by", "superseded_by", "answers", "supersedes", "verified_by",
+        "body_md", "context_md", "decision_md", "consequences_md", "plan", "audit_ok"], surfaceCtx);
+      if (rest.content) body.appendChild(el("div", { class: "detail-grid one" }, [section("Recorded detail", "info", [rest.content])]));
+      if (rest.admin) body.appendChild(rest.admin);
+    }
+
     if (r.provenance) {
       var pv = r.provenance;
       body.appendChild(el("div", { class: "detail-grid one" }, [section("Provenance", "info", [
@@ -2285,6 +2435,22 @@
       _openModalEntity = { type: type, id: r.id };
       openModal(role, title, r.id, iconName, body);
       try { history.replaceState(null, "", "#" + type + "-" + localId(r.id)); } catch (e) {}
+      // Then read the WHOLE record: the snapshot row is a projection, and a dialog that shows
+      // only the projection hides every field it does not carry. A failed read keeps what is on
+      // screen and says so, with a retry.
+      var openedId = r.id;
+      readRecord(openedId).then(function () {
+        if (_openModalEntity && _openModalEntity.id === openedId) openEntity(type, BY_ID[openedId] || r, true);
+      }, function (error) {
+        if (!_openModalEntity || _openModalEntity.id !== openedId) return;
+        var mb = doc.getElementById("modalBody");
+        if (!mb || mb.querySelector("[data-full-read-failed]")) return;
+        var retry = el("button", { class: "text-action", type: "button", text: "Retry" });
+        retry.addEventListener("click", function () { openEntity(type, BY_ID[openedId] || r); });
+        mb.insertBefore(el("div", { class: "callout warn", "data-full-read-failed": "1" }, [
+          el("div", { text: "Showing the board's summary of this record; the full record could not be read (" +
+                            ((error && error.message) || "unknown error") + ")." }), retry]), mb.firstChild);
+      });
     }
   }
 
@@ -2692,6 +2858,7 @@
       if (tab._facetBar) renderFacetBar(tab);
       if (tab._tbody) { updateSortHeaders(tab); renderRows(tab); }
       if (tab._stage) renderTaskStage(tab, changes);
+      if (tab._catalog) refreshCatalog(tab, false);
     });
   }
 
@@ -2807,7 +2974,29 @@
     tickLiveMeta();
   }
 
+  /* Reads of the same URL already in flight SHARE one request: a burst of live events that
+     each trigger a repaint must not become a burst of identical GETs. Each caller gets its own
+     clone of the one response, so each may read the body. Writes are never shared. */
+  var _inflightGets = {};
   function timedFetch(url, options) {
+    var method = String((options && options.method) || "GET").toUpperCase();
+    if (method !== "GET") return timedFetchOnce(url, options);
+    var shared = _inflightGets[url];
+    if (!shared) {
+      shared = _inflightGets[url] = timedFetchOnce(url, options);
+      var clear = function () { if (_inflightGets[url] === shared) delete _inflightGets[url]; };
+      shared.then(clear, clear);
+    }
+    return shared.then(function (response) { return response.clone(); });
+  }
+  function getJSON(url) {
+    return timedFetch(url, { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      });
+  }
+  function timedFetchOnce(url, options) {
     if (!global.AbortController) return fetch(url, options);
     var controller = new global.AbortController();
     var timer = setTimeout(function () { controller.abort(); }, 9000);
@@ -3213,15 +3402,25 @@
       if (m && keyMap[m[1]]) initial = keyMap[m[1]];
     }
     activate(initial);
-    if (location.hash) {
+    /* A record address (#<type>-<local>) opens that record — at load, and whenever the address
+       changes in place (a pasted link, an in-page anchor, back/forward). Any type resolves:
+       one the snapshot carries opens at once, anything else reads its own endpoint. */
+    function openFromHash() {
       var hm = location.hash.slice(1).match(/^([a-z]+)-(.+)$/);
-      if (hm && keyMap[hm[1]]) {
-        var rec = null;
-        Object.keys(BY_ID).forEach(function (k) { if (k.split(":")[1] === hm[1] && localId(k) === hm[2]) rec = BY_ID[k]; });
-        if (rec) setTimeout(function () { openEntity(hm[1], rec); }, 60);
-      }
+      if (!hm) return;
+      if (keyMap[hm[1]] && _panes[keyMap[hm[1]]]) activate(keyMap[hm[1]]);
+      var rec = null;
+      Object.keys(BY_ID).forEach(function (k) { if (k.split(":")[1] === hm[1] && localId(k) === hm[2]) rec = BY_ID[k]; });
+      if (rec) setTimeout(function () { openEntity(hm[1], rec); }, 60);
+      else setTimeout(function () { openById(projectKeyFromPage() + ":" + hm[1] + ":" + hm[2]); }, 60);
     }
+    if (location.hash) openFromHash();
+    global.addEventListener("hashchange", openFromHash);
     startLive();
+  }
+
+  function projectKeyFromPage() {
+    return doc.documentElement.getAttribute("data-project") || String(Object.keys(BY_ID)[0] || "").split(":")[0];
   }
 
   function toggleTheme() {
@@ -3272,7 +3471,7 @@
     _taskAgeTimer = setTimeout(function () { refreshTaskAges(); scheduleTaskAgeRefresh(); }, delay);
   }
 
-  global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity,
+  global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity, openById: openById,
                  closeModal: closeModal, live: function () { return LIVE; } };
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", build);

@@ -2,8 +2,9 @@
 
 Security posture is fail-closed: SECRET_KEY is REQUIRED in prod (no committed literal — the hub
 audit's AST gate enforces this), ephemeral only under DEBUG; ALLOWED_HOSTS never defaults to '*';
-general Hub mutations are token-gated via the HUB_WRITE_TOKEN environment variable. Reads remain
-unauthenticated in this example, and the optional launch mint uses its narrow CSRF gate. This file is also what
+general Hub mutations are token-gated via the HUB_WRITE_TOKEN environment variable. Reads are
+authenticated by default; only the DEBUG preview declares them public, and the optional launch mint
+uses its narrow CSRF gate. This file is also what
 `manage.py hubaudit` AST-scans, so it doubles as the reference shape for a mounted project.
 """
 import json
@@ -89,6 +90,12 @@ HUB_PROJECT_REPOS = json.loads(os.environ.get("HUB_PROJECT_REPOS", "") or "{}")
 # before they are released, measured from its last-seen stamp. Default 30 minutes.
 HUB_GONE_GRACE_S = int(os.environ.get("HUB_GONE_GRACE_S", "1800") or 1800)
 
+# Reads are authenticated by default (a Django user, a scoped agent credential, or the shared
+# root token). This example mounts no sign-in, so its local preview declares the board public
+# — only under DEBUG. Outside DEBUG the example refuses anonymous reads, and a real adopter
+# should add a sign-in rather than copy the public setting (hubaudit flags it in production).
+HUB_READ_AUTH = "public" if DEBUG else "required"
+
 # Optional local-worker bridge. Adopters enable it only after wiring their own launch protocol.
 HUB_WORKER_LAUNCH_ENABLED = False
 HUB_WORKER_PROTOCOL = "hub-example"
@@ -97,6 +104,6 @@ HUB_WORKER_GRANT_TTL_S = 120
 
 # Shared-root migration credential. Normal workers use short-lived scoped X-Agent-Token
 # credentials issued through /hub/api/agent-credential. Disable this compatibility path after the
-# fleet has migrated; reads remain unauthenticated and the narrow launch mint remains CSRF-gated.
+# fleet has migrated; reads follow HUB_READ_AUTH above and the narrow launch mint remains CSRF-gated.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lower() == "true"

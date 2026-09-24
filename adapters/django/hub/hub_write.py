@@ -382,6 +382,56 @@ def _append_create(type_, payload, *, agent, idem, etype):
     return resp, status
 
 
+#: How many fresh reads a server-side read-then-append gets before it gives up.
+FRESH_APPEND_ATTEMPTS = 3
+
+
+def _append_fresh(type_, eid, payload, *, agent, idem, etype, operation,
+                  attempts=FRESH_APPEND_ATTEMPTS):
+    """Append where the SERVER derives expected_version from its own read of state.
+
+    Both optimistic-concurrency refusals are retryable here, because the version this path
+    sends comes from a read a concurrent writer can beat:
+
+    - 409 — the entity moved between the read and the append;
+    - 428 — it did not EXIST at the read, so None was sent, and a concurrent writer created
+      it before this append landed. This is the half that is easy to miss: treating it as
+      terminal makes a first-ever write under contention fail with a refusal that the very
+      next fresh read would satisfy.
+
+    Anything else (schema, secret shape) is terminal — retrying cannot help. ``payload`` may
+    be a callable ``payload(existing) -> dict`` when the body is derived from the current
+    entity. When the attempts run out, WHICH status ended the loop travels with the result
+    (``ledger`` on the response body) and into the operational error stream, so a refusal
+    never reaches an operator as a bare status with no cause."""
+    resp, status = {"errors": [{"code": "append_not_attempted"}]}, 0
+    for _attempt in range(max(1, int(attempts))):
+        existing = hub_app.current_state()["entities"].get(eid)
+        body = payload(existing) if callable(payload) else payload
+        resp, status = _append(type_, eid, body,
+                               expected_version=existing.get("version") if existing else None,
+                               agent=agent, idem=idem, etype=etype)
+        if status in (200, 201) or status not in (409, 428):
+            return resp, status
+    code = ""
+    try:
+        code = str((resp.get("errors") or [{}])[0].get("code") or "")
+    except Exception:                                        # noqa: BLE001
+        code = ""
+    resp = dict(resp)
+    resp["ledger"] = {"status": status, "code": code, "attempts": attempts}
+    try:
+        hub_app.record_error(
+            "hub.write", "%s: append to %s gave up after %d fresh reads" % (operation, eid, attempts),
+            severity="error", code="append_contention",
+            details="entity=%s agent=%s attempts=%d last_status=%s last_code=%s"
+                    % (eid, agent, attempts, status, code or "-"),
+            context={"component": "hub-write", "operation": operation})
+    except Exception:                                        # noqa: BLE001 - telemetry never
+        pass                                                 # decides a write's outcome
+    return resp, status
+
+
 @writer(scope="task:write")
 def task(request, b):
     agent = b.get("agent", "agent")
@@ -832,7 +882,9 @@ def deploy(request, b):
                     "tasks_closed": normalized_tasks})
     existing = entities.get(eid)
     if existing:
-        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "at", "build",
+        # `at` is when the release was recorded, not part of what was released: a re-run job
+        # that re-posts the same proof later is the same record, answered with the first `at`.
+        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "build",
                             "method", "audit_ok")
         comparable_existing = dict(existing)
         if isinstance(comparable_existing.get("tasks_closed"), list):
@@ -841,7 +893,7 @@ def deploy(request, b):
                          for field in immutable_fields)
         if same_proof:
             return JsonResponse({"data": {"id": eid, "version": existing.get("version"),
-                                           "idempotent": True}})
+                                           "idempotent": True, "at": existing.get("at")}})
         return JsonResponse({"errors": [{"code": "immutable_deploy",
             "msg": "a deploy record is immutable; publish a different SHA for a different release",
             "id": eid, "version": existing.get("version")}]}, status=409)
@@ -1741,7 +1793,6 @@ def ask(request, b):
     local = "q-%s-%s" % (_slug(agent, "agent"),
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
-    existing = state["entities"].get(eid)
     tags = ["question", "open"] + (["human-only"] if b.get("human_only") else [])
     payload = {"type": "note", "category": "context", "title": text[:300],
                "asker": agent, "from_agent": agent, "status": "standing", "tags": tags,
@@ -1761,9 +1812,8 @@ def ask(request, b):
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:
         payload["relates_to"] = related
-    resp, status = _append("note", eid, payload,
-                           expected_version=existing.get("version") if existing else None,
-                           agent=agent, idem=b.get("idem_key"), etype="note.created")
+    resp, status = _append_fresh("note", eid, payload, agent=agent, idem=b.get("idem_key"),
+                                 etype="note.created", operation="ask")
     return JsonResponse(resp, status=status)
 
 
@@ -1893,16 +1943,20 @@ def answer(request, b):
     # status enum, is what marks a question as awaiting an answer.
     still_open = False
     try:
-        tags = [t for t in (note_ent.get("tags") or []) if str(t).lower() != "open"]
-        if "answered" not in [str(t).lower() for t in tags]:
-            tags.append("answered")
-        if tags != list(note_ent.get("tags") or []):
-            closed = {k: v for k, v in note_ent.items() if k not in ("version", "provenance")}
-            closed["tags"] = tags
-            _retire_resp, retire_status = _append(
-                "note", question_id, closed, expected_version=note_ent.get("version"),
-                agent=agent, idem=None, etype="note.created")
-            still_open = retire_status not in (200, 201)
+        def _closed(current):
+            # Rebuilt from the entity as it stands at EACH attempt: a concurrent edit to the
+            # question must survive the retire, not be overwritten by the first read's copy.
+            base = current or note_ent
+            kept = [t for t in (base.get("tags") or []) if str(t).lower() != "open"]
+            if "answered" not in [str(t).lower() for t in kept]:
+                kept.append("answered")
+            closed = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+            closed["tags"] = kept
+            return closed
+        _retire_resp, retire_status = _append_fresh(
+            "note", question_id, _closed, agent=agent, idem=None, etype="note.created",
+            operation="answer:retire-question")
+        still_open = retire_status not in (200, 201)
     except Exception:                                    # noqa: BLE001 - never lose the reply
         still_open = True
     if still_open:
@@ -1927,7 +1981,6 @@ def answer(request, b):
     try:
         note_local = "qa-" + question_id.rsplit(":", 1)[-1]
         lesson_id = ids.make_id(hub_app.PROJECT_KEY, "note", note_local)
-        existing_lesson = (state.get("entities") or {}).get(lesson_id)
         lesson_payload = {
             "type": "note", "category": "method",
             "title": (question_text or ("answer for " + asker))[:300],
@@ -1936,10 +1989,9 @@ def answer(request, b):
             "status": "standing",
             "relates_to": [question_id],
         }
-        _lesson_resp, lesson_status = _append(
-            "note", lesson_id, lesson_payload,
-            expected_version=existing_lesson.get("version") if existing_lesson else None,
-            agent=agent, idem=None, etype="note.created")
+        _lesson_resp, lesson_status = _append_fresh(
+            "note", lesson_id, lesson_payload, agent=agent, idem=None, etype="note.created",
+            operation="answer:crystallize")
         resp["data"]["crystallized"] = lesson_id if lesson_status in (200, 201) else False
     except Exception:                                    # noqa: BLE001 - bookkeeping never
         resp["data"]["crystallized"] = False             # loses an answer already sent
@@ -2006,16 +2058,14 @@ def ack(request, b):
                        "correction before acknowledging it"}]}, status=409)
     local = "%s--%s" % (directive_id.rsplit(":", 1)[-1], _slug(agent, "agent"))
     eid = ids.make_id(hub_app.PROJECT_KEY, "ack", local)
-    existing = state["entities"].get(eid)
     payload = {"type": "ack", "directive": directive_id, "agent": agent,
                "note": str(b.get("note") or "")}
     idem = b.get("idem_key") or f"ack:{eid}"
     if revision is not None:
         payload["delivery_revision"] = revision
         idem += f":revision:{revision}"
-    resp, status = _append("ack", eid, payload,
-                           expected_version=existing.get("version") if existing else None,
-                           agent=agent, idem=idem, etype="ack.recorded")
+    resp, status = _append_fresh("ack", eid, payload, agent=agent, idem=idem,
+                                 etype="ack.recorded", operation="ack")
     if status in (200, 201):
         hub_app.receipt(kind, directive_id, "delivered", agent=agent,
                         detail=str(b.get("note") or "")[:200])
@@ -2263,6 +2313,47 @@ def app_error(request, b):
         },
     )
     return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
+
+
+@writer(scope="error:report")
+def ci_failure(request, b):
+    """A failed CI job, classified by what its OWN LOG says (hub_core.ci_trace).
+
+    The CI job (an ``after_script`` on failure, or a forwarder) posts the tail of its log with
+    the pipeline's metadata; the hub classifies it — rollback / real / not_deployed / unclear /
+    unreadable — and records ONE operational row whose severity comes from the verdict, never
+    from the trigger: a rollback is critical whatever the pipeline status said, and a failure
+    on an api- or schedule-triggered run is not explained away by its trigger unless its log
+    shows it stopped before any phase ran. The raw log is never stored — only the classified
+    line — and a secret-shaped log is refused at the write seam like any other payload."""
+    from hub_core import ci_trace
+    project = re.sub(r"[^a-z0-9._-]", "", str(b.get("project") or "").strip().lower())[:80]
+    job = str(b.get("job") or "").strip()[:120]
+    if not project or not job:
+        return JsonResponse({"errors": [{"code": "need_project_and_job",
+            "msg": "project and job are required"}]}, status=400)
+    source = re.sub(r"[^a-z_]", "", str(b.get("source") or "").strip().lower())[:30]
+    verdict = ci_trace.classify(str(b.get("trace") or ""), source=source,
+                                deployless=bool(b.get("deployless")))
+    ref = str(b.get("ref") or "")[:120]
+    sha = str(b.get("sha") or "")[:64]
+    row = hub_app.record_error(
+        "ci.%s.%s" % (project, re.sub(r"[^a-z0-9_-]", "-", job.lower())[:60]),
+        ("%s failed%s: %s" % (job, (" on " + ref) if ref else "", verdict["note"]))[:800],
+        severity=verdict["severity"],
+        code="ci_" + verdict["verdict"],
+        details=("pipeline=%s job_id=%s source=%s deployless=%s verdict=%s detail=%s"
+                 % (str(b.get("pipeline") or "-")[:40], str(b.get("job_id") or "-")[:40],
+                    source or "-", bool(b.get("deployless")), verdict["verdict"],
+                    verdict["detail"] or "-"))[:2000],
+        context={"app": project, "component": "ci", "operation": job,
+                 "reason": verdict["verdict"], "release": sha,
+                 "url": str(b.get("url") or "")[:240]},
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"],
+                                  "verdict": verdict["verdict"], "detail": verdict["detail"],
+                                  "note": verdict["note"], "severity": verdict["severity"]}},
+                        status=201)
 
 
 @writer(scope="error:report")

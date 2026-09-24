@@ -105,6 +105,11 @@ def _origin(source: str, context: dict) -> dict:
             out["origin_agent"] = parts[1]
     elif src.startswith("browser."):
         out["origin"] = "browser"
+    elif src.startswith("ci."):
+        out["origin"] = "ci"
+        parts = source.split(".")
+        if len(parts) > 1:
+            out["origin_app"] = parts[1]
     elif src.startswith("app."):
         out["origin"] = "app"
         parts = source.split(".")
@@ -142,6 +147,9 @@ CHANNELS = (
     {"key": "app", "label": "Satellite services",
      "wired": "POST /hub/api/app-error from each service's error forwarder",
      "match": ("app.",)},
+    {"key": "ci", "label": "Failed CI jobs",
+     "wired": "POST /hub/api/ci-failure from a failing job's own log tail (classified by the log)",
+     "match": ("ci.",)},
     {"key": "external", "label": "Foreign/scanner traffic",
      "wired": "django.security.* — recorded as warnings, never as our errors",
      "match": ("django.security.",)},
