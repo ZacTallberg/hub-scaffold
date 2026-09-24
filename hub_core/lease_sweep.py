@@ -16,6 +16,13 @@ naming who held it and how long ago it lapsed, and the task back to `todo`, wher
 offers it again. The row is a lifecycle row (hub_core.plan), so no completeness count ever reads
 an abandonment as progress.
 
+A LEASE IS HELD BY A LIVE CONSOLE. A clock is only the backstop: when the Hub can PROVE the
+console that holds a still-unexpired lease is gone (hub_core.liveness: its machine is reporting
+and the console is not among its live ones) for ``liveness.GONE_GRACE_S`` from its last-seen
+stamp, that is proof too, and the task is handed back without waiting hours for the lease clock.
+The adapter expires that lease in place, so the gone console's fencing token stops working. An
+UNPROVABLE holder (quiet machine, unreadable presence, no console recorded) is left to the clock.
+
 WHY IT IS SAFE TO BE WRONG. The worst it can do is put a task back on the queue with a note
 saying why: nothing is deleted, no checkpoint is lost, and a claim makes it in-progress again in
 one call. It is deliberately slow to fire -- a grace period past the lease's own expiry, or a
@@ -70,7 +77,8 @@ def phrase(age_s) -> str:
 
 
 def handback_reason(task: dict, lease: dict | None, now: float | None = None, *,
-                    grace_s: float = LEASE_GRACE_S, unheld_s: float = UNHELD_AFTER_S) -> str:
+                    grace_s: float = LEASE_GRACE_S, unheld_s: float = UNHELD_AFTER_S,
+                    roster=None, gone_grace_s: float | None = None) -> str:
     """WHY this task should go back on the queue, in the words a person will read -- or "" when
     it should be left exactly where it is. Every uncertain case returns "": held, recently
     lapsed, a decision waiting on a person, or simply not in progress."""
@@ -87,7 +95,24 @@ def handback_reason(task: dict, lease: dict | None, now: float | None = None, *,
         except (TypeError, ValueError):
             return ""                         # an unreadable lease is not proof of anything
         if expires > now:
-            return ""                         # somebody holds it
+            if roster is None:
+                return ""                     # somebody holds it, and liveness was not asked
+            from . import liveness
+            v = liveness.verdict(roster, lease.get("session"), lease.get("machine"),
+                                 floor=float(lease.get("last_heartbeat") or
+                                             lease.get("claimed") or 0),
+                                 now=now, grace_s=(liveness.GONE_GRACE_S if gone_grace_s is None
+                                                   else gone_grace_s))
+            if not v["released"]:
+                return ""                     # live, unprovable, or gone inside its grace
+            who = str(lease.get("agent") or "").strip() or "a worker"
+            where = str(lease.get("machine") or "").strip()
+            return ("The console %s%s that held this task (%s) is gone: its machine is still "
+                    "reporting and that console has not been seen for %s. Handed back by the hub "
+                    "so the board stops reading it as in progress; its lease is void and its "
+                    "checkpoints stand."
+                    % (str(lease.get("session") or "")[:64], " on %s" % where if where else "",
+                       who, phrase(v["gone_s"])))
         lapsed = now - expires
         if lapsed < grace_s:
             return ""                         # just lapsed: the holder may be mid-step
@@ -114,7 +139,8 @@ def handback_payload(task: dict, why: str) -> dict:
 
 def candidates(entities: dict, read_lease, now: float | None = None, *,
                grace_s: float = LEASE_GRACE_S, unheld_s: float = UNHELD_AFTER_S,
-               limit: int = MAX_PER_SWEEP) -> list:
+               limit: int = MAX_PER_SWEEP, roster=None,
+               gone_grace_s: float | None = None) -> list:
     """``[(task, why)]`` for every in-progress task whose holder is provably gone, oldest id
     first, bounded by `limit`. An unreadable lease skips its task (fail closed)."""
     now = time.time() if now is None else now
@@ -129,7 +155,8 @@ def candidates(entities: dict, read_lease, now: float | None = None, *,
             lease = read_lease(task.get("id"))
         except Exception:                                    # noqa: BLE001
             continue
-        why = handback_reason(task, lease, now, grace_s=grace_s, unheld_s=unheld_s)
+        why = handback_reason(task, lease, now, grace_s=grace_s, unheld_s=unheld_s,
+                              roster=roster, gone_grace_s=gone_grace_s)
         if why:
             out.append((task, why))
     return out

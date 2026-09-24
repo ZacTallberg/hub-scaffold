@@ -79,6 +79,10 @@ HUB_DONE_STRICTNESS = os.environ.get("HUB_DONE_STRICTNESS", "tracked")  # eviden
 # through HUB_COMMIT_RESOLVER = "package.module:function" (function(project, sha) -> True/False/None).
 HUB_PROJECT_REPOS = json.loads(os.environ.get("HUB_PROJECT_REPOS", "") or "{}")
 
+# How long a console the Hub can PROVE is gone keeps what it held (task leases and item claims)
+# before they are released, measured from its last-seen stamp. Default 30 minutes.
+HUB_GONE_GRACE_S = int(os.environ.get("HUB_GONE_GRACE_S", "1800") or 1800)
+
 # Optional local-worker bridge. Adopters enable it only after wiring their own launch protocol.
 HUB_WORKER_LAUNCH_ENABLED = False
 HUB_WORKER_PROTOCOL = "hub-example"

@@ -127,10 +127,13 @@ TOOLS = [
     {"name": "claim_item",
      "description": "Claim a non-task item (a question id or an error fingerprint) for ONE machine "
                     "so two machines never work the same thing; the same machine re-claims "
-                    "idempotently. release=true gives it back.",
+                    "idempotently. release=true gives it back. session names the console "
+                    "holding it: a claim whose console is provably gone frees itself after the "
+                    "grace, and a refusal says when.",
      "inputSchema": {"type": "object", "properties": {
          "item": {"type": "string"}, "machine": {"type": "string"},
-         "release": {"type": "boolean"}, "agent": {"type": "string"}},
+         "release": {"type": "boolean"}, "agent": {"type": "string"},
+         "session": {"type": "string"}},
          "required": ["item", "machine"]}},
     {"name": "heartbeat_task",
      "description": "Renew a live task lease; this proves liveness, not progress.",
@@ -358,7 +361,7 @@ def _call_tool(name, args, auth_headers):
                              {"repo": args["repo"]} if args.get("repo") else {},
                              auth_headers, method="get")
     elif name == "claim_item":
-        payload = {k: args[k] for k in ("item", "machine", "release", "agent")
+        payload = {k: args[k] for k in ("item", "machine", "release", "agent", "session")
                    if args.get(k) not in (None, "")}
         status, body = _seam("/hub/api/item-claim", payload, auth_headers)
     elif name == "heartbeat_task":

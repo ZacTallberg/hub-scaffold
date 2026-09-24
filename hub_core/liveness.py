@@ -21,7 +21,10 @@ holder is absent from that complete slice. Three answers, never two:
     UNPROVABLE  presence could not be read, the holder's machine is silent, or the holder named
                 no console at all -- absence proves nothing here
 
-UNPROVABLE is never a reason to free, refuse or rewrite anything; the lease's own expiry is the
+GONE, once it has lasted ``GONE_GRACE_S`` from the console's last-seen stamp, RELEASES what the
+holder held: the lease sweep hands its task back, an item claim is free to take, and a renewal
+from another console takes over the record. Inside the grace it releases nothing, and every
+refusal says when it will. UNPROVABLE is never a reason to free, refuse or rewrite anything; the lease's own expiry is the
 only thing allowed to act on an unprovable holder. The window ordering is load-bearing:
 REPORTING_WINDOW_S < presence.SESSION_ACTIVE_S, so by the time a console drops out of the live
 set because its machine went quiet, that machine has been silent for several reporting windows
@@ -42,6 +45,11 @@ UNPROVABLE = "unprovable"
 #: A machine that has reported anything (heartbeat or an authenticated write) this recently is
 #: REPORTING: its console list is complete enough that a missing console is a closed one.
 REPORTING_WINDOW_S = 300
+#: How long a holder must have been GONE -- measured from its console's LAST-SEEN stamp, not from
+#: when it claimed -- before what it held is released. Longer than the live window, so a console
+#: that stepped away briefly is never robbed, and far shorter than a lease or claim TTL, so a
+#: closed console's work is back on offer within the half hour instead of hours later.
+GONE_GRACE_S = 1800
 
 
 def _norm_session(value) -> str:
@@ -149,13 +157,31 @@ def resolve(hub_dir, now: float | None = None) -> Roster:
                   reporting=reporting, silent=silent, readable=True, at=now)
 
 
-def holder(roster: Roster, lease: dict, now: float | None = None) -> dict:
-    """The holder of one lease, as every surface should render it."""
+def verdict(roster, session: str, machine: str = "", floor: float = 0.0,
+            now: float | None = None, grace_s: float = GONE_GRACE_S) -> dict:
+    """ONE answer to "may this holder's claim be released?", shared by every claim kind.
+
+    ``{state, gone_s, frees_in_s, released}``: `released` is True only for a GONE holder whose
+    grace has run out. LIVE and UNPROVABLE never release (a missing roster is UNPROVABLE)."""
+    if roster is None:
+        return {"state": UNPROVABLE, "gone_s": None, "frees_in_s": None, "released": False}
+    state, gone_s = roster.gone_for(session, machine, floor=floor, now=now)
+    if state != GONE or gone_s is None:
+        return {"state": state, "gone_s": None, "frees_in_s": None, "released": False}
+    left = max(0, int(grace_s - gone_s))
+    return {"state": GONE, "gone_s": int(gone_s), "frees_in_s": left, "released": left <= 0}
+
+
+def holder(roster: Roster, lease: dict, now: float | None = None,
+           grace_s: float = GONE_GRACE_S) -> dict:
+    """The holder of one lease, as every surface should render it -- including, for a GONE
+    holder, how long until what it holds frees itself."""
     lease = lease or {}
-    state, gone_s = roster.gone_for(lease.get("session"), lease.get("machine"),
-                                    floor=float(lease.get("last_heartbeat") or
-                                                lease.get("claimed") or 0), now=now)
+    v = verdict(roster, lease.get("session"), lease.get("machine"),
+                floor=float(lease.get("last_heartbeat") or lease.get("claimed") or 0),
+                now=now, grace_s=grace_s)
     return {"holder_session": _norm_session(lease.get("session")) or None,
             "holder_machine": _norm_machine(lease.get("machine")) or None,
-            "holder_state": state,
-            "holder_gone_s": (round(gone_s) if gone_s is not None else None)}
+            "holder_state": v["state"],
+            "holder_gone_s": v["gone_s"],
+            "holder_frees_in_s": v["frees_in_s"]}
