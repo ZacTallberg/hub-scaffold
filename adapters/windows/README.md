@@ -114,3 +114,23 @@ powershell -ExecutionPolicy Bypass -File adapters\windows\launch-worker.ps1 `
 The Hub page never asks for a write token and has no unlock flow. If either appears, a stale frontend
 or old deployment is being served; verify the live build SHA and clear the stale deployment/cache
 rather than entering a token.
+
+## Unattended responders (separate from the launch control)
+
+`register-responder.ps1` schedules `python -m hub_core.responder --home <dir> poll` for the
+current user, no admin needed — the event-driven launcher described in
+`patterns/unattended-responders.md`. It is independent of the Launch Worker bridge above: no
+protocol handler, no browser grant.
+
+```powershell
+# write <HomeDir>\responder.env first: HUB_API_BASE, HUB_AGENT_ID, HUB_RESPONDER_RUNTIME,
+# HUB_RESPONDER_WORKSPACE, HUB_AGENT_TOKEN_FILE (a path; the token itself never goes in the file)
+.\register-responder.ps1 -HomeDir "$env:USERPROFILE\.hub-responder"   # arm; re-run = repair
+.\register-responder.ps1 -Remove                                        # leave
+```
+
+The task runs under `pythonw.exe` so the scheduler never flashes a console window, refuses to
+overlap itself, and gives each poll a ten-minute limit (the sessions it starts are detached and
+bounded by their own clocks). The sessions get a hidden console of their own, so nothing below
+them pops a window either. Kill switch: create `<HomeDir>\DISABLED`. `-Remove` deletes only the
+scheduled task; the ledger (`runs.json`) and `responder.log` stay for you to read.

@@ -16,7 +16,7 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, validate
+from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, textguard, validate
 from hub_core import errorlog as _errorlog
 from hub_core.canonical import content_hash
 from hub_core.process_lock import LockBusy, ProcessFileLock
@@ -151,6 +151,16 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
                        f"is append-only and hash-chained — a secret written here can never be "
                        f"removed. Redact it and retry. If a real secret already reached the "
                        f"ledger, ROTATE it; editing the chain is not possible."}]}, status=422)
+        # CONTROL-BYTE REFUSAL, same choke point, same reasoning: a backslash escape eaten
+        # between an author's source and this call (\a inside a Windows path) lands raw BEL
+        # bytes in the ledger, invisible on the page and corrupting every reader's copy. The
+        # operational error stream is exempt — it never enters the ledger, and a stack trace
+        # with ESC colour codes refused at the door is a failure nobody would ever see.
+        if scope != "error:report":
+            controls = textguard.control_char_problems(b)
+            if controls:
+                return JsonResponse({"errors": [{"code": "control_chars",
+                    "msg": textguard.message(controls), "found": controls}]}, status=422)
         requested_agent = b.get("agent")
         if auth.mode == "scoped-agent":
             if requested_agent not in (None, "", auth.subject):
@@ -1935,7 +1945,10 @@ def ask(request, b):
     local = "q-%s-%s" % (_slug(agent, "agent"),
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
-    tags = ["question", "open"] + (["human-only"] if b.get("human_only") else [])
+    # `review: true` marks a HUMAN GATE: delivered like any question, but tagged so no
+    # unattended session may take it (the responder skips `review`; its charter forbids it).
+    tags = (["question", "open"] + (["human-only"] if b.get("human_only") else [])
+            + (["review"] if b.get("review") is True else []))
     # The question is stored WHOLE. It used to be cut at 300 characters with no marker, so
     # the operator answered the first half of a question and the asker never learned why.
     payload = {"type": "note", "category": "context", "title": text,

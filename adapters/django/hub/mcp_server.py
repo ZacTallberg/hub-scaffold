@@ -549,6 +549,25 @@ TOOLS = [
          "agent": {"type": "string"}, "machine": {"type": "string"},
          "session": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 3000}}}},
+    {"name": "record",
+     "description": "Record what you learned as the RIGHT kind of record: finding (a discovered "
+                    "fact, with evidence), method (a reusable procedure), gap (an ownable "
+                    "deficiency with a severity), or review (a human gate delivered to the "
+                    "operator before the thing ships).",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"enum": ["finding", "method", "gap", "review"]},
+         "agent": {"type": "string"}, "title": {"type": "string"},
+         "text": {"type": "string",
+                  "description": "evidence (finding/gap), how it is done (method), or the "
+                                 "context a person needs to decide (review)"},
+         "severity": {"enum": ["P0", "P1", "P2", "P3"], "description": "gap only"},
+         "relates_to": {"type": "array", "items": {"type": "string"}}},
+         "required": ["kind", "agent", "title", "text"]}},
+    {"name": "read_doctrine",
+     "description": "Read a standing document (doctrine, charter, agents) exactly as this "
+                    "credential may see it; audience-scoped sections are applied server-side.",
+     "inputSchema": {"type": "object", "properties": {
+         "doc": {"type": "string", "description": "document name (default doctrine)"}}}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -715,6 +734,37 @@ def _plan_write(args, auth_headers, mutate, attempts=3):
         if status not in (409, 428) or not codes & {"conflict", "precondition_required"}:
             break
     return status, body
+
+
+def _record(args, auth_headers):
+    """One tool, four record kinds, each landing on the write route that owns it (the same
+    mapping as the CLI's finding/method/gap/review verbs)."""
+    kind, agent = args["kind"], args["agent"]
+    title, text = str(args["title"]), str(args["text"])
+    related = [str(r) for r in (args.get("relates_to") or [])]
+    if kind in ("finding", "method"):
+        payload = {"agent": agent, "title": title, "body_md": text, "status": "standing",
+                   "category": "discovery" if kind == "finding" else "method",
+                   "tags": [kind]}
+        if related:
+            payload["relates_to"] = related
+        return _seam("/hub/api/note", payload, auth_headers)
+    if kind == "gap":
+        if args.get("severity") not in ("P0", "P1", "P2", "P3"):
+            return 400, {"errors": [{"code": "need_severity",
+                                     "msg": "a gap carries a severity P0..P3"}]}
+        return _seam("/hub/api/gap", {"agent": agent, "title": title, "status": "open",
+                                      "severity": args["severity"], "evidence": text},
+                     auth_headers)
+    if kind == "review":
+        payload = {"agent": agent, "question": "Review gate: " + title, "anyway": True,
+                   "review": True,
+                   "context": text + "\n\nThis is a human gate: nothing it covers ships "
+                                     "until a person answers."}
+        if related:
+            payload["relates_to"] = related
+        return _seam("/hub/api/ask", payload, auth_headers)
+    return 400, {"errors": [{"code": "unknown_kind", "msg": str(kind)}]}
 
 
 def _call_tool(name, args, auth_headers):
@@ -1042,6 +1092,11 @@ def _call_tool(name, args, auth_headers):
     elif name == "console_history":
         query = {key: args[key] for key in ("agent", "machine", "session", "limit") if args.get(key)}
         status, body = _seam("/hub/history.json", query, auth_headers, method="get")
+    elif name == "record":
+        status, body = _record(args, auth_headers)
+    elif name == "read_doctrine":
+        status, body = _seam("/hub/doctrine.json", {"doc": args.get("doc") or "doctrine"},
+                             auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

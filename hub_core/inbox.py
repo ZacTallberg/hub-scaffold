@@ -224,6 +224,9 @@ def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> 
             "waited_s": int(waited) if waited is not None else None,
             "age": age_phrase(waited),
             "stuck": waited is not None and waited >= ASK_STUCK_S,
+            # A HUMAN GATE (`review`): delivered like any question, never taken by an
+            # unattended session.
+            "review": "review" in [str(t).lower() for t in (ent.get("tags") or [])],
             **({"unstuck": True} if unstuck else {}),
             **({"human_only": True} if human_only else {}),
             **({"granted": granted,

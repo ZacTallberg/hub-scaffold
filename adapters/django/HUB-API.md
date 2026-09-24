@@ -91,6 +91,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `POST /hub/api/history` | **Opt-in.** A workstation's batch of new console turns: `{agent, sessions:[{session, runtime, cwd, title, turns:[{ts, role, text}]}]}` (≤ 512 KB). Needs `history:write`; a scoped credential uploads as its own subject. NOT `@writer`: secret-shaped spans are replaced by `[REDACTED]` rather than refusing the batch. Stored in the `HUB_DIR/histories/` sidecar, never the ledger; answers `{sessions, turns, redacted_on_receipt}`. 404 while disabled. |
 | `POST /hub/api/retire` | Retire or re-open one knowledge record — `gap`, `note`, `directive`, `adr`, or an adopter-added `finding` — by `id` or `type` + exact `title`. Each type moves only to a status its schema enumerates (defaults: note/directive/adr → `superseded`, finding → `stale`; a gap must name its status). Any move other than a re-open requires `note`, which is appended to the record's text with a dated `[status YYYY-MM-DD by agent]` stamp, never written over it. `closed`/`mitigated` gaps require `addressed_by` (422 `need_addressed_by` names it). Needs `record:retire` plus the target type's `<type>:write` scope. Retired records — dead by status (`superseded, dropped, rejected, retracted, stale`) or named in a live record's `supersedes` — leave `search.json` at once (`hub_core/record_state.py` is the one definition). |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
+| `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish, `record` (a finding, method, gap or review, each onto its own write path) and `read_doctrine` (the facet-rendered standing documents); run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
 | `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
 | `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. On the thread-holding (WSGI) path at most `HUB_LIVE_STREAMS_MAX` streams (default 3; 0 = unlimited) are open per process; a stream past the cap receives one `busy` frame `{reason, limit, retry_ms}` (jittered 8–20 s) and closes — the board treats that as capacity, not a transport failure, shows "Waiting for a live slot" and reconnects after `retry_ms`. ASGI streams hold no worker thread and are not capped. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
@@ -124,6 +125,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/task/<local>.json` | Also carries the same annotations; `python -m hub_core.client recall <id>` prints it as state, holder, commits and the checkpoint trail in order. |
 | `GET /hub/attention.json` | **Needs attention**: every fixable operational condition — seats gone silent, clients older than the one this hub serves, consoles working with no task, orphaned leases, stalled or unclosed tasks, unstarted unattended requests, expiring/expired credentials, unanswered questions, unclaimed errors — each with `severity`, `who` acts, the exact `fix`, the `evidence` values that produced it, and a real `age_s` (first-seen is persisted). Cleared conditions move to `recently_cleared` with how long they stood. A source that could not be read is named in `sources` and silences only its own detectors. `ETag`/304 (ages are excluded from the tag). |
 | `GET /hub/consoles.json[?session=<id>]` | Every live console split `attended` / `unattended` (live runs) / `finished` (runs that ended in the last 30 min, kept as a recap with their outcome), each with an honest state (`working` under two minutes of quiet, else `idle` with "idle 12 min, last did …"), the digest a supervisor reported, and the task IT claimed. `crossovers[]` lists every pair of consoles on the same file, task, subsystem or subject; `?session=` adds `addressed[]` — the signals for that console with the peer's focus, task, latest checkpoint (a peer report), how to reach them and a suggested split. |
+| `GET /hub/doctrine.json?doc=<name>` | a standing document rendered through its facet fences for THE PRESENTING CREDENTIAL: `{doc, served[], facets_visible[], subject, sha256, text}`. A credential with scope `facet:<name>` (or `facet:*`, or `*`) sees that facet's blocks, an anonymous read sees none; hidden blocks leave no trace and the response names only the facets this caller CAN see. `404 unknown_doc` lists the served names; a source file carrying a C0 control character (a lost `\a` in a Windows path) is refused `503 control_chars` naming the offsets, never served. A near-miss fence marker (wrong shape, trailing text) hides the rest of the document from every reader below `*`. Documents come from `HUB_DOCTRINE_FILES` (default `PROJECT/DOCTRINE.md`, `CHARTER-CORE.md`, `AGENTS.md`). Fence syntax: `patterns/multi-agent-coordination.md`. |
 
 `GET /hub/hub.json` (and `GET /hub/?format=json`) answer **304** when the caller already holds the
 current tag, so an idle poll or a re-grounding pull costs an empty body. The tag is WEAK (`W/"…"`):
@@ -437,6 +439,17 @@ bridge an app writes, the agent's upstream contract).
 | `GET /hub/api/agent/history?person=&app=&scope=app\|all` (`agent:history`) | | The person's past conversations for this app, or all. |
 | `GET /hub/api/agent/conversation?person=&id=` (`agent:history`) | | One conversation's turns. |
 
+### Recording the right kind of thing
+
+The client's `review-gate` verb and the MCP `record` tool are
+routings onto the write paths above, not new endpoints: a finding is a `note` in category
+`discovery` tagged `finding`, a method a `note` in category `method`, a gap a `gap` with a
+severity and evidence, and a review an `ask` whose question starts `Review gate:` sent with
+`review: true` — so it is DELIVERED to the operator before the thing ships, and tagged `review`
+(the inbox item carries `review: true`) so no unattended responder is ever launched for it. When to use which:
+`patterns/multi-agent-coordination.md`. `create --unattended` marks a task for the event-driven
+responder lane (`routing.required_capabilities` += `unattended`; `patterns/unattended-responders.md`).
+
 ### The operational error stream
 
 | Endpoint (scope) | Key body fields | Behaviour |
@@ -486,6 +499,10 @@ the weight a reader should show is `max(1 + occurrences_since_last, occurrences_
 Every write on every endpoint above is additionally screened for secret shapes and refused
 `422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
 be removed, only rotated. Recognizable redaction placeholders pass.
+Every board write outside the error-report scope is also refused `422 control_chars` when a
+string carries a C0 control character other than newline, carriage return or tab — almost
+always a backslash escape eaten between the source and the call (`\a` in a Windows path lands a
+raw BEL). The refusal names the field, offsets and character; fix the source and resend.
 
 ### Task lifecycle beyond claim/complete
 
@@ -595,7 +612,7 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 `bad_sha`/`release_not_observed`/`need_tasks_closed`/`invalid_task_closure` (422) ·
 `immutable_deploy`/`adr_immutable` (409) · `bad_grant_request` (422) · `launch_disabled`/`not_found` (404) ·
 `launch_refused` (403) · `launch_unavailable` (503) ·
-`need_agent`/`secret_shaped_payload`/`bad_older_than_hours` (400/422) ·
+`need_agent`/`secret_shaped_payload`/`control_chars`/`bad_older_than_hours` (400/422) ·
 `need_question`/`need_question_and_text`/`need_app`/`need_bound`/`need_fingerprint` (400) ·
 `duplicate_question`/`unknown_asker`/`not_acked` (409) ·
 `no_such_question`/`unknown_directive` (404).

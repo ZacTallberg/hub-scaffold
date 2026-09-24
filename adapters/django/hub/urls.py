@@ -44,6 +44,8 @@ urlpatterns = [
     path("knowledge/since", R(knowledge_api.knowledge_since), name="knowledge-since"),
     path("capabilities.json", R(knowledge_api.capabilities_json), name="capabilities"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
+    # Standing documents rendered through their facet fences for the presenting credential.
+    path("doctrine.json", R(hub_api.doctrine_json), name="doctrine"),
     path("agent-updates.json", R(hub_api.agent_updates_json), name="agent-updates"),
     path("receipts.json", R(hub_api.receipts_json), name="receipts"),
     path("activity.json", R(hub_api.activity_json), name="activity"),
@@ -189,7 +191,7 @@ VISIBILITY = {
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
-    "history.json": "member",
+    "history.json": "member", "doctrine.json": "veiled",
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
     "capabilities.json": "veiled",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
