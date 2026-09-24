@@ -204,11 +204,17 @@
     };
   }
   function taskProgress(task) {
-    var plan = (task && task.plan) || [];
+    // A LIFECYCLE row (a hand-back) is shown on the task but never counted as a done step:
+    // counted, it made a task read more finished each time a run died on it.
+    var plan = ((task && task.plan) || []).filter(function (s) { return s && !s.lifecycle; });
     if (!plan.length) return null;
-    var done = plan.filter(function (s) { return s && s.done; }).length;
+    var done = plan.filter(function (s) { return s.done; }).length;
     return { done: done, total: plan.length, pct: Math.round(done * 100 / plan.length),
-             step: (plan.filter(function (s) { return s && !s.done; })[0] || {}).step || null };
+             step: (plan.filter(function (s) { return !s.done; })[0] || {}).step || null };
+  }
+  function handBack(task) {
+    // The one self-counting hand-back row, when a run ended with this task unfinished.
+    return ((task && task.plan) || []).filter(function (s) { return s && s.kind === "handed_back"; })[0] || null;
   }
   function taskStatusBadge(task) {
     // `done` means the real operation completed. A receipt is required only when this task
@@ -1219,6 +1225,7 @@
       var askedMs = Date.parse(askedAt), answeredMs = Date.parse(answeredAt);
       threads.push({
         id: n.id, asker: asker, title: n.title || "", context: n.body_md || "",
+        hop: parseInt(n.hop, 10) || 0,
         open: tags.indexOf("open") >= 0,
         answered: !!reply,
         answer: answerText,
@@ -1250,6 +1257,9 @@
     var kids = [
       el("span", { class: "ask-head" }, [
         el("span", { class: "ask-from", text: t.asker || "someone" }),
+        t.hop ? el("span", { class: "ask-hop", title: "raised by an unattended run " + t.hop +
+                             " hop" + (t.hop === 1 ? "" : "s") + " deep; hop 2 is a person's",
+                             text: "escalation · hop " + t.hop }) : null,
         el("span", { class: "ask-state" + (t.open ? " is-open" : t.acked ? " is-closed" : " is-answered"),
                      text: stateLbl }),
         el("time", { class: "rel-time ask-age", datetime: t.askedAt || "", "data-ts": t.askedAt || "",
@@ -1748,6 +1758,18 @@
           el("div", { class: "tcard-track" }, [el("div", { class: "tcard-fill", style: "width:" + prog.pct + "%" })]),
           el("div", { class: "cell-sub", text: "step " + prog.done + "/" + prog.total + (prog.step ? (" — " + prog.step) : "") })
         ])));
+      }
+      var back = handBack(r);
+      if (back) {
+        var times = back.times || 1;
+        liveRows.push(row("Handed back", el("div", { class: "callout" + (times > 1 ? " warn" : "") }, [
+          el("span", { class: "b-glyph", "aria-hidden": "true", text: times > 1 ? GLYPH.warn : GLYPH.info }),
+          el("div", null, [
+            el("div", { text: times === 1 ? "A run ended with this task unfinished; it went back to the queue."
+                                         : times + " runs ended with this task unfinished — a pattern about the task, not one bad run." }),
+            back.note ? el("div", { class: "cell-sub", text: back.note }) : null,
+            back.note_at ? el("div", { class: "cell-sub mono", text: back.note_at }) : null
+          ].filter(Boolean))])));
       }
       if (proof.declared) liveRows.push(rowMono("Declared critical probe", proof.command));
       if (rec) {

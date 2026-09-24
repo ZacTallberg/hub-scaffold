@@ -62,6 +62,25 @@ def body_text(value, limit=8000) -> str:
                         % (limit, len(s)))
 
 
+def _hop(value) -> int:
+    try:
+        return max(0, min(9, int(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _age_s(stamp):
+    """Seconds since an ISO stamp, or None when it cannot be read (never a guess)."""
+    from datetime import datetime, timezone
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0, int(time.time() - when.timestamp()))
+
+
 def question_items(state) -> list:
     """Open questions from a person, addressed to the operator, newest first."""
     out = []
@@ -75,13 +94,18 @@ def question_items(state) -> list:
             continue
         prov = ent.get("provenance") or {}
         asker = _text(ent.get("asker") or prov.get("agent") or "", 60)
+        at = _text(prov.get("created_at") or prov.get("updated_at") or "", 40)
         out.append({
             "kind": "question",
             "id": eid,
             "from": asker or "a board member",
             "title": _text(ent.get("title"), 300),
             "body": body_text(ent.get("body_md")),
-            "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
+            "at": at,
+            # Escalation depth (0 = a person or an attended session) and how long it has
+            # waited: an unattended responder takes a hop-1 escalation only after a cooldown.
+            "hop": _hop(ent.get("hop")),
+            "age_s": _age_s(at),
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out

@@ -703,6 +703,76 @@ def release(request, b):
     return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
 
 
+HAND_BACK_KIND = "handed_back"
+
+
+def handed_back_count(plan) -> int:
+    """How many runs ended with this task unfinished, from its own plan. One self-counting row
+    carries `times`; a row written without it counts once. Every reader that caps attempts reads
+    this number, so it means the same thing on every machine."""
+    return sum(int(step.get("times") or 1) for step in (plan or [])
+               if isinstance(step, dict) and step.get("kind") == HAND_BACK_KIND)
+
+
+@writer(scope="task:release")
+def hand_back(request, b):
+    """A run ended with its task still in progress: put the task back on the queue, say so ONCE.
+
+    Held work whose worker has gone is the board's most expensive lie — it reads as in flight
+    while nobody is on it. `release` alone returns the lease but leaves the task `in_progress`
+    and silent. A hand-back is the whole transition, atomically under the lease lock: the fenced
+    lease is proven (token + subject), the task returns to `todo`, and its plan gains ONE
+    lifecycle row (`kind: handed_back`, `lifecycle: true`) that counts itself (`times`).
+
+    One row, not one per run: three hand-backs are a pattern about the task, and three copies of
+    one sentence are how a pattern goes unread. The row is re-appended at the END, so "the newest
+    checkpoint is a hand-back" still means nobody has picked the task up since. `lifecycle: true`
+    keeps it out of every "N of M steps done" counter while it stays visible — a hand-back
+    recorded as a done step made a task look MORE finished each time a run died on it."""
+    eid, token = b.get("id"), b.get("token")
+    agent = str(b.get("agent") or "agent")
+    note = str(b.get("note") or "").strip()
+    if (not isinstance(eid, str) or not eid.strip() or not isinstance(token, str)
+            or not token.strip()):
+        return JsonResponse({"errors": [{"code": "need_id_token"}]}, status=400)
+    if not note or len(note) > 600:
+        return JsonResponse({"errors": [{"code": "need_note",
+            "msg": "say why the run ended with the task unfinished (1..600 characters)"}]},
+            status=400)
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        lease = hub_app._read_lease(eid)
+        if not lease or lease.get("token") != token:
+            return JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+        if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
+                                        request.hub_auth.credential_id):
+            return JsonResponse({"errors": [{"code": "lease_subject_mismatch"}]}, status=409)
+        if b.get("agent") and b.get("agent") != lease.get("agent"):
+            return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
+        state = hub_app.current_state()
+        ent = state.get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if ent.get("status") != "in_progress":
+            return JsonResponse({"errors": [{"code": "not_in_progress",
+                "msg": "only held, unfinished work is handed back",
+                "status": ent.get("status")}]}, status=409)
+        plan = [dict(step) for step in (ent.get("plan") or []) if isinstance(step, dict)]
+        times = handed_back_count(plan) + 1
+        plan = [step for step in plan if step.get("kind") != HAND_BACK_KIND]
+        line = note if times == 1 else ("[handed back %d times] %s" % (times, note))[:600]
+        plan.append({"step": note[:80], "done": True, "note": line, "kind": HAND_BACK_KIND,
+                     "lifecycle": True, "times": times,
+                     "note_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
+        resp, status = _append("task", eid, {"type": "task", "status": "todo", "plan": plan},
+                               expected_version=ent.get("version"), agent=agent,
+                               idem=b.get("idem_key"), etype="task.handed_back")
+        if status != 200:
+            return JsonResponse(resp, status=status)
+        released = hub_app.release_lease(eid, token)
+    return JsonResponse({"ok": True, "task": eid, "handed_back": times,
+                         "lease_released": released, "version": resp["data"]["version"]})
+
+
 def _bounded_setting(name, default, low, high):
     try:
         value = int(hub_app._dj_setting(name, os.environ.get(name, default)))
@@ -1139,6 +1209,21 @@ def ask(request, b):
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:
         payload["relates_to"] = related
+    # THE ESCALATION DEPTH, as a field. An unattended run's question carries how many unattended
+    # hops deep it is (its launcher passes HUB_RESPONDER_HOP; the client stamps it). A responder
+    # may take a hop-1 escalation once more after a cooldown; hop 2 is a person's. A stamp in
+    # prose depends on the model remembering to write it — a field set by the process does not.
+    hop = b.get("hop")
+    if hop not in (None, "", 0):
+        try:
+            hop = int(hop)
+        except (TypeError, ValueError):
+            hop = -1
+        if not 0 <= hop <= 9:
+            return JsonResponse({"errors": [{"code": "bad_hop",
+                "msg": "hop is the escalation depth, an integer 0..9"}]}, status=422)
+        if hop:
+            payload["hop"] = hop
     resp, status = _append("note", eid, payload,
                            expected_version=existing.get("version") if existing else None,
                            agent=agent, idem=b.get("idem_key"), etype="note.created")
