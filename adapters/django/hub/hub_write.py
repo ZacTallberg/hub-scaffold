@@ -628,7 +628,9 @@ def deploy(request, b):
                     "tasks_closed": normalized_tasks})
     existing = entities.get(eid)
     if existing:
-        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "at", "build",
+        # `at` is when the release was recorded, not part of what was released: a re-run job
+        # that re-posts the same proof later is the same record, answered with the first `at`.
+        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "build",
                             "method", "audit_ok")
         comparable_existing = dict(existing)
         if isinstance(comparable_existing.get("tasks_closed"), list):
@@ -637,7 +639,7 @@ def deploy(request, b):
                          for field in immutable_fields)
         if same_proof:
             return JsonResponse({"data": {"id": eid, "version": existing.get("version"),
-                                           "idempotent": True}})
+                                           "idempotent": True, "at": existing.get("at")}})
         return JsonResponse({"errors": [{"code": "immutable_deploy",
             "msg": "a deploy record is immutable; publish a different SHA for a different release",
             "id": eid, "version": existing.get("version")}]}, status=409)

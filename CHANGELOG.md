@@ -28,8 +28,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - **Deploy records survive a cold hub.** `python -m hub_core.client deploy` posts the immutable
   release closure with growing per-attempt timeouts (20/45/90 s), one `DEPLOY_RECORD_RETRY` line
   per transport failure, never a retry of a refusal — safe only because the record is
-  idempotent by sha, so a lost reply comes back `idempotent: true`. `record_deploy` joins the MCP
-  tools.
+  idempotent by sha, so a lost reply comes back `idempotent: true`. The record's `at` is not part
+  of the proof: a re-run job re-posting the same release later is answered idempotent with the
+  first `at`, not refused. `record_deploy` joins the MCP tools and stamps `at` when omitted.
 - **Standard components and app skeletons.** A `cap` of `kind: component` carries what/when/get/
   entry/delivery/exemplar/depends_on; a `kind: skeleton` names components (`applies`) or takes
   all of them in dependency order (`applies_all`). `GET /hub/components.json` resolves skeletons
