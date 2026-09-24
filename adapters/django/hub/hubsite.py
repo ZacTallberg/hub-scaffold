@@ -17,4 +17,8 @@ def hub(request):
     if request.GET.get("format") == "json":
         return hub_json(request)
     _state, snap = _snapshot(request.GET.get("served"))
+    from . import veil
+    view = veil.veil_for(request)
+    if not view.open:
+        snap = view.scrub(snap)        # the inlined island is a payload like any other
     return HttpResponse(shell.render(snap, f"{hub_app.BRAND} · Hub", csrf_token=get_token(request)))

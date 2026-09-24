@@ -7,7 +7,9 @@ from the JSONL on init, so a crash between the JSONL append and the index commit
 (the JSONL is the durable source). Stdlib only (works in Django and in single-file WSGI).
 """
 import os
+import random
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,37 @@ class ConflictError(Exception):
         self.aggregate = aggregate
         self.expected = expected
         self.current = current
+
+
+class StoreBusy(TimeoutError):
+    """The ledger write lock could not be taken inside the wait budget. RETRYABLE.
+
+    A capacity condition, not a defect: the failure happens BEFORE any line is written, any index
+    row is inserted or any fsync runs, so the same call repeated a moment later succeeds and a
+    retry can never double-write. It has its own class so a caller can tell it apart from
+    ConflictError (a real disagreement about versions) and from a genuine sqlite fault. Left raw,
+    ``sqlite3.OperationalError: database is locked`` (or the ledger file lock's timeout) climbs out
+    of a view as an unhandled 500 and lands on the error queue as a defect somebody must pick up,
+    for a condition that is transient by construction. The adapter answers it 503 + Retry-After.
+
+    Subclasses TimeoutError so every existing ``except TimeoutError`` keeps working."""
+
+    def __init__(self, what, waited_s, cause=None):
+        super().__init__("ledger write lock unavailable during %s after %.1fs" % (what, waited_s))
+        self.what = what
+        self.waited_s = waited_s
+        self.cause = cause
+
+
+# THE SQLITE WAIT BUDGET IS SPLIT, NOT SHORTENED. SQLite's busy handler backs off on a fixed
+# schedule, so several writers waiting on one lock stay in step and one of them can be beaten on
+# every retry until its whole timeout is spent. Several shorter attempts separated by RANDOMISED
+# sleeps spend about the same wall clock while giving the waiter independent, de-synchronised
+# chances, so a convoy resolves instead of electing a loser.
+BEGIN_ATTEMPTS = 3
+BEGIN_TIMEOUT_MS = 5000
+BEGIN_BACKOFF_S = 0.05          # multiplied by the attempt number
+BEGIN_JITTER_S = 0.25           # the de-synchronising part; must not be zero
 
 
 def _now_iso() -> str:
@@ -162,7 +195,7 @@ class LedgerLock:
                     if _t.time() > deadline:
                         os.close(fd)
                         self._rlock.release()
-                        raise TimeoutError(f"ledger lock busy: {self.path}")
+                        raise StoreBusy("ledger file lock", self.timeout)
                     self.attempts += 1
                     _t.sleep(0.002)
             try:      # for a human reading a wedged board; nothing ever reads it back. Byte 0 is
@@ -222,8 +255,13 @@ _HASH_FIELDS = (
 
 
 class EventStore:
-    def __init__(self, root):
+    def __init__(self, root, lock_timeout=None):
+        """``lock_timeout`` bounds how long THIS handle waits for the ledger lock before raising
+        StoreBusy. None keeps the far-off LedgerLock ceiling (offline tools, migrations); a
+        request-serving adapter passes its own budget so a lock burst answers 503 in seconds
+        instead of holding a request thread for a quarter of an hour."""
         self.root = Path(root)
+        self._lock_timeout = lock_timeout
         self.root.mkdir(parents=True, exist_ok=True)
         self.jsonl = self.root / "events.jsonl"
         self.db_path = self.root / "events.db"
@@ -241,7 +279,7 @@ class EventStore:
         # path: an earlier attempt to remove the drop entirely (rebuild into side tables and swap by
         # DDL) lost an acked event, and serializing the window is worth far more than a cleverer
         # rebuild that cannot be trusted with the ledger.
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             self._init_db()
             self._reconcile()
 
@@ -251,7 +289,7 @@ class EventStore:
     def _init_db(self):
         c = self._db
         c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA busy_timeout=5000")
+        c.execute("PRAGMA busy_timeout=%d" % BEGIN_TIMEOUT_MS)
         c.execute(
             "CREATE TABLE IF NOT EXISTS events ("
             "seq INTEGER PRIMARY KEY, event_id TEXT, ts TEXT, aggregate TEXT, type TEXT,"
@@ -282,6 +320,26 @@ class EventStore:
     def _drop_trigger(self):
         self._db.execute("DROP TRIGGER IF EXISTS events_no_update")
         self._db.execute("DROP TRIGGER IF EXISTS events_no_delete")
+
+    def _begin_immediate(self, what):
+        """Take the SQLite write lock, riding out contention; raise StoreBusy when the budget is
+        spent. Only CONTENTION is retryable — "cannot start a transaction within a transaction",
+        a corrupt file or a read-only volume keep their own message instead of being relabelled
+        as busy."""
+        started = time.monotonic()
+        cause = None
+        for attempt in range(BEGIN_ATTEMPTS):
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if "locked" not in text and "busy" not in text:
+                    raise
+                cause = exc
+                if attempt < BEGIN_ATTEMPTS - 1:
+                    time.sleep(BEGIN_BACKOFF_S * (attempt + 1) + random.uniform(0, BEGIN_JITTER_S))
+        raise StoreBusy(what, time.monotonic() - started, cause)
 
     def _meta_get(self, key):
         r = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -330,7 +388,7 @@ class EventStore:
         rewrites it would resurrect the very fork/lost-write class the lock closes."""
         if self._reconcile_current():
             return
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             if self._reconcile_current():
                 return
             self._reconcile_heal()
@@ -395,7 +453,7 @@ class EventStore:
         trouble = None
         for attempt in range(2):
             try:
-                c.execute("BEGIN IMMEDIATE")
+                self._begin_immediate("reconcile")
                 self._drop_trigger()
                 armed = [r["name"] for r in c.execute(
                     "SELECT name FROM sqlite_master WHERE type='trigger' AND name IN "
@@ -557,7 +615,7 @@ class EventStore:
         allocated against a SQLite head the file has already moved past.
         """
         import json
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             return self._append_locked(
                 aggregate=aggregate, type=type, payload=payload,
                 expected_version=expected_version, agent_id=agent_id, session_id=session_id,
@@ -584,16 +642,16 @@ class EventStore:
         ops = [dict(op) for op in (operations or [])]
         if not ops:
             return []
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             head_hash = self._meta_get("chain_head") or ""
             if jsonl_tail_hash(self.jsonl) != head_hash:
                 self._reconcile_heal()
             c = self._db
-            c.execute("BEGIN IMMEDIATE")
+            self._begin_immediate("append_batch")
             if self._jsonl_tail_seq() > self._last_seq_and_hash()[0]:
                 c.execute("ROLLBACK")
                 self._reconcile()
-                c.execute("BEGIN IMMEDIATE")
+                self._begin_immediate("append_batch")
             try:
                 replay = []
                 for op in ops:
@@ -695,7 +753,7 @@ class EventStore:
         if tail != head_hash:
             self._reconcile_heal()
         c = self._db
-        c.execute("BEGIN IMMEDIATE")  # serialize writers
+        self._begin_immediate("append")  # serialize writers
         # ALLOCATE FROM THE CANONICAL SOURCE: with the write lock held, the index must agree with
         # the jsonl tail before any seq is minted. If the file is ahead (an earlier append's index
         # commit failed or crashed after the fsync), re-sync the index from the file and retake
@@ -703,7 +761,7 @@ class EventStore:
         if self._jsonl_tail_seq() > self._last_seq_and_hash()[0]:
             c.execute("ROLLBACK")
             self._reconcile()
-            c.execute("BEGIN IMMEDIATE")
+            self._begin_immediate("append")
         try:
             if idem_key:
                 r = c.execute("SELECT raw FROM events WHERE aggregate=? AND idem_key=?",

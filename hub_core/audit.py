@@ -102,6 +102,13 @@ def _v(vid, severity, invariant, observed, expected, *, kind="logic", remediatio
 DEPLOY_BOOKKEEPING_PATHS = frozenset({"PROJECT/state.json"})
 
 
+# Only the most recent audit's per-entity schema results, keyed by the entity's canonical content
+# and the registry's. Never the audit VERDICT: chain checks, references, coherence and rulings all
+# still run on every audit — only re-validating a byte-identical entity against byte-identical
+# schemas is skipped. Concurrent audits can only lose hits, never borrow a result for other inputs.
+_VALIDATION_CACHE = {"schema": None, "entities": {}}
+
+
 def audit(state, registry, *, store: EventStore = None, coherence: dict = None, adapters=None,
           suppress=None, legacy_receipt_baseline=None,
           legacy_entity_schema_baseline=None) -> dict:
@@ -130,9 +137,20 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
             # not silently fall back to the older status-condition receipt exception.
             if legacy_entity_context is None:
                 legacy_context = None
+    global _VALIDATION_CACHE
+    from .canonical import content_hash as _content_hash
+    from .validate import _HAVE_JSONSCHEMA
+    schema_key = (_content_hash(registry.by_id), _HAVE_JSONSCHEMA) if entities else None
+    prior_checks = (_VALIDATION_CACHE["entities"]
+                    if _VALIDATION_CACHE["schema"] == schema_key else {})
+    checked = {}
     for eid, ent in entities.items():
         et = ent.get("type")
-        errors = _validate(ent, et, registry)
+        digest = _content_hash(ent)
+        cached = prior_checks.get(eid)
+        errors = (list(cached[1]) if cached is not None and cached[0] == digest
+                  else _validate(ent, et, registry))
+        checked[eid] = (digest, tuple(errors))
         if not errors:
             continue
 
@@ -198,6 +216,7 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
             violations.append(_v(f"schema:{eid}", "high", "entity validates against its schema",
                                  f"{eid}: {err}", "valid per hub:%s" % et, kind="schema",
                                  remediation="fix the entity payload", subject=eid))
+    _VALIDATION_CACHE = {"schema": schema_key, "entities": checked}
 
     # 2. referential integrity: no dangling idref
     for dgl in state.get("dangling", []):

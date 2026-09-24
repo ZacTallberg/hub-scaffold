@@ -15,8 +15,9 @@ from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpRespon
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
 
-from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
-                      inbox as inbox_core, project, projections, telemetry, upcast, wip)
+from hub_core import (activity as activity_core, adherence, cost, dag, errorlog,
+                      failure_taxonomy, flow, inbox as inbox_core, project, projections,
+                      telemetry, upcast, updates, wip)
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
@@ -305,9 +306,12 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
     tasks = state.get("by_type", {}).get("task", [])
     items = []
 
-    def add(rank, kind, reason, tid=None, title=None, route=None):
-        items.append({"rank": rank, "kind": kind, "reason": reason, "id": tid, "route": route,
-                      "title": title or (tid.rsplit(":", 1)[-1] if tid else None)})
+    def add(rank, kind, reason, tid=None, title=None, route=None, waited_s=None):
+        row = {"rank": rank, "kind": kind, "reason": reason, "id": tid, "route": route,
+               "title": title or (tid.rsplit(":", 1)[-1] if tid else None)}
+        if isinstance(waited_s, (int, float)) and not isinstance(waited_s, bool) and waited_s >= 0:
+            row["waited_s"] = int(waited_s)
+        items.append(row)
 
     for t in tasks:
         if t.get("poison_blocked") and t.get("operator_attention", True):
@@ -323,14 +327,19 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
         if r.get("stalled"):
             add(1, "stalled-lease",
                 f"{r.get('agent')} has held the lease {_fmt_age(r.get('age_s'))} without finishing",
-                r.get("task"), r.get("title"))
+                r.get("task"), r.get("title"), waited_s=r.get("age_s"))
 
     # OPEN QUESTIONS are operator work: an ask nobody sees is a worker blocked on one fact,
-    # and the cost of a question compounds for as long as it sits.
+    # and the cost of a question compounds for as long as it sits. Every row says how long it
+    # has waited, and a STUCK ask (past HUB_ASK_STUCK_S) outranks a fresh one — the rail reads
+    # the same `waited_s` the inbox carries, so the detector can never go silent on a key seam.
     for q in (asks or []):
-        add(1, "open-question",
-            f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}", q.get("id"),
-            q.get("title"), route={"view": "overview", "focus": "asks"})
+        age = (" — waiting " + q["age"]) if q.get("age") else ""
+        kind = "gate" if q.get("kind") == "gate" else (
+            "stuck-question" if q.get("stuck") else "open-question")
+        add(1 if (q.get("stuck") or q.get("kind") == "gate") else 2, kind,
+            f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}{age}", q.get("id"),
+            q.get("title"), route={"view": "overview", "focus": "asks"}, waited_s=q.get("waited_s"))
 
     # OVERDUE directives: `deadline` is documented as "surfaced, never enforced" — this is
     # the surfacing. An active directive past its deadline with targets still unacked is an
@@ -419,11 +428,30 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
                 "unblocked executable work has no concrete acceptance — spec it before pull",
                 t["id"], t.get("title"))
 
+    # A SLOW ROUTE is operator work: a route clients wait on that crossed the slow threshold in
+    # at least one process window. Worded worst-window on purpose — it is NOT an average, and a
+    # sentence that reads as steady-state will be acted on as one.
+    try:
+        from .middleware import route_timings, slow_routes
+        timings = route_timings()
+        for route in slow_routes(timings)[:3]:
+            v = timings.get(route) or {}
+            add(3, "slow-route",
+                "%s: worst-window p95 %.1f s over %d request(s) in %d window(s) this hour"
+                % (route, (v.get("p95_worst_ms") or 0) / 1000.0, v.get("count") or 0,
+                   v.get("windows") or 0), None, route, route={"view": "perf"})
+    except Exception:                                        # noqa: BLE001 - never break the rail
+        pass
+
     if _readiness(state).get("ready", 0) == 0 and not (inflight or []):
         add(0, "board-drained",
             "no ready work and no worker in flight — spec a needs-spec item or file new work")
 
-    items.sort(key=lambda i: (i["rank"], str(i.get("id") or "")))
+    # Within a rank the LONGEST WAIT leads — the same key the inbox and the Questions card
+    # order by. A row with no measurable age sorts after every aged one (never as age 0), and
+    # the id only breaks exact ties, so an old ask can never sit behind a fresh one by id.
+    items.sort(key=lambda i: (i["rank"], "waited_s" not in i, -int(i.get("waited_s") or 0),
+                              str(i.get("id") or "")))
     return items[:32]
 
 
@@ -582,11 +610,8 @@ def _fleet(events, state, inflight):
     # per-console rows are the surface that stops two sessions from unknowingly working the
     # same thing.
     sessions_by_agent = {}
-    try:
-        for s in hub_app.live_sessions():
-            sessions_by_agent.setdefault(s["agent"], []).append(s)
-    except Exception:                                        # noqa: BLE001 - never 500 the board
-        sessions_by_agent = {}
+    for s in _activity_rows(state):
+        sessions_by_agent.setdefault(s["agent"], []).append(s)
 
     cards = []
     for ag in set(lease_by_agent) | set(trails) | set(sessions_by_agent):
@@ -597,6 +622,9 @@ def _fleet(events, state, inflight):
         if not lease and not sessions and (idle_s is None or idle_s > 1800):
             continue
         newest_session_age = sessions[0].get("age_s") if sessions else None
+        # HEADLINE THE FRESHEST WORKING CONSOLE'S FOCUS, not whichever console reported last:
+        # an idle window's stale focus reads as what the person is doing now, and is not.
+        lead = activity_core.headline(sessions) or {}
         if lease and lease.get("stalled"):
             status = "stalled"
         elif lease:
@@ -615,7 +643,10 @@ def _fleet(events, state, inflight):
             "machine": (sessions[0].get("machine") if sessions else "") or "",
             "task": lease.get("title") if lease else None,
             "task_id": lease.get("task") if lease else None,
-            "focus": (sessions[0].get("focus") if (not lease and sessions) else "") or "",
+            "focus": (lead.get("focus") if not lease else "") or "",
+            "focus_console": (lead.get("name") or lead.get("session") or "") if lead else "",
+            "consoles": len(sessions),
+            "consoles_without_task": sum(1 for c in sessions if not c.get("has_task")),
             "age_s": lease.get("age_s") if lease else None,
             "idle_s": idle_s, "trail": trails.get(ag, []),
             "sessions": sessions[:6],
@@ -650,9 +681,16 @@ def _dag_block(state, workers):
 # stat fingerprint of claims/, or a fresh claim would stay invisible until the next append.
 # `served` is in the key because it feeds the build/coherence block; one probe must never be
 # handed another probe's cached verdict. Races just recompute, which is benign.
-_STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None}
+_STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None, "full_at": 0.0}
+# The incremental fold is chain-checked page by page, but it still inherits whatever the last
+# full replay produced. A periodic full replay bounds how long any drift (an upcaster changed
+# under a running process, a projection bug fixed by a hot reload) can survive in memory.
+FULL_REPLAY_S = 15 * 60
 _STATE_LOCK = threading.RLock()
 _SNAP_CACHE = {"key": None, "value": None}
+# Per-phase build timings of the snapshot: the last build and the worst seen per phase in this
+# process, so "the board is slow" names a phase instead of a feeling.
+_SNAP_TIMINGS = {"last": {}, "worst": {}, "count": 0}
 _AUDIT_CACHE = {"key": None, "value": None}
 _DELIVERY_CACHE = {"values": {}, "building": set()}
 _DELIVERY_LOCK = threading.RLock()
@@ -714,10 +752,12 @@ def _projected(store, cursor):
             and pending[-1].get("seq") == seq and pending[-1].get("hash", "") == head_hash
         )
 
+        stale = time.time() - float(_STATE_CACHE.get("full_at") or 0) >= FULL_REPLAY_S
         if cached_seq is None or seq < cached_seq or (seq == cached_seq and head_hash != cached_hash) \
-                or (incremental and not contiguous):
+                or (incremental and not contiguous) or stale:
             events = _events_through(store, 0, seq)
             state = project.state(events)
+            _STATE_CACHE["full_at"] = time.time()
         elif incremental:
             events = list(_STATE_CACHE["events"] or ()) + pending
             entities = project.advance(
@@ -784,18 +824,46 @@ def _delivery_fast(state, cursor, served):
     return provisional, False
 
 
-def _live_side_blocks(state):
+def _live_side_blocks(state, lease_rows=None):
     """The addressed plane, the operational stream, and the live consoles — computed once
     per live payload so the attention rail, the cockpit cards, and the JSON endpoints all
     read ONE answer to "what is open" and "what is broken". Fail-soft: a sidecar problem
     must never take the board down."""
-    asks = inbox_core.question_items(state)
+    asks = hub_app.question_items(state)
     error_rows, error_meta, error_unclaimed = _errors_block()
-    try:
-        sessions_live = hub_app.live_sessions()
-    except Exception:                                        # noqa: BLE001
-        sessions_live = []
+    sessions_live = _activity_rows(state, lease_rows)
     return asks, error_rows, error_meta, error_unclaimed, sessions_live
+
+
+def _activity_rows(state, lease_rows=None):
+    """Every live console bound to its project and the task THAT console holds (the uniform
+    session shape plus project/has_task/task_id). Fail-soft: presence must never 500 a read."""
+    try:
+        tasks = (state.get("by_type") or {}).get("task") or [
+            e for e in (state.get("entities") or {}).values() if e.get("type") == "task"]
+        return activity_core.rows(hub_app.live_sessions(),
+                                  hub_app.leases() if lease_rows is None else lease_rows, tasks)
+    except Exception:                                        # noqa: BLE001
+        return []
+
+
+@require_GET
+def activity_json(request):
+    """What every live console is doing: agent, machine, console name/session, project, repo,
+    state, focus, recently edited files, and the task THIS console holds (or `has_task: false`
+    — the work a board otherwise loses). ?agent= narrows to one agent's consoles; ?session=
+    adds `no_task_for` — the projects that console is in without a task."""
+    state, _ = _snapshot()
+    rows = _activity_rows(state)
+    agent = (request.GET.get("agent") or "").strip().lower()
+    if agent:
+        rows = [r for r in rows if str(r.get("agent") or "").lower() == agent]
+    meta = activity_core.summary(rows)
+    session = (request.GET.get("session") or request.headers.get("X-Hub-Session") or "").strip()
+    if session:
+        meta["session"] = session[:8]
+        meta["no_task_for"] = [r.get("project") for r in activity_core.no_task_for(rows, session)]
+    return JsonResponse({"data": rows, "metadata": meta})
 
 
 def _live_blocks(events, state, audit, deliv, cursor):
@@ -827,6 +895,7 @@ def _live_blocks(events, state, audit, deliv, cursor):
         # deliver → answer → ack loop closes through the board, so the board shows it.
         "asks": asks[:12],
         "asks_open": len(asks),
+        "asks_stuck": inbox_core.stuck_summary(asks),
         # THE OPERATIONAL ERROR STREAM, bar-annotated, with the shape a reader needs
         # (trend, sources, coverage) — the failures the ledger audit cannot see.
         "errors": error_rows[:40],
@@ -834,6 +903,9 @@ def _live_blocks(events, state, audit, deliv, cursor):
         # EVERY LIVE CONSOLE, flat: the surface that stops two sessions from unknowingly
         # working the same thing. The per-agent fleet cards roll these up.
         "sessions_live": sessions_live[:12],
+        # THE AGENTS' OWN FEED: what they did, in their words, newest first — rides the same
+        # push tick so a posted fix appears on every open board within a second.
+        "updates": updates.read(hub_dir, 40),
         "attention": _attention(state, audit, inflight, adher, deliv,
                                 asks=asks, error_unclaimed=error_unclaimed),
         "telemetry": telemetry.read_aggregate(hub_dir),
@@ -857,10 +929,18 @@ def _snapshot(served=None):
         # last append happened to capture.
         key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
                hub_app.presence_stamp(), errorlog.stamp(hub_app.HUB_DIR),
-               git_head, int(time.time() // 5))
+               updates.stamp(hub_app.HUB_DIR), git_head, int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
+        timings, mark = {}, [time.perf_counter()]
+
+        def _tick(phase):
+            now = time.perf_counter()
+            timings[phase] = round((now - mark[0]) * 1000, 1)
+            mark[0] = now
+
         events, state = _projected(s, cur)
+        _tick("fold")
         # Realtime lease/telemetry refreshes must not repeatedly pay for a repository audit whose
         # inputs did not change. Structural audit truth changes with the ledger or build identity;
         # cache on exactly those inputs and keep the five-second live cockpit refresh lightweight.
@@ -870,17 +950,23 @@ def _snapshot(served=None):
         else:
             audit = hub_app.run_audit(s, served=served)
             _AUDIT_CACHE["key"], _AUDIT_CACHE["value"] = audit_key, audit
+        _tick("audit")
         build = hub_app.build_meta(served, state=state)
+        _tick("build")
         last = events[-1] if events else {}
         inflight = _inflight(state)
+        lease_rows = hub_app.leases()           # ONE lease read shared by every block below
         adher = adherence.score(events, state, leases=inflight)
+        _tick("leases_adherence")
         # Repository ancestry can require many Git calls. First paint uses the truthful cached or
         # provisional view; the completed materialization publishes its own live patch.
         # Until then, an unmeasured leg stays an honest unknown rather than silent green.
         deliv, _ = _delivery_fast(state, cur, served)
+        _tick("delivery")
         hub_dir = hub_app.HUB_DIR
         side_asks, side_error_rows, side_error_meta, side_unclaimed, side_sessions = \
-            _live_side_blocks(state)
+            _live_side_blocks(state, lease_rows)
+        _tick("side_blocks")
         live = {
             "transport": "event-stream",
             "realtime": hub_app.realtime_info(),
@@ -909,9 +995,11 @@ def _snapshot(served=None):
             # later patch read one truth.
             "asks": side_asks[:12],
             "asks_open": len(side_asks),
+            "asks_stuck": inbox_core.stuck_summary(side_asks),
             "errors": side_error_rows[:40],
             "error_log": side_error_meta,
             "sessions_live": side_sessions[:12],
+            "updates": updates.read(hub_dir, 40),
             "attention": _attention(state, audit, inflight, adher, deliv,
                                     asks=side_asks, error_unclaimed=side_unclaimed),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
@@ -922,7 +1010,19 @@ def _snapshot(served=None):
             # own concurrency budget rather than the operator guessing at it.
             "wip": hub_app.wip_status(len(inflight)),
         }
+        _tick("live_blocks")
         snap = projections.hub_snapshot(state, build=build, audit=audit, live=live)
+        _tick("projection")
+        timings["total"] = round(sum(float(v) for v in timings.values()), 1)
+        live["timings_ms"] = timings
+        _SNAP_TIMINGS["last"] = dict(timings)
+        for phase, value in timings.items():
+            _SNAP_TIMINGS["worst"][phase] = max(float(_SNAP_TIMINGS["worst"].get(phase) or 0),
+                                                float(value))
+        _SNAP_TIMINGS["count"] = int(_SNAP_TIMINGS["count"]) + 1
+        maintain = hub_app.maintain_action()
+        if maintain:
+            snap["maintain"] = maintain
         if hub_app.worker_launch_enabled():
             from django.urls import reverse
 
@@ -1015,6 +1115,9 @@ def entity_json(request, type, local):
     ent = state["entities"].get(eid)
     if not ent:
         raise Http404("no entity %s" % eid)
+    from . import veil
+    if not veil.veil_for(request).visible(ent):
+        raise Http404("no entity %s" % eid)      # omission: exactly the unknown-entity answer
     flags = state.get("flags", {}).get(eid, {})
     return JsonResponse({"data": {**ent, **flags}})
 
@@ -1250,6 +1353,7 @@ def questions_json(request):
             if reply else ""
         row = {
             "id": eid, "asker": asker, "at": asked_at,
+            "to": str(ent.get("to") or "").lower(),
             "title": str(ent.get("title") or ""),
             "context": str(ent.get("body_md") or "")[:1400],
             "open": "open" in tags,
@@ -1270,10 +1374,18 @@ def questions_json(request):
             row["reply_seconds"] = None
             row["waiting_seconds"] = max(0, int(now - asked_epoch)) if asked_epoch else None
         rows.append(row)
-    # Newest first within each state; anything still needing a human ahead of what is
-    # closed: waiting-for-an-answer, then answered-but-not-yet-delivered, then done.
+    # Anything still needing a human ahead of what is closed: waiting-for-an-answer, then
+    # answered-but-not-yet-delivered, then done. Open rows are LONGEST WAIT FIRST (an unknown
+    # age last, never first) — newest-first put the ask that had waited two days at the bottom
+    # of the list, behind twenty fresher ones. Closed rows stay newest first.
     rows.sort(key=lambda r: r["at"], reverse=True)
+    rows.sort(key=lambda r: (r["waiting_seconds"] is None, -(r["waiting_seconds"] or 0))
+              if r["open"] and not r["answered"] else (True, 0))
     rows.sort(key=lambda r: (r["acked"], r["answered"]))
+    for r in rows:
+        r["stuck"] = bool(r["open"] and not r["answered"]
+                          and (r["waiting_seconds"] or 0) >= inbox_core.ASK_STUCK_S)
+    stuck_rows = [r for r in rows if r["stuck"]]
 
     waits = [r["waiting_seconds"] for r in rows if r["open"] and r["waiting_seconds"] is not None]
     answered_waits = sorted(r["reply_seconds"] for r in rows if r["reply_seconds"] is not None)
@@ -1310,6 +1422,13 @@ def questions_json(request):
         "longest_wait_who": next((r["asker"] for r in rows
                                   if r["open"] and (r["waiting_seconds"] or 0) == longest), ""),
         "median_reply_seconds": median_reply,
+        # STUCK: open, unanswered, and waiting past HUB_ASK_STUCK_S. The count, the threshold it
+        # was measured against, and the ids — a stuck ask that only a detector can see is not
+        # surfaced.
+        "stuck": len(stuck_rows),
+        "stuck_after_seconds": inbox_core.ASK_STUCK_S,
+        "stuck_ids": [r["id"] for r in stuck_rows][:20],
+        "unstick_after_seconds": inbox_core.ASK_UNSTICK_S,
         "replied_count": len(answered_waits),
         "lanes": lanes[:6],
         "days": days}})
@@ -1323,29 +1442,66 @@ def _operator_agent() -> str:
                or _os.environ.get("HUB_OPERATOR_AGENT") or "operator").strip().lower()
 
 
+def _inbox_reader(request):
+    """(agent, machine, session) for an inbox read. The session and machine come from the
+    query or the same X-Hub-* headers every write carries, so a console that names itself is
+    delivered its own mail — and mail for a console that has ended falls through to it."""
+    agent = (request.GET.get("agent") or "").strip().lower()
+    machine = (request.GET.get("machine") or request.headers.get("X-Hub-Machine") or "")
+    session = (request.GET.get("session") or request.headers.get("X-Hub-Session") or "")
+    return agent, machine.strip().lower()[:120], session.strip()[:64]
+
+
+def _inbox_kwargs(request, machine, session):
+    try:
+        live = hub_app.live_sessions() if session else None
+    except Exception:                                        # noqa: BLE001 - never break delivery
+        live = None
+    return {"machine": machine, "session": session, "live": live,
+            "human_gate": hub_app.human_gate(), "gate_satisfied": hub_app.gate_satisfied(),
+            "visible": _veil_visible(request)}
+
+
+def _veil_visible(request):
+    """The caller's visibility filter over addressed items (the contributor veil), or None
+    when the caller sees everything."""
+    try:
+        from . import veil as _veil
+        view = _veil.veil_for(request)
+    except Exception:                                        # noqa: BLE001
+        return None
+    return None if view.open else view.visible
+
+
 @require_GET
 def inbox_json(request):
-    """What is addressed to ?agent= right now: directives aimed at it, the answer to its
-    own question, and — for the operator — every open question."""
-    agent = (request.GET.get("agent") or "").strip().lower()
+    """What is addressed to ?agent= right now: messages to it, the questions it should see
+    (addressed to it; for the operator, every unaddressed one; for everyone, any ask stuck past
+    the unstick window), directives aimed at it, and the answer to its own question. Name a
+    console (?session= or X-Hub-Session) to receive only that console's mail — plus mail for a
+    console of yours that has since ended."""
+    agent, machine, session = _inbox_reader(request)
     if not agent:
         return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
     state, _ = _snapshot()
-    return JsonResponse({"data": inbox_core.snapshot(state, agent, _operator_agent()),
-                         "metadata": {"agent": agent, "operator": _operator_agent()}})
+    data = inbox_core.snapshot(state, agent, _operator_agent(), hub_dir=hub_app.HUB_DIR,
+                               **_inbox_kwargs(request, machine, session))
+    return JsonResponse({"data": data,
+                         "metadata": {"agent": agent, "operator": _operator_agent(),
+                                      "session": session, "machine": machine}})
 
 
 @require_GET
 def inbox_wait(request):
     """Long-poll: return the moment something is addressed to ?agent=.
 
-    This is the mechanism behind "asking the operator reaches them in about a second": a
+    This is the mechanism behind "asking reaches the answerer in about a second": a
     supervisor loop spends the sleep it was already doing blocked here, so an ask raises a
     notification on the answerer's side without anybody watching a browser tab, and the
     answer lands back on the asker's side the same way. Bounded hard — never longer than
-    MAX_WAIT_S, never more than MAX_WAITERS at once (past the ceiling it answers
-    immediately with degraded=true: an honest poll, not a starved server)."""
-    agent = (request.GET.get("agent") or "").strip().lower()
+    MAX_WAIT_S, never more than MAX_WAITERS at once (past the ceiling it answers from the
+    caller's last projection with degraded=true: an honest poll, not a starved server)."""
+    agent, machine, session = _inbox_reader(request)
     if not agent:
         return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
     known = (request.GET.get("fp") or "")[:64]
@@ -1353,6 +1509,8 @@ def inbox_wait(request):
         timeout = float(request.GET.get("wait") or inbox_core.MAX_WAIT_S)
     except (TypeError, ValueError):
         timeout = inbox_core.MAX_WAIT_S
+    visible = _veil_visible(request)
+    tier = getattr(request, "hub_tier", "") or ""
 
     def snapshot_fn(who):
         s = hub_app.store()
@@ -1360,25 +1518,236 @@ def inbox_wait(request):
             state = project.state(s.events())
         finally:
             s.close()
-        return inbox_core.snapshot(state, who, _operator_agent())
+        kwargs = _inbox_kwargs(request, machine, session)
+        kwargs["visible"] = visible
+        return inbox_core.snapshot(state, who, _operator_agent(), hub_dir=hub_app.HUB_DIR,
+                                   **kwargs)
 
     def signal_fn():
         # The cheap fingerprint of everything the snapshot depends on — the wait loop must
-        # not fold the whole ledger per poll tick. "" on error never equals a real signal,
-        # so a failed read degrades to always-fold rather than skipping a real change.
+        # not fold the whole ledger per poll tick. The presence stamp rides it BUCKETED
+        # (session routing reads presence, and presence moves on every request). "" on error
+        # never equals a real signal, so a failed read degrades to always-fold rather than
+        # skipping a real change.
         try:
             s = hub_app.store()
             try:
-                return str(s.latest_cursor().get("seq") or 0)
+                seq = s.latest_cursor().get("seq") or 0
             finally:
                 s.close()
         except Exception:                                    # noqa: BLE001
             return ""
+        try:
+            stamp = hub_app.presence_stamp() if session else None
+        except Exception:                                    # noqa: BLE001
+            stamp = None
+        return inbox_core.change_signal(seq, stamp)
 
-    payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn, signal_fn=signal_fn)
+    payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn,
+                              signal_fn=signal_fn, key=(agent, machine, session, tier))
     return JsonResponse({"data": payload,
                          "metadata": {"agent": agent, "operator": _operator_agent(),
+                                      "session": session, "machine": machine,
                                       "max_wait_s": inbox_core.MAX_WAIT_S}})
+
+
+@require_GET
+def perf_json(request):
+    """Where the time goes: per-route latency (worst process window in the last hour), the
+    slow-route verdict, and the snapshot's per-phase build timings.
+
+    ``?profile=snapshot`` runs ONE ordinary snapshot build under Python's thread-local profiler
+    on this request's thread and returns the 30 costliest functions (locations and durations
+    only — never arguments, locals or entity bodies). It is CPU on the serving process, so it
+    needs a credential: the shared-root token or a scoped credential holding ``perf:profile``.
+    Its own request is excluded from the route samples it would otherwise distort."""
+    if request.GET.get("profile"):
+        from . import hub_write
+        auth, _problem = hub_write._authenticate(request)
+        if not auth or not auth.allows("perf:profile"):
+            return JsonResponse({"errors": [{"code": "insufficient_scope",
+                                              "required": "perf:profile"}]}, status=403)
+        if request.GET["profile"] != "snapshot":
+            return JsonResponse({"errors": [{"code": "unknown_profile"}]}, status=400)
+        import pstats
+        import profile as thread_profile
+        from pathlib import Path
+        _SNAP_CACHE["key"] = None                  # profile a real build, not a memo hit
+        profiler = thread_profile.Profile(timer=time.perf_counter)
+        wall, cpu = time.perf_counter(), time.thread_time()
+        _, snap = profiler.runcall(_snapshot, request.GET.get("served"))
+        elapsed_ms = round((time.perf_counter() - wall) * 1000, 1)
+        cpu_ms = round((time.thread_time() - cpu) * 1000, 1)
+        functions = []
+        for (filename, line, name), (_prim, calls, own, cumulative, _callers) in sorted(
+                pstats.Stats(profiler).stats.items(), key=lambda item: -item[1][3])[:30]:
+            path = Path(filename)
+            try:
+                location = path.relative_to(hub_app.BASE_DIR.parent).as_posix()
+            except ValueError:
+                location = path.name
+            functions.append({"file": location, "line": line, "function": name,
+                              "calls": calls, "own_ms": round(own * 1000, 1),
+                              "cumulative_ms": round(cumulative * 1000, 1)})
+        return JsonResponse({"data": {"profile": "snapshot", "elapsed_ms": elapsed_ms,
+                                      "thread_cpu_ms": cpu_ms, "functions": functions,
+                                      "snapshot_ms": (snap.get("live") or {}).get("timings_ms"),
+                                      "cursor": (snap.get("live") or {}).get("cursor")}})
+    import os as _os
+    from .middleware import route_timings, slow_routes
+    routes = route_timings()
+    slow = slow_routes(routes)
+    return JsonResponse({"data": {
+        "routes": routes,
+        "routes_verdict": (
+            "no recent route observations" if not routes else
+            "every observed route stayed under the slow-route threshold, in every window"
+            if not slow else
+            "%d route(s) crossed the slow-route threshold in at least one process window "
+            "(worst-window p95, not an average): %s" % (len(slow), ", ".join(slow))),
+        "slow_routes": slow,
+        "snapshot": {"last_ms": dict(_SNAP_TIMINGS["last"]),
+                     "worst_ms": dict(_SNAP_TIMINGS["worst"]),
+                     "builds": int(_SNAP_TIMINGS["count"])},
+        "process": {"pid": _os.getpid()},
+    }, "metadata": {"window_s": 3600, "long_polls_exempt": ["/hub/inbox/wait", "/hub/live/events"],
+                    "fields": "p50_worst_ms/p95_worst_ms are the worst single process window's "
+                              "percentiles; count is a true total"}})
+
+
+@require_GET
+def tiers_json(request):
+    """Who is which visibility tier, and the declared facets (ids and labels only)."""
+    from hub_core import veil as core
+    from . import veil
+    doc = core.registry(veil.registry_path())
+    return JsonResponse({"data": core.read_tiers(hub_app.HUB_DIR), "metadata": {
+        "active": veil.active(), "tiers": list(core.TIERS),
+        "facets": [{"id": f["id"], "label": f["label"], "tiers": f["tiers"]}
+                   for f in doc.get("facets") or []],
+        **({"broken": doc["broken"]} if doc.get("broken") else {})}})
+
+
+@require_GET
+def veil_audit_json(request):
+    """Render every veiled read route AS A CONTRIBUTOR, in process, and scan what would be
+    served for every hidden term. A hit is a leak: the route handed a contributor a word the
+    veil exists to withhold. Hits are recorded on the operational stream (so they page), and
+    the report lists route, facet and term. Routes that need an argument are rendered with a
+    representative one; the long-poll is rendered as an immediate poll."""
+    from django.test import RequestFactory
+    from django.urls import get_resolver
+    from . import veil
+    veil_obj = veil.Veil("contributor")
+    if veil_obj.open:
+        return JsonResponse({"data": {"routes_checked": 0, "hits": [],
+                                      "verdict": "no facets are hidden from contributors"}})
+    patterns = []
+
+    def walk(entries, prefix=""):
+        for entry in entries:
+            sub = getattr(entry, "url_patterns", None)
+            if sub is not None:
+                walk(sub, prefix + str(entry.pattern))
+            else:
+                patterns.append((prefix + str(entry.pattern), entry))
+    walk(get_resolver().url_patterns)
+    factory = RequestFactory()
+    state, snap = _snapshot()
+    sample_agent = next(iter(veil.core.read_tiers(hub_app.HUB_DIR)), "contributor")
+    samples = {"<str:type>.json": ("tasks.json", {"type": "task"}),
+               "<str:type>/<str:local>.json": None}
+    checked, hits, skipped = [], [], []
+    for route, entry in patterns:
+        callback = entry.callback
+        if getattr(callback, "_hub_visibility", None) != "veiled":
+            continue
+        tail = route.split("hub/", 1)[-1] if "hub/" in route else route
+        if "<" in tail and tail not in samples:
+            skipped.append(tail)
+            continue
+        sample = samples.get(tail)
+        if tail in samples and sample is None:
+            skipped.append(tail)
+            continue
+        path = "/" + route.replace("<str:type>.json", sample[0]) if sample else "/" + route
+        kwargs = sample[1] if sample else {}
+        query = {"agent": sample_agent, "wait": "0", "q": "the"}
+        request = factory.get(path, query)
+        request.hub_tier = "contributor"
+        try:
+            response = callback(request, **kwargs)
+            if getattr(response, "streaming", False):
+                skipped.append(tail)
+                continue
+            body = response.content
+            if str(response.get("Content-Type", "")).startswith("application/json"):
+                body = veil.scrub_response(veil_obj, response).content
+            text = body.decode("utf-8", "replace")
+        except Exception as exc:                             # noqa: BLE001
+            skipped.append("%s (%s)" % (tail, type(exc).__name__))
+            continue
+        checked.append(tail)
+        for term, facet in veil_obj.terms():
+            if re.search(veil.core._term_pattern(term), text, re.I):
+                hits.append({"route": tail or "(board)", "facet": facet, "term": term})
+    if hits:
+        try:
+            hub_app.record_error(
+                "hub.veil", "the veil audit found %d hidden term(s) served to a contributor"
+                % len(hits), severity="error", code="veil_leak",
+                context={"component": "veil", "hits": hits[:10]})
+        except Exception:                                    # noqa: BLE001
+            pass
+    return JsonResponse({"data": {
+        "routes_checked": len(checked), "checked": checked, "skipped": skipped, "hits": hits,
+        "verdict": ("LEAK: %d hidden term(s) reached a contributor" % len(hits)) if hits else
+                   "no hidden term reached a contributor on %d route(s)" % len(checked)}})
+
+
+@require_GET
+def receipts_json(request):
+    """The notification lifecycle: what was offered to whom, delivered, refused, resolved.
+    ?ref= is one item's thread (oldest first); ?undelivered=1 lists offers nobody ever
+    acknowledged; otherwise the newest receipts (?stage=, ?agent=, ?limit=)."""
+    from hub_core import receipts
+    ref = (request.GET.get("ref") or "").strip()
+    if ref:
+        return JsonResponse({"data": receipts.for_ref(hub_app.HUB_DIR, ref),
+                             "metadata": {"ref": ref}})
+    if request.GET.get("undelivered"):
+        try:
+            within = max(60, min(int(request.GET.get("within_s") or 86400), 30 * 86400))
+        except (TypeError, ValueError):
+            within = 86400
+        rows = receipts.undelivered(hub_app.HUB_DIR, within)
+        kind = (request.GET.get("kind") or "").strip().lower()
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return JsonResponse({"data": rows, "metadata": {"undelivered": len(rows),
+                                                        "within_s": within}})
+    try:
+        limit = max(1, min(int(request.GET.get("limit") or 50), 500))
+    except (TypeError, ValueError):
+        limit = 50
+    rows = receipts.recent(hub_app.HUB_DIR, limit, stage=(request.GET.get("stage") or "").strip(),
+                           agent=(request.GET.get("agent") or "").strip().lower())
+    return JsonResponse({"data": rows, "metadata": {"count": len(rows),
+                                                    "stages": list(receipts.STAGES)}})
+
+
+@require_GET
+def agent_updates_json(request):
+    """The agents' first-person feed, newest first (``?limit=``, default 60, max 200)."""
+    try:
+        limit = max(1, min(int(request.GET.get("limit") or 60), updates.KEEP))
+    except (TypeError, ValueError):
+        limit = 60
+    rows = updates.read(hub_app.HUB_DIR, limit)
+    day = time.time() - 86400
+    return JsonResponse({"data": rows, "metadata": {
+        "count": len(rows), "last_24h": sum(1 for r in rows if (r.get("epoch") or 0) >= day),
+        "kinds": list(updates.KINDS)}})
 
 
 # ── The operational error stream, whoami, and board search ──

@@ -704,6 +704,12 @@ project key are renameable bindings; the rules are not.
     "tags": { "type": "array", "items": { "type": "string" } },
     "relates_to": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "task/adr/feat this came from or informs." },
     "asker": { "type": "string", "description": "For a note tagged `question`: who asked, stamped once by the ask endpoint. First-class on purpose — provenance.agent becomes whoever LAST touched the note (the answerer, after an answer), so deriving the asker from provenance mis-addresses every re-answered reply." },
+    "to": { "type": "string", "description": "For an addressed question or message: the one agent it is for. Empty on a question means the operator's; a question unanswered past the unstick window reaches every console regardless." },
+    "from_agent": { "type": "string", "description": "Who sent this message or question, stamped once by the write seam and never rewritten by a later touch." },
+    "from_session": { "type": "string", "description": "The sender's console session id (X-Hub-Session). A reply or an answer is routed back to THIS console, not to every console the sender has open." },
+    "session": { "type": "string", "description": "For a message: the one recipient console it is addressed to. Mail for a console that has since ended falls through to that agent's most recently active live console." },
+    "machine": { "type": "string", "description": "For a message: pin delivery to one of the recipient's machines." },
+    "tier": { "type": "string", "description": "For a question: the asker's visibility tier when it was filed, so an answer is checked against what that tier may see." },
     "found_at": { "type": "string", "description": "when/where it was learned." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
@@ -719,7 +725,7 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:directive",
   "title": "Directive — an operator instruction addressed to named agents",
-  "description": "Created ONLY under the `directive:write` scope (the shared-root credential holds it; a worker credential is issued it only deliberately): an instruction injected into every targeted agent's working context is an authority tier above ordinary board writes. An answer to a question is a directive whose `answers` names the question note. Delivery is CLOSED by acks: each targeted agent records one, and a directive whose every named target has acked retires itself to `fulfilled` — a queue of delivered items that never leaves 'active' is a queue people learn to ignore.",
+  "description": "Created ONLY under the `directive:write` scope (the shared-root credential holds it; a worker credential is issued it only deliberately): an instruction injected into every targeted agent's working context is an authority tier above ordinary board writes. An answer to a question is a directive whose `answers` names the question note; the answer endpoint mints it under the narrower `ask:answer` scope because it builds the directive itself — targeted at the asker read from the question, and at the asking console (`session`) — so it can neither broadcast nor carry a standing instruction. Delivery is CLOSED by acks: each targeted agent records one, and a directive whose every named target has acked retires itself to `fulfilled` — a queue of delivered items that never leaves 'active' is a queue people learn to ignore.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -738,6 +744,8 @@ project key are renameable bindings; the rules are not.
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
     "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
+    "session": { "type": "string", "description": "Deliver to one console only. An answer carries the asking console's session so the reply lands where the question was asked, never broadcast." },
+    "delivery_revision": { "type": "integer", "minimum": 1, "description": "Bumped each time an answer is corrected. An ack must name the revision it read; an ack of an older revision never closes a corrected answer." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
   },
@@ -761,6 +769,7 @@ project key are renameable bindings; the rules are not.
     "directive": { "$ref": "hub:common#/$defs/idref" },
     "agent": { "type": "string", "minLength": 1, "description": "The acking agent. Under a minted (identity-bound) token this is forced from the token binding server-side, never trusted from the payload." },
     "note": { "type": "string", "description": "What was done to satisfy the directive." },
+    "delivery_revision": { "type": "integer", "minimum": 1, "description": "The directive revision this receipt covers. Required when the directive carries one; a stale revision is refused so a correction is never marked read unread." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
   },

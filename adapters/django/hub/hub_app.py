@@ -164,6 +164,20 @@ def _schedule_lease_truth(lease):
         logging.getLogger(__name__).exception("Hub lease truth timer could not be scheduled")
 
 
+def maintain_action():
+    """The navbar's "Update Core Systems" link — the adopter's MANUAL repair pass for a machine
+    whose own update loop has not converged (a runbook page, a deep link that opens an agent
+    session, a pipeline trigger). HUB_MAINTAIN_URL enables it; HUB_MAINTAIN_LABEL renames it.
+    A script-bearing scheme is refused: the value lands in an href on every board."""
+    url = str(_dj_setting("HUB_MAINTAIN_URL") or os.environ.get("HUB_MAINTAIN_URL") or "").strip()
+    scheme = url.split(":", 1)[0].lower() if ":" in url.split("/", 1)[0] else ""
+    if not url or scheme in ("javascript", "data", "vbscript"):
+        return None
+    label = str(_dj_setting("HUB_MAINTAIN_LABEL") or os.environ.get("HUB_MAINTAIN_LABEL")
+                or "Update Core Systems").strip()[:40]
+    return {"url": url[:500], "label": label}
+
+
 def worker_launch_enabled() -> bool:
     """Whether this deployment intentionally exposes its optional local-worker launch bridge."""
     value = _dj_setting("HUB_WORKER_LAUNCH_ENABLED", False)
@@ -186,9 +200,24 @@ def registry():
     return hub_core.Registry.from_dir(SCHEMA_DIR)
 
 
+def ledger_wait_s() -> float:
+    """How long a request waits for the ledger lock before answering 503 busy.
+
+    HUB_LEDGER_WAIT_S (setting or environment), default 30 s: long enough to outlast a full index
+    rebuild, short enough to stay under common proxy read timeouts. Offline tools that construct
+    their own EventStore keep the store's far-off ceiling."""
+    raw = _dj_setting("HUB_LEDGER_WAIT_S") or os.environ.get("HUB_LEDGER_WAIT_S") or 30
+    try:
+        return max(1.0, min(float(raw), 600.0))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def store():
-    """A fresh EventStore handle per call (cheap; avoids cross-thread sqlite handles)."""
-    return hub_core.EventStore(HUB_DIR)
+    """A fresh EventStore handle per call (cheap; avoids cross-thread sqlite handles). Bounded by
+    ledger_wait_s(): a lock held past it raises hub_core.store.StoreBusy, which the write seam
+    and LedgerBusyMiddleware answer 503 + Retry-After — never a 500."""
+    return hub_core.EventStore(HUB_DIR, lock_timeout=ledger_wait_s())
 
 
 def current_state(st=None):
@@ -202,20 +231,115 @@ def current_state(st=None):
         owned.close()
 
 
+_GIT_HEAD = {"key": None, "sha": None, "at": 0.0}
+_GIT_HEAD_TTL_S = 60.0       # only when there is no checkout whose refs can be watched
+
+
+def _git_head_key():
+    """What HEAD resolves through, as a cheap stat-only fingerprint — or None without a checkout.
+
+    Walks up from WORK_ROOT to the ``.git`` git itself would find (a linked worktree's ``.git``
+    is a file naming its private dir; ``commondir`` names the shared one), then stamps HEAD's
+    text plus the mtime of every place the named ref can live (loose ref in either dir,
+    packed-refs). A commit, checkout, reset or pull rewrites one of those, so the memo can never
+    serve a HEAD that has moved."""
+    import os as _os
+    try:
+        here = Path(WORK_ROOT).resolve()
+    except OSError:
+        return None
+    for d in (here, *here.parents):
+        dot = d / ".git"
+        if dot.is_dir():
+            gitdir = dot
+            break
+        if dot.is_file():
+            try:
+                text = dot.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            if not text.startswith("gitdir:"):
+                return None
+            gitdir = Path(text[7:].strip())
+            if not gitdir.is_absolute():
+                gitdir = (d / gitdir).resolve()
+            break
+    else:
+        return None
+    try:
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    common = gitdir
+    try:
+        rel = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        common = (gitdir / rel).resolve() if not _os.path.isabs(rel) else Path(rel)
+    except OSError:
+        pass
+    stamps = []
+    if head.startswith("ref:"):
+        ref = head[4:].strip()
+        for base in (gitdir, common):
+            for path in (base / ref, base / "packed-refs"):
+                try:
+                    stamps.append(path.stat().st_mtime_ns)
+                except OSError:
+                    stamps.append(0)
+    return (str(gitdir), head, tuple(stamps))
+
+
 def _git_head():
     """Return the running code identity in every deployment shape.
 
     A source checkout can ask Git directly. A production image normally contains no ``.git``;
     there the pre-build stamp is the artifact's own identity and is the value that must ride on
     Hub mutations and discovery metadata.
+
+    MEMOIZED on what HEAD resolves through (``_git_head_key``). Every snapshot keys on the head
+    and every ledger write stamps it, and a ``git rev-parse`` subprocess per call was measured as
+    the dominant cost of a snapshot build (two spawns, ~0.5 s of a ~0.55 s build on Windows).
+    The refs are stat()ed instead, so a commit or checkout is still seen on the next read. With
+    no watchable checkout the answer is remembered for a minute.
     """
+    key = _git_head_key()
+    now = time.time()
+    memo = _GIT_HEAD
+    if memo["sha"] is not None:
+        if key is not None and memo["key"] == key:
+            return memo["sha"]
+        if key is None and memo["key"] is None and now - float(memo["at"]) < _GIT_HEAD_TTL_S:
+            return memo["sha"]
     try:
         r = subprocess.run(["git", "-C", str(WORK_ROOT), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=4)
         head = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         head = ""
-    return head or _running_sha()
+    sha = head or _running_sha()
+    if sha:
+        memo.update(key=key, sha=sha, at=now)
+    return sha
+
+
+def entity_from_store(st, eid: str) -> dict:
+    """ONE entity, folded from its own aggregate's events only.
+
+    A write needs the entity it is about to update (to merge, validate and check its version)
+    and nothing else; folding the whole ledger for it made every append cost a full replay, and
+    every append moves the head, so a burst of writes paid one full fold each. The fold of an
+    aggregate's own events is exactly that entity's row in the full fold (payloads merge per
+    aggregate, never across aggregates)."""
+    events = st.events(aggregate=eid)
+    return dict((_project.fold(events) or {}).get(eid, {})) if events else {}
+
+
+def entity(eid: str) -> dict:
+    """``entity_from_store`` over a store this helper opens and always closes."""
+    owned = store()
+    try:
+        return entity_from_store(owned, eid)
+    finally:
+        owned.close()
 
 
 def _build_stamp_path() -> Path:
@@ -399,6 +523,18 @@ def route_guard_adapter(state):
             sub = getattr(p, "url_patterns", None)
             if sub is not None:
                 walk(sub, pat)
+            elif "hub/api/" not in pat and pat.startswith("hub/") and getattr(
+                    getattr(p, "callback", None), "_hub_visibility", None) not in (
+                    "open", "veiled", "member"):
+                # Every read route DECLARES who may see it (open | veiled | member). An
+                # undeclared route serves no narrowed reader, and a new one must not slip in
+                # without somebody deciding — the veil is only as strong as its coverage.
+                viols.append(_sv("routes:undeclared-visibility",
+                                 "every /hub read route declares its visibility",
+                                 "%s -> %s declares none" % (pat, getattr(getattr(p, "callback", None),
+                                                                          "__name__", "?")),
+                                 "open | veiled | member",
+                                 remediation="add the route to urls.VISIBILITY"))
             elif "hub/api/" in pat:
                 cb = getattr(p, "callback", None)
                 guarded = getattr(cb, "_hub_token_gated", False) or getattr(cb, "_hub_origin_gated", False)
@@ -575,7 +711,7 @@ def _write_lease(task_id, lease):
 
 
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
-          actor_kind=None):
+          actor_kind=None, session="", machine=""):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
@@ -597,9 +733,13 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                               expires=cur["expires"])
             _schedule_lease_truth(cur)
             return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
+        # The CLAIMING CONSOLE rides the lease: with several consoles of one agent live, the
+        # session is the only fact that says which of them took responsibility — a claim must
+        # never be inferred from the directory a console happens to stand in.
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
                  "auth_subject": auth_subject, "credential_id": credential_id,
                  "actor_kind": actor_kind,
+                 "session": str(session or "")[:64], "machine": str(machine or "").lower()[:120],
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
@@ -736,12 +876,22 @@ def observe_presence(agent, headers, *, heartbeat=False):
     cockpits — throttled, because presence rides every write and the wake-up plane must not
     carry one signal per request. Fail-soft end to end: presence must never break a write."""
     try:
+        raw_files = headers.get("X-Hub-Files")
+        files = None if raw_files is None else [
+            f.strip() for f in str(raw_files).replace(";", ",").split(",") if f.strip()]
         _presence.observe(
             HUB_DIR, agent,
             machine=headers.get("X-Hub-Machine") or "",
             session=headers.get("X-Hub-Session") or "",
             cwd=headers.get("X-Hub-Cwd") or "",
             focus=headers.get("X-Hub-Focus") or "",
+            name=headers.get("X-Hub-Console") or "",
+            repo=headers.get("X-Hub-Repo") or "",
+            app=headers.get("X-Hub-App") or "",
+            state=headers.get("X-Hub-State") or "",
+            runtime=headers.get("X-Hub-Runtime") or "",
+            files=files,
+            retract_focus=headers.get("X-Hub-Focus-Retract") or "",
             heartbeat=heartbeat)
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
@@ -765,6 +915,54 @@ def presence_stamp():
     return _presence.stamp(HUB_DIR)
 
 
+# ---- addressed delivery: the adopter's human-gate seam and the receipt record ----
+# An ask only a person can satisfy (an approval on a host, a signature) is delivered as a GATE:
+# it reaches the operator and is never widened to every console. HUB_HUMAN_GATE_PATTERN is a
+# regex over the ask's title + body; an ask can also carry the `human-only` tag itself.
+# HUB_GATE_RESOLVER is an optional dotted path to `resolver(text) -> str`: a non-empty answer
+# names the evidence that the approval has ALREADY landed, which turns the gate back into an
+# ordinary question anybody can close. It runs inside every inbox fold, so it must read a
+# cache only — never a subprocess, never a network call.
+from hub_core import inbox as _inbox
+from hub_core import receipts as _receipts
+
+
+def human_gate():
+    pattern = _dj_setting("HUB_HUMAN_GATE_PATTERN") or os.environ.get("HUB_HUMAN_GATE_PATTERN") or ""
+    return _inbox.gate_pattern_classifier(pattern)
+
+
+@functools.lru_cache(maxsize=4)
+def _resolver(path):
+    import importlib
+    module, _, name = path.rpartition(".")
+    return getattr(importlib.import_module(module), name)
+
+
+def gate_satisfied():
+    path = _dj_setting("HUB_GATE_RESOLVER") or os.environ.get("HUB_GATE_RESOLVER") or ""
+    if not path:
+        return None
+    try:
+        return _resolver(path)
+    except Exception:                                        # noqa: BLE001 - a bad path reads as unset
+        return None
+
+
+def question_items(state):
+    """The WHOLE open-question queue, longest wait first, gates classified."""
+    return _inbox.question_items(state, human_gate=human_gate(), gate_satisfied=gate_satisfied())
+
+
+def receipt(kind, ref, stage, **kwargs):
+    """One notification-lifecycle receipt. Fail-soft: a receipt that cannot be written must
+    never be the reason a delivery does not happen."""
+    try:
+        return _receipts.record(HUB_DIR, kind, ref, stage, **kwargs)
+    except Exception:                                        # noqa: BLE001
+        return {}
+
+
 # ---- the operational error stream: record-and-wake wrappers over hub_core.errorlog ----
 from hub_core import errorlog as _errorlog
 
@@ -776,6 +974,28 @@ def record_error(source, message, **kwargs):
     if not row.get("suppressed_since"):
         _publish_realtime("errors.recorded", fingerprint=row.get("fingerprint"))
     return row
+
+
+def record_ledger_busy(path, method, waited_s, details=""):
+    """One WARNING row for a busy-ledger refusal, the same from every path that answers it.
+
+    Both refusal paths call this: LedgerBusyMiddleware (a StoreBusy that escaped a view) and the
+    write seam (which catches StoreBusy itself to answer the structured 503). Contention is
+    back-pressure, so it is trended as a warning rather than triaged as a defect — but it must
+    be RECORDED, or write contention stays invisible on the board. Fail-soft: the 503 is served
+    whether or not the row lands."""
+    try:
+        return record_error(
+            "hub.ledger",
+            "ledger lock unavailable; answered 503 (retryable, nothing was written)",
+            severity="warning", code="ledger_busy", details=str(details or "")[:500],
+            # The wait rides in `reason`: the error log keeps only an allowlisted set of
+            # context keys, so a bespoke key would be dropped at the door.
+            context={"component": "store", "path": str(path or "")[:240],
+                     "method": str(method or ""),
+                     "reason": "waited %.1f s for the ledger lock" % float(waited_s or 0)})
+    except Exception:                                        # noqa: BLE001
+        return None
 
 
 def errors_changed():

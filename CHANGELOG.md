@@ -14,6 +14,67 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Delivery: addressed mail that lands, asks that never get stuck, a visibility veil
+
+- **Busy ledger answers 503, never 500.** `StoreBusy` + jittered `BEGIN IMMEDIATE` retries inside
+  one budget; `LedgerBusyMiddleware` answers any hub path `503 {code: busy}` + `Retry-After`; the
+  write seam's own busy 503 and the middleware's record the same `ledger_busy` warning row (path,
+  method, wait) through one helper; the client retries only refusals that state nothing was written.
+- **Agents narrate their own work.** A bounded, append-only first-person updates feed
+  (`POST /hub/api/agent-update`, `GET /hub/agent-updates.json`, `update --note --evidence`, MCP
+  `post_update`, auto-posted by answer/ack/finish under `HUB_AUTOWORKER=1`); a lost write is a
+  retryable 503 with its reason.
+- **Asks never get stuck.** Every question carries `waited_s`/`age`, longest wait first (unknown
+  ages last); `ask --to <agent>` addresses one agent; an ask unanswered past `HUB_ASK_UNSTICK_S`
+  reaches every console except its asker's; `questions.json` and the board's Questions card lead
+  with `N stuck — oldest X` (`HUB_ASK_STUCK_S`), and the attention rail ranks stuck asks first and
+  orders every rank longest wait first (rows carry `waited_s`; unknown ages last, id only on ties).
+  Anyone holding `ask:answer` may answer (the reply is built from the question, so it can neither
+  broadcast nor carry a standing instruction).
+- **Human-only gates.** `ask --human-only` (or `HUB_HUMAN_GATE_PATTERN` over title + body) files a
+  gate that reaches the operator and is never widened; `HUB_GATE_RESOLVER` (cache-only) can report
+  that the approval already landed, which turns the gate back into an ordinary question.
+- **Agent-to-agent mail.** `POST /hub/api/message` / `message/ack`, `msg <agent> [--session]`,
+  `inbox --ack`, MCP `send_message` / `ack_message`. Mail and answers are routed to the CONSOLE that
+  asked (`from_session`); mail for a console that has ended falls through to the agent's most
+  recently active live console, naming the original. A corrected answer bumps `delivery_revision`;
+  an ack must name the revision it read (`428` missing, `409` stale). Old deliveries say when they
+  were written.
+- **Notification receipts.** `hub_core.receipts`: offered (only when the addressed set changes),
+  delivered, failed (with the refusal), resolved; `GET /hub/receipts.json`, `receipts
+  --undelivered`.
+- **Per-console presence bound to projects and tasks.** Consoles report name, repo, app, state,
+  runtime and recent files (the board shows a runtime chip on each console row);
+  `GET /hub/activity.json` and `consoles` bind each console to the task
+  THAT console claimed (leases record the claiming session; a claim is never inferred from a
+  directory) and name the projects being worked with no task. `start` publishes the task title as
+  focus and `finish`/`release` retract it; a bare id or stub is never a focus; agent cards headline
+  the freshest working console. A presence observation that would only move a timestamp on a fresh
+  row is skipped, and the inbox wait takes its slot before folding and reuses its last projection.
+- **Performance, named for what it computes.** `RouteTimingMiddleware` + `GET /hub/perf.json`
+  (`p50_worst_ms`/`p95_worst_ms` over process windows, samples expire after an hour, long-polls
+  exempt, a worst-window slow-route verdict that also reaches the attention rail), per-phase
+  snapshot timings in `live.timings_ms`, `?profile=snapshot` (one profiled build, `perf:profile`),
+  audit schema checks reused for byte-identical entities, one lease read per snapshot, and lock
+  waits bounded including in-process contention. The git head is memoized on what HEAD resolves
+  through (stat only, no `git` spawn per snapshot or write); a write folds only its own aggregate,
+  never the ledger; presence rows are memoized on the directory fingerprint; the incremental fold
+  forces a full replay every 15 minutes.
+- **The contributor veil.** `PROJECT/facets.json` declares facets hidden from lower tiers
+  (`tiers.json`, `POST /hub/api/tier`, `tier <agent> --set`). Every read route declares `open`,
+  `veiled` or `member` (the audit flags an undeclared one); hidden records are OMITTED from veiled
+  JSON, the board's inlined snapshot, entity reads and the inbox (before fingerprinting); an answer
+  naming a hidden facet to a contributor needs `disclose` + `veil:disclose`; `veil-audit` renders
+  every veiled route as a contributor and reports any term that got through. Open for everyone when
+  no facets are declared.
+- **Per-prompt context in three channels.** `prompt-context` re-sends the doctrine only when it
+  changes (or on session start), and live items whenever they move, with a per-session receipt.
+- **Update Core Systems.** `HUB_MAINTAIN_URL` puts the manual repair pass in the navbar.
+- **Patterns.** `patterns/agent-client-daemon.md` (delivery into consoles, a second runtime as an
+  adapter, a self-updater that cannot break itself, headless children on Windows) and
+  `patterns/route-reconciler.md` (per-entry refusal behind a mass-refusal guard, a report on every
+  pass).
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

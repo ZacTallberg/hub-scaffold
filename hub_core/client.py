@@ -24,8 +24,18 @@ in silence::
     python -m hub_core.client inbox --agent operator          # what is addressed to me now
     python -m hub_core.client wait --agent operator --follow  # block; print arrivals (a notifier)
     python -m hub_core.client answer project:note:q-worker-1-1a2b3c4d \
-      --text "the retry queue; requeue stalled items"         # needs directive:write
-    python -m hub_core.client ack project:directive:0001 --agent worker-1
+      --text "the retry queue; requeue stalled items"         # needs ask:answer
+    python -m hub_core.client ack project:directive:0001 --agent worker-1 --revision 1
+    python -m hub_core.client msg bob --note "schema landed; your import can start"
+    python -m hub_core.client inbox --agent bob --ack m-alice-0a1b2c3d   # retire a message
+    python -m hub_core.client receipts --undelivered          # offered, never acknowledged
+
+`ask --to <agent>` addresses one agent; an unaddressed ask is the operator's; any ask unanswered
+past HUB_ASK_UNSTICK_S reaches every console. Set HUB_SESSION_ID so mail and answers come back
+to the console that asked.
+
+`update --note "..." --evidence <sha|url>` posts one first-person line to the agents' feed; under
+HUB_AUTOWORKER=1 the answer/ack/finish verbs post their own line automatically.
 
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
@@ -91,24 +101,47 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         **_auth_headers(),
         **(extra_headers or {}),
     }
-    request = urllib.request.Request(
-        f"{base}/api/{operation}",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
+    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    # BACK-PRESSURE IS RETRIED, NOTHING ELSE. A 503 whose code says the write never happened
+    # (the ledger lock was busy, a sidecar feed lost its append) is safe to repeat by
+    # construction; any other failure is returned to the caller unchanged, because a retry that
+    # reports failure for a write that landed is worse than the failure it was avoiding.
+    for attempt in range(_BUSY_ATTEMPTS):
+        request = urllib.request.Request(
+            f"{base}/api/{operation}", data=data, headers=headers, method="POST")
         try:
-            body: Any = json.loads(detail)
-        except json.JSONDecodeError:
-            body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            try:
+                body: Any = json.loads(detail)
+            except json.JSONDecodeError:
+                body = detail
+            if error.code == 503 and attempt < _BUSY_ATTEMPTS - 1 and _retryable(body):
+                import time as _time
+                try:
+                    delay = float(error.headers.get("Retry-After") or 2)
+                except (TypeError, ValueError):
+                    delay = 2.0
+                _time.sleep(max(0.5, min(delay, 10.0)) * (attempt + 1))
+                continue
+            raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+    raise RuntimeError(f"Hub stayed busy at {base} after {_BUSY_ATTEMPTS} attempts")
+
+
+_BUSY_ATTEMPTS = 3
+_RETRYABLE_CODES = {"busy", "update_write_failed"}
+
+
+def _retryable(body: Any) -> bool:
+    """True only for a refusal that states nothing was written."""
+    try:
+        return any((e or {}).get("code") in _RETRYABLE_CODES for e in body.get("errors") or [])
+    except AttributeError:
+        return False
 
 
 def _optional_auth_headers() -> dict[str, str]:
@@ -118,14 +151,52 @@ def _optional_auth_headers() -> dict[str, str]:
         return {}          # reads are public; whoami simply reports no credential
 
 
+def _repo_remote(start: str) -> str:
+    """The origin remote of the repository containing `start`, read from .git/config — no
+    subprocess on the hot path. '' when there is none."""
+    import configparser
+    from pathlib import Path
+    try:
+        here = Path(start).resolve()
+    except OSError:
+        return ""
+    for folder in (here, *here.parents):
+        git = folder / ".git"
+        config = git / "config"
+        if git.is_file():                     # a worktree: "gitdir: <path>"
+            try:
+                target = git.read_text(encoding="utf-8").split(":", 1)[1].strip()
+                common = (Path(target) / "commondir")
+                base = Path(target) / (common.read_text(encoding="utf-8").strip()
+                                       if common.is_file() else ".")
+                config = base.resolve() / "config"
+            except (OSError, IndexError):
+                return ""
+        if config.is_file():
+            parser = configparser.ConfigParser(strict=False)
+            try:
+                parser.read(config, encoding="utf-8")
+                return parser.get('remote "origin"', "url", fallback="")
+            except (configparser.Error, OSError):
+                return ""
+    return ""
+
+
 def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, str]:
     """The observed-presence headers every write may carry. Environment first, flags win —
-    the board's live-console view is only as true as what the seats send."""
+    the board's live-console view is only as true as what the seats send. The console's name,
+    repository and runtime ride along so the roster can bind it to a project; the repository
+    is read from .git/config (never a subprocess) unless HUB_REPO says otherwise."""
+    cwd = os.environ.get("HUB_CWD") or os.getcwd()
     values = {
         "X-Hub-Machine": os.environ.get("HUB_MACHINE", ""),
         "X-Hub-Session": os.environ.get("HUB_SESSION_ID", ""),
-        "X-Hub-Cwd": os.environ.get("HUB_CWD") or os.getcwd(),
+        "X-Hub-Cwd": cwd,
         "X-Hub-Focus": os.environ.get("HUB_FOCUS", ""),
+        "X-Hub-Console": os.environ.get("HUB_CONSOLE_NAME", ""),
+        "X-Hub-Repo": os.environ.get("HUB_REPO") or _repo_remote(cwd),
+        "X-Hub-App": os.environ.get("HUB_APP", ""),
+        "X-Hub-Runtime": os.environ.get("HUB_RUNTIME", ""),
     }
     if arguments is not None:
         if getattr(arguments, "machine", None):
@@ -157,7 +228,7 @@ def _get(base: str, path: str, timeout: int = 30) -> dict[str, Any]:
 
 
 def _agent(arguments: argparse.Namespace) -> str:
-    return arguments.agent or os.environ.get("HUB_AGENT_ID") or "agent"
+    return getattr(arguments, "agent", None) or os.environ.get("HUB_AGENT_ID") or "agent"
 
 
 def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -226,6 +297,10 @@ def _payload_ask(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         payload["relates_to"] = arguments.relates_to
     if arguments.anyway:
         payload["anyway"] = True
+    if getattr(arguments, "to", None):
+        payload["to"] = arguments.to
+    if getattr(arguments, "human_only", False):
+        payload["human_only"] = True
     return "ask", payload
 
 
@@ -233,7 +308,28 @@ def _payload_answer(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
     payload: dict[str, Any] = {"question": arguments.question_id, "text": arguments.text}
     if arguments.crystallize:
         payload["crystallize"] = True
+    if getattr(arguments, "disclose", False):
+        payload["disclose"] = True
     return "answer", payload
+
+
+def _run_tier(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read every agent's visibility tier, or set one (credential:manage scope)."""
+    if arguments.set is None:
+        return _get(base, "tiers.json")
+    return _post(base, "tier", {"target": arguments.target, "tier": arguments.set})
+
+
+def _run_veil_audit(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Render every veiled route as a contributor and list any hidden term that got through."""
+    return _get(base, "veil-audit.json", timeout=120)
+
+
+def _run_perf(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Per-route latency (worst process window), the slow-route verdict and the snapshot's
+    per-phase timings; --profile runs one profiled snapshot build (perf:profile scope)."""
+    return _get(base, "perf.json" + ("?profile=snapshot" if arguments.profile else ""),
+                timeout=120)
 
 
 def _payload_directive(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -249,7 +345,55 @@ def _payload_ack(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     payload: dict[str, Any] = {"agent": _agent(arguments), "directive": arguments.directive_id}
     if arguments.note:
         payload["note"] = arguments.note
+    if arguments.revision is not None:
+        payload["delivery_revision"] = arguments.revision
     return "ack", payload
+
+
+def _payload_msg(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Agent-to-agent mail. `--session` addresses one of the recipient's consoles (the id the
+    board and `consoles` show); your own console rides X-Hub-Session so a reply comes back
+    to THIS window."""
+    payload: dict[str, Any] = {"agent": _agent(arguments), "to": arguments.to,
+                               "note": arguments.note}
+    for name in ("title", "session", "machine"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    return "message", payload
+
+
+def _payload_update(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """One first-person line on the agents' feed. `--evidence` MUST reach the row: a feed post
+    without the sha/url behind it is the one thing feed evidence exists to prevent."""
+    payload: dict[str, Any] = {"agent": _agent(arguments), "summary": arguments.note,
+                               "kind": arguments.kind}
+    if arguments.evidence:
+        payload["evidence"] = arguments.evidence
+    if arguments.item:
+        payload["item"] = arguments.item
+    payload["by"] = "autoworker" if _autoworker() else "human"
+    return "agent-update", payload
+
+
+def _autoworker() -> bool:
+    return os.environ.get("HUB_AUTOWORKER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _auto_update(base: str, arguments: argparse.Namespace, kind: str, summary: str,
+                 evidence: str = "", item: str = "") -> dict[str, Any] | None:
+    """The emit is MECHANICAL for unattended agents, so one cannot forget to narrate: under
+    HUB_AUTOWORKER=1 the answer/ack/finish verbs post their own feed line. An interactive person
+    running the same verb does not flood the feed. Fail-soft: narration never fails the verb."""
+    if not _autoworker():
+        return None
+    try:
+        return _post(base, "agent-update",
+                     {"agent": _agent(arguments), "kind": kind, "summary": summary[:4000],
+                      "evidence": evidence, "item": item, "by": "autoworker"},
+                     extra_headers=_presence_headers(arguments))
+    except (RuntimeError, ValueError) as error:
+        return {"feed_error": str(error)[:300]}
 
 
 def _payload_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -292,9 +436,49 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     return "ack-error", payload
 
 
+def _reader_query(arguments: argparse.Namespace) -> str:
+    """?agent=&session=&machine= for inbox reads: a console that names itself receives its own
+    mail, plus mail for a console of this agent that has since ended."""
+    from urllib.parse import urlencode
+    query = {"agent": arguments.agent}
+    session = getattr(arguments, "session", None) or os.environ.get("HUB_SESSION_ID", "")
+    machine = getattr(arguments, "machine", None) or os.environ.get("HUB_MACHINE", "")
+    if session:
+        query["session"] = session
+    if machine:
+        query["machine"] = machine
+    return urlencode(query)
+
+
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
-    from urllib.parse import quote
-    return _get(base, f"inbox.json?agent={quote(arguments.agent)}")
+    """What is addressed to you now. `--ack <id>` retires one delivered MESSAGE instead (an
+    answer or directive is acked with `ack`, naming its delivery revision)."""
+    if getattr(arguments, "ack", None):
+        payload = {"agent": arguments.agent, "id": arguments.ack}
+        if getattr(arguments, "via", None):
+            payload["via"] = arguments.via
+        return _post(base, "message/ack", payload, extra_headers=_presence_headers(arguments))
+    return _get(base, f"inbox.json?{_reader_query(arguments)}")
+
+
+def _run_receipts(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """The notification lifecycle: one item's thread (--ref), the offers nobody acknowledged
+    (--undelivered), or the newest receipts."""
+    from urllib.parse import urlencode
+    query: dict[str, Any] = {}
+    if arguments.ref:
+        query["ref"] = arguments.ref
+    elif arguments.undelivered:
+        query["undelivered"] = 1
+        if arguments.kind:
+            query["kind"] = arguments.kind
+    else:
+        query["limit"] = arguments.limit
+        if arguments.stage:
+            query["stage"] = arguments.stage
+        if arguments.agent:
+            query["agent"] = arguments.agent
+    return _get(base, "receipts.json?" + urlencode(query))
 
 
 def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -310,7 +494,7 @@ def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
         try:
             payload = _get(
                 base,
-                f"inbox/wait?agent={quote(arguments.agent)}&fp={quote(fingerprint)}"
+                f"inbox/wait?{_reader_query(arguments)}&fp={quote(fingerprint)}"
                 f"&wait={arguments.wait}",
                 timeout=arguments.wait + 15,
             )
@@ -333,6 +517,146 @@ def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
             return payload
         if changed:
             print(json.dumps(data, sort_keys=True), flush=True)
+
+
+def _run_release(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Hand a held task back (the lease only; the task stays on the board) and retract the
+    focus `start` declared for it."""
+    token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
+    if not token:
+        raise ValueError("provide --lease-token or set HUB_LEASE_TOKEN")
+    headers = _presence_headers(arguments)
+    try:
+        title = str(_fetch_task(base, arguments.task_id).get("title") or "")
+    except RuntimeError:
+        title = ""
+    if title:
+        headers["X-Hub-Focus-Retract"] = title[:180]
+    return _post(base, "release", {"id": arguments.task_id, "token": token,
+                                   "agent": _agent(arguments)}, extra_headers=headers)
+
+
+def _run_consoles(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Every live console on the board — project, state, focus, files, and the task THAT
+    console holds — with this console marked and the projects it is in without a task."""
+    from urllib.parse import urlencode
+    query: dict[str, str] = {}
+    if arguments.agent:
+        query["agent"] = arguments.agent
+    session = os.environ.get("HUB_SESSION_ID", "")
+    if session:
+        query["session"] = session
+    payload = _get(base, "activity.json" + ("?" + urlencode(query) if query else ""))
+    machine = os.environ.get("HUB_MACHINE", "").strip().lower()
+    for row in payload.get("data") or []:
+        if session and str(row.get("session") or "") == session[:8]:
+            row["this_console"] = True
+        elif machine and str(row.get("machine") or "").lower() == machine:
+            row["this_machine"] = True
+    nudge = (payload.get("metadata") or {}).get("no_task_for") or []
+    if nudge:
+        payload["nudge"] = ("you hold no task for %s — `start <task>` or `create` one so this "
+                            "work is visible on the board" % ", ".join(nudge))
+    return payload
+
+
+def _context_state_path(session: str):
+    from pathlib import Path
+    root = Path(os.environ.get("HUB_CONTEXT_STATE_DIR")
+                or Path(os.path.expanduser("~")) / ".hub-context")
+    safe = "".join(c for c in (session or "default") if c.isalnum() or c in "._-")[:64]
+    return root / ((safe or "default") + ".json")
+
+
+def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict[str, Any]:
+    """What a per-prompt hook should inject — THREE channels, fingerprinted SEPARATELY, because
+    they change at three different rates.
+
+    Folding standing doctrine, slow-moving reference and live board lines into one string under
+    one hash makes the cheapest half of the payload hostage to the most volatile: the live lines
+    move every prompt, so the hash moves every prompt, and the unchanged doctrine is re-sent
+    (and re-billed) every time. Here:
+
+      doctrine  the charter core (+ HUB_DOCTRINE_FILE): emitted when its text changes, on
+                SessionStart (which also covers resume and post-compaction), or with --force;
+                otherwise SILENT — the session already holds it
+      live      what is addressed to this agent/console now (inbox): re-sent whenever it moves
+      nudge     the projects this console is in without a task: re-sent whenever it moves
+
+    The per-session state file records the hash and time each channel was last emitted — the
+    receipt that says what this session was actually told. The text to inject is `context`."""
+    import hashlib
+    import time as _time
+    session = arguments.session or os.environ.get("HUB_SESSION_ID", "") or "default"
+    state_path = _context_state_path(session)
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    force = arguments.force or arguments.event.lower() in ("sessionstart", "session-start")
+    channels: dict[str, str] = {}
+
+    doctrine_parts = []
+    for path in [_charter_file()] + [p for p in (os.environ.get("HUB_DOCTRINE_FILE") or "").split(
+            os.pathsep) if p]:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                doctrine_parts.append(handle.read().strip())
+        except OSError:
+            continue
+    channels["doctrine"] = "\n\n".join(p for p in doctrine_parts if p)
+
+    live_lines, nudge = [], ""
+    agent = _agent(arguments)
+    if base:
+        try:
+            from urllib.parse import urlencode
+            query = {"agent": agent}
+            if session != "default":
+                query["session"] = session
+            inbox = _get(base, "inbox.json?" + urlencode(query), timeout=8)
+            from .inbox import render_line
+            for item in (inbox.get("data") or {}).get("items") or []:
+                live_lines.append("- " + render_line(item) + "  [" + str(item.get("id")) + "]")
+            if session != "default":
+                activity = _get(base, "activity.json?" + urlencode({"session": session}), timeout=8)
+                gap = (activity.get("metadata") or {}).get("no_task_for") or []
+                if gap:
+                    nudge = ("You hold no task for %s — `start <task>` or `create` one so this "
+                             "work is visible on the board." % ", ".join(gap))
+        except (RuntimeError, ValueError):
+            live_lines.append("- (the hub did not answer; addressed items are unknown this prompt)")
+    channels["live"] = ("Addressed to you now:\n" + "\n".join(live_lines)) if live_lines else ""
+    channels["nudge"] = nudge
+
+    emitted, parts = {}, []
+    now = _time.time()
+    for name in ("doctrine", "live", "nudge"):
+        text = channels[name]
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        prior = (state.get(name) or {}).get("sha")
+        send = bool(text) and (digest != prior or (name == "doctrine" and force))
+        if send:
+            parts.append(text)
+            state[name] = {"sha": digest, "emitted_at": now, "chars": len(text)}
+        elif not text and prior:
+            state[name] = {"sha": digest, "emitted_at": now, "chars": 0}   # cleared
+        emitted[name] = {"sent": send, "chars": len(text) if send else 0, "sha": digest}
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, state_path)
+    except OSError:
+        # If the receipt cannot be written the next prompt cannot know what this one said, so
+        # it must say everything again: drop the doctrine hash rather than go silent on a guess.
+        pass
+    context = "\n\n".join(parts)
+    if arguments.text:
+        print(context)
+        raise SystemExit(0)
+    return {"context": context, "channels": emitted, "session": session,
+            "chars": len(context)}
 
 
 def _run_search(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -404,7 +728,17 @@ def _run_start(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {"id": arguments.task_id, "agent": _agent(arguments)}
     if arguments.ttl_s is not None:
         payload["ttl_s"] = arguments.ttl_s
-    claim = _post(base, "claim", payload, extra_headers=_presence_headers(arguments))
+    headers = _presence_headers(arguments)
+    # START PUBLISHES WHAT, NEVER WHICH: the console's focus becomes the task's title (a bare id
+    # tells a reader of the roster nothing), unless the caller declared a focus of its own.
+    if not getattr(arguments, "focus", None):
+        try:
+            title = str(_fetch_task(base, arguments.task_id).get("title") or "")
+        except RuntimeError:
+            title = ""
+        if title:
+            headers["X-Hub-Focus"] = title[:180]
+    claim = _post(base, "claim", payload, extra_headers=headers)
     token = claim.get("token") or (claim.get("data") or {}).get("token") or ""
     entity = _fetch_task(base, arguments.task_id)
     sha = _charter_sha()
@@ -515,8 +849,16 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
                     "output_tail": output[-2000:].decode("utf-8", errors="replace")}
         payload["verification_run"] = receipt
 
-    result = _post(base, "complete", payload, extra_headers=_presence_headers(arguments))
-    return {"completed": result,
+    headers = _presence_headers(arguments)
+    if entity.get("title"):
+        # Retract the focus `start` declared — only if it is still that one; a newer focus set
+        # by another verb is never cleared by this.
+        headers["X-Hub-Focus-Retract"] = str(entity["title"])[:180]
+    result = _post(base, "complete", payload, extra_headers=headers)
+    feed = _auto_update(base, arguments, "fixed",
+                        f"Finished {entity.get('title') or arguments.task_id}: {arguments.accept_note}",
+                        evidence=(arguments.evidence or [""])[0], item=arguments.task_id)
+    return {"completed": result, **({"feed": feed} if feed else {}),
             **({"verification_run": receipt} if receipt else
                {"note": "no critical probe was declared — done stands on the real operation"})}
 
@@ -567,16 +909,39 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--relates-to", action="append", default=[], dest="relates_to")
     ask.add_argument("--anyway", action="store_true",
                      help="file even though the board already has a matching question")
+    ask.add_argument("--to", help="address one agent (default: the operator); an ask unanswered "
+                                  "past HUB_ASK_UNSTICK_S reaches every console regardless")
+    ask.add_argument("--human-only", action="store_true", dest="human_only",
+                     help="only a person can satisfy this (an approval, a physical step): "
+                          "delivered as a gate, never widened to every console")
     ask.set_defaults(payload=_payload_ask)
 
     answer = commands.add_parser("answer",
-                                 help="reply to a question AND retire it (directive:write scope)")
+                                 help="reply to a question AND retire it (ask:answer scope)")
     answer.add_argument("question_id")
     answer.add_argument("--text", required=True)
     answer.add_argument("--crystallize", action="store_true",
                         help="also mint a standing knowledge note (only when the NEXT person "
                              "would otherwise re-derive this; most answers are one-offs)")
+    answer.add_argument("--disclose", action="store_true",
+                        help="send a reply that names a facet the asker's tier cannot see, and "
+                             "record the disclosure (veil:disclose scope)")
     answer.set_defaults(payload=_payload_answer)
+
+    tier = commands.add_parser("tier", help="read tiers, or set one agent's visibility tier")
+    tier.add_argument("target", nargs="?", help="the agent")
+    tier.add_argument("--set", choices=("operator", "member", "contributor", ""),
+                      help="the tier to set ('' clears it)")
+    tier.set_defaults(runner=_run_tier)
+
+    veil_audit = commands.add_parser(
+        "veil-audit", help="render every veiled route as a contributor; list any leaked term")
+    veil_audit.set_defaults(runner=_run_veil_audit)
+
+    perf = commands.add_parser("perf", help="route latency, slow routes, snapshot phase timings")
+    perf.add_argument("--profile", action="store_true",
+                      help="profile one snapshot build (perf:profile scope)")
+    perf.set_defaults(runner=_run_perf)
 
     directive = commands.add_parser("directive",
                                     help="issue an operator instruction (directive:write scope)")
@@ -590,7 +955,29 @@ def _parser() -> argparse.ArgumentParser:
     ack.add_argument("directive_id")
     ack.add_argument("--agent")
     ack.add_argument("--note")
+    ack.add_argument("--revision", type=int,
+                     help="the delivery_revision you read (required when the answer carries one)")
     ack.set_defaults(payload=_payload_ack)
+
+    msg = commands.add_parser("msg", help="send mail to another agent (delivered into its inbox)")
+    msg.add_argument("to")
+    msg.add_argument("--note", required=True)
+    msg.add_argument("--title")
+    msg.add_argument("--session", help="the recipient console id (from `consoles`)")
+    msg.add_argument("--machine", help="pin delivery to one of the recipient's machines")
+    msg.add_argument("--agent")
+    msg.set_defaults(payload=_payload_msg)
+
+    update = commands.add_parser("update",
+                                 help="post one first-person line to the agents' updates feed")
+    update.add_argument("--note", required=True, help="what you did, in your own words")
+    update.add_argument("--evidence", help="the sha / URL / path that proves it")
+    update.add_argument("--kind", choices=("fixed", "answered", "acked", "shipped", "escalated",
+                                           "noop"), default="fixed")
+    update.add_argument("--item", help="the board id this narrates (task, question, error)")
+    update.add_argument("--agent")
+    update.add_argument("--machine")
+    update.set_defaults(payload=_payload_update)
 
     presence = commands.add_parser("presence",
                                    help="seat heartbeat; sends X-Hub-* headers from env/flags")
@@ -598,6 +985,25 @@ def _parser() -> argparse.ArgumentParser:
     presence.add_argument("--machine")
     presence.add_argument("--focus")
     presence.set_defaults(payload=_payload_presence)
+
+    focus = commands.add_parser("focus",
+                                help="say what THIS console is on, in your own words")
+    focus.add_argument("focus", help="a sentence, not an id")
+    focus.add_argument("--agent")
+    focus.add_argument("--machine")
+    focus.set_defaults(payload=_payload_presence)
+
+    consoles = commands.add_parser("consoles",
+                                   help="every live console: project, focus, and the task it holds")
+    consoles.add_argument("--agent", help="only this agent's consoles")
+    consoles.set_defaults(runner=_run_consoles)
+
+    release = commands.add_parser("release", help="hand a held task's lease back")
+    release.add_argument("task_id")
+    release.add_argument("--agent")
+    release.add_argument("--lease-token", dest="lease_token")
+    release.add_argument("--machine")
+    release.set_defaults(runner=_run_release)
 
     forget = commands.add_parser("forget-presence",
                                  help="drop a phantom/retired seat row (presence:manage scope)")
@@ -631,11 +1037,28 @@ def _parser() -> argparse.ArgumentParser:
 
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)
+    inbox.add_argument("--session", help="this console's id (default HUB_SESSION_ID)")
+    inbox.add_argument("--machine", help="this machine (default HUB_MACHINE)")
+    inbox.add_argument("--ack", help="retire one delivered message by id")
+    inbox.add_argument("--via", help="how it was delivered (recorded on the receipt)")
     inbox.set_defaults(runner=_run_inbox)
+
+    receipts = commands.add_parser("receipts",
+                                   help="notification lifecycle: offered/delivered/failed/resolved")
+    receipts.add_argument("--ref", help="one item's thread")
+    receipts.add_argument("--undelivered", action="store_true",
+                          help="offers nobody acknowledged (last 24 h)")
+    receipts.add_argument("--kind", help="narrow --undelivered (message, answer, directive)")
+    receipts.add_argument("--stage", choices=("offered", "delivered", "failed", "resolved"))
+    receipts.add_argument("--agent")
+    receipts.add_argument("--limit", type=int, default=50)
+    receipts.set_defaults(runner=_run_receipts)
 
     wait = commands.add_parser("wait",
                                help="long-poll the inbox; --follow loops and prints arrivals")
     wait.add_argument("--agent", required=True)
+    wait.add_argument("--session", help="this console's id (default HUB_SESSION_ID)")
+    wait.add_argument("--machine", help="this machine (default HUB_MACHINE)")
     wait.add_argument("--fp", help="last known addressed-set fingerprint")
     wait.add_argument("--wait", type=int, default=25)
     wait.add_argument("--follow", action="store_true")
@@ -658,6 +1081,18 @@ def _parser() -> argparse.ArgumentParser:
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")
     nxt.add_argument("--n", type=int, default=1)
     nxt.set_defaults(runner=_run_next)
+
+    prompt_context = commands.add_parser(
+        "prompt-context",
+        help="per-prompt hook payload: doctrine only when it changed, live items when they move")
+    prompt_context.add_argument("--event", default="UserPromptSubmit",
+                                help="the hook event; SessionStart always re-sends the doctrine")
+    prompt_context.add_argument("--session", help="this console's id (default HUB_SESSION_ID)")
+    prompt_context.add_argument("--agent")
+    prompt_context.add_argument("--force", action="store_true", help="re-send the doctrine")
+    prompt_context.add_argument("--text", action="store_true",
+                                help="print only the text to inject (for a hook's stdout)")
+    prompt_context.set_defaults(runner=_run_prompt_context, optional_base=True)
 
     reground = commands.add_parser("reground",
                                    help="print the charter core + its sha — re-entry after context compaction")
@@ -701,12 +1136,34 @@ def main() -> int:
     parser = _parser()
     arguments = parser.parse_args()
     try:
-        base = None if getattr(arguments, "local", False) else _base_url(arguments.url)
+        if getattr(arguments, "local", False):
+            base = None
+        elif getattr(arguments, "optional_base", False):
+            # A hook must still emit the local doctrine when no hub is configured.
+            try:
+                base = _base_url(arguments.url)
+            except ValueError:
+                base = None
+        else:
+            base = _base_url(arguments.url)
         if getattr(arguments, "runner", None):
             result = arguments.runner(base, arguments)
         else:
             operation, payload = arguments.payload(arguments)
             result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+            if operation == "answer":
+                feed = _auto_update(base, arguments, "answered",
+                                    "Answered %s: %s" % (arguments.question_id, arguments.text),
+                                    item=arguments.question_id)
+            elif operation == "ack":
+                feed = _auto_update(base, arguments, "acked",
+                                    "Acknowledged %s%s" % (arguments.directive_id,
+                                                           (": " + arguments.note) if arguments.note else ""),
+                                    item=arguments.directive_id)
+            else:
+                feed = None
+            if feed:
+                result = {**result, "feed": feed}
     except (ValueError, RuntimeError) as error:
         print(str(error), file=sys.stderr)
         return 1
