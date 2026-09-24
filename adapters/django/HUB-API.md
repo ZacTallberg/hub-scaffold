@@ -64,7 +64,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
-| `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
+| `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish, `record` (a finding, method, gap or review, each onto its own write path) and `read_doctrine` (the facet-rendered standing documents); run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
 | `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
 | `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
@@ -76,6 +76,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
+| `GET /hub/doctrine.json?doc=<name>` | a standing document rendered through its facet fences for THE PRESENTING CREDENTIAL: `{doc, served[], facets_visible[], subject, sha256, text}`. A credential with scope `facet:<name>` (or `facet:*`, or `*`) sees that facet's blocks, an anonymous read sees none; hidden blocks leave no trace and the response names only the facets this caller CAN see. `404 unknown_doc` lists the served names. Documents come from `HUB_DOCTRINE_FILES` (default `PROJECT/DOCTRINE.md`, `CHARTER-CORE.md`, `AGENTS.md`). Fence syntax: `patterns/multi-agent-coordination.md`. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
 unchanged, so an idle poll or a re-grounding pull costs an empty body.
@@ -233,6 +234,16 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | `/hub/api/presence` (`presence:write`) | `agent` (+ the `X-Hub-*` headers) | The seat heartbeat; the response carries the shared freshness contract. Ordinary writes stamp activity on their own. |
 | `/hub/api/forget-presence` (`presence:manage`) | `machine` and/or `target` (the agent name) | Drop a phantom or retired seat row — a decommissioned laptop otherwise sits on the fleet strip looking like a teammate until the retirement horizon. Refuses to drop everything (`422 need_machine_or_target`); connected cockpits wake immediately. |
 
+### Recording the right kind of thing
+
+The client's `finding`, `method`, `gap` and `review` verbs (and the MCP `record` tool) are
+routings onto the write paths above, not new endpoints: a finding is a `note` in category
+`discovery` tagged `finding`, a method a `note` in category `method`, a gap a `gap` with a
+severity and evidence, and a review an `ask` whose question starts `Review gate:` — so it is
+DELIVERED to the operator before the thing ships. When to use which:
+`patterns/multi-agent-coordination.md`. `create --unattended` marks a task for the event-driven
+responder lane (`routing.required_capabilities` += `unattended`; `patterns/unattended-responders.md`).
+
 ### The operational error stream
 
 | Endpoint (scope) | Key body fields | Behaviour |
@@ -250,6 +261,10 @@ unthrottled flood does not just add noise, it EVICTS every other error from a bo
 Every write on every endpoint above is additionally screened for secret shapes and refused
 `422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
 be removed, only rotated. Recognizable redaction placeholders pass.
+Every board write outside the error-report scope is also refused `422 control_chars` when a
+string carries a C0 control character other than newline, carriage return or tab — almost
+always a backslash escape eaten between the source and the call (`` in a Windows path lands a
+raw BEL). The refusal names the field, offsets and character; fix the source and resend.
 
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
 (dereferenceable-evidence mode).
@@ -273,7 +288,7 @@ Most write refusals are `{errors:[{code, msg, …}]}`:
 `bad_sha`/`release_not_observed`/`need_tasks_closed`/`invalid_task_closure` (422) ·
 `immutable_deploy`/`adr_immutable` (409) · `bad_grant_request` (422) · `launch_disabled`/`not_found` (404) ·
 `launch_refused` (403) · `launch_unavailable` (503) ·
-`need_agent`/`secret_shaped_payload`/`bad_older_than_hours` (400/422) ·
+`need_agent`/`secret_shaped_payload`/`control_chars`/`bad_older_than_hours` (400/422) ·
 `need_question`/`need_question_and_text`/`need_app`/`need_bound`/`need_fingerprint` (400) ·
 `duplicate_question`/`unknown_asker`/`not_acked` (409) ·
 `no_such_question`/`unknown_directive` (404).

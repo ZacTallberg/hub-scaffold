@@ -14,6 +14,39 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Unattended responders, record kinds, audience-fenced doctrine, and a control-byte guard
+
+- **`hub_core.responder` — spend a session only when something happened.** A scheduled `poll`
+  reads the board and launches one bounded session per workable item: a question for the
+  operator, a FRESH unclaimed error, or a task created with `create --unattended`. A rotting
+  in-progress task and the ready queue are counted and surfaced, never woken for. The launcher
+  re-reads each item live (and stands down if it was taken), caps attempts, runs one session per
+  lane (short for questions/errors, long for tasks), tells the session its kill minute and
+  ship-by minute, kills and proves dead the whole tree at the clock, and reads the outcome from
+  the board — never the exit code. Every terminal outcome posts a board update naming any
+  uncommitted files left behind (never committed for the session). Sessions are non-interactive
+  (no git credential prompt or dialog, `stdin=DEVNULL`) and, on Windows, get a hidden console of
+  their own. A local run ledger records each run from the moment it waits for a lane; the run id
+  rides the session environment and each run is its own presence seat. A daily canary proves the
+  ask loop and never concludes from an unreachable board or a single empty read. `check-env`
+  prints the OK / FIXED / NEEDS A PERSON repair table and, daily, boards what needs a person.
+  `adapters/windows/register-responder.ps1` arms it under `pythonw.exe`; `-Remove` leaves.
+  Asks raised under `HUB_UNATTENDED=1` are stamped `via=responder` by the client itself, so an
+  automated escalation chain stops at one hop. `patterns/unattended-responders.md`.
+- **Record the right kind of thing.** Client verbs `finding`, `method`, `gap`, `review` and the
+  MCP `record` tool route each kind onto its own write path; a review rides the ask loop so it is
+  delivered before the thing ships.
+- **Audience-fenced doctrine.** `GET /hub/doctrine.json` (client `doctrine`, MCP
+  `read_doctrine`) serves a standing document through `<!-- facet: X -->` fences, decided by the
+  presenting credential's `facet:*` scopes; hidden blocks leave no trace and a malformed fence
+  hides rather than leaks (`hub_core/facets.py`, `HUB_DOCTRINE_FILES`).
+- **Control characters are refused at the write seam** (`422 control_chars`, naming field and
+  offset): a lost `` in a Windows path would otherwise publish an invisible BEL into the
+  append-only ledger. The error-report scope is exempt.
+- **Coordination doctrine** for many consoles on one board — crossover kinds, what deliberately
+  does not fire, one owner plus one integrator, reuse verification —
+  `patterns/multi-agent-coordination.md`.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

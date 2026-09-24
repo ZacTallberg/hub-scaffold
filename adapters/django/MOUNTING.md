@@ -57,6 +57,9 @@ HUB_PROJECT_KEY = "{{PROJECT_KEY}}"   # entity-id prefix, lowercase slug, e.g. "
 HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads "Acme · Hub"
 # HUB_PROJECT_DIR = BASE_DIR / "PROJECT"  # override for monorepos; env form is also accepted
 # HUB_WORK_ROOT = BASE_DIR                 # repo/evidence root; defaults to HUB_PROJECT_DIR.parent
+# HUB_DOCTRINE_FILES = {"doctrine": "PROJECT/DOCTRINE.md", "charter": "CHARTER-CORE.md"}
+#                                          # documents /hub/doctrine.json serves through their facet
+#                                          # fences; relative paths resolve from HUB_WORK_ROOT
 # HUB_DIR = "/mounted/durable/path/hub"   # REQUIRED in production; never leave the live ledger
 #                                          # inside an ephemeral application image
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
