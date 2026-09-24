@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -136,11 +137,27 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
     return removed
 
 
+FILES_WINDOW_S = 600            # an edit older than ten minutes is history, not shared work
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def redact_focus(text: str) -> str:
+    """A focus line is read by every other console: an address pasted into a prompt must
+    not ride it there."""
+    return _EMAIL.sub("[email]", str(text or ""))
+
+
 def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: str = "",
-            focus: str = "", heartbeat: bool = False) -> None:
+            focus: str = "", heartbeat: bool = False, project: str = "", files=None,
+            name: str = "", unattended=None) -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine).
-    A heartbeat stamps heartbeat_at; anything else stamps activity_at. Never raises."""
+    A heartbeat stamps heartbeat_at; anything else stamps activity_at. Never raises.
+
+    The optional per-console facts are what crossover detection compares: the project the
+    console stands in, the files it edited in the last ten minutes (merged, each stamped),
+    its display name (how a sibling on the same machine addresses it), and whether it is an
+    unattended process nobody is reading."""
     agent = (agent or "").strip().lower()
     if not agent:
         return
@@ -178,11 +195,29 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 prior = sessions.get(sid) if isinstance(sessions.get(sid), dict) else {}
                 # A heartbeat carries no prompt, so it must not blank the last known focus —
                 # keep the prior one until a new prompt replaces it (merge-never-clobber).
-                sessions[sid] = {
+                entry = {
                     "cwd": (cwd or "").strip()[:200] or prior.get("cwd", ""),
-                    "focus": (focus or "").strip()[:180] or prior.get("focus", ""),
+                    "focus": redact_focus((focus or "").strip()[:180]) or prior.get("focus", ""),
                     "at": now,
                 }
+                entry["project"] = (project or "").strip().lower()[:80] or prior.get("project", "")
+                entry["name"] = (name or "").strip()[:40] or prior.get("name", "")
+                if unattended is not None:
+                    entry["unattended"] = bool(unattended)
+                elif prior.get("unattended"):
+                    entry["unattended"] = True
+                edits = {}
+                for item in prior.get("files") or []:
+                    if (isinstance(item, dict) and item.get("path")
+                            and now - epoch(item.get("at")) <= FILES_WINDOW_S):
+                        edits[item["path"]] = epoch(item.get("at"))
+                for path in (files or [])[:20]:
+                    path = str(path or "").strip().replace("\\", "/")[:200]
+                    if path:
+                        edits[path] = now
+                entry["files"] = [{"path": k, "at": v} for k, v in
+                                  sorted(edits.items(), key=lambda kv: kv[1], reverse=True)[:20]]
+                sessions[sid] = entry
                 # A console quiet past the keep window is closed. Without pruning this list
                 # only grows and ends up reporting every window ever opened.
                 cutoff = now - SESSION_KEEP_S
@@ -246,7 +281,15 @@ def read(hub_dir) -> dict:
             sess = r.get("sessions")
             entry["sessions"] = sorted(
                 ({"id": k, "cwd": (v or {}).get("cwd", ""),
-                  "focus": (v or {}).get("focus", ""), "at": epoch((v or {}).get("at"))}
+                  "focus": (v or {}).get("focus", ""), "at": epoch((v or {}).get("at")),
+                  "project": (v or {}).get("project", ""), "name": (v or {}).get("name", ""),
+                  "unattended": bool((v or {}).get("unattended")),
+                  # The window is applied at READ as well as at write: a console that stopped
+                  # observing still carries its last edits, and an edit an hour old must not
+                  # pair it with anybody as "both edited this in the last ten minutes".
+                  "files": [f.get("path") for f in ((v or {}).get("files") or [])
+                            if isinstance(f, dict) and f.get("path")
+                            and time.time() - epoch(f.get("at")) <= FILES_WINDOW_S]}
                  for k, v in (sess or {}).items() if isinstance(v, dict)),
                 key=lambda s: s.get("at") or 0, reverse=True) if isinstance(sess, dict) else []
             machines.append(entry)
@@ -309,6 +352,10 @@ def live_sessions(hub_dir, now: float | None = None) -> list:
                             "session": str(s.get("id") or "")[:8],
                             "cwd": str(s.get("cwd") or "")[:64],
                             "focus": str(s.get("focus") or "")[:100],
+                            "project": str(s.get("project") or ""),
+                            "name": str(s.get("name") or ""),
+                            "unattended": bool(s.get("unattended")),
+                            "files": list(s.get("files") or [])[:10],
                             "age_s": round(now - at)})
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
     return out

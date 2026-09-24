@@ -87,7 +87,21 @@ def question_items(state) -> list:
     return out
 
 
-def directive_items(state, agent: str) -> list:
+def _pinned_elsewhere(ent, machine: str, session: str) -> bool:
+    """A directive PINNED to one computer (`machine`) or one console (`session`) is delivered
+    only there. A caller that does not say where it is cannot claim to be the pinned place —
+    an unpinned client receiving a pinned instruction is exactly the misdelivery the pin
+    exists to prevent."""
+    want_machine = str(ent.get("machine") or "").strip().lower()
+    want_session = str(ent.get("session") or "").strip()[:8]
+    if want_machine and want_machine != (machine or "").strip().lower():
+        return True
+    if want_session and want_session != (session or "").strip()[:8]:
+        return True
+    return False
+
+
+def directive_items(state, agent: str, *, machine: str = "", session: str = "") -> list:
     """Active directives aimed at this agent — including the answer to its own question.
     An item this agent has ALREADY ACKED is closed and not addressed to it any more;
     without that, the asker's own machine keeps announcing a reply it acknowledged."""
@@ -106,6 +120,8 @@ def directive_items(state, agent: str) -> list:
         targets = [str(t).lower() for t in (ent.get("targets") or [])]
         if agent not in targets and "all" not in targets:
             continue
+        if _pinned_elsewhere(ent, machine, session):
+            continue
         prov = ent.get("provenance") or {}
         answered = ent.get("answers") or ""
         out.append({
@@ -117,16 +133,19 @@ def directive_items(state, agent: str) -> list:
             "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
             "answers": _text(answered, 120),
             "remediation_cmd": _text(ent.get("remediation_cmd"), 400),
+            "machine": _text(ent.get("machine"), 120),
+            "session": _text(ent.get("session"), 64),
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out
 
 
-def items_for(state, agent: str, operator: str) -> list:
-    """Everything currently addressed to `agent`. The operator additionally receives every
-    open question — questions are addressed to whoever can answer them."""
+def items_for(state, agent: str, operator: str, *, machine: str = "", session: str = "") -> list:
+    """Everything currently addressed to `agent` (on this machine / in this console, when
+    the caller says). The operator additionally receives every open question — questions are
+    addressed to whoever can answer them."""
     agent = (agent or "").strip().lower()
-    items = directive_items(state, agent)
+    items = directive_items(state, agent, machine=machine, session=session)
     if agent and agent == (operator or "").strip().lower():
         items = question_items(state) + items
     return items
@@ -192,6 +211,8 @@ def render_line(item) -> str:
         return "%s asks: %s" % (item.get("from") or "someone", item.get("title") or "")
     if item.get("kind") == "answer":
         return "Answer from %s: %s" % (item.get("from") or "the operator", item.get("title") or "")
+    if item.get("kind") in ("error", "overlap"):
+        return str(item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 

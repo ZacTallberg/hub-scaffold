@@ -17,6 +17,8 @@
       "minItems": 1,
       "description": "Agent names, or the single element 'all'. Auto-retire on full ack applies only to explicitly named targets — 'all' has no closed roster to check off."
     },
+    "machine": { "type": "string", "maxLength": 120, "description": "Pin delivery to ONE computer: only an inbox read that names this machine receives it. An unpinned client cannot claim to be the pinned place." },
+    "session": { "type": "string", "maxLength": 64, "description": "Pin delivery to ONE console (its session id). The write path resolves a console NAME to the live session it addresses and refuses a console that is not live, so a message never lands in a window nobody has open." },
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
