@@ -575,7 +575,7 @@ def _write_lease(task_id, lease):
 
 
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
-          actor_kind=None):
+          actor_kind=None, session=""):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
@@ -592,6 +592,8 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                 cur["actor_kind"] = actor_kind
             cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
+            if session and not cur.get("session"):
+                cur["session"] = str(session)[:8]
             _write_lease(task_id, cur)
             _publish_realtime("lease.heartbeat", task=task_id, agent=agent,
                               expires=cur["expires"])
@@ -601,6 +603,11 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                  "auth_subject": auth_subject, "credential_id": credential_id,
                  "actor_kind": actor_kind,
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
+        # The CONSOLE that claimed it: a lease names an agent, and an agent with several
+        # consoles open is several holders — without the session the crossover detector can
+        # bind a task to a console only when the agent has exactly one.
+        if session:
+            lease["session"] = str(session)[:8]
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
                           expires=lease["expires"])
@@ -736,12 +743,22 @@ def observe_presence(agent, headers, *, heartbeat=False):
     cockpits — throttled, because presence rides every write and the wake-up plane must not
     carry one signal per request. Fail-soft end to end: presence must never break a write."""
     try:
+        # The per-console facts crossover detection compares ride optional headers too:
+        # the project the console stands in, the files it edited (comma-separated), its
+        # display name, and whether it is an unattended process nobody is reading.
+        files = [f.strip() for f in (headers.get("X-Hub-Files") or "").split(",") if f.strip()]
+        unattended = headers.get("X-Hub-Unattended")
         _presence.observe(
             HUB_DIR, agent,
             machine=headers.get("X-Hub-Machine") or "",
             session=headers.get("X-Hub-Session") or "",
             cwd=headers.get("X-Hub-Cwd") or "",
             focus=headers.get("X-Hub-Focus") or "",
+            project=headers.get("X-Hub-Project") or "",
+            files=files,
+            name=headers.get("X-Hub-Console-Name") or "",
+            unattended=(None if unattended in (None, "") else
+                        str(unattended).strip().lower() in ("1", "true", "yes")),
             heartbeat=heartbeat)
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
@@ -781,3 +798,40 @@ def record_error(source, message, **kwargs):
 def errors_changed():
     """Wake cockpits after an ack/reopen/clear — queue state changed with no new row."""
     _publish_realtime("errors.changed")
+
+
+# ---- declared services, problems, app health: the adopter's own map ----
+def apps_config():
+    """The services this project runs, as the adopter declares them: settings.HUB_APPS (a
+    dict) or the HUB_APPS_JSON environment variable. Per service, all optional:
+    {"url", "health_url", "project" (its CI project when it differs), "hosted_in",
+     "owners": [agent, ...], "status": "planned"}. A service that has never been declared but
+    has forwarded an error still appears — reporting is evidence enough to exist."""
+    raw = _dj_setting("HUB_APPS", None)
+    if raw is None:
+        text = os.environ.get("HUB_APPS_JSON") or ""
+        try:
+            raw = json.loads(text) if text.strip() else {}
+        except ValueError:
+            raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k).strip().lower(): (v if isinstance(v, dict) else {}) for k, v in raw.items()
+            if str(k).strip()}
+
+
+def native_slug():
+    """The hub's own row in the health table: it records its own errors directly."""
+    return str(_dj_setting("HUB_APP_SLUG", "") or os.environ.get("HUB_APP_SLUG") or "hub").strip().lower()
+
+
+def native_deploy(state):
+    """The newest deploy record on this board — the hub's own release."""
+    best = None
+    for ent in (state.get("entities") or {}).values():
+        if not isinstance(ent, dict) or ent.get("type") != "deploy":
+            continue
+        at = str(ent.get("at") or (ent.get("provenance") or {}).get("updated_at") or "")
+        if best is None or at > best["at"]:
+            best = {"at": at, "sha": str(ent.get("sha") or "")}
+    return best
