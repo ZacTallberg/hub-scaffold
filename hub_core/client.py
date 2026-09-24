@@ -82,9 +82,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 
@@ -415,6 +418,15 @@ def _auth_headers() -> dict[str, str]:
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
 
 
+# Operations whose server path honours `idem_key` (a repeated key with an identical payload
+# replays the first event instead of writing again). Only these are retried automatically: a
+# retry of anything else could double-apply, and a retry that reports failure for a write that
+# landed is worse than the failure it was avoiding.
+RETRY_SAFE_OPERATIONS = frozenset({"task", "directive", "answer", "ask", "ack", "gap", "note"})
+RETRY_ATTEMPTS = 3
+RETRY_STATUSES = frozenset({502, 503, 504})   # the edge lost the response or the hub was busy
+
+
 def _safe_headers(headers: dict[str, str]) -> dict[str, str]:
     """Header values http.client can actually put on the wire.
 
@@ -473,12 +485,40 @@ def _bases_of(base: Any) -> list[str]:
 def _post(base: Any, operation: str, payload: dict[str, Any],
           extra_headers: dict[str, str] | None = None,
           timeout: float | None = None) -> dict[str, Any]:
+    """POST one write over every configured route (``_request``).
+
+    For a retry-safe operation the request carries an idempotency key (minted here when the
+    caller supplied none), and a failure that says nothing about whether the write landed -- a
+    read timeout, a reset, a 502/503/504 from the edge -- is retried with the SAME key and
+    payload. The server replays a request that already landed, so the caller sees one success
+    (`data.replayed` says so) instead of a failure for a write that happened, or a second copy
+    of it. Only when every retry is spent does the outcome-unknown path apply."""
     headers = {"Content-Type": "application/json", **_common_headers(), **_auth_headers(),
                **_telemetry_headers(), **_unattended_headers(), **_artifact_headers(),
                **(extra_headers or {})}
-    return _request(_bases_of(base), "POST", f"api/{operation}",
-                    data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-                    headers=headers, timeout=timeout)
+
+    def once(body: dict[str, Any]) -> dict[str, Any]:
+        return _request(_bases_of(base), "POST", f"api/{operation}",
+                        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+                        headers=headers, timeout=timeout)
+
+    if operation not in RETRY_SAFE_OPERATIONS:
+        return once(payload)
+    payload = dict(payload)
+    payload.setdefault("idem_key", "cli:" + uuid.uuid4().hex)
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return once(payload)
+        except HubUnreachable as error:
+            if not error.reached:
+                raise                      # no route connected: the offline queue's case
+            if attempt == RETRY_ATTEMPTS:
+                raise
+            delay = 0.5 * attempt + random.uniform(0, 0.5)
+            print(json.dumps({"transient": str(error)[:200], "retry": attempt,
+                              "retry_in_s": round(delay, 2)}), file=sys.stderr)
+            time.sleep(delay)
+    raise RuntimeError("unreachable")
 
 
 def _post_versioned(base: Any, operation: str, payload: dict[str, Any],
@@ -1457,6 +1497,13 @@ def _payload_capability(arguments: argparse.Namespace) -> tuple[str, dict[str, A
     return "capability", payload
 
 
+def _run_list(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """One WHOLE collection. hub.json may carry a large collection only as a head (its
+    `partial` block says which); this is the read that returns every row."""
+    from urllib.parse import quote
+    return _get(base, f"{quote(arguments.type)}.json")
+
+
 def _run_questions(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "questions.json")
 
@@ -2212,7 +2259,9 @@ def _parser() -> argparse.ArgumentParser:
         "veil-audit", help="render every veiled route as a contributor; list any leaked term")
     veil_audit.set_defaults(runner=_run_veil_audit)
 
-    perf = commands.add_parser("perf", help="route latency, slow routes, snapshot phase timings")
+    perf = commands.add_parser("perf", help="route latency, slow routes, snapshot phase timings, "
+                                            "and which process answered (role, backgrounder "
+                                            "clock, startup prewarm)")
     perf.add_argument("--profile", action="store_true",
                       help="profile one snapshot build (perf:profile scope)")
     perf.set_defaults(runner=_run_perf)
@@ -2470,6 +2519,10 @@ def _parser() -> argparse.ArgumentParser:
     capability.add_argument("--expected-version", dest="expected_version", type=int,
                             help="required to update an existing capability")
     capability.set_defaults(payload=_payload_capability)
+
+    listing = commands.add_parser("list", help="one whole collection (task, note, directive, ...)")
+    listing.add_argument("type", help="singular type (task) or snapshot key (tasks)")
+    listing.set_defaults(runner=_run_list)
 
     questions = commands.add_parser("questions",
                                     help="every question with waits, lanes, and reply times")

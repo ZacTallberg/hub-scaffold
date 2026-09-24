@@ -53,7 +53,9 @@ from a working multi-project system. Nothing here names any specific person, hos
   hardening** (`deploy-hardening.md`: the deploy-step failures that roll back good builds or hide
   bad ones, and how CI/rollback results reach the board), **machine push identity**
   (`machine-push-identity.md`), and the **presence gate** (`presence-gate.py`: a harness hook that
-  derives the files a console edited, so the board can name two consoles editing one file).
+  derives the files a console edited, so the board can name two consoles editing one file), and **read access grants**
+  (`read-access-grants.md`: a private board admits its static allowlist plus the ledger's own
+  active grants — bounded, fail-soft, never wider on a failed read).
   Operating write-ups for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys
   that CI never cancels, push-only change triggers, job ceilings, publications from the protected
   ref), `app-slots.md` (allocate / stage / cut over / retire / re-adopt an app's port, service and

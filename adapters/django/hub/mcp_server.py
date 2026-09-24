@@ -10,6 +10,7 @@ The optional MCP polling hint is deliberately omitted: MCP point reads remain in
 the Hub UI and worker coordination stay literally event-push realtime over the canonical SSE rail.
 """
 import json
+import re
 
 from django.http import JsonResponse
 
@@ -239,7 +240,9 @@ TOOLS = [
          "context": {"type": "string"}, "anyway": {"type": "boolean"},
          "to": {"type": "string", "description": "address one agent; default the operator"},
          "human_only": {"type": "boolean",
-                        "description": "only a person can satisfy it: delivered as a gate"}},
+                        "description": "only a person can satisfy it: delivered as a gate"},
+         "idem_key": {"type": "string", "description": "repeat it on a retry: a call that "
+                      "already landed replays instead of being refused as its own duplicate"}},
          "required": ["agent", "question"]}},
     {"name": "answer_question",
      "description": "Answer an open question and retire it. The reply is addressed to the asker "
@@ -261,7 +264,8 @@ TOOLS = [
                     "delivery_revision you read when the item carries one.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
-         "note": {"type": "string"}, "delivery_revision": {"type": "integer"}},
+         "note": {"type": "string"}, "delivery_revision": {"type": "integer"},
+         "idem_key": {"type": "string"}},
          "required": ["agent", "directive"]}},
     {"name": "send_message",
      "description": "Send mail to another agent; it is delivered into their inbox (to one of "
@@ -358,6 +362,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "pipeline": {"type": "string"}, "job": {"type": "string"},
          "project": {"type": "string"}, "limit": {"type": "integer"}}}},
+    {"name": "list_collection",
+     "description": "Every row of one board collection (task, adr, feat, gap, cap, deploy, "
+                    "note, directive, ack, run). The board snapshot may carry a large collection "
+                    "only as its newest rows; this returns all of them.",
+     "inputSchema": {"type": "object", "properties": {
+         "type": {"type": "string"}}, "required": ["type"]}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -642,7 +652,7 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/complete", payload, auth_headers)
     elif name == "ask_operator":
         payload = {"agent": args["agent"], "question": args["question"]}
-        for key in ("context", "anyway", "to", "human_only"):
+        for key in ("context", "anyway", "to", "human_only", "idem_key"):
             if args.get(key):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/ask", payload, auth_headers)
@@ -663,6 +673,8 @@ def _call_tool(name, args, auth_headers):
             payload["note"] = args["note"]
         if args.get("delivery_revision") is not None:
             payload["delivery_revision"] = int(args["delivery_revision"])
+        if args.get("idem_key"):
+            payload["idem_key"] = args["idem_key"]
         status, body = _seam("/hub/api/ack", payload, auth_headers)
     elif name == "send_message":
         payload = {"agent": args["agent"], "to": args["to"], "note": args["note"]}
@@ -727,6 +739,9 @@ def _call_tool(name, args, auth_headers):
             # One lost optimistic-concurrency race is retried with the version the refusal
             # named; a second miss is a live race and is returned as-is.
             status, body = _seam(path, dict(fields, expected_version=current), auth_headers)
+    elif name == "list_collection":
+        kind = re.sub(r"[^a-z]", "", str(args.get("type") or "").lower())
+        status, body = _seam("/hub/%s.json" % kind, {}, auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)
