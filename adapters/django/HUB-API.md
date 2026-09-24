@@ -63,7 +63,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note, directive, ack, held`. |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). A task read with `?lineage=1` also carries its **lineage ladder** (see below). |
 | `GET /hub/held.json[?repo=]` | the promotion queue: every OPEN hold, oldest first, with `age_s`, `urgency` (info/warn/critical, four times faster for a commit on one disk only), its holder and a one-line `detail`; metadata counts promoted and abandoned. |
-| `GET /hub/item-claims.json` | every live per-machine item claim: `{item: {machine, agent, age_s, releases_in_s}}`. |
+| `GET /hub/item-claims.json` | every per-machine item claim still in force: `{item: {machine, session, agent, age_s, releases_in_s, holder_state, gone_s, frees_in_s}}`; a claim whose console is GONE past the grace is omitted. |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
@@ -164,12 +164,19 @@ A caller's empty `take` answers `409 no_ready_task` with `withheld` counts by re
   holder's machine quiet) the renewal goes through but never rewrites the recorded holder.
   `hub_core.liveness` answers `live` / `gone` / `unprovable`; absence from a PARTIAL roster is
   never read as gone. In-flight rows carry `holder_session`, `holder_machine`, `holder_state`,
-  `holder_gone_s`.
+  `holder_gone_s`, `holder_frees_in_s`.
+- **A GONE console releases what it held.** Once a holder has been provably GONE for
+  `HUB_GONE_GRACE_S` (default 30 min) measured from its console's last-seen stamp, its task
+  lease is void: the sweep hands the task back and expires that lease in place (by its fencing
+  token), a claim from another agent is granted with `took_over_from`, and a renewal from another
+  console of the same agent takes over the recorded holder. Inside the grace the claim is refused
+  `409 leased` with `holder_state: "gone"` and `frees_in_s`. UNPROVABLE never releases anything; only the clock does.
 - **The hub hands back abandoned work.** On its own read paths (throttled) the Hub returns an
   `in_progress` task to `todo` when its lease expired more than `HUB_LEASE_SWEEP_GRACE_S`
   (default 1 h) ago, or when no lease holds it and nothing moved for `HUB_LEASE_SWEEP_UNHELD_S`
-  (default 4 h). It writes ONE self-counting `handed_back` lifecycle row naming who held it and
-  how long ago it lapsed. Decision tasks are never handed back.
+  (default 4 h), or when the console holding its live lease is GONE past `HUB_GONE_GRACE_S`. It
+  writes ONE self-counting `handed_back` lifecycle row naming who held it and how long ago it
+  lapsed (or went). Decision tasks are never handed back.
 - **Lifecycle rows are not work.** A plan row with `lifecycle: true` or a lifecycle `kind`
   (`handed_back`, `lease_released`, `reaped`, `launcher_timeout`, `claim_expired`, `lifecycle`) is
   shown but never counted in "N of N done"; a recurring one counts itself in `times`.
@@ -178,11 +185,15 @@ A caller's empty `take` answers `409 no_ready_task` with `withheld` counts by re
 
 ### One responder per item: item claims
 
-`POST /hub/api/item-claim` (`task:claim`, explicit `@writer`) `{item, machine, [release]}` claims
+`POST /hub/api/item-claim` (`task:claim`, explicit `@writer`) `{item, machine, [release, session]}` claims
 a NON-task item — a question id or an error fingerprint — for ONE machine. A different machine
 gets `409 claimed_elsewhere` naming the holder and when the claim releases; the same machine
-re-claims idempotently (renewing the TTL, 30 minutes). A claimed question or error is reported IN
-FLIGHT on the rail and the error card, never as unclaimed.
+re-claims idempotently (renewing the TTL, 30 minutes). The claim records its console (`session`,
+or the `X-Hub-Session` header): when that console is provably GONE past `HUB_GONE_GRACE_S` the
+claim is no longer in force and another machine is granted it with `took_over_from`; inside the
+grace the `409` says `holder_state: "gone"` and `frees_in_s`. A claimed question or error is
+reported IN FLIGHT on the rail and the error card, never as unclaimed; a gone holder's reads
+"holder gone · frees in …".
 
 ### The lineage ladder
 
@@ -198,9 +209,13 @@ full shas are cached in `HUB_DIR/ancestry.json`, an unavailable one never is.
 
 `POST /hub/api/held` (`held:write`) `{repo, sha, reason, rebuild, [branch, from_gap, attested,
 unpushed_reason, local_path, title]}` records a finished commit deliberately NOT live yet. It is
-refused `422 sha_not_pushed` unless the client attests a remote branch contains it or the Hub's
-commit resolver finds it — or `unpushed_reason` records why it is on no remote (then marked ON ONE
-DISK ONLY). `POST /hub/api/held/promote` requires `evidence` (the pipeline, sha or URL of the
+refused `422 sha_not_pushed` unless the client attests a remote branch contains it or the Hub
+confirms a SERVER has it — a remote-tracking ref in a configured checkout contains it, or the
+`HUB_COMMIT_RESOLVER` adapter says the forge has it — or `unpushed_reason` records why it is on no
+remote (then marked ON ONE DISK ONLY). Mere existence in a local checkout is never confirmation:
+a commit the Hub finds locally on no remote-tracking ref is refused unless attested or explained,
+and the record keeps `hub_saw: "local_only"`. The refusal's `searched` names every place asked
+and what each saw. `POST /hub/api/held/promote` requires `evidence` (the pipeline, sha or URL of the
 rebuild that ran); `POST /hub/api/held/abandon` requires `reason`. Open holds ride the rail with
 urgency climbing by age.
 
