@@ -9,3 +9,4 @@ db.sqlite3
 build_sha.txt
 .hub_write_token.local
 .selftest-tmp.*
+.hub-backups/
