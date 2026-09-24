@@ -88,8 +88,12 @@ def _context(value) -> dict:
     # "machine", "app" and "agent" are the three things a reader most needs: a row that
     # says WHAT broke and nothing about WHERE makes a worker's failure and a service's
     # failure look identical.
+    # The CI keys (project, ref, sha, job, jobs, trigger, restored_sha) are the discriminators a
+    # later green is matched on: dropped here, a success on one branch retired a failure on
+    # another, and a pipeline success could never match the jobs it ran.
     allowed = ("component", "method", "path", "status", "reason", "operation", "release",
-               "machine", "app", "agent", "url")
+               "machine", "app", "agent", "url", "project", "ref", "sha", "job", "jobs",
+               "trigger", "restored_sha")
     return {k: _clean(value.get(k), 240) for k in allowed if value.get(k) not in (None, "")}
 
 
@@ -107,6 +111,11 @@ def _origin(source: str, context: dict) -> dict:
         out["origin"] = "browser"
     elif src.startswith("app."):
         out["origin"] = "app"
+        parts = source.split(".")
+        if len(parts) > 1:
+            out["origin_app"] = parts[1]
+    elif src.startswith("ci."):
+        out["origin"] = "ci"
         parts = source.split(".")
         if len(parts) > 1:
             out["origin_app"] = parts[1]
@@ -142,6 +151,9 @@ CHANNELS = (
     {"key": "app", "label": "Satellite services",
      "wired": "POST /hub/api/app-error from each service's error forwarder",
      "match": ("app.",)},
+    {"key": "ci", "label": "CI and deploy results",
+     "wired": "POST /hub/api/ci-event from a CI webhook or a pipeline step (webhook secret)",
+     "match": ("ci.",)},
     {"key": "external", "label": "Foreign/scanner traffic",
      "wired": "django.security.* — recorded as warnings, never as our errors",
      "match": ("django.security.",)},
