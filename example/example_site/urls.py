@@ -10,13 +10,23 @@ from django.urls import include, path
 
 from hub.agent_card import agent_card_view
 
+from . import demo_app
+
 
 def index(request):
-    return JsonResponse({"app": "example", "hub": "/hub/"})
+    return JsonResponse({"app": "example", "hub": "/hub/", "demo_app": "/demo-app/"})
 
 
 urlpatterns = [
     path("", index),
     path(".well-known/agent-card.json", agent_card_view),
     path("hub/", include("hub.urls")),
+    # A tiny adopting app (demo_app.py): links the hub-hosted agent component and bridges its
+    # calls server-side with the app's hub credential.
+    path("demo-app/", demo_app.page),
+    path("demo-app/agent/ask", demo_app.agent_ask),
+    path("demo-app/agent/history", demo_app.agent_history),
+    path("demo-app/agent/conversation", demo_app.agent_conversation),
+    path("demo-app/profile.json", demo_app.profile),
+    path("demo-app/feed.json", demo_app.feed),
 ]

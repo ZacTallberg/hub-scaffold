@@ -83,6 +83,11 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 #     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"}}}
 
 # Optional workstation worker bridge (disabled unless explicitly enabled):
+# HUB_DISK_WARN_GB = 15 / HUB_DISK_CRITICAL_GB = 8   # free-space thresholds for the hub's own drive
+# HUB_AGENT_URL = "https://agent.example/api/v1"      # brokered agent service (patterns/app-services.md)
+# HUB_AGENT_KEY = os.environ["HUB_AGENT_KEY"]         # the ONE agent key; never given to apps
+# HUB_AGENT_CONTEXT = "project-docs"                   # the corpus the agent answers from
+# HUB_AGENT_LABEL = "Assistant"; HUB_AGENT_TIMEOUT_S = 90; HUB_AGENT_TLS_VERIFY = True
 HUB_WORKER_LAUNCH_ENABLED = False
 HUB_WORKER_PROTOCOL = "hub-{{PROJECT_KEY}}"
 # HUB_WORKER_LAUNCH_ISSUER_URL = "{{LIVE_URL}}/hub/api/launch-grant/consume"

@@ -14,6 +14,30 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### App services, honest write outcomes, and a cockpit that reports only what it measured
+
+- **The hub serves the apps around it** (`patterns/app-services.md`). Hosted UI components at
+  `/hub/components/` (link, never copy; version hashed from the served bytes; adopters observed),
+  per-app component properties whose schema travels in each component's manifest
+  (`POST /hub/api/component-props`, `component:configure`; out-of-set values refused and listed),
+  one app's slice of the board (`/hub/app-feed.json`), a person's cross-app preferences
+  (`/hub/api/profile`, closed sets, SVG marks refused), and the hub as the one credential broker to
+  an agent service (`/hub/api/agent/{ask,history,conversation}`; unconfigured, failed and empty
+  answers each named). The `agent` component ships: launcher, docked resizable panel that pushes
+  the page, past chats, distinct states. Client verbs `components`, `component-props`,
+  `app-feed`, `profile`, `agent-ask`, `agent-history`; MCP tools `app_feed`, `list_components`,
+  `get_component_props`, `set_component_props`, `ask_agent`; a board card lists hosted components;
+  the example site carries a runnable adopting app at `/demo-app/`.
+- **The write seam can serve a token-gated read** (`writer(methods=..., presence=False)`, scope per
+  method), so server-to-server routes keep the same credential, scope and refusal recording.
+- **Writes say what happened.** An unmintable id is `400 invalid_local`; sidecar writes retry a
+  transient Windows sharing violation instead of 500ing; written text is stored whole and display
+  lines are ellipsis previews; a refused finish is recorded on the task with its fix.
+- **The cockpit reports only what it measured.** Console cwd and repo move as one fact and recent
+  files age out after 15 minutes; the hub's own drive is measured (`live.host_disk`, attention item
+  below `HUB_DISK_WARN_GB`); a question settled without a reply is never counted as answered;
+  build coherence names what was not reported; evidence lists and prose render as what they are.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

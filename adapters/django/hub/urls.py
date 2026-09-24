@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, mcp_server, run_api
+from . import app_services, hub_api, hub_write, hubsite, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -28,6 +28,15 @@ urlpatterns = [
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
+    # Services to the apps around the hub (adapters/django/hub/app_services.py): hosted UI
+    # components and their per-app properties, and one app's slice of the board. Above the
+    # catch-alls, which would read "components/props/<slug>.json" as an entity.
+    path("components/", app_services.component_index, name="components"),
+    path("components/props/<str:slug>.json", app_services.component_props,
+         name="component-props"),
+    path("components/<str:name>/<str:filename>", app_services.component_file,
+         name="component-file"),
+    path("app-feed.json", app_services.app_feed_json, name="app-feed"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
     path("<str:type>/<str:local>.json", hub_api.entity_json),
@@ -64,6 +73,13 @@ urlpatterns = [
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),
+    # Per-app component settings (operator), a person's cross-app preferences (an app's server
+    # on behalf of a person it signed in), and the brokered agent (the hub holds the one key).
+    path("api/component-props", app_services.set_component_props),
+    path("api/profile", app_services.profile),
+    path("api/agent/ask", app_services.agent_ask),
+    path("api/agent/history", app_services.agent_history),
+    path("api/agent/conversation", app_services.agent_conversation),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP

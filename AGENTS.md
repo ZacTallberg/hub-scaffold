@@ -43,7 +43,11 @@ from a working multi-project system. Nothing here names any specific person, hos
   that keeps failures in its own log can only be debugged from a shell on its host), and
   **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
-  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
+  the barren ladder it climbs when a cycle produces nothing), and **app services**
+  (`app-services.md`: hosted UI components apps link instead of copy, per-app component
+  properties, each app's slice of the board, per-person preferences, and the hub as the one
+  credential broker to an agent service — its routes ship mounted but do nothing until an app
+  links a component or `HUB_AGENT_URL` is set). None of the others runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook

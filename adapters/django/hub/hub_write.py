@@ -75,25 +75,32 @@ def _body(request):
         return None
 
 
-def writer(fn=None, *, scope=None):
+def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
+    """The one authenticated seam. `methods` admits GET for a token-gated READ that serves
+    another server (an app asking on behalf of a person it signed in) -- the same credential,
+    scope and refusal recording as a write, with an empty body. `scope` may be a mapping of
+    method -> scope when one route both reads and writes (read and write are different
+    authorities). `presence=False` keeps such service calls off the fleet roster: an app's
+    server is not somebody's seat."""
     if fn is None:
-        return lambda view: writer(view, scope=scope)
+        return lambda view: writer(view, scope=scope, methods=methods, presence=presence)
 
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
-        if request.method != "POST":
-            return HttpResponseNotAllowed(["POST"])
+        if request.method not in methods:
+            return HttpResponseNotAllowed(list(methods))
         auth, problem = _authenticate(request)
         if not auth:
             _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
-        if not auth.allows(scope):
+        required = scope.get(request.method) if isinstance(scope, dict) else scope
+        if not required or not auth.allows(required):
             _record_refusal(request, "insufficient_scope",
-                            "a write was refused: subject %r lacks scope %r" % (auth.subject, scope))
-            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+                            "a write was refused: subject %r lacks scope %r" % (auth.subject, required))
+            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": required,
                                               "subject": auth.subject}]}, status=403)
-        b = _body(request)
+        b = {} if request.method == "GET" else _body(request)
         if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
         # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
@@ -124,8 +131,9 @@ def writer(fn=None, *, scope=None):
         # board knows who is on it without anyone filing a report — and an unauthenticated
         # caller can never forge a seat. The label the write carries (or, for a scoped
         # credential, its immutable subject) names the seat. Fail-soft by construction.
-        seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
-        hub_app.observe_presence(seat, request.headers)
+        if presence:
+            seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
+            hub_app.observe_presence(seat, request.headers)
         request.hub_auth = auth
         marker = _AUTH.set(auth)
         try:
