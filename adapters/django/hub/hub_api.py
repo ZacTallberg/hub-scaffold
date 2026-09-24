@@ -262,7 +262,11 @@ def _errors_block():
                                          "external": bool(row.get("external")), "newest": ""})
         # occurrences_since_last is what the write-time throttle collapsed, so the true
         # weight of a repeating error is not the number of rows it left behind.
-        entry["count"] += 1 + int(row.get("occurrences_since_last") or 0)
+        # occurrences_folded counts what the throttle has folded SINCE the newest row was
+        # written; the larger of the two is the honest weight (summing would double-count the
+        # occurrence the row itself is).
+        entry["count"] += max(1 + int(row.get("occurrences_since_last") or 0),
+                              int(row.get("occurrences_folded") or 0))
         if str(row.get("ts") or "") > entry["newest"]:
             entry["newest"] = str(row.get("ts") or "")
     recent = sum(buckets[-6:])

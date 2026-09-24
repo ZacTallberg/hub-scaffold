@@ -40,6 +40,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import atomic
 from .process_lock import ProcessFileLock
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -64,6 +65,34 @@ _URL_SECRET = re.compile(r"(?i)([?&](?:k|key|token|secret|code)=)[^&#\s]+")
 # we do not serve is a scanner or a stale bookmark, worth counting and worth never letting
 # near the top of the stream.
 _EXTERNAL_NOISE = ("django.security.disallowedhost", "django.security.suspiciousoperation")
+
+
+# What varies per OCCURRENCE, stripped so two occurrences of one failure share a signature.
+# The fingerprint is three things at once -- the throttle bucket, the collapsed-repeat count and
+# the ack identity -- so a per-run id left in it ("job 1b4e...-... failed") defeats all three:
+# nothing folds, one cause floods the bounded store and evicts every other error, and an ack
+# covers exactly one occurrence. A UUID is collapsed WHOLE and FIRST: its dashes split it into
+# 8-4-4-4-12 and the hex pass only matches runs of 7+, so the short groups would otherwise
+# survive as partially-digested letters and every occurrence would normalise differently.
+_N_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+_N_DIGITS = re.compile(r"\d+")
+_N_HEX = re.compile(r"\b[0-9a-f]{7,64}\b")
+_N_QUERY = re.compile(r"\?[^\s]*")
+_N_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+_N_SPACES = re.compile(r"\s+")
+
+
+def normalize_message(message) -> str:
+    """The message with per-occurrence detail removed: uuids, ids, counts, hex shas, query
+    strings and quoted values. Any layer that groups rows by cause must use THIS function, so
+    that the key it groups by and the fingerprint an ack is filed under can never disagree."""
+    text = str(message or "").lower()
+    text = _N_QUOTED.sub("'...'", text)
+    text = _N_QUERY.sub("", text)
+    text = _N_UUID.sub("#", text)        # whole, before the per-segment passes below
+    text = _N_HEX.sub("#", text)
+    text = _N_DIGITS.sub("#", text)
+    return _N_SPACES.sub(" ", text).strip()[:120]
 
 
 def _errors_path(hub_dir) -> Path:
@@ -201,8 +230,10 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
     clean_code = _clean(code or "runtime_error", 120)
     clean_message = _clean(message or "Unspecified operational error")
     clean_details = _clean(details, 2000)
+    # NORMALISED, not raw: see normalize_message. The row still carries the raw message.
     fingerprint = hashlib.sha256(
-        f"{clean_source}\0{clean_code}\0{clean_message}".encode("utf-8", errors="replace")
+        f"{clean_source}\0{clean_code}\0{normalize_message(clean_message)}"
+        .encode("utf-8", errors="replace")
     ).hexdigest()[:16]
     row = {
         "ts": datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -243,8 +274,10 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
         Path(hub_dir).mkdir(parents=True, exist_ok=True)
         with ProcessFileLock(Path(hub_dir), name=".errors.lock", timeout=5):
             _compact_locked(hub_dir)
-            with _errors_path(hub_dir).open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+            # atomic.append_line: on Windows the open loses to a reader holding the file.
+            atomic.append_line(_errors_path(hub_dir),
+                               json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n",
+                               newline="\n", fsync=False)
         _WRITE_FAILURE.pop(key, None)
     except Exception as exc:                                 # noqa: BLE001 - must not raise
         # Logging cannot raise into the failing request, but the board must not call a
@@ -285,10 +318,25 @@ def read(hub_dir, limit=READ_LIMIT) -> tuple[list, dict]:
         rows = decoded[-window:]
         rows.reverse()
         acked = read_acked(hub_dir)
-        for row in rows:
-            mark = acked.get(row.get("fingerprint"))
+        seen_map = _LAST_SEEN.get(key, {})
+        newest_of = set()
+        for row in rows:                  # newest-first, so the first row of a signature wins
+            fp = row.get("fingerprint")
+            mark = acked.get(fp)
             if mark:
                 row["acked"] = mark
+            # The throttle counts every suppressed repeat, but a written row only learns its
+            # weight on the NEXT write after the window -- a failure every thirty seconds would
+            # read x1 for the whole window. So the NEWEST row of each signature carries what
+            # this process has folded since it was written (the count resets on every write,
+            # which is why it is applied to that one row only: stamping every row sharing the
+            # signature would multiply it by the rows in the window). Process-local, like the
+            # throttle it reads: another worker process's repeats arrive with its next row.
+            if fp not in newest_of:
+                newest_of.add(fp)
+                seen = seen_map.get(fp)
+                if seen and seen[1] > 1 and float(row.get("epoch") or 0) >= seen[0] - 0.01:
+                    row["occurrences_folded"] = seen[1]
         metadata = {
             "available": failure is None,
             "retention": KEEP_ROWS,

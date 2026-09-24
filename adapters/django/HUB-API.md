@@ -247,6 +247,11 @@ The sending half — LOGGING handlers for the host app, a bounded fail-soft forw
 satellite services — is `patterns/error-visibility.md`; wire it before the first feature.
 Rows are redacted at write and throttled per fingerprint (the count is preserved) — an
 unthrottled flood does not just add noise, it EVICTS every other error from a bounded store.
+The fingerprint is computed over the message with per-occurrence detail removed (uuids, hex
+ids, numbers, query strings, quoted values), so `job <uuid> failed` from a hundred runs is ONE
+signature: one throttle bucket, one ack. The newest row of a signature carries
+`occurrences_folded` — the repeats this process has collapsed since that row was written — and
+the weight a reader should show is `max(1 + occurrences_since_last, occurrences_folded)`.
 Every write on every endpoint above is additionally screened for secret shapes and refused
 `422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
 be removed, only rotated. Recognizable redaction placeholders pass.
