@@ -2694,6 +2694,12 @@ def hand(request):
     return hand_back(request)
 
 
+# The dispatcher itself authenticates nothing: each branch is a full @writer. It carries the
+# union of both branches' scopes so the route audit sees the gate the request will meet.
+hand._hub_token_gated = True
+hand._hub_required_scope = ("task:assign", "task:release")
+
+
 @writer(scope="task:release")
 def unclaim(request, b):
     """Let go of a task without handing it anywhere: the lease released (own, or an orphaned
