@@ -30,9 +30,10 @@ in silence::
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream. `ci-failure` posts a failed CI job's log tail; the hub classifies it (rollback /
-real / not_deployed / unclear) by what the LOG says, never by the pipeline's trigger. `components`
-and `capability` read and register the standard components and app skeletons a new app starts
-from.
+real / not_deployed / unclear) by what the LOG says, never by the pipeline's trigger. `deploy`
+records a verified release and survives a cold hub (growing timeouts, retried only because the
+record is idempotent by sha). `components` and `capability` read and register the standard
+components and app skeletons a new app starts from.
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
@@ -83,7 +84,7 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _post(base: str, operation: str, payload: dict[str, Any],
-          extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
+          extra_headers: dict[str, str] | None = None, timeout: float = 30) -> dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -101,7 +102,7 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
@@ -112,6 +113,8 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+    except (TimeoutError, OSError) as error:        # a read timeout surfaces bare, not as URLError
+        raise RuntimeError(f"Hub is unreachable at {base}: {error}") from error
 
 
 def _optional_auth_headers() -> dict[str, str]:
@@ -294,6 +297,72 @@ def _payload_ci_failure(arguments: argparse.Namespace) -> tuple[str, dict[str, A
     if arguments.deployless:
         payload["deployless"] = True
     return "ci-failure", payload
+
+
+#: A deploy record is posted seconds after the release restarted the service, so its first read
+#: pays for the whole warm-up. One short timeout there turns a slow hub into a LOST record.
+DEPLOY_RECORD_TIMEOUTS = (20.0, 45.0, 90.0)
+#: Statuses that are the edge or a waking service talking, not the Hub's verdict on the record.
+_TRANSIENT_STATUSES = {502, 503, 504}
+
+
+def _transient(error: RuntimeError) -> bool:
+    """True for a transport failure or a gateway status; False for any Hub verdict (4xx, 500)."""
+    text = str(error)
+    if text.startswith("Hub is unreachable"):
+        return True
+    try:
+        return int(json.loads(text).get("status")) in _TRANSIENT_STATUSES
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _run_deploy(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Record one immutable release closure, surviving a cold hub.
+
+    Retried ONLY because the write is idempotent by sha: the Hub answers an exact repeat of the
+    same proof as ``idempotent: true``, so an attempt that landed but whose reply was lost cannot
+    become a second record or a false failure on the next try. Each transport failure prints one
+    ``DEPLOY_RECORD_RETRY`` line on stderr, so a hub that is getting slower stays audible; a
+    refusal (bad sha, task not done, changed proof) is a verdict and is never retried."""
+    import time
+    sha = arguments.sha.strip().lower()
+    payload: dict[str, Any] = {"sha": sha, "served_sha": (arguments.served_sha or "").strip().lower(),
+                               "tasks_closed": list(arguments.task or []), "agent": _agent(arguments)}
+    for name in ("at", "method", "build"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if "at" not in payload:
+        # Stamped ONCE, before the first attempt: a retry must repeat the same proof exactly,
+        # or the idempotent repeat becomes a refused rewrite of this sha's record.
+        import datetime
+        payload["at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if arguments.audit_ok is not None:
+        payload["audit_ok"] = arguments.audit_ok == "true"
+    try:
+        timeouts = [float(v) for v in str(arguments.timeouts).split(",") if v.strip()]
+    except ValueError as error:
+        raise ValueError("--timeouts takes comma-separated seconds, e.g. 20,45,90") from error
+    if not timeouts or any(t <= 0 for t in timeouts):
+        raise ValueError("--timeouts needs at least one positive number of seconds")
+    last: RuntimeError | None = None
+    for attempt, timeout in enumerate(timeouts, start=1):
+        try:
+            result = _post(base, "deploy", payload, extra_headers=_presence_headers(arguments),
+                           timeout=timeout)
+            if attempt > 1:
+                result = {**result, "attempts": attempt}
+            return result
+        except RuntimeError as error:
+            if not _transient(error):
+                raise
+            last = error
+            print(f"DEPLOY_RECORD_RETRY sha={sha[:12]} attempt={attempt}/{len(timeouts)} "
+                  f"timeout_s={timeout:g} reason={error}", file=sys.stderr)
+            if attempt < len(timeouts):
+                time.sleep(min(5.0 * attempt, 30.0))
+    raise RuntimeError(f"DEPLOY_RECORD_FAILED sha={sha[:12]} after {len(timeouts)} attempts: {last}")
 
 
 def _payload_agent_error(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -677,6 +746,22 @@ def _parser() -> argparse.ArgumentParser:
     ci_failure.add_argument("--deployless", action="store_true",
                             help="this pipeline carries no deploy stage")
     ci_failure.set_defaults(payload=_payload_ci_failure)
+
+    deploy = commands.add_parser(
+        "deploy", help="record a verified release (idempotent by sha; retries a cold hub)")
+    deploy.add_argument("--sha", required=True, help="the commit that was built and shipped")
+    deploy.add_argument("--served-sha", dest="served_sha", required=True,
+                        help="the identity the front-door canary actually observed")
+    deploy.add_argument("--task", action="append",
+                        help="a done task this release carries (repeatable; none is allowed)")
+    deploy.add_argument("--at")
+    deploy.add_argument("--method")
+    deploy.add_argument("--build")
+    deploy.add_argument("--audit-ok", dest="audit_ok", choices=("true", "false"))
+    deploy.add_argument("--agent")
+    deploy.add_argument("--timeouts", default=",".join("%g" % t for t in DEPLOY_RECORD_TIMEOUTS),
+                        help="per-attempt timeouts in seconds, growing (default 20,45,90)")
+    deploy.set_defaults(runner=_run_deploy)
 
     agent_error = commands.add_parser("agent-error",
                                       help="report a worker-side operational failure")
