@@ -9,7 +9,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from hub_core import shell
 
 from . import hub_app
-from .hub_api import _snapshot, hub_json
+from .hub_api import _snapshot, _wire_snapshot, hub_json
 
 
 @ensure_csrf_cookie
@@ -17,4 +17,6 @@ def hub(request):
     if request.GET.get("format") == "json":
         return hub_json(request)
     _state, snap = _snapshot(request.GET.get("served"))
-    return HttpResponse(shell.render(snap, f"{hub_app.BRAND} · Hub", csrf_token=get_token(request)))
+    # The page embeds exactly what hub.json serves: large collections as heads, with their exact
+    # counts, hydrated by the board from /hub/<type>.json after first paint.
+    return HttpResponse(shell.render(_wire_snapshot(snap), f"{hub_app.BRAND} · Hub", csrf_token=get_token(request)))

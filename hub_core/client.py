@@ -383,6 +383,13 @@ def _run_search(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, f"search.json?q={quote(arguments.query)}&limit={arguments.limit}")
 
 
+def _run_list(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """One WHOLE collection. hub.json may carry a large collection only as a head (its
+    `partial` block says which); this is the read that returns every row."""
+    from urllib.parse import quote
+    return _get(base, f"{quote(arguments.type)}.json")
+
+
 def _run_questions(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "questions.json")
 
@@ -688,6 +695,10 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
     search.set_defaults(runner=_run_search)
+
+    listing = commands.add_parser("list", help="one whole collection (task, note, directive, ...)")
+    listing.add_argument("type", help="singular type (task) or snapshot key (tasks)")
+    listing.set_defaults(runner=_run_list)
 
     questions = commands.add_parser("questions",
                                     help="every question with waits, lanes, and reply times")

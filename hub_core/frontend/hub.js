@@ -164,6 +164,34 @@
   rebuildIndex();
   function live() { return D.live || {}; }
 
+  /* ---- snapshot heads + tab hydration ----
+     A large collection may ride the snapshot as a HEAD (every still-live row plus the newest of
+     the rest); D.partial names it and D.collection_counts carries its exact size. Its tab fetches
+     the WHOLE list from /hub/<type>.json after first paint (tasks first, since the overview
+     derives from them), and every later snapshot merges INTO a hydrated list by id, so a head
+     never shrinks a tab back to its newest rows. */
+  var HYDRATED = {};
+  function isPartial(key) { return !!(D.partial && D.partial[key]) && !HYDRATED[key]; }
+  function exactCount(key, rows) {
+    var counts = D.collection_counts || {};
+    return isPartial(key) && typeof counts[key] === "number" ? counts[key] : (rows || []).length;
+  }
+  function mergeById(base, over) {
+    // `over` is the newer read; a row it carries wins unless `base` holds a HIGHER version (a
+    // live patch that landed after `over` was built). Rows only `base` holds are kept.
+    var idx = {}, out = [];
+    (over || []).forEach(function (r) { if (r && r.id) idx[r.id] = r; });
+    var seen = {};
+    (base || []).forEach(function (r) {
+      if (!r || !r.id) return;
+      var o = idx[r.id];
+      seen[r.id] = true;
+      out.push(o && !((Number(r.version) || 0) > (Number(o.version) || 0)) ? o : r);
+    });
+    (over || []).forEach(function (r) { if (r && r.id && !seen[r.id]) out.push(r); });
+    return out;
+  }
+
   /* ============================ TAB DEFINITIONS ============================ */
   var TABS = [
     { key: "overview", label: "Overview", icon: "gauge", build: buildOverview },
@@ -533,7 +561,14 @@
         el("div", { class: "empty-state" }, [icon("tray"), el("p", { text: (q || tab._facet) ? "No " + tab.label.toLowerCase() + " match the current filter — clear it to see all." : "No " + tab.label.toLowerCase() + " yet." })])
       ])]));
     }
-    if (tab._count) tab._count.textContent = String(shown);
+    if (tab._count) {
+      // A count over a head is a count of nothing: say "60 of 495" until the rest arrives.
+      var whole = exactCount(tab.key, tab.rows);
+      var partialNow = isPartial(tab.key) && whole > tab.rows.length;
+      tab._count.textContent = partialNow ? shown + " of " + whole : String(shown);
+      if (partialNow) tab._count.setAttribute("title", "Showing the newest rows; loading the rest");
+      else tab._count.removeAttribute("title");
+    }
   }
 
   function updateSortHeaders(tab) {
@@ -1982,6 +2017,10 @@
       + (!LIVE.dataHealthy ? " · recovery active" : "");
   }
   function renderConnectionStatus() {
+    if (!LIVE.connected && LIVE.busyUntil && LIVE.busyUntil > Date.now()) {
+      setStatus("disconnected", "Waiting for a live slot");
+      return;
+    }
     setStatus(LIVE.connected ? "connected" : "disconnected", LIVE.connected ? "Connected" : "Disconnected");
   }
   function paintBackdrop() {
@@ -2209,7 +2248,7 @@
     TABS.forEach(function (tab) {
       if (tab.key === "overview") return;
       if (tab.pick) tab.rows = tab.pick(D);
-      if (tab._badge) tab._badge.textContent = String(tab.rows.length);
+      if (tab._badge) tab._badge.textContent = String(exactCount(tab.key, tab.rows));
       if (tab._facetBar) renderFacetBar(tab);
       if (tab._tbody) { updateSortHeaders(tab); renderRows(tab); }
       if (tab._stage) renderTaskStage(tab, changes);
@@ -2243,6 +2282,9 @@
   function applySnapshot(next, reason) {
     if (!next || !next.tasks) throw new Error("incomplete Hub snapshot");
     var viewState = captureViewState();
+    COLLECTIONS.forEach(function (key) {
+      if (next.partial && next.partial[key]) next[key] = mergeById(D[key] || [], next[key] || []);
+    });
     var changes = taskDelta(D.tasks || [], next.tasks || []);
     var oldActivity = ((live().activity || [])[0] || {}).seq || 0;
     var prevProg = live().progress || {};
@@ -2305,7 +2347,8 @@
       });
     }
     if (payload.audit) D.audit = Object.assign({}, D.audit || {}, payload.audit);
-    derivePhases();
+    // Over a head this would count the newest rows only; the server's phases stay until then.
+    if (!isPartial("tasks")) derivePhases();
     var changes = taskDelta(prevTasks, D.tasks || []);
     rebuildIndex();
     rerenderTabs(changes);
@@ -2357,15 +2400,66 @@
     });
   }
   function recoverSnapshot(reason) {
-    return timedFetch("?format=json" + servedSuffix(), {
+    // The last validator rides three carriers (standard header, X-Hub-ETag, ?etag=) because a
+    // proxy in front of the hub may drop If-None-Match; whichever survives earns the 304.
+    var tag = LIVE.snapshotETag || "";
+    var headers = { Accept: "application/json" };
+    if (tag) { headers["If-None-Match"] = tag; headers["X-Hub-ETag"] = tag; }
+    return timedFetch("?format=json" + servedSuffix() + (tag ? "&etag=" + encodeURIComponent(tag) : ""), {
+      credentials: "same-origin", cache: "no-store", headers: headers
+    }).then(function (response) {
+      if (response.status === 304) return null;
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      LIVE.snapshotETag = response.headers.get("X-Hub-ETag") || response.headers.get("ETag") || "";
+      return response.json();
+    }).then(function (snapshot) {
+      if (snapshot) applySnapshot(snapshot, reason || "recovery");
+      LIVE.signaledCursor = Math.max(LIVE.signaledCursor, LIVE.cursor);
+    });
+  }
+
+  var HYDRATE_QUEUE = [], HYDRATING = false;
+  function hydrate(key) {
+    return timedFetch(encodeURIComponent(key) + ".json", {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
       return response.json();
-    }).then(function (snapshot) {
-      applySnapshot(snapshot, reason || "recovery");
-      LIVE.signaledCursor = Math.max(LIVE.signaledCursor, LIVE.cursor);
+    }).then(function (payload) {
+      var viewState = captureViewState();
+      // The fetched list is the base; anything this page already holds at a higher version (a
+      // live patch newer than the read) survives the merge.
+      D[key] = mergeById(payload.data || [], D[key] || []).map(function (r) {
+        var fresh = BY_ID[r.id];
+        return fresh && (Number(fresh.version) || 0) > (Number(r.version) || 0) ? fresh : r;
+      });
+      HYDRATED[key] = true;
+      rebuildIndex();
+      rerenderTabs({});
+      refreshOverview();
+      publishClientState();
+      restoreViewState(viewState);
     });
+  }
+  function pumpHydration() {
+    if (HYDRATING) return;
+    while (HYDRATE_QUEUE.length && !isPartial(HYDRATE_QUEUE[0])) HYDRATE_QUEUE.shift();
+    var key = HYDRATE_QUEUE.shift();
+    if (!key) return;
+    HYDRATING = true;
+    hydrate(key).catch(function () {
+      // Not fatal: the tab keeps its head and its exact count, and the next open retries.
+    }).then(function () {
+      HYDRATING = false;
+      // One collection at a time, spaced, so a loaded hub is never asked for all of them at once.
+      setTimeout(pumpHydration, 250);
+    });
+  }
+  function queueHydration(key, first) {
+    if (!isPartial(key)) return;
+    HYDRATE_QUEUE = HYDRATE_QUEUE.filter(function (k) { return k !== key; });
+    if (first) HYDRATE_QUEUE.unshift(key); else HYDRATE_QUEUE.push(key);
+    pumpHydration();
   }
   function noteEventSignal(signal) {
     signal = signal || {};
@@ -2498,6 +2592,19 @@
       if (source !== LIVE.source) return;
       disconnectLive();
       connectLive();
+    });
+    source.addEventListener("busy", function (event) {
+      // The server is at its concurrent-stream cap and turned this tab away on purpose. That is
+      // capacity, not a transport failure: close without counting a failure and come back after
+      // the jittered delay the server named. The board keeps its last canonical state meanwhile.
+      if (source !== LIVE.source) return;
+      var data = {};
+      try { data = JSON.parse(event.data); } catch (error) {}
+      var wait = Math.max(2000, Number(data.retry_ms) || 15000);
+      disconnectLive();
+      LIVE.busyUntil = Date.now() + wait;
+      renderConnectionStatus();
+      setTimeout(function () { LIVE.busyUntil = 0; connectLive(); }, wait);
     });
     source.onerror = function () {
       if (source !== LIVE.source) return;
@@ -2641,6 +2748,7 @@
   /* ============================ TABS ============================ */
   var _panes = {};
   function activate(key) {
+    queueHydration(key, true);
     TABS.forEach(function (t) {
       var on = t.key === key;
       if (t._btn) {
@@ -2679,7 +2787,7 @@
       var btn = el("button", { class: "tab-btn", id: "tab-btn-" + t.key, type: "button", role: "tab",
         "data-tab": t.key, "aria-controls": "tab-" + t.key, "aria-selected": "false", tabindex: "-1" },
         [icon(t.icon), doc.createTextNode(" " + t.label)]);
-      if (t.rows) { t._badge = el("span", { class: "tab-badge", text: String(t.rows.length) }); btn.appendChild(t._badge); }
+      if (t.rows) { t._badge = el("span", { class: "tab-badge", text: String(exactCount(t.key, t.rows)) }); btn.appendChild(t._badge); }
       btn.addEventListener("click", function () { activate(t.key); });
       btn.addEventListener("keydown", function (event) { tabKeydown(event, t.key); });
       t._btn = btn; tabsBar.appendChild(btn);
@@ -2720,6 +2828,8 @@
       if (m && keyMap[m[1]]) initial = keyMap[m[1]];
     }
     activate(initial);
+    queueHydration("tasks", true);
+    COLLECTIONS.forEach(function (key) { queueHydration(key, false); });
     if (location.hash) {
       var hm = location.hash.slice(1).match(/^([a-z]+)-(.+)$/);
       if (hm && keyMap[hm[1]]) {
@@ -2780,7 +2890,11 @@
   }
 
   global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity,
-                 closeModal: closeModal, live: function () { return LIVE; } };
+                 closeModal: closeModal, live: function () { return LIVE; },
+                 hydration: function () {
+                   return { partial: Object.keys(D.partial || {}), hydrated: Object.keys(HYDRATED),
+                            counts: D.collection_counts || {} };
+                 } };
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", build);
   else build();

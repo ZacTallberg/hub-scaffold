@@ -7,6 +7,8 @@ reconnect cursor reconciliation closes the only interval in which a client could
 """
 import asyncio
 import json
+import os
+import random
 import re
 import threading
 import time
@@ -944,25 +946,134 @@ def _snapshot(served=None):
         s.close()
 
 
-def _etag(snap):
-    """A validator for the WHOLE representation, including lease-only and telemetry changes.
+# Clock-derived fields that move on every rebuild while nothing on the board changed. They are
+# kept OUT of the validator (the client ticks ages itself between reads), and the tag carries a
+# five-minute bucket instead, so a 304 can never pin an age more than one bucket stale.
+_VOLATILE_KEYS = frozenset({"generated_at", "age_s", "idle_s"})
+_ETAG_BUCKET_S = 300
 
-    The ledger head alone is insufficient: heartbeat rewrites, lease expiry, and OTLP appends all
-    change the live cockpit without appending a board event. Hashing the already-built snapshot is
-    bounded by the response size and makes a 304 a truthful byte-representation claim.
+
+def _without_volatile(value):
+    if isinstance(value, dict):
+        return {k: _without_volatile(v) for k, v in value.items() if k not in _VOLATILE_KEYS}
+    if isinstance(value, list):
+        return [_without_volatile(v) for v in value]
+    return value
+
+
+def _etag(snap):
+    """A WEAK validator for the served representation.
+
+    Hashing the snapshot verbatim made the tag useless: `generated_at` and every age/idle counter
+    change on each five-second rebuild, so two back-to-back reads of an unchanged board carried
+    different tags and a conditional GET never answered 304 (measured on the example board: 746 ->
+    754 in `age_s`, 377 -> 385 in `idle_s`, a new `generated_at`, a new tag). Those clock fields
+    are stripped; everything that describes the board -- rows, leases, telemetry, audit, build --
+    still feeds the hash, plus a coarse time bucket. Weak (`W/`) because a 304 claims semantic,
+    not byte, equivalence: the body you already hold differs only in ages you are ticking locally.
     """
-    return '"%s"' % content_hash(snap)
+    return 'W/"%s"' % content_hash({"snap": _without_volatile(snap),
+                                     "bucket": int(time.time() // _ETAG_BUCKET_S)})
+
+
+def _sent_etag(request):
+    """The caller's last tag, from whichever carrier survived the path to us.
+
+    A reverse proxy or edge cache in front of an adopting host may drop or rewrite
+    `If-None-Match` (the same compare answering 304 in-process and 200 through the proxy is the
+    fingerprint). The board's own client therefore sends it three ways: the standard header, an
+    `X-Hub-ETag` header, and an `?etag=` query parameter. Quotes and the weak prefix are
+    normalised, so a tag the proxy weakened still matches."""
+    raw = (request.headers.get("If-None-Match") or request.headers.get("X-Hub-ETag")
+           or request.GET.get("etag") or "")
+    return raw.strip().replace("W/", "").strip('"')
+
+
+def _conditional(request, etag, build_body):
+    """304 when the caller already holds `etag`; otherwise the JSON body. The tag rides both."""
+    if _sent_etag(request) == etag.replace("W/", "").strip('"'):
+        resp = HttpResponse(status=304)
+    else:
+        resp = JsonResponse(build_body())
+    resp["ETag"] = etag
+    resp["X-Hub-ETag"] = etag
+    return resp
+
+
+# First-paint scaling. A board's snapshot carries every row of every collection, and the page
+# paints nothing until the browser has parsed it -- on a long-lived board that is megabytes
+# before the first pixel. So a collection larger than HEAD_ROWS rides on the WIRE as a head: every
+# row that is still live (open work, active directives, open questions and gaps) plus the newest
+# of the rest up to HEAD_ROWS. `partial[<key>]` names each headed collection, `collection_counts`
+# stays exact, and a tab fetches its whole list from GET /hub/<type>.json on first open.
+#
+# The head exists ONLY on the wire (`_wire_snapshot`). The cached snapshot every server-side
+# consumer reads -- the attention rail, counts, search, the MCP tools -- stays whole, so no derived
+# number can ever be computed over a head. 0 disables heading.
+def _int_setting(name, default):
+    """A Django setting, else the environment, else `default` -- where 0 is a real value."""
+    value = hub_app._dj_setting(name, None)
+    if value is None:
+        value = os.environ.get(name)
+    try:
+        return int(value) if value not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+HEAD_ROWS = _int_setting("HUB_SNAPSHOT_HEAD_ROWS", 60)
+_HEADABLE = ("tasks", "adrs", "feats", "gaps", "caps", "deploys", "notes", "directives", "acks")
+
+
+def _row_live(key, row):
+    status = str(row.get("status") or "")
+    if key == "tasks":
+        return status not in ("done", "dropped")
+    if key == "directives":
+        return status == "active"
+    if key == "gaps":
+        return status in ("open", "investigating")
+    if key == "notes":
+        return "open" in [str(t).lower() for t in (row.get("tags") or [])]
+    return False
+
+
+def _row_updated(row):
+    prov = row.get("provenance") or {}
+    return str(prov.get("updated_at") or prov.get("created_at") or row.get("ts") or "")
+
+
+def _head(key, rows):
+    live_ids = {r.get("id") for r in rows if _row_live(key, r)}
+    rest = sorted((r for r in rows if r.get("id") not in live_ids), key=_row_updated, reverse=True)
+    keep = live_ids | {r.get("id") for r in rest[:max(0, HEAD_ROWS - len(live_ids))]}
+    return [r for r in rows if r.get("id") in keep]      # the snapshot's own order, filtered
+
+
+def _wire_snapshot(snap):
+    """The snapshot as SERVED: exact collection counts, and heads for the large collections."""
+    counts = {key: len(snap.get(key) or []) for key in _COLLECTION.values()}
+    wire = dict(snap)
+    wire["collection_counts"] = counts
+    partial = {}
+    if HEAD_ROWS > 0:
+        for key in _HEADABLE:
+            rows = snap.get(key) or []
+            if len(rows) > HEAD_ROWS:
+                head = _head(key, rows)
+                if len(head) < len(rows):
+                    wire[key] = head
+                    partial[key] = True
+    wire["partial"] = partial
+    return wire
 
 
 def hub_json(request):
     _, snap = _snapshot(request.GET.get("served"))
-    etag = _etag(snap)
-    # 304 on a matching If-None-Match: a reconnect re-ground or supervisor read gets an empty body
+    wire = _wire_snapshot(snap)
+    # 304 on the caller's last tag: a reconnect re-ground or supervisor read gets an empty body
     # when nothing changed, instead of the full snapshot every time.
-    resp = HttpResponse(status=304) if request.headers.get("If-None-Match") == etag \
-        else JsonResponse(snap)
-    resp["ETag"] = etag
-    return resp
+    return _conditional(request, _etag(wire), lambda: wire)
 
 
 def _delta_payload(since, served=None):
@@ -1003,12 +1114,25 @@ def delta_json(request):
     return JsonResponse(_delta_payload(since, served=request.GET.get("served")))
 
 
+_PLURAL_TO_TYPE = {v: k for k, v in _COLLECTION.items()}
+
+
 def type_json(request, type):
-    if type not in _COLLECTION:
+    """One WHOLE collection, in exactly the snapshot's row shape: {data, count, cursor, metadata}.
+
+    Accepts the singular type (`task`) or the snapshot key (`tasks`), so a tab can hydrate the
+    collection its head came from without a lookup table. Conditional on a per-collection tag:
+    a tab re-reading an unchanged list gets a 304, not the list."""
+    key = _COLLECTION.get(type) or (type if type in _PLURAL_TO_TYPE else None)
+    if not key:
         raise Http404("unknown type")
     _, snap = _snapshot()
-    data = snap[_COLLECTION[type]]
-    return JsonResponse({"data": data, "metadata": {"type": type, "count": len(data)}})
+    data = snap.get(key) or []
+    cursor = ((snap.get("live") or {}).get("cursor")) or {}
+    body = {"data": data, "count": len(data),
+            "cursor": {"seq": cursor.get("seq"), "hash": cursor.get("hash")},
+            "metadata": {"type": _PLURAL_TO_TYPE[key], "key": key, "count": len(data)}}
+    return _conditional(request, 'W/"%s"' % content_hash(data), lambda: body)
 
 
 def entity_json(request, type, local):
@@ -1052,6 +1176,25 @@ def schema_json(request, type):
     return HttpResponse(p.read_text(encoding="utf-8"), content_type="application/json")
 
 
+# Concurrent board streams per process on the THREAD-HOLDING (WSGI) path. Each open tab's
+# stream pins one worker thread until it closes, so a handful of tabs can starve a small thread
+# pool of the requests that actually write. 0 = unlimited. The ASGI path holds no worker thread
+# per stream and is not capped.
+LIVE_STREAMS_MAX = _int_setting("HUB_LIVE_STREAMS_MAX", 3)
+
+
+class _Unbounded:
+    def acquire(self, blocking=False):
+        return True
+
+    def release(self):
+        pass
+
+
+_LIVE_SLOTS = (threading.BoundedSemaphore(LIVE_STREAMS_MAX) if LIVE_STREAMS_MAX > 0
+               else _Unbounded())
+
+
 @require_GET
 def live_events(request):
     """Persistent push stream carrying canonical patches, not polling hints.
@@ -1089,6 +1232,26 @@ def live_events(request):
                 f"data: {json.dumps(payload, separators=(',', ':'))}\n\n")
 
     def stream():
+        # A WSGI stream holds a worker THREAD for its whole life. Past the cap, the tab is turned
+        # away with one `busy` frame naming a jittered retry instead of starving every ordinary
+        # request of the thread pool. The slot is taken when the body is first iterated -- a
+        # response that is never iterated never held one -- and released in `finally`.
+        if not _LIVE_SLOTS.acquire(blocking=False):
+            yield busy_frame()
+            return
+        try:
+            yield from held_stream()
+        finally:
+            _LIVE_SLOTS.release()
+
+    def busy_frame():
+        retry_ms = int(random.uniform(8000, 20000))
+        body = {"reason": "live_streams_saturated", "limit": LIVE_STREAMS_MAX,
+                "retry_ms": retry_ms}
+        return (f"retry: {retry_ms}\nevent: busy\n"
+                f"data: {json.dumps(body, separators=(',', ':'))}\n\n")
+
+    def held_stream():
         subscription = realtime.subscribe(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
         cursor, head = initial_cursor()
         try:

@@ -10,6 +10,7 @@ The optional MCP polling hint is deliberately omitted: MCP point reads remain in
 the Hub UI and worker coordination stay literally event-push realtime over the canonical SSE rail.
 """
 import json
+import re
 
 from django.http import JsonResponse
 
@@ -144,6 +145,12 @@ TOOLS = [
          "query": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
          "required": ["query"]}},
+    {"name": "list_collection",
+     "description": "Every row of one board collection (task, adr, feat, gap, cap, deploy, "
+                    "note, directive, ack, run). The board snapshot may carry a large collection "
+                    "only as its newest rows; this returns all of them.",
+     "inputSchema": {"type": "object", "properties": {
+         "type": {"type": "string"}}, "required": ["type"]}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -326,6 +333,9 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
                              auth_headers, method="get")
+    elif name == "list_collection":
+        kind = re.sub(r"[^a-z]", "", str(args.get("type") or "").lower())
+        status, body = _seam("/hub/%s.json" % kind, {}, auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)
