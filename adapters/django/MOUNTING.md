@@ -250,6 +250,12 @@ sure that proxy does not buffer `text/event-stream`, does not cache or transform
 connection a suitable idle timeout. Those proxy settings are part of the realtime path: buffering
 turns immediate server events back into delayed batches even when Django is correct.
 
+If you enable Django's `SECURE_SSL_REDIRECT` behind that proxy, exempt the liveness path from it
+(`SECURE_REDIRECT_EXEMPT = [r"(^|/)hub/cursor\.json$"]`; the example site does this under
+`HUB_SSL_REDIRECT=1`). A host-local probe calls `http://127.0.0.1:<port>/...` with no proxy and no
+`X-Forwarded-Proto`; redirected, it is sent to an https URL the app server cannot serve, and every
+rolling restart reads as unhealthy. See `patterns/deploy-runbook.md` → "Rolling restarts".
+
 The Hub kit is inlined and does not require `collectstatic`, but the host product often does. Build
 the product's static artifact under **production settings**. In particular, never run
 `DEBUG=1 python manage.py collectstatic` when `STORAGES` selects its hashed/manifest backend only in
