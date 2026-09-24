@@ -24,6 +24,7 @@ from hub_core import (activity as activity_core, adherence, app_health,
                       project, projections, task_health, task_rows, telemetry, upcast,
                       updates, wip)
 from hub_core import overlap as overlap_core
+from hub_core import record_state as _record_state
 from hub_core.canonical import content_hash
 from hub_core.text import preview
 
@@ -1591,12 +1592,95 @@ def _wire_snapshot(snap):
     return wire
 
 
+# -- Input-state memo for the heavy JSON reads ------------------------------------------------
+#
+# hub.json and next.json were rebuilt per request: open the store (sqlite connect, ledger lock,
+# schema check), run `git rev-parse`, fingerprint leases, and then -- for hub.json -- hash and
+# re-serialize the whole snapshot BEFORE the ETag could even be compared. A 304 saved bytes,
+# never CPU, and a supervisor or several tabs asking the same question paid for it every time.
+#
+# The memo keys a view's BYTES on a stats-only fingerprint of what the view is built from, taken
+# without opening anything, and serves those bytes (or a 304) while the fingerprint holds and the
+# build is younger than the view's reuse cap. The cap bounds everything the stamps do not model:
+# time-only boundaries (not_before timers, rolling windows, a lease expiring with no file moving)
+# and a code landing that moves the git head. hub.json's cap equals the snapshot memo's own
+# five-second time bucket, so the memo adds no staleness the snapshot did not already allow.
+#
+# Two rules keep it honest. A build is remembered only if its inputs did not move WHILE it ran --
+# otherwise the bytes describe a state that no longer matches the key. And any stamp that cannot
+# be read yields None, which means "build", never "assume unchanged".
+MEMO_REUSE_S = {"hub": 5.0, "next": 10.0}
+_VIEW_MEMO: dict = {}
+_VIEW_MEMO_LOCK = threading.Lock()
+
+
+def _view_inputs():
+    """Stats-only fingerprint of the stores the heavy reads are built from.
+
+    The ledger contributes its SIZE, not its mtime: opening the store restamps the file's mtime,
+    while every append (and every heal) changes its size. Leases, presence, the error sidecars
+    and worker telemetry change with no ledger event, so each contributes its own stamp."""
+    import os as _os
+    try:
+        ledger = (hub_app.HUB_DIR / "events.jsonl").stat().st_size
+        claims = ()
+        if hub_app.CLAIMS.exists():
+            claims = tuple(sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size)
+                                  for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")))
+        return (ledger, claims, hub_app.presence_stamp(), errorlog.stamp(hub_app.HUB_DIR),
+                _telemetry_fp())
+    except OSError:
+        return None
+
+
+def _memo_hit(name, extra, sent_etag=None):
+    """Return (ready response or None, memo key or None) for one view at the current inputs."""
+    inputs = _view_inputs()
+    if inputs is None:
+        return None, None
+    key = (name, extra, inputs)
+    with _VIEW_MEMO_LOCK:
+        hit = _VIEW_MEMO.get(key)
+    if hit is None or time.monotonic() - hit[0] >= MEMO_REUSE_S[name]:
+        return None, key
+    _at, etag, body = hit
+    if etag and sent_etag == etag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = HttpResponse(body, content_type="application/json")
+    if etag:
+        resp["ETag"] = etag
+    resp["X-Hub-Memo"] = "hit"
+    return resp, key
+
+
+def _memo_store(key, resp, etag=None):
+    """Keep a 200 build only if its inputs did not move while it was built."""
+    if key is None or getattr(resp, "status_code", 0) != 200:
+        return
+    if key[2] != _view_inputs():
+        return
+    with _VIEW_MEMO_LOCK:
+        if len(_VIEW_MEMO) >= 32:
+            _VIEW_MEMO.clear()
+        _VIEW_MEMO[key] = (time.monotonic(), etag, resp.content)
+
+
 def hub_json(request):
-    _, snap = _snapshot(request.GET.get("served"))
+    served = request.GET.get("served")
+    sent = request.headers.get("If-None-Match")
+    # Built once per input state: a supervisor fleet re-grounding every heartbeat must not fold
+    # the ledger on every read (MEMO_REUSE_S bounds how stale a reused build may be).
+    hit, key = _memo_hit("hub", served, sent)
+    if hit is not None:
+        return hit
+    _, snap = _snapshot(served)
     wire = _wire_snapshot(snap)
     # 304 on the caller's last tag: a reconnect re-ground or supervisor read gets an empty body
     # when nothing changed, instead of the full snapshot every time.
-    return _conditional(request, _etag(wire), lambda: wire)
+    resp = _conditional(request, _etag(wire), lambda: wire)
+    _memo_store(key, resp, resp["ETag"])
+    return resp
 
 
 def _delta_payload(since, served=None):
@@ -1940,6 +2024,31 @@ def live_events(request):
 
 
 def next_json(request):
+    """DISCOVER -- built once per input state and reused for at most MEMO_REUSE_S["next"].
+
+    A supervisor or a fleet of worker beacons asks this same question every heartbeat, and each
+    ask replayed the whole ledger. A lease that EXPIRES moves no file, so the reuse cap is what
+    bounds how late a stale reclaim appears; a claim or release rewrites the claims directory
+    and invalidates the memo at once. A 429 (saturated) answer is never remembered."""
+    try:
+        n = max(1, min(int(request.GET.get("n", "1")), 50))
+    except ValueError:
+        n = 1
+    # WHO IS ASKING is part of the answer (work given to somebody else, machine affinity, the
+    # unattended lane), so it is part of the memo key: one caller's filtered rail is never
+    # served to another.
+    who = offer.caller(request.GET, request.headers)
+    lane = request.GET.get("unattended") in ("1", "true")
+    hit, key = _memo_hit("next", (n, who.get("agent"), who.get("machine"),
+                                  bool(who.get("unattended")), lane))
+    if hit is not None:
+        return hit
+    resp = _next_json_build(n, who, lane)
+    _memo_store(key, resp)
+    return resp
+
+
+def _next_json_build(n, who, unattended_lane=False):
     """DISCOVER: ranked unblocked tasks without a live lease, including stale reclaims.
 
     A worker's entrypoint — pull the top task, claim it, and complete the real operation. A receipt
@@ -1972,7 +2081,6 @@ def next_json(request):
     # work given to somebody else by name, work only another machine can do, and an
     # unattended run's escalation that is a person's. A withheld row is COUNTED by reason in
     # the metadata, never silently dropped -- a rail that hides work reads as an empty one.
-    who = offer.caller(request.GET, request.headers)
     now_s = time.time()
     for t in tasks:
         cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]))
@@ -1992,7 +2100,7 @@ def next_json(request):
     for lease in live_leases:
         busy_touches.update(schedule.normalized_touches(entities.get(lease.get("task"), {})))
     ready = schedule.order_ready(ready, flags, busy_touches=busy_touches)
-    if request.GET.get("unattended") in ("1", "true"):
+    if unattended_lane:
         # THE UNATTENDED LANE: what a supervisor may hand an unattended worker without asking —
         # tasks explicitly marked unattended, P0-P2 only (P3 is a wish list), never a decision
         # (a person's call). Work handed back by a run that ended unfinished is todo again and
@@ -2017,10 +2125,6 @@ def next_json(request):
                       for t in tasks
                       if t.get("status") == "todo" and flags.get(t["id"], {}).get("snoozed_until")),
                      key=lambda t: (t.get("not_before") or "", t["id"]))
-    try:
-        n = max(1, min(int(request.GET.get("n", "1")), 50))
-    except ValueError:
-        n = 1
     rows = [dict(t, available=True) for t in _annotated_tasks(state, ready[:n])]
     return JsonResponse({"data": rows, "needs_spec": needs_spec[:n], "snoozed": snoozed[:n],
                          "metadata": {"available": len(ready), "unblocked": len(ready),
@@ -2712,10 +2816,13 @@ def search_json(request):
     terms = [t for t in re.split(r"[^a-z0-9._-]+", q) if t and t not in _SEARCH_STOP][:24]
     state, _ = _snapshot()
     hits = []
+    # One definition of a dead record (hub_core.record_state): its own status says the claim is
+    # no longer true, or a live record's `supersedes` names it. Both keep it out of the answer.
+    superseded = _record_state.superseded_ids(state["entities"])
     for ent in state["entities"].values():
         if not isinstance(ent, dict):
             continue
-        if ent.get("status") in ("superseded", "dropped", "rejected"):
+        if _record_state.is_retired(ent, superseded):
             continue
         title = str(ent.get("title") or ent.get("name") or "")
         body = str(ent.get("body_md") or ent.get("summary") or ent.get("decision_md") or

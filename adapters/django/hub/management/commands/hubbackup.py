@@ -63,6 +63,9 @@ FALLBACK_KEEP = 3
 EXCLUDE_GLOBS = (
     "__pycache__", "*.pyc", "*.lock", "*.lock.*", ".*.lock", "*.tmp", "*.partial",
     "events.db", "events.db-wal", "events.db-shm",       # the index: rebuilt from events.jsonl
+    # Console chat histories: what people typed to their assistants. A backup copy would outlive
+    # HUB_HISTORY_RETENTION_DAYS and keep it long after the hub deleted it (docs/OPERATIONS.md).
+    "histories",
 )
 
 

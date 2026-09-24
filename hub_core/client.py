@@ -37,6 +37,19 @@ to the console that asked.
 `update --note "..." --evidence <sha|url>` posts one first-person line to the agents' feed; under
 HUB_AUTOWORKER=1 the answer/ack/finish verbs post their own line automatically.
 
+A claim that stopped being true is retired, never deleted — the reason is appended, dated::
+
+    python -m hub_core.client retire project:gap:0007 --status closed \
+      --addressed-by project:task:0042 --note "export now streams; measured 3 s"
+    python -m hub_core.client retire "the queue saturates at noon" --type note \
+      --note "no longer true after the worker split"
+
+Console chat histories (off unless the hub enables them; see hub_core/histories.py)::
+
+    python -m hub_core.client history-push --agent alice --follow   # workstation uploader
+    python -m hub_core.client history --agent alice                 # list consoles
+    python -m hub_core.client history --agent alice --session 3f2a  # read one
+
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), `app-error` / `agent-error` / `ack-error` feed the operational
 error stream, and `errors --include deferred|all` reads the raw stream back with the queue's own
@@ -69,6 +82,8 @@ Services to the apps around the hub::
     python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
     python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
     python -m hub_core.client profile --person alice --set theme=dark
+    python -m hub_core.client profile --person alice --app budget-app --set ui=110   # one app only
+    python -m hub_core.client profile --person alice --star budget-app
     python -m hub_core.client agent-ask --question "..." --person alice --app budget-app
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
@@ -1425,6 +1440,52 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     return "ack-error", payload
 
 
+def _payload_retire(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments)}
+    target = arguments.target
+    if arguments.type:
+        payload.update({"type": arguments.type, "title": target})
+    else:
+        payload["id"] = target
+    for name in ("status", "note", "superseded_by"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    if arguments.addressed_by:
+        payload["addressed_by"] = arguments.addressed_by
+    return "retire", payload
+
+
+def _run_history_push(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Upload this workstation's new console turns (see hub_core.transcripts for what is sent)."""
+    import time as _time
+
+    from . import transcripts
+
+    agent = _agent(arguments)
+    headers = _presence_headers(arguments)
+
+    def post(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return _post(base, operation, payload, extra_headers=headers)
+
+    result = transcripts.push(post, agent, force=not arguments.follow)
+    if not arguments.follow:
+        return result
+    while True:                                   # a notifier-style loop; Ctrl-C ends it
+        print(json.dumps(result, sort_keys=True), flush=True)
+        _time.sleep(max(15, arguments.interval))
+        result = transcripts.push(post, agent)
+
+
+def _run_history(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {key: value for key, value in (("agent", arguments.agent),
+                                             ("machine", arguments.machine),
+                                             ("session", arguments.session),
+                                             ("limit", arguments.limit)) if value}
+    return _get(base, "history.json" + ("?" + urlencode(query) if query else ""))
+
+
 def _where_query() -> str:
     """?machine=&session= for addressed reads — a directive PINNED to one computer or console
     is delivered only to a caller that says it is there."""
@@ -2266,10 +2327,31 @@ def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
-    from urllib.parse import quote
-    path = "profile?person=" + quote(arguments.person)
-    if arguments.set:
-        return _post(base, path, {"prefs": _pairs(arguments.set)})
+    """Read or change one person's preferences, as the app that signed them in.
+
+    `--set key=value` merges everywhere; with `--app <slug>` it sets that app's override
+    instead, and `--clear-app` puts that app back on the everywhere-values. `--star` /
+    `--unstar` edit the starred apps (a list that replaces, so the current one is read first).
+    With no change it reads, including the apps the person can reach and, with --app, what that
+    app resolves to. Needs profile:read / profile:write."""
+    from urllib.parse import urlencode
+    query = {"person": arguments.person}
+    if arguments.app:
+        query["app"] = arguments.app
+    path = "profile?" + urlencode(query)
+    change: dict[str, Any] = _pairs(arguments.set)
+    if arguments.app and (change or arguments.clear_app):
+        change = {"apps": {arguments.app: {} if arguments.clear_app else change}}
+    elif arguments.clear_app:
+        raise ValueError("--clear-app needs --app <slug>")
+    if arguments.star or arguments.unstar:
+        current = _get(base, "api/profile?" + urlencode({"person": arguments.person}))
+        starred = list(((current.get("data") or {}).get("prefs") or {}).get("starred") or [])
+        starred = [s for s in starred if s not in (arguments.unstar or [])]
+        starred += [s for s in (arguments.star or []) if s not in starred]
+        change["starred"] = starred
+    if change:
+        return _post(base, path, {"prefs": change})
     return _get(base, "api/" + path)
 
 
@@ -3232,6 +3314,37 @@ def _parser() -> argparse.ArgumentParser:
     ack_error.add_argument("--reopen", action="store_true")
     ack_error.set_defaults(payload=_payload_ack_error)
 
+    retire = commands.add_parser(
+        "retire", help="retire or re-open a gap/note/directive/ADR/finding (reason required)")
+    retire.add_argument("target", help="the record id, or its exact title together with --type")
+    retire.add_argument("--type", help="the record type when TARGET is a title (gap, note, ...)")
+    retire.add_argument("--status", help="the new status; each type has a sensible default "
+                                          "except gap, which must be named")
+    retire.add_argument("--note", help="what retired it — appended with a dated stamp")
+    retire.add_argument("--addressed-by", action="append", default=[], dest="addressed_by",
+                        help="task id that closed a gap (required for closed/mitigated)")
+    retire.add_argument("--superseded-by", dest="superseded_by",
+                        help="the id of the record that replaced this one")
+    retire.add_argument("--agent")
+    retire.set_defaults(payload=_payload_retire)
+
+    history_push = commands.add_parser(
+        "history-push", help="upload this workstation's new console turns (history:write scope)")
+    history_push.add_argument("--agent")
+    history_push.add_argument("--machine")
+    history_push.add_argument("--follow", action="store_true",
+                              help="keep uploading; at most one upload per interval")
+    history_push.add_argument("--interval", type=int, default=60)
+    history_push.set_defaults(runner=_run_history_push)
+
+    history = commands.add_parser(
+        "history", help="list stored consoles, or read one console's turns (history:read scope)")
+    history.add_argument("--agent")
+    history.add_argument("--machine")
+    history.add_argument("--session")
+    history.add_argument("--limit", type=int)
+    history.set_defaults(runner=_run_history)
+
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)
     inbox.add_argument("--session", help="this console's id (default HUB_SESSION_ID)")
@@ -3450,6 +3563,11 @@ def _parser() -> argparse.ArgumentParser:
                                help="a person's cross-app preferences; --set key=value merges (profile:write)")
     prof.add_argument("--person", required=True)
     prof.add_argument("--set", action="append", metavar="KEY=VALUE")
+    prof.add_argument("--app", help="scope --set to this app's override, and resolve for it")
+    prof.add_argument("--clear-app", action="store_true",
+                      help="with --app: put that app back on the everywhere-values")
+    prof.add_argument("--star", action="append", metavar="SLUG")
+    prof.add_argument("--unstar", action="append", metavar="SLUG")
     prof.set_defaults(runner=_run_profile)
 
     ask_agent = commands.add_parser("agent-ask", help="ask the brokered agent (agent:ask)")

@@ -12,10 +12,14 @@ TRUST, route by route:
                                   /hub read (public unless the adopter puts reads behind auth).
 * /hub/api/component-props        WRITE, scope component:configure. Changes what EVERY person on
                                   one app sees, so it is an operator credential, not a browser.
-* /hub/api/profile                GET scope profile:read, POST scope profile:write. Per-person
-                                  state, asked for by an app's server on behalf of a person it has
-                                  signed in; the hub authenticates the app, the app vouches for
-                                  the person.
+* /hub/api/profile                Per-person state, named exactly two ways. (1) An app's SERVER
+                                  with its credential (GET profile:read, POST profile:write) and
+                                  ?person= for someone it has signed in: the hub authenticates the
+                                  app, the app vouches for the person. (2) The person's OWN
+                                  same-origin browser, when the adopter names a HUB_PERSON
+                                  resolver: the person is whoever the resolver says, a ?person=
+                                  naming anyone else answers 404, and a POST must pass Django's
+                                  CSRF check. Everyone else gets the plain 404 of an unknown route.
 * /hub/api/agent/{ask,history,conversation}
                                   scopes agent:ask / agent:history. The hub holds the ONE agent
                                   key; an app's bridge holds only its hub credential.
@@ -25,11 +29,15 @@ from __future__ import annotations
 import os
 
 from django.conf import settings
-from django.http import Http404, HttpResponse, JsonResponse
+import json
 
-from hub_core import agent_broker, app_feed, components, profiles
+from django.http import Http404, HttpResponse, HttpResponseNotAllowed, JsonResponse
+from django.utils.module_loading import import_string
+from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from . import hub_app
+from hub_core import agent_broker, app_feed, components, profiles, reach
+
+from . import hub_app, viewers
 from .hub_write import writer
 
 
@@ -134,6 +142,10 @@ def app_feed_json(request):
 
 # ---------------------------------------------------------------- a person's preferences
 
+#: The largest body the browser path reads: a mark at its cap plus room for every other key.
+_PROFILE_MAX_BODY = profiles.MARK_MAX_CHARS + 16_384
+
+
 def _person_or_400(request):
     who = (request.GET.get("person") or "").strip().lower()
     if not profiles.valid_person(who):
@@ -143,21 +155,88 @@ def _person_or_400(request):
     return who, None
 
 
+def _grants(person: str) -> dict:
+    """{slug: role} from the adopter's HUB_REACH seam. Unset or failing: no grants -- the
+    failure mode of an access question is "nothing listed", never "everything listed"."""
+    path = getattr(settings, "HUB_REACH", None)
+    if not path:
+        return {}
+    try:
+        resolve = import_string(path) if isinstance(path, str) else path
+        out = resolve(person)
+    except Exception:                                        # noqa: BLE001 -- fail closed
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def _profile_answer(request, who, b):
+    """The one answer both paths give. GET adds what the person can reach (the adopter's
+    HUB_APPS directory joined with its HUB_REACH grants); a write does not re-read grants, so
+    starring an app never costs an access lookup. ?app=<slug> adds `resolved`: the
+    everywhere-choices with that app's override laid on top."""
+    if request.method == "GET":
+        prefs = profiles.get(hub_app.HUB_DIR, who)
+        data = {"person": who, "prefs": prefs,
+                **reach.apps_for(_grants(who), getattr(settings, "HUB_APPS", None))}
+    else:
+        prefs, ignored = profiles.update(hub_app.HUB_DIR, who, b.get("prefs"))
+        # What was IGNORED is reported, so a caller sending a key this hub does not know finds
+        # out instead of wondering why it never sticks.
+        data = {"person": who, "prefs": prefs, "ignored": ignored}
+    slug = (request.GET.get("app") or "").strip().lower()
+    if slug and profiles.SLUG_RE.fullmatch(slug):
+        data["app"] = slug
+        data["resolved"] = profiles.resolve(prefs, slug)
+    return _no_store(JsonResponse({"data": data}))
+
+
 @writer(scope={"GET": "profile:read", "POST": "profile:write"}, methods=("GET", "POST"),
         presence=False)
-def profile(request, b):
-    """GET /hub/api/profile?person=<name> (profile:read) -- that person's preferences.
-    POST /hub/api/profile?person=<name> {"prefs": {...}} (profile:write) -- merge them."""
+def _profile_for_app(request, b):
     who, refused = _person_or_400(request)
     if refused:
         return refused
-    if request.method == "GET":
-        return _no_store(JsonResponse({"data": {"person": who,
-                                                "prefs": profiles.get(hub_app.HUB_DIR, who)}}))
-    prefs, ignored = profiles.update(hub_app.HUB_DIR, who, b.get("prefs"))
-    # What was IGNORED is reported, so a caller sending a key this hub does not know finds out
-    # instead of wondering why it never sticks.
-    return _no_store(JsonResponse({"data": {"person": who, "prefs": prefs, "ignored": ignored}}))
+    return _profile_answer(request, who, b)
+
+
+@csrf_protect
+def _profile_for_browser(request, who):
+    b = {}
+    if request.method == "POST":
+        if len(request.body or b"") > _PROFILE_MAX_BODY:
+            return JsonResponse({"errors": [{"code": "too_large", "max": _PROFILE_MAX_BODY}]},
+                                status=413)
+        try:
+            b = json.loads((request.body or b"").decode("utf-8") or "{}")
+        except ValueError:
+            b = None
+        if not isinstance(b, dict):
+            return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+    return _profile_answer(request, who, b)
+
+
+@csrf_exempt            # the browser half re-applies CSRF itself; the app half is token-gated
+def profile(request):
+    """GET /hub/api/profile[?person=<name>][&app=<slug>] -- a person's preferences, the apps
+    they can reach, and (with app) what that app should look like for them.
+    POST /hub/api/profile[?person=<name>] {"prefs": {...}} -- merge a change (per key; per app
+    under prefs.apps, where {} removes an app and null resets one key)."""
+    if request.method not in ("GET", "POST"):
+        return HttpResponseNotAllowed(["GET", "POST"])
+    if request.headers.get("X-Agent-Token") or request.headers.get("X-Write-Token"):
+        return _profile_for_app(request)
+    who = viewers.person(request)
+    asked = (request.GET.get("person") or "").strip().lower()
+    if not profiles.valid_person(who) or (asked and asked != who):
+        # A request the hub cannot name is nobody; a browser naming somebody else is refused
+        # as if the route were not there.
+        return HttpResponse("Not Found", status=404, content_type="text/plain")
+    return _profile_for_browser(request, who)
+
+
+profile._hub_token_gated = True
+profile._hub_origin_gated = True           # the browser half is @csrf_protect
+profile._hub_required_scope = {"GET": "profile:read", "POST": "profile:write"}
 
 
 # ---------------------------------------------------------------- the brokered agent

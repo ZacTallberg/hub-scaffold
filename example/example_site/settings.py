@@ -128,3 +128,22 @@ LOGGING = {
     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR",
                                    "propagate": True}},
 }
+
+# Console chat histories are OFF by default: turn them on only after the people whose consoles
+# upload have been told the operator can read them. The browser viewer check is an adopter
+# callable; "hub.viewers.debug_loopback" answers yes only under DEBUG from 127.0.0.1.
+HUB_HISTORIES_ENABLED = os.environ.get("HUB_HISTORIES_ENABLED", "").lower() == "true"
+HUB_HISTORY_VIEWER = os.environ.get("HUB_HISTORY_VIEWER") or None
+
+# The shared app banner (hub_core/components/banner) and the person's preferences it keeps at
+# /hub/api/profile. HUB_PERSON names the adopter's "who is this browser" callable; the example
+# has no sign-in, so it uses the developer-only resolver (DEBUG + loopback, as HUB_DEBUG_PERSON).
+HUB_PERSON = os.environ.get("HUB_PERSON") or ("hub.viewers.debug_person" if DEBUG else None)
+HUB_DEBUG_PERSON = os.environ.get("HUB_DEBUG_PERSON", "alice")
+# The app directory the banner's app drawer resolves slugs against, and the grants seam.
+HUB_APPS = [
+    {"slug": "budget-app", "name": "Budget", "url": "/demo/budget-app/"},
+    {"slug": "reporting", "name": "Reporting", "url": "/demo/reporting/"},
+    {"slug": "timesheets", "name": "Timesheets", "url": ""},
+]
+HUB_REACH = "example_site.demo.reach"
