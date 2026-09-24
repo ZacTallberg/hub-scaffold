@@ -306,6 +306,9 @@ class EventStore:
             c.execute("CREATE TABLE idem (aggregate TEXT, idem_key TEXT, seq INTEGER, PRIMARY KEY(aggregate, idem_key))")
         c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_events_agg ON events(aggregate)")
+        # A scoped replay (idem_scope) looks a key up ACROSS aggregates; without this index that
+        # lookup is a table scan under the write lock on every retried create.
+        c.execute("CREATE INDEX IF NOT EXISTS ix_events_idem ON events(idem_key)")
         self._install_trigger()
 
     def _install_trigger(self):
@@ -602,11 +605,18 @@ class EventStore:
 
     def append(self, *, aggregate, type, payload, expected_version=None, agent_id=None,
                session_id=None, parent_event_id=None, actor_kind="agent", model_version=None,
-               repo_build=None, git_sha=None, idem_key=None) -> dict:
+               repo_build=None, git_sha=None, idem_key=None, idem_scope=None) -> dict:
         """Append one event with OCC + idempotency + hash-chain. Returns the stored event.
 
         Raises ConflictError if expected_version != current head for the aggregate.
         Replaying the same idem_key is a safe no-op that returns the original event.
+
+        ``idem_scope`` (an aggregate-id PREFIX, creates only) widens the replay lookup from this
+        aggregate to every aggregate under the prefix. A create allocates its id per attempt, so
+        a retried create (a response that timed out, a queued replay) names a NEW aggregate and
+        the per-aggregate lookup can never see its first attempt -- every retry minted a twin.
+        With a scope the lookup finds the first attempt's event and returns it; the caller reads
+        its ``aggregate`` to learn which record the retry is.
 
         Runs under LedgerLock (serialize-ledger-file-rewrites): the sqlite BEGIN IMMEDIATE
         serializes appenders against each other, but only the file lock serializes them against
@@ -621,7 +631,7 @@ class EventStore:
                 expected_version=expected_version, agent_id=agent_id, session_id=session_id,
                 parent_event_id=parent_event_id, actor_kind=actor_kind,
                 model_version=model_version, repo_build=repo_build, git_sha=git_sha,
-                idem_key=idem_key)
+                idem_key=idem_key, idem_scope=idem_scope)
 
     def append_batch(self, operations) -> list[dict]:
         """Commit multiple aggregate events at one canonical-file boundary.
@@ -743,7 +753,7 @@ class EventStore:
 
     def _append_locked(self, *, aggregate, type, payload, expected_version, agent_id,
                        session_id, parent_event_id, actor_kind, model_version, repo_build,
-                       git_sha, idem_key):
+                       git_sha, idem_key, idem_scope=None):
         import json
         # Tail-consistency guard: a crashed sync/heal can leave the FILE ahead of this handle's
         # SQLite view (the lock died with the crasher). Re-heal before allocating seq/prev_hash
@@ -766,6 +776,12 @@ class EventStore:
             if idem_key:
                 r = c.execute("SELECT raw FROM events WHERE aggregate=? AND idem_key=?",
                               (aggregate, idem_key)).fetchone()
+                if not r and idem_scope:
+                    # substr() rather than LIKE: an id may carry '_' or '%', which LIKE reads
+                    # as wildcards and would widen the scope past the prefix it names.
+                    r = c.execute("SELECT raw FROM events WHERE idem_key=? AND "
+                                  "substr(aggregate, 1, ?)=? ORDER BY seq LIMIT 1",
+                                  (idem_key, len(idem_scope), idem_scope)).fetchone()
                 if r:
                     c.execute("COMMIT")
                     return json.loads(r["raw"])

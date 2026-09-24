@@ -203,8 +203,41 @@
       complete: !command || passed
     };
   }
+  // The same definition hub_core.checkpoints uses: a scheduler's lifecycle row and a grown
+  // placeholder are shown in the plan but never counted toward "N of N done".
+  var LIFECYCLE_KINDS = { handed_back: 1, lease_released: 1, reaped: 1, launcher_timeout: 1,
+                          claim_expired: 1, lifecycle: 1 };
+  function isWorkStep(s) {
+    if (!s || typeof s !== "object") return false;
+    if (s.lifecycle === true || LIFECYCLE_KINDS[s.kind]) return false;
+    if (!s.done && !String(s.note || "").trim() &&
+        (s.auto === true || /^step \d+$/i.test(String(s.step || "").trim()))) return false;
+    return true;
+  }
+  // Each checkpoint as the worker recorded it — typed kind, the commit and pipeline it names,
+  // the note — with scheduler rows and grown placeholders labelled for what they are.
+  function checkpointRows(task) {
+    return ((task && task.plan) || []).map(function (s, i) {
+      if (!s || typeof s !== "object") return null;
+      var kind = s.kind || "checkpoint";
+      var label = (i + 1) + ". " + (s.done ? "✓ " : "○ ") + (s.step || "");
+      var meta = [];
+      if (!isWorkStep(s)) meta.push(s.auto ? "placeholder — not counted" : "scheduler row — not counted");
+      if (kind !== "checkpoint") meta.push(kind + (s.times > 1 ? " ×" + s.times : ""));
+      if (s.sha) meta.push("commit " + s.sha);
+      if (s.pipeline_id) meta.push("pipeline " + s.pipeline_id);
+      if (s.note_at) meta.push(relativeTime(s.note_at));
+      return row(label, el("div", null, [
+        s.note ? el("div", { class: "detail-prose", text: s.note }) : null,
+        meta.length ? el("div", { class: "cell-sub mono", text: meta.join(" · ") }) : null,
+        s.pipeline_url && /^https?:\/\//.test(s.pipeline_url)
+          ? el("a", { class: "cell-sub", href: s.pipeline_url, rel: "noopener noreferrer", target: "_blank",
+                      text: "open pipeline" }) : null
+      ].filter(Boolean)));
+    }).filter(Boolean);
+  }
   function taskProgress(task) {
-    var plan = (task && task.plan) || [];
+    var plan = ((task && task.plan) || []).filter(isWorkStep);
     if (!plan.length) return null;
     var done = plan.filter(function (s) { return s && s.done; }).length;
     return { done: done, total: plan.length, pct: Math.round(done * 100 / plan.length),
@@ -1048,6 +1081,10 @@
           s.project ? el("span", { class: "badge " + (s.has_task ? "b-pass" : "b-warn"),
                                    title: s.has_task ? (s.task_title || s.task_id) : "this console holds no task for " + s.project,
                                    text: s.has_task ? "task" : "no task" }) : null,
+          // Only the console that CLAIMED the task is marked as holding it; a sibling
+          // window standing in the same directory is not its owner.
+          s.task_id ? el("span", { class: "sess-held", title: "this console holds " + s.task_id,
+                                   text: "holds " + localId(s.task_id) }) : null,
           s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
           el("span", { class: "sess-age", text: (s.state ? s.state + " · " : "") + (s.age_s != null ? fmtAge(s.age_s) : "") })
         ].filter(Boolean));
@@ -1459,6 +1496,8 @@
         return row((sess.session || "?") + (sess.machine ? " @ " + sess.machine : ""),
           el("div", null, [
             sess.runtime ? el("span", { class: "sess-rt", title: "agent runtime", text: sess.runtime }) : null,
+            sess.task_id ? el("div", { class: "cell-sub", text: "holds " + sess.task_id +
+              " (claimed from this console)" }) : null,
             sess.focus ? el("div", { class: "detail-prose", text: sess.focus }) : null,
             el("div", { class: "cell-sub", text: (sess.cwd || "") +
                (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") })
@@ -1623,6 +1662,199 @@
     ]);
   }
 
+  /* ---- WORK HEALTH: is "in progress" true? (hub_core.task_health) ----
+     Every in-progress task in exactly one bucket, each with the reason the hub gave. A task
+     whose checkpoints are all recorded reads "ready to close" only when something names a
+     commit/URL/path to check AND no checkpoint says work remains — never "done". */
+  function taskButton(id, title, sub, tone) {
+    var rec = BY_ID[id];
+    var node = el("button", { class: "attn-item t-" + (tone || "info"), type: "button",
+      "data-focus-key": "health:" + id, "aria-label": (title || id) + (sub ? " — " + sub : "") }, [
+      el("span", { class: "attn-kind b-" + (tone || "info"), text: localId(id) }),
+      el("span", { class: "attn-body" }, [
+        el("span", { class: "attn-title", text: title || id }),
+        sub ? el("span", { class: "attn-reason", text: sub }) : null
+      ].filter(Boolean))
+    ]);
+    if (rec) node.addEventListener("click", function () { openEntity("task", rec); });
+    else { node.disabled = true; node.title = "not on this board snapshot"; }
+    return node;
+  }
+  function openDecisions() {
+    return (D.tasks || []).filter(function (t) {
+      return t && t.work_kind === "decision" && t.status !== "done" && t.status !== "dropped" && !t.decision;
+    });
+  }
+  function workstreamCard(th) {
+    th = th || {};
+    var counts = th.counts || {};
+    var body = el("div", { class: "attn-list" });
+    function group(label, rows, tone, sub) {
+      if (!rows || !rows.length) return;
+      body.appendChild(el("div", { class: "cell-sub", style: "margin:8px 0 4px", text: label + " · " + rows.length }));
+      rows.slice(0, 6).forEach(function (r) { body.appendChild(taskButton(r.id, r.title, sub(r), tone)); });
+    }
+    group("Ready to close", th.complete_unclosed, "warn", function (r) {
+      return r.says_unfinished ? ("a checkpoint says work remains: " + r.says_unfinished)
+           : (r.closeable ? "all " + r.total + " checkpoints recorded · has a commit/URL/path to verify"
+                          : "all " + r.total + " checkpoints recorded · nothing to verify against");
+    });
+    group("Stalled", th.stalled, "fail", function (r) { return r.reason; });
+    group("Orphaned", th.orphaned, "fail", function (r) { return r.reason; });
+    group("Unattended requests nobody started", th.unstarted, "warn", function (r) { return r.body; });
+    var decisions = openDecisions();
+    if (decisions.length) {
+      body.appendChild(el("div", { class: "cell-sub", style: "margin:8px 0 4px", text: "Decisions waiting on a person · " + decisions.length }));
+      decisions.slice(0, 6).forEach(function (t) { body.appendChild(taskButton(t.id, t.title, "a person's call — open it to decide", "info")); });
+    }
+    if (!body.children.length) {
+      body.appendChild(el("div", { class: "attn-clear" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+        doc.createTextNode(counts.in_progress ? " Every in-progress task moved within the last 30 minutes."
+                                              : " Nothing is in progress.")]));
+    }
+    var moving = counts.moving || 0, total = counts.in_progress || 0;
+    return el("section", { class: "card attention-card", id: "workstreamCard", "aria-labelledby": "wsTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "wsTitle" }, [icon("checks"),
+          doc.createTextNode("Workstream  ·  " + moving + " of " + total + " in progress actually moving")])
+      ]),
+      el("div", { class: "card-body" }, [body])
+    ]);
+  }
+
+  /* ---- NEEDS ATTENTION: operational conditions with who acts, the fix, values and age ---- */
+  function needsAttentionCard(na) {
+    na = na || {};
+    var items = na.items || [];
+    var body = el("div", { class: "attn-list" });
+    var TONE = { critical: "fail", warn: "warn", info: "info" };
+    items.slice(0, 10).forEach(function (it) {
+      var tone = TONE[it.severity] || "info";
+      var node = el("button", { class: "attn-item t-" + tone, type: "button", "data-focus-key": "na:" + it.id,
+        "aria-label": it.severity + ": " + it.title }, [
+        el("span", { class: "attn-kind b-" + tone, text: it.severity }),
+        el("span", { class: "attn-body" }, [
+          el("span", { class: "attn-title", text: it.title }),
+          el("span", { class: "attn-reason", text: "who: " + (it.who || "—") + "  ·  standing " + fmtAge(it.age_s || 0) })
+        ])
+      ]);
+      node.addEventListener("click", function () { openAttentionItem(it); });
+      body.appendChild(node);
+    });
+    if (!items.length) body.appendChild(el("div", { class: "attn-clear" }, [
+      el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+      doc.createTextNode(" " + (na.verdict || "nothing needs attention"))]));
+    var cleared = (na.recently_cleared || []).length;
+    var failing = Object.keys(na.sources || {}).filter(function (k) { return na.sources[k] !== "ok"; });
+    return el("section", { class: "card attention-card", id: "needsAttentionCard", "aria-labelledby": "naTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "naTitle" }, [icon("warning"),
+          doc.createTextNode("Needs attention" + (items.length ? "  ·  " + items.length : ""))]),
+        el("span", { class: "cell-sub", text: (cleared ? cleared + " recently cleared" : "") +
+          (failing.length ? (cleared ? " · " : "") + "not checked: " + failing.join(", ") : "") })
+      ]),
+      el("div", { class: "card-body" }, [
+        items.length ? el("p", { class: "cell-sub", style: "margin-bottom:8px", text: na.verdict || "" }) : null,
+        body
+      ].filter(Boolean))
+    ]);
+  }
+  function openAttentionItem(it) {
+    var body = el("div");
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Condition", "warning", [
+      row("Severity", it.severity), row("Who acts", it.who || "—"),
+      it.detail ? row("Detail", it.detail) : null,
+      rowMono("Fix", it.fix), rowMono("Standing", fmtAge(it.age_s || 0)),
+      rowMono("Values", JSON.stringify(it.evidence || {}))
+    ])]));
+    var subject = (it.evidence || {}).task;
+    if (subject && BY_ID[subject]) body.appendChild(el("div", { class: "detail-grid one" }, [section("Subject", "checks", [row("Task", chipRow([subject], "task"))])]));
+    openModal(it.severity === "critical" ? "fail" : "warn", it.title, it.kind, "warning", body);
+  }
+
+  /* ---- CONSOLES: attended vs unattended, honest idle, crossovers ---- */
+  function consoleLine(sess) {
+    return el("li", { class: "agent-sess" }, [
+      el("span", { class: "sess-id", text: sess.session || "?" }),
+      el("span", { class: "sess-held", text: sess.agent + (sess.machine ? "@" + sess.machine : "") }),
+      sess.task_id ? el("span", { class: "sess-held", text: "holds " + localId(sess.task_id) }) : null,
+      el("span", { class: "sess-focus", text: sess.activity || sess.focus || sess.state || "" })
+    ].filter(Boolean));
+  }
+  function openRunDetail(sess) {
+    var rows = [
+      row("State", sess.state + (sess.outcome ? " · " + sess.outcome : "")),
+      row("Doing", sess.activity || "—"),
+      sess.subject ? row("Subject", BY_ID[sess.subject] ? chipRow([sess.subject], "task") : sess.subject) : null,
+      sess.subject_title ? row("Subject title", sess.subject_title) : null,
+      sess.phase ? rowMono("Phase", sess.phase) : null,
+      sess.narration ? row("Last narration", sess.narration) : null,
+      sess.last_result ? rowMono("Latest result", sess.last_result) : null,
+      (sess.targets || []).length ? rowMono("Targets", sess.targets.join(", ")) : null,
+      sess.started ? rowMono("Started", fmtAge(Date.now() / 1000 - sess.started) + " ago") : null,
+      sess.bounded_s ? rowMono("Bounded to", fmtAge(sess.bounded_s)) : null,
+      sess.ended ? rowMono("Ended", fmtAge(Date.now() / 1000 - sess.ended) + " ago") : null,
+      rowMono("Console", (sess.session || "?") + " · " + sess.agent + (sess.machine ? "@" + sess.machine : "")),
+      sess.run ? rowMono("Run", sess.run) : null
+    ];
+    var body = el("div", null, [el("div", { class: "detail-grid one" }, [section("Unattended run", "pulse", rows)])]);
+    openModal(sess.finished ? "info" : "warn", sess.subject_title || sess.subject || ("run " + (sess.run || sess.session)),
+              sess.kind || "unattended", "pulse", body);
+  }
+  function consolesCard(sessions, crossovers) {
+    sessions = sessions || {};
+    var counts = sessions.counts || {};
+    var body = el("div", { class: "card-body" });
+    var attended = sessions.attended || [], un = sessions.unattended || [], fin = sessions.finished || [];
+    body.appendChild(el("div", { class: "cell-sub", text: "Attended consoles · " + (counts.attended || 0) }));
+    if (attended.length) body.appendChild(el("ul", { class: "agent-sessions" }, attended.slice(0, 8).map(consoleLine)));
+    var totalUn = (counts.unattended || 0) + (counts.finished || 0);
+    body.appendChild(el("div", { class: "cell-sub", style: "margin-top:10px",
+      text: (counts.unattended || 0) + " of " + totalUn + " unattended sessions running" +
+            (fin.length ? " · " + fin.length + " finished in the last 30 min" : "") }));
+    if (un.length) {
+      var list = el("div", { class: "attn-list" });
+      un.slice(0, 8).forEach(function (sess) {
+        var b = el("button", { class: "attn-item t-" + (sess.state === "working" ? "info" : "warn"), type: "button",
+          "data-focus-key": "run:" + sess.session }, [
+          el("span", { class: "attn-kind b-" + (sess.state === "working" ? "info" : "warn"), text: sess.state }),
+          el("span", { class: "attn-body" }, [
+            el("span", { class: "attn-title", text: sess.subject_title || sess.subject || (sess.agent + " · " + sess.session) }),
+            el("span", { class: "attn-reason", text: sess.activity || "" })
+          ])
+        ]);
+        b.addEventListener("click", function () { openRunDetail(sess); });
+        list.appendChild(b);
+      });
+      body.appendChild(list);
+    }
+    if (fin.length) {
+      var recap = el("ul", { class: "agent-sessions" });
+      fin.slice(0, 5).forEach(function (sess) {
+        var li = consoleLine(sess);
+        li.addEventListener("click", function () { openRunDetail(sess); });
+        recap.appendChild(li);
+      });
+      body.appendChild(recap);
+    }
+    crossovers = crossovers || [];
+    body.appendChild(el("div", { class: "cell-sub", style: "margin-top:10px", text: "Crossovers · " + crossovers.length }));
+    crossovers.slice(0, 6).forEach(function (x) {
+      body.appendChild(el("div", { class: "callout " + (x.kind === "file" || x.kind === "task" ? "warn" : "info") }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH[x.kind === "file" || x.kind === "task" ? "warn" : "pass"] }),
+        el("div", null, [el("strong", { text: x.kind + " " }), doc.createTextNode(x.detail + " — " +
+          (x.a.agent || "?") + " (" + (x.a.session || "?") + ") and " + (x.b.agent || "?") + " (" + (x.b.session || "?") + ")")])
+      ]));
+    });
+    return el("section", { class: "card", id: "consolesCard", "aria-labelledby": "consolesTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "consolesTitle" }, [icon("users"), doc.createTextNode("Consoles")])
+      ]),
+      body
+    ]);
+  }
+
   function overviewHeading(kicker, title, copy) {
     return el("div", { class: "overview-heading" }, [
       el("span", { class: "overview-heading-kicker", text: kicker }),
@@ -1654,6 +1886,16 @@
     scroll.appendChild(el("div", { class: "operations-grid" }, [
       asksCard(), errorsCard(L.errors, L.error_log)
     ]));
+
+    // Is "in progress" true, and what needs a person? The workstream buckets and the
+    // operational attention list (owner, fix, values, age), then every live console —
+    // attended, unattended runs, finished recaps — with the crossovers between them.
+    scroll.appendChild(overviewHeading("Health", "Work that is really moving",
+      "In-progress tasks nobody is moving, decisions waiting on a person, and conditions only a person can fix."));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [
+      workstreamCard(L.task_health), needsAttentionCard(L.needs_attention)
+    ]));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [consolesCard(L.sessions, L.crossovers)]));
 
     var dc = dagCard(L.dag);
     scroll.appendChild(overviewHeading("Next", "The pullable frontier",
@@ -1851,6 +2093,29 @@
         ])));
       }
       if (liveRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Live", "pulse", liveRows)]));
+      var cps = checkpointRows(r);
+      if (cps.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Checkpoints", "checks", cps)]));
+      var lane = [
+        r.unattended ? row("Queue", "unattended — offered to unattended workers (P0-P2)") : null,
+        r.project ? rowMono("Project", r.project) : null,
+        r.auto_close ? row("Automatic close", r.auto_close.state + (r.auto_close.why ? " — " + r.auto_close.why : "") +
+                                               (r.auto_close.sha ? " (commit " + r.auto_close.sha + ")" : "")) : null
+      ].filter(Boolean);
+      if (lane.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Lane", "rocket", lane)]));
+      if (r.work_kind === "decision") {
+        var dec = r.decision;
+        var decRows = dec ? [
+          row("Decided", dec.text), rowMono("By", dec.decided_by + " · " + dec.decided_at),
+          rowMono("Then", dec.then), dec.followup ? row("Build task", chipRow([dec.followup], "task")) : null
+        ] : [
+          row("Waiting on", "a person's call — never an unattended worker's"),
+          rowMono("Decide", "python -m hub_core.client decide " + r.id + ' --then file --decision "..."'),
+          rowMono("Or close", "python -m hub_core.client decide " + r.id + ' --then close --decision "..."'),
+          rowMono("Or reply", "python -m hub_core.client decide " + r.id + ' --then reply --decision "<question>"'),
+          row("Who", "a named decider's own credential (HUB_DECIDERS); agent tokens are refused")
+        ];
+        body.appendChild(el("div", { class: "detail-grid one" }, [section("Decision", "branch", decRows)]));
+      }
     }
 
     var links = [];

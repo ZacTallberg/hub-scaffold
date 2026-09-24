@@ -83,6 +83,11 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/agent-updates.json?limit=N` | the agents' own first-person feed of what they did — `{at, epoch, agent, machine, kind, summary, evidence, item, by}`, newest first, bounded to the last 200 lines; metadata carries `last_24h`. The same rows ride `live.updates`. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
+| `GET /hub/next.json?unattended=1` | The **unattended lane**: only tasks marked `unattended`, priority P0–P2 (P3 is a wish list), never a `work_kind: decision`, and never one a live run is already on. Work a run handed back is `todo` again and re-offered here. Every row (on either form of `next.json`) is annotated like the task feed below. |
+| `GET /hub/project/<slug>/tasks.json` | One project's task feed for a consuming app: `{project, open[], finished[], counts}` — open tasks plus those finished in the last 14 days, each annotated with `holder` (agent, console, `live`/`abandoned`), `responder` (latest run: waiting/working/finished + outcome), `pushed` (typed `pushed` checkpoint first; a note sha only as `source: note`, never hex glued to an id), `handed_back`, `deployed`, and `ci_problem` (an unacked error row joined on the task's OWN recorded sha or pipeline, never on project alone). Carries an `ETag` that moves only when something a reader shows moves; `If-None-Match` answers **304**. |
+| `GET /hub/task/<local>.json` | Also carries the same annotations; `python -m hub_core.client recall <id>` prints it as state, holder, commits and the checkpoint trail in order. |
+| `GET /hub/attention.json` | **Needs attention**: every fixable operational condition — seats gone silent, clients older than the one this hub serves, consoles working with no task, orphaned leases, stalled or unclosed tasks, unstarted unattended requests, expiring/expired credentials, unanswered questions, unclaimed errors — each with `severity`, `who` acts, the exact `fix`, the `evidence` values that produced it, and a real `age_s` (first-seen is persisted). Cleared conditions move to `recently_cleared` with how long they stood. A source that could not be read is named in `sources` and silences only its own detectors. `ETag`/304 (ages are excluded from the tag). |
+| `GET /hub/consoles.json[?session=<id>]` | Every live console split `attended` / `unattended` (live runs) / `finished` (runs that ended in the last 30 min, kept as a recap with their outcome), each with an honest state (`working` under two minutes of quiet, else `idle` with "idle 12 min, last did …"), the digest a supervisor reported, and the task IT claimed. `crossovers[]` lists every pair of consoles on the same file, task, subsystem or subject; `?session=` adds `addressed[]` — the signals for that console with the peer's focus, task, latest checkpoint (a peer report), how to reach them and a suggested split. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
 unchanged, so an idle poll or a re-grounding pull costs an empty body.
@@ -111,6 +116,9 @@ source of truth, and every ratio carries its denominator.
 | `worker_health` | receipt outcomes and completions per seat, with denominators. |
 | `failure_modes` | what KIND of refusal the fleet keeps hitting, plus the unclassified count. |
 | `wip` | the adaptive concurrency ceiling the claim seam enforces. |
+| `task_health` | Is "in progress" true? Every `in_progress` task in exactly one bucket — `moving` (a step or event inside 30 min; moving WINS, even over a fully ticked plan), `complete_unclosed` (every work checkpoint recorded, nothing since; `closeable` only when a checkpoint names a commit/URL/path AND none says work remains), `stalled`, `orphaned` — with `counts`, the operator's `hygiene` items and `unstarted` unattended requests. A decision is never stalled. Grown placeholders and scheduler rows never count. |
+| `sessions` / `crossovers` | The attended / unattended / finished console split with `counts`, and the crossover pairs (`consoles.json` above). |
+| `needs_attention` | The operational attention list (`attention.json` above). |
 | `telemetry` / `cost` | OTLP GenAI aggregate and its dollarized fold; absent until a first instrumented run exists. |
 
 ## WRITE endpoints (POST, scoped `X-Agent-Token` preferred)
@@ -171,7 +179,7 @@ intentionally omitted: canonical Hub coordination is committed-event push, not p
 |---|---|---|---|
 | `/hub/api/task` (`task:write`) | Create: `title`; update: `id` + `expected_version` plus changed fields. Updating active/leased work also requires its fencing `token`. Optional `priority` (P0–P3), `status` (not `done`/`in_progress`), `verification_command`, `deps`, `acceptance`, `phase`, `touches`, `plan`, `implements`, `decided_by`, `surfaced_by`, `source` | `200 {data:{id,version,event}}` | `409 use_complete` / `use_claim`; wrong/stale lease; `428 precondition_required`; `409 conflict`; `422 schema` |
 | `/hub/api/agent-credential` (`credential:manage`) | `action:issue` + `subject`, `scopes[]`, `ttl_s`; `action:revoke` + `credential_id`; or `action:list` | One-time bearer token on issue; sanitized metadata otherwise | `403 insufficient_scope`; `422 credential` |
-| `/hub/api/claim` | Existing task `id`, non-empty string `agent`, optional `ttl_s` (default 900; 1–86400) | Atomically acquires/renews the lease and transitions `todo` to `in_progress`; `200 {ok:true,token,expires,version,…}`. A same-agent retry renews without rotating the token. **Keep `token`.** | `404 not_found`; `409 deps_blocked`, `not_claimable`, or `{ok:false,reason:"held"}`; `422 bad_ttl` |
+| `/hub/api/claim` | Existing task `id`, non-empty string `agent`, optional `ttl_s` (default 900; 1–86400), optional `session` (the claiming console; defaults to the `X-Hub-Session` header) | Atomically acquires/renews the lease and transitions `todo` to `in_progress`; `200 {ok:true,created,token,expires,version,session,…}`. A same-agent retry renews without rotating the token (`created:false`). A renewal whose transition lost an OCC race keeps its lease and answers `200` with `transition_raced:true` and the current version — only a lease this call CREATED is ever released on a failed transition. The recorded `session` is what binds the claim to one of the agent's consoles on the board (a sessionless legacy lease is attributed only when the agent has exactly one live console). **Keep `token`.** | `404 not_found`; `409 deps_blocked`, `not_claimable`, or `{ok:false,reason:"held"}`; `422 bad_ttl` |
 | `/hub/api/heartbeat` | `id`, `token`, optional `ttl_s` (default 900; 1–86400) | `200 {ok:true,expires}` | `400 need_id_token`; `409 {ok:false,reason:"no/stale lease"}`; `422 bad_ttl` |
 | `/hub/api/run` (`run:write`) | `task`, `lease_token`; optional `title`, `goal`, `parent_run`, `trace_id`, `ttl_ms`, `idem_key` | Durable folded AgentRun plus `id`, version, event | `404 not_found`; `409 lease`; `422 parent_run` / schema |
 | `/hub/api/run/update` (`run:write`) | `id`, `lease_token`, lifecycle `action` plus its typed fields; optional `expected_version`, `idem_key` | Updated folded run, operation result, and no-replay recovery envelope | `404 not_found`; `409 lease` / `owner` / `transition` / `conflict`; `422 schema` |
@@ -197,7 +205,11 @@ for the workstation half of the issuer-bound consume protocol.
 2. `accept_note` + at least one `evidence_uri` — else `422 need_evidence`.
 3. **strict mode only** (`HUB_DONE_STRICTNESS=strict`): every `evidence_uri` must dereference — a URL returning
    <400, a commit sha in this repo, or an existing path resolved from `BASE_DIR` (absolute paths are
-   also accepted) — else `422 evidence_unresolvable`. Strict changes evidence resolvability; it does
+   also accepted) — else `422 evidence_unresolvable`. A single evidence string may be a comma/space list of
+   shas or URLs (a task spanning several commits is ordinary); it splits only when EVERY part is
+   sha- or URL-shaped, each part must dereference, and a bad part is named. A bare sha this
+   repository does not contain is refused naming the repository searched and asking for the
+   commit's forge URL instead. Strict changes evidence resolvability; it does
    not require a `verification_command`.
 4. If the task has an optional `verification_command`, you must supply a matching typed
    `verification_run` receipt —
@@ -267,6 +279,42 @@ unthrottled flood does not just add noise, it EVICTS every other error from a bo
 Every write on every endpoint above is additionally screened for secret shapes and refused
 `422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
 be removed, only rotated. Recognizable redaction placeholders pass.
+
+### Task lifecycle beyond claim/complete
+
+| Endpoint (scope) | Key body fields | Behaviour |
+|---|---|---|
+| `/hub/api/task` (`task:write`) | create: `title`, `acceptance`, optional `priority`, `project`, `unattended`, `work_kind`, `idem_key` | **A retried create is not a new record**: the id is allocated per attempt, so with an `idem_key` the replay lookup spans every task and answers the retry with the first attempt's record plus `replayed: true` (the client stamps one key per intent). `unattended: true` offers it to the unattended lane. A `work_kind: decision` with `unattended: true` — on create, on update, or setting the flag on an existing decision — is `409 decision_not_unattended`. |
+| plan items | `kind`, `sha`, `pipeline_id`, `pipeline_url`, `lifecycle`, `times`, `auto` | Typed checkpoints: `pushed` names the commit (`client step --sha --pipeline`), `deployed` is written by a verified deploy, and the scheduler kinds (`handed_back`, `lease_released`, `reaped`, `launcher_timeout`, `claim_expired`, `lifecycle`) are shown but never counted toward "N of N done", nor are `auto` placeholders grown to reach a numbered step. An unknown kind is refused by the schema. |
+| `/hub/api/hand` (`task:release`) | `id`, `agent`, optional `token`, `note` | Back to the queue **for an unattended worker**: `todo`, `unattended: true`, lease released, one counted `handed_back` scheduler row. Refused on a decision. |
+| `/hub/api/unclaim` (`task:release`) | `id`, `agent`, optional `token`, `note` | Let go: lease released, `in_progress` back to `todo`, `unattended` unchanged. With nothing held and nothing in flight it is a no-op (`noop: true`) and writes nothing. |
+| — the orphaned-lease remedy | (either verb, no `token`) | Without the fencing token, a lease is released only when it belongs to the SAME agent (and credential subject) and its claiming console is no longer live. A live console's lease is `409 lease_live`; another agent's is `409 held`. |
+| `/hub/api/task/decide` (`task:decide`) | `id`, `decision`, `then` (`file`, `close` or `reply`) | **A decision is a person's call.** Only a scoped credential whose subject is in `HUB_DECIDERS` (default the operator) may decide; the shared-root token and every other agent get `403 decision_needs_a_person`. `file` mints the build task (unattended, P0–P2, acceptance leads with the decision) and closes the decision naming it; `close` records it with nothing to build; `reply` leaves it open, puts the reply on its trail and addresses a directive to the filer — the decision leaves the decider's inbox until a newer checkpoint follows. Closing goes through the one done path; a second press returns the first result (`already_decided`). Open decisions reach the deciders' inbox (kind `decision`) with a board deep link. The board itself holds no write credential, so its decision section shows the exact command. |
+| `/hub/api/overlap-seen` (`presence:write`) | `ids[]` | Records that crossover signals reached their console (a sidecar, never the ledger), so each is announced once per side until it changes. |
+| `/hub/api/presence` body `session_state` | `phase`, `doing`, `narration`, `last_result`, `targets`, `kind`, `run`, `subject`, `subject_title`, `state`, `outcome`, `started`, `ended`, `bounded_s`, `project`, `files` | The digest a supervisor distilled from a session's own activity, bounded and typed; unknown keys are dropped (`client presence --doing … --kind responder …`). `kind` ∈ `responder, scheduled, autoworker, unattended` marks an unattended run. Any write may also carry `X-Hub-Project`, `X-Hub-Files`, `X-Hub-Session-Kind`, `X-Hub-Run`, `X-Hub-Subject`. |
+
+The inbox (`inbox.json`, `inbox/wait`, `client inbox --text`) also delivers the lanes that address
+themselves: `decision` to the deciders, `task-stall` (unclosed, stalled or unstarted work) to the
+operator, `attention` items to their owner after 30 minutes (critical at once) and to the operator
+after 24 hours, and `overlap` crossovers to each attended console's agent, once per side.
+
+**A verified deploy closes the loop.** After `POST /hub/api/deploy` records a release, every open
+task whose structured commit (`plan[].sha`) is an ANCESTOR of the deployed sha gets exactly one
+`deployed` checkpoint (once per commit, however many later builds contain it). An `unattended` task
+is then finished by the hub through the same done path — a short lease it holds (never when anyone
+else holds the task), the deploy record and the commit as evidence; a person's task is only stepped.
+A `todo` task qualifies only with a recorded commit; prose never counts. The response adds
+`tasks: {closed, stepped, refused, unchecked}` when anything happened; a refused close is written
+onto the task as `auto_close`. Ancestry is asked of the repository at `HUB_WORK_ROOT`
+(`HUB_VCS_ANCESTRY=none` when the image carries none); a question it could not answer is reported
+as `unchecked`, never read as "no". The closure is fail-soft: the release record is already
+durable.
+
+**Client telemetry.** Every `hub_core.client` call sends `X-Hub-Client-Version` (a digest of the
+client); write responses carry `X-Hub-Client-Current`, and the attention list names each seat
+running a different client. `HUB_CLIENT_SELF_UPDATE=1` lets a stale client fast-forward its own
+git checkout — opt-in, `pull --ff-only` only, rate-limited to one attempt per 15 minutes with the
+stamp written before the attempt, detached and fail-soft.
 
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
 (dereferenceable-evidence mode).

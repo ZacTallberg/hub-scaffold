@@ -32,7 +32,8 @@ _SKILL_BLURBS = {
     "corpus": "Curate corpus records that stay queryable without masquerading as executable work.",
     "governance": "Mechanize a board law with both-directions proof.",
     "verification": "Write falsifiable proof for a surface and capture its receipt.",
-    "decision": "Record a ruling as an ADR and re-point the affected work to it.",
+    "decision": "A person's call: a named decider decides it (POST /hub/api/task/decide) or records "
+                "the ruling as an ADR, and the affected work is re-pointed to it. Never unattended.",
     "research": "Ground a question in dereferenceable evidence and file the result as a base entity.",
     "migration": "Move a surface between representations without losing coverage or history.",
     "duplicate": "Fold duplicate work into its canonical task.",

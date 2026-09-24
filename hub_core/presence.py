@@ -52,7 +52,7 @@ FILES_FRESH_S = 900             # a console's file list older than this is histo
 WORKING_S = 120                 # activity this recent reads as `working`, else `idle`
 # The console fields a session carries, besides its stamps. One list, so the write merge, the
 # read projection and the uniform row shape can never quietly disagree about what a session is.
-SESSION_FIELDS = ("cwd", "focus", "name", "repo", "app", "state", "runtime")
+CONSOLE_FIELDS = ("cwd", "focus", "name", "repo", "app", "state", "runtime")
 _STUB_FOCUS = re.compile(r"^\s*(?:[a-z0-9_-]+:[a-z]+:[A-Za-z0-9._-]+|working|busy|idle|\W*)\s*$",
                          re.I)
 
@@ -151,6 +151,44 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
     return removed
 
 
+#: Session fields a client MAY report beyond cwd/focus, each bounded. Kind/run/subject tell an
+#: unattended run from a person's console; project/files feed the crossover detector; the digest
+#: fields (phase .. last_result) are what a supervisor distilled from the session's own activity,
+#: so the board can say "idle 12 min, last did X" instead of stamping every open window "active".
+SESSION_FIELDS = {"kind": 16, "run": 64, "subject": 120, "subject_title": 160, "project": 80,
+                  "runtime": 16, "phase": 16, "doing": 180, "narration": 220,
+                  "last_result": 60, "outcome": 24, "state": 16}
+SESSION_NUMBERS = ("started", "ended", "bounded_s", "doing_at")
+UNATTENDED_KINDS = ("responder", "scheduled", "autoworker", "unattended")
+UNATTENDED_RECAP_S = 1800       # a finished run stays visible as a recap this long, then goes
+
+
+def _clean_session_extra(extra) -> dict:
+    """Bound and type every optional session field; unknown keys are dropped, never stored."""
+    extra = extra if isinstance(extra, dict) else {}
+    out = {}
+    for key, limit in SESSION_FIELDS.items():
+        value = extra.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()[:limit]
+    for key in SESSION_NUMBERS:
+        try:
+            value = float(extra.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            out[key] = value
+    for key, limit, cap in (("files", 160, 12), ("targets", 60, 4)):
+        value = extra.get(key)
+        if isinstance(value, str):
+            value = value.split(",")
+        if isinstance(value, list):
+            out[key] = [str(v).strip()[:limit] for v in value if str(v).strip()][:cap]
+    if "files" in out:
+        out["files_at"] = time.time()
+    return out
+
+
 def valid_focus(focus: str) -> str:
     """The focus as stored, or "" when it says nothing a reader can use (a bare entity id, a
     one-word stub). A console's focus is the board's answer to "what is this window on"."""
@@ -160,12 +198,13 @@ def valid_focus(focus: str) -> str:
     return text
 
 
-def _session_merge(prior: dict, now: float, fields: dict, files, retract: str) -> dict:
+def _session_merge(prior: dict, now: float, fields: dict, files, retract: str,
+                   extra: dict | None = None) -> dict:
     """One console's record after this observation: merge-never-clobber for every field (a
     heartbeat carries no prompt, so it must not blank the last known focus), a stub focus is
     rejected, and a retraction clears only the focus it names."""
-    out = {k: prior.get(k, "") for k in SESSION_FIELDS}
-    for key in SESSION_FIELDS:
+    out = {k: prior.get(k, "") for k in CONSOLE_FIELDS}
+    for key in CONSOLE_FIELDS:
         value = str(fields.get(key) or "").strip()
         if key == "focus":
             value = valid_focus(value)
@@ -181,13 +220,25 @@ def _session_merge(prior: dict, now: float, fields: dict, files, retract: str) -
     else:
         out["files"] = prior.get("files") or []
         out["files_at"] = prior.get("files_at") or 0
+    # The optional session fields (kind/run/subject, the supervisor's digest, the crossover
+    # project) merge the same way: kept until a newer report replaces them.
+    for key, value in prior.items():
+        if (key in SESSION_FIELDS or key in SESSION_NUMBERS or key == "targets") \
+                and key not in CONSOLE_FIELDS:
+            out[key] = value
+    fresh = _clean_session_extra(extra)
+    fresh.pop("files", None)
+    fresh.pop("files_at", None)
+    out.update(fresh)
+    if fresh.get("doing") or fresh.get("phase"):
+        out["doing_at"] = now
     out["at"] = now
     out["active_at"] = now
     return out
 
 
 def _same_but_stamps(old: dict, new: dict) -> bool:
-    stamps = {"at", "active_at", "files_at"}
+    stamps = {"at", "active_at", "files_at", "doing_at"}
     return {k: v for k, v in (old or {}).items() if k not in stamps} == \
         {k: v for k, v in (new or {}).items() if k not in stamps}
 
@@ -195,17 +246,23 @@ def _same_but_stamps(old: dict, new: dict) -> bool:
 def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: str = "",
             focus: str = "", heartbeat: bool = False, name: str = "", repo: str = "",
             app: str = "", state: str = "", runtime: str = "", files=None,
-            retract_focus: str = "") -> None:
+            retract_focus: str = "", extra: dict | None = None, client: str = "") -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine),
     carrying its name, repo, app, state, focus and recently edited files. A heartbeat stamps
     heartbeat_at; anything else stamps activity_at. An observation that would only move stamps
-    on a row seen within QUIET_REWRITE_S is skipped. Never raises."""
+    on a row seen within QUIET_REWRITE_S is skipped. ``extra`` carries the optional session
+    fields (SESSION_FIELDS: kind, run, subject, the supervisor's digest, project, files);
+    ``client`` the reporting client's version, kept per machine so a seat running an older
+    client than the hub serves is visible. Never raises."""
     agent = (agent or "").strip().lower()
     if not agent:
         return
     fields = {"cwd": cwd, "focus": focus, "name": name, "repo": repo, "app": app,
               "state": state, "runtime": runtime}
+    if files is None and isinstance(extra, dict) and extra.get("files"):
+        files = _clean_session_extra({"files": extra.get("files")}).get("files")
+    client = str(client or "").strip()[:64]
     try:
         pdir = _dir(hub_dir)
         pdir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +283,10 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
             sessions = prior_row.get("sessions") if isinstance(prior_row.get("sessions"), dict) else {}
             prior_session = sessions.get(sid) if sid else None
             unchanged = not sid or (isinstance(prior_session, dict) and _same_but_stamps(
-                prior_session, _session_merge(prior_session, now, fields, None, retract_focus)))
+                prior_session, _session_merge(prior_session, now, fields, None, retract_focus,
+                                              extra)))
+            if client and prior_row.get("client") != client:
+                unchanged = False
             if fresh and unchanged and (not sid or now - epoch(prior_session.get("at")) < QUIET_REWRITE_S):
                 return
         with ProcessFileLock(pdir, name=".presence.lock", timeout=5):
@@ -254,13 +314,18 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 if not isinstance(sessions, dict):
                     sessions = {}
                 prior = sessions.get(sid) if isinstance(sessions.get(sid), dict) else {}
-                sessions[sid] = _session_merge(prior, now, fields, files, retract_focus)
+                sessions[sid] = _session_merge(prior, now, fields, files, retract_focus, extra)
                 # A console quiet past the keep window is closed. Without pruning this list
-                # only grows and ends up reporting every window ever opened.
+                # only grows and ends up reporting every window ever opened. A finished
+                # unattended run is kept for its recap window, measured from when it ENDED.
                 cutoff = now - SESSION_KEEP_S
                 payload["sessions"] = {
                     k: v for k, v in sessions.items()
-                    if isinstance(v, dict) and epoch(v.get("at")) >= cutoff}
+                    if isinstance(v, dict)
+                    and max(epoch(v.get("at")), epoch(v.get("ended"))) >= cutoff}
+            if client:
+                payload["client"] = client
+                payload["client_at"] = now
             tmp = p.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload), encoding="utf-8")
             os.replace(tmp, p)
@@ -341,7 +406,7 @@ def read(hub_dir) -> dict:
             entry.setdefault("machine", name)
             sess = r.get("sessions")
             entry["sessions"] = sorted(
-                (dict({f: (v or {}).get(f, "") for f in SESSION_FIELDS}, id=k,
+                (dict(v or {}, **{f: (v or {}).get(f, "") for f in CONSOLE_FIELDS}, id=k,
                       files=list((v or {}).get("files") or []),
                       files_at=epoch((v or {}).get("files_at")),
                       at=epoch((v or {}).get("at")),
@@ -389,15 +454,56 @@ def device_state(row: dict, now: float | None = None) -> dict:
     }
 
 
+def session_kind(s: dict) -> str:
+    """``attended`` for a person's console; otherwise the unattended lane that started it. A
+    separate axis from state: a finished run is still unattended, an idle person still a person."""
+    kind = str((s or {}).get("kind") or "").strip().lower()
+    return kind if kind in UNATTENDED_KINDS else "attended"
+
+
+def _phrase(seconds) -> str:
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return "%d s" % seconds
+    if seconds < 3600:
+        return "%d min" % (seconds // 60)
+    return "%d h" % (seconds // 3600)
+
+
 def session_row(agent: str, machine: str, s: dict, now: float) -> dict:
     """ONE console, in the one shape every reader gets — the same key set whether the console
     reported a name and files or only a cwd. A projection that re-lists fields per caller is
-    the projection that silently drops the next one."""
+    the projection that silently drops the next one.
+
+    State is honest: an unattended run that ENDED is ``done``; a reported state other than
+    working/idle (``waiting``) is kept; otherwise ``working`` while the console acted within
+    WORKING_S, else ``idle`` with ``activity`` reading "idle 12 min, last did …" — a window
+    that is merely OPEN is not a console that is working."""
     at = epoch(s.get("active_at") or s.get("at"))
     files_at = epoch(s.get("files_at"))
     files = [str(f)[:160] for f in (s.get("files") or [])][:12] \
         if (not files_at or now - files_at <= FILES_FRESH_S) else []
-    state = str(s.get("state") or "") or ("working" if at and now - at < WORKING_S else "idle")
+    kind = session_kind(s)
+    ended = epoch(s.get("ended"))
+    finished = kind != "attended" and (bool(ended) or s.get("state") == "done")
+    idle_for = round(now - at) if at else None
+    reported = str(s.get("state") or "")
+    if finished:
+        state = "done"
+    elif reported and reported not in ("working", "idle"):
+        state = reported
+    else:
+        state = "working" if at and now - at < WORKING_S else "idle"
+    did = str(s.get("doing") or s.get("narration") or s.get("focus") or "")[:120]
+    if state == "idle":
+        activity = "idle %s%s" % (_phrase(idle_for), (", last did " + did) if did else "")
+    elif state == "done":
+        activity = "finished %s ago%s" % (
+            _phrase(now - (ended or at)),
+            (" — " + str(s.get("outcome"))) if s.get("outcome") else "")
+    else:
+        activity = did or state
+    anchor = ended if finished and ended else at
     return {
         "agent": agent, "machine": machine or "",
         "session": str(s.get("id") or "")[:8],
@@ -407,10 +513,26 @@ def session_row(agent: str, machine: str, s: dict, now: float) -> dict:
         "repo": str(s.get("repo") or "")[:200],
         "app": str(s.get("app") or "")[:60],
         "focus": str(s.get("focus") or "")[:180],
+        "project": str(s.get("project") or "")[:80],
         "state": state[:16],
         "files": files,
+        "kind": kind, "unattended": kind != "attended",
+        "run": str(s.get("run") or "")[:64],
+        "subject": str(s.get("subject") or "")[:120],
+        "subject_title": str(s.get("subject_title") or "")[:160],
+        "phase": str(s.get("phase") or "")[:16],
+        "doing": str(s.get("doing") or "")[:180],
+        "narration": str(s.get("narration") or "")[:220],
+        "last_result": str(s.get("last_result") or "")[:60],
+        "targets": list(s.get("targets") or [])[:4],
+        "outcome": str(s.get("outcome") or "")[:24],
+        "started": epoch(s.get("started")) or None,
+        "ended": ended or None,
+        "bounded_s": int(epoch(s.get("bounded_s"))) or None,
+        "finished": finished, "activity": activity,
+        "idle_for_s": idle_for,
         "active_at": at or None,
-        "age_s": round(now - at) if at else None,
+        "age_s": round(now - anchor) if anchor else None,
     }
 
 
@@ -427,11 +549,72 @@ def live_sessions(hub_dir, now: float | None = None) -> list:
         for m in seen.get("machines") or []:
             for s in m.get("sessions") or []:
                 at = epoch(s.get("active_at") or s.get("at"))
-                if not (s.get("focus") or s.get("cwd") or s.get("name") or s.get("repo")):
+                kind = session_kind(s)
+                ended = epoch(s.get("ended"))
+                finished = kind != "attended" and (bool(ended) or s.get("state") == "done")
+                if kind == "attended" and not (s.get("focus") or s.get("cwd")
+                                               or s.get("name") or s.get("repo")):
                     continue
-                if not at or (now - at) > SESSION_ACTIVE_S:
+                if finished:
+                    # An ended unattended run stays a recap for UNATTENDED_RECAP_S, aged from
+                    # when it ended, and never rides its last "working" stamp back into view.
+                    anchor = ended or at
+                    if not anchor or (now - anchor) > UNATTENDED_RECAP_S:
+                        continue
+                elif s.get("state") == "gone" or not at or (now - at) > SESSION_ACTIVE_S:
                     continue
                 out.append(session_row(agent, m.get("machine") or "", s, now))
+    out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
+    return out
+
+
+def split(rows: list) -> dict:
+    """``{"attended", "unattended", "finished"}`` from one list of console rows. ``unattended``
+    is exactly the runs that are LIVE (working, idle or waiting); an ended run is a recap in
+    ``finished``, never a row in the live section. Live runs sort working first, then newest."""
+    attended = [r for r in rows or [] if not r.get("unattended")]
+    rest = [r for r in rows or [] if r.get("unattended")]
+    finished = [r for r in rest if r.get("finished")]
+    unattended = [r for r in rest if not r.get("finished")]
+    unattended.sort(key=lambda r: (0 if r.get("state") == "working" else 1, r.get("age_s") or 0))
+    finished.sort(key=lambda r: r.get("age_s") or 0)
+    return {"attended": attended, "unattended": unattended, "finished": finished}
+
+
+def attribute_leases(sessions: list, leases: list) -> list:
+    """Bind each live console to the task lease IT holds — never to one inferred from a path.
+
+    A claim asserts responsibility, so attributing it by directory ("this console is standing
+    in the repo that task is about") turns anyone who opens a repository to read a file into
+    its owner — a confident board that is wrong, which is worse than an empty one. The rule:
+
+    * CERTAIN — the lease records the claiming session and it is this console's session.
+    * LEGACY — a lease written without a session (an older client) is attributed only when the
+      agent has exactly ONE live console it could belong to. With several, the honest answer
+      is that the hub does not know, and nothing is attributed.
+
+    Returns new session rows carrying ``task_id`` (or "") and ``has_task``; the input is not
+    mutated. Pure: sessions are ``live_sessions`` rows, leases are live lease records."""
+    by_agent = {}
+    for s in sessions or []:
+        by_agent.setdefault(str(s.get("agent") or "").lower(), []).append(s)
+    held = {}
+    for lease in leases or []:
+        agent = str((lease or {}).get("agent") or "").lower()
+        if agent and lease.get("task"):
+            held.setdefault(agent, []).append(lease)
+    out = []
+    for agent, rows_ in by_agent.items():
+        mine = held.get(agent, [])
+        for s in rows_:
+            sid = str(s.get("session") or "")[:8]
+            tid = next((lease["task"] for lease in mine
+                        if sid and str(lease.get("session") or "")[:8] == sid), "")
+            if not tid and len(rows_) == 1:
+                tid = next((lease["task"] for lease in mine if not lease.get("session")), "")
+            row = dict(s)
+            row.update({"task_id": tid, "has_task": bool(tid)})
+            out.append(row)
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
     return out
 

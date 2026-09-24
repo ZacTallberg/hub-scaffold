@@ -2067,6 +2067,7 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .sess-id { font-family: var(--mono, monospace); color: var(--muted); flex: none; }
 .sess-cwd { color: var(--muted); flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-focus { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-held { flex: none; font-size: 10.5px; color: var(--accent); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; white-space: nowrap; }
 .sess-age { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
 .sess-rt { flex: none; font-size: 10px; line-height: 1.4; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); white-space: nowrap; }
 
