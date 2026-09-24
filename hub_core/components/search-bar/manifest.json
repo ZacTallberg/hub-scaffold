@@ -1,0 +1,55 @@
+{
+  "name": "search-bar",
+  "title": "Search bar",
+  "summary": "One search box any app links: a hairline field that submits to the app's own results page, an optional suggest-as-you-type panel from the app's own endpoint, a top match the app learned from what people actually opened, and an optional smart pass the app computes. Empty, unconfigured and failed are drawn as three different states.",
+  "link": [
+    "<link rel=\"stylesheet\" href=\"{hub}/components/search-bar/search-bar.css\">",
+    "<script src=\"{hub}/components/search-bar/search-bar.js\"></script>"
+  ],
+  "mount": {
+    "element": "#app-search (or any element with data-app-search); link the script WITHOUT defer, immediately after the mount",
+    "attributes": {
+      "data-action": "REQUIRED: the app's own search RESULTS page, where the form GETs. No action, no bar.",
+      "data-app": "the app slug; keys this reader's saved recent searches and names the props record",
+      "data-app-name": "the app's name, used in the label, the 'Popular in ...' heading and the fallback pre-text",
+      "data-param": "the query parameter name (default q)",
+      "data-value": "the current query, so the box is filled in on a results page",
+      "data-sources": "comma-separated list of what this app searches, composed into the pre-text",
+      "data-placeholder": "an explicit pre-text; prefer data-sources or the endpoint's placeholder",
+      "data-suggest-url": "optional: the APP's own JSON endpoint for suggest-as-you-type; without it there is no panel",
+      "data-chose-url": "optional: the APP's own endpoint that receives the beacon when a suggestion is opened",
+      "data-min": "characters before the first suggest request (default 2)",
+      "data-hotkey": "the single key that focuses the bar (default /); Ctrl/Cmd-K always works",
+      "data-agent-powered": "declare only when the app's search is model-assisted; draws a faint star",
+      "data-props": "optional: the hub's component-properties route for this app"
+    },
+    "slot": "[data-search-fallback] inside the mount is the no-JS box (a plain input in a plain form); removed only once the component has rendered"
+  },
+  "contract": {
+    "suggest": "GET <suggest-url>?q=...  ->  {\"ok\": true, \"groups\": [{\"key\", \"title\", \"rows\": [{\"title\", \"meta\", \"url\", \"ref\"}]}], \"top\": {\"title\", \"meta\", \"url\", \"ref\", \"why\"}, \"popular\": [\"...\"], \"placeholder\": \"...\", \"total\": 19, \"smart\": false}",
+    "unconfigured": "{\"ok\": false, \"reason\": \"unconfigured\", \"error\": \"<what is missing, in a reader's words>\"}",
+    "failed": "{\"ok\": false, \"reason\": \"failed\", \"error\": \"<what went wrong>\"}",
+    "smart": "GET <suggest-url>?q=...&smart=1 -> the same shape, re-ranked by the app; optional smart_error when its pass could not run",
+    "chose": "POST <chose-url> {\"q\", \"ref\", \"url\", \"kind\", \"rank\"} -> {\"ok\": true}; CSRF from <body data-csrf>, a csrfmiddlewaretoken input, or a cookie whose name ends in csrftoken"
+  },
+  "rules": [
+    "The hub serves this component and never an app's data: every URL on the mount is on the app's own origin, behind its own sign-in.",
+    "The component never calls a model and never invents a reason: `top`, `why` and the smart pass are the app's.",
+    "Nothing is learned from a query that was merely typed or run: the beacon fires only when a person opened a suggestion.",
+    "A suggest endpoint that answers HTML is reported as a failure, never parsed as an empty result.",
+    "The top match is lifted out of its group, never listed twice.",
+    "The pre-text never rotates; the endpoint's placeholder is applied once."
+  ],
+  "props": [
+    {"key": "placeholder", "label": "Search box pre-text", "type": "text", "max": 80, "default": "",
+     "hint": "Wins over the app's own and the suggest endpoint's. Blank keeps the app's."},
+    {"key": "hotkey", "label": "Jump-to-search key", "type": "choice", "default": "/",
+     "hint": "Ctrl/Cmd-K always works.",
+     "options": [{"value": "/", "label": "/"}, {"value": "s", "label": "s"}, {"value": "off", "label": "Off"}]}
+  ],
+  "publishes": {
+    "html_attributes": ["data-sb-ready", "data-sb-version"],
+    "events_read": ["hub:component-props"],
+    "page_attributes_read": ["data-csrf"]
+  }
+}
