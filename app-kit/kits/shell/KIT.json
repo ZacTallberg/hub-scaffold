@@ -1,0 +1,1 @@
+{"state": "active", "summary": "App shell whose capabilities (toasts, palette, live, drawer, confirm, transitions, prefetch) are declared, not always-on", "installs": ["app_shell"]}

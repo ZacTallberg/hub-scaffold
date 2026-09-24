@@ -99,6 +99,7 @@ launcher never receives it. Read [SECURITY.md](SECURITY.md) before enabling writ
 | Run, back up, restore, rotate, or troubleshoot | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
 | Apply the transient proof policy | [docs/TESTING.md](docs/TESTING.md) |
 | Install the optional Windows worker adapter | [adapters/windows/README.md](adapters/windows/README.md) |
+| Build a Django app that pairs with the Hub, to a measured bar | [app-kit/README.md](app-kit/README.md) |
 | Understand the human/agent laws | [OPERATING-AGREEMENT.md](OPERATING-AGREEMENT.md) |
 | Run a maintenance/build/review campaign | [campaigns/README.md](campaigns/README.md) |
 | Bootstrap or rebind the management plane | [PROJECT-PLANE-BOOTSTRAP.md](PROJECT-PLANE-BOOTSTRAP.md) |
@@ -115,7 +116,8 @@ adapters/django/hub/            mounted Django app and management commands
 adapters/windows/               optional per-user local worker bridge
 PROJECT/                        canonical management-plane templates and entity schemas
 example/                        runnable Django integration example
-patterns/                       opt-in deploy/CI/canary/repository/agent patterns, app slots, sign-in, shared banner
+patterns/                       opt-in deploy/CI/canary/repository/agent patterns, app slots, sign-in, shared banner, worker longevity
+app-kit/                        brand-free Django app kits (errors, health, CSRF, settings, gate, shell, runner, assistant), the app bar, and its audit
 campaigns/                      operating playbooks
 governance/                     agent-rule templates installed by init.sh
 docs/                           architecture, operations, and transient-proof guidance

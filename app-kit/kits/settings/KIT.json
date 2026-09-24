@@ -1,0 +1,1 @@
+{"state": "active", "summary": "Fail-closed Django settings and a production env validator that names every problem at once", "installs": ["appkit_settings.py", "envcheck.py"]}
