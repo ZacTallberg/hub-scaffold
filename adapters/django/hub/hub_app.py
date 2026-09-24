@@ -742,6 +742,10 @@ def observe_presence(agent, headers, *, heartbeat=False):
             session=headers.get("X-Hub-Session") or "",
             cwd=headers.get("X-Hub-Cwd") or "",
             focus=headers.get("X-Hub-Focus") or "",
+            # The repo travels WITH the cwd (an absent header beside a cwd means "no repo
+            # here"), and a file list is replaced only when the header is actually sent.
+            repo=headers.get("X-Hub-Repo") or "",
+            files=headers.get("X-Hub-Files"),
             heartbeat=heartbeat)
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
