@@ -402,10 +402,14 @@
       "aria-labelledby": "tab-btn-" + tab.key, tabindex: "0" });
     var search = el("input", { type: "search", placeholder: "Filter " + tab.label.toLowerCase() + "…", "aria-label": "Filter " + tab.label });
     var countEl = el("span", { class: "stat-value", role: "status", "aria-live": "polite", text: String(tab.rows.length) });
+    // WHEN THIS COLLECTION LAST CHANGED. A table filled once and never written again looks
+    // exactly like a live one; "newest 15d ago · snapshot" is honest, an undated table is not.
+    var newestEl = el("span", { class: "stat-item tab-newest" });
+    tab._newest = newestEl;
     var toolbar = el("div", { class: "toolbar" }, [
       el("div", { class: "search-box" }, [icon("search", "s-icon"), search]),
       el("div", { class: "toolbar-spacer" }),
-      el("div", { class: "stats-bar" }, [el("div", { class: "stat-item" }, [countEl, doc.createTextNode(" " + tab.label.toLowerCase())])])
+      el("div", { class: "stats-bar" }, [el("div", { class: "stat-item" }, [countEl, doc.createTextNode(" " + tab.label.toLowerCase())]), newestEl])
     ]);
     var facetBar = el("div", { class: "facet-bar" });
     var thead = el("tr");
@@ -535,6 +539,31 @@
       ])]));
     }
     if (tab._count) tab._count.textContent = String(shown);
+    paintNewest(tab);
+  }
+
+  /* The newest write in the WHOLE collection (not the filtered view): its age, and a "snapshot"
+     badge once nothing has been written for a week, so a one-time fill cannot pass for a live
+     surface. A collection with no dated row says nothing rather than guessing. */
+  var SNAPSHOT_AFTER_S = 7 * 86400;
+  function paintNewest(tab) {
+    var box = tab && tab._newest;
+    if (!box) return;
+    var newest = 0;
+    (tab.rows || []).forEach(function (r) {
+      var pv = (r && r.provenance) || {};
+      var t = Date.parse(pv.updated_at || pv.created_at || "");
+      if (!isNaN(t) && t > newest) newest = t;
+    });
+    box.textContent = "";
+    if (!newest) return;
+    var ageS = Math.max(0, (Date.now() - newest) / 1000);
+    box.appendChild(doc.createTextNode("newest " + (ageS < 5 ? "just now" : fmtAge(ageS) + " ago")));
+    if (ageS > SNAPSHOT_AFTER_S) {
+      box.appendChild(el("span", { class: "badge b-stale", title:
+        "Nothing has been written to this collection for over a week: read it as a dated snapshot, not a live view.",
+        text: "snapshot" }));
+    }
   }
 
   function updateSortHeaders(tab) {
