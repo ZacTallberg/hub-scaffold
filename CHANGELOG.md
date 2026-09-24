@@ -14,6 +14,37 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### App errors: every failure class reaches the Hub, and the sender proves its chain
+
+- **`app-kit/`** (new): a brand-free Django kit that pairs with the Hub. `kits/error-visibility`
+  (`app_errors`) arms automatic producers for every class: request exceptions, every ERROR log
+  record classified as django/data/other (also on loggers that stop propagating, and re-attached
+  after a second `django.setup()` strips them), dying threads and processes, agentic-chat faults,
+  and the browser's JS/promise/request/stream/socket/worker/CSP failures, with noise discipline at
+  the sender. It keeps a fail-soft local recorder and a forwarder that sends one `info` arming row
+  per serving process, counts deliveries, and never forwards from a test run. `error_selftest`
+  fires every producer for real without leaking to the board. `kits/health` emits the readiness
+  payload shape the deploy gate reads. `kits/csrf` reads the CSRF cookie by its configured name at
+  send time.
+- **Error stream:** `info` is a real severity that never passes the bar. `coverage.forwarders`
+  lists each satellite that armed (and whether one degraded). Details keep a traceback's head AND
+  tail (32 KB, gap stated) and lift its `ExceptionType: message` line onto the row as `cause`. A
+  readiness 503 and a handled upstream 502/504 are warnings. Arming rows get a 60 s throttle
+  window. `report_app_error` is an MCP tool.
+- **Board:** reports its own uncaught exceptions and unhandled rejections through `client-error`,
+  and reads the CSRF cookie (name rendered from settings) at send time, so an open board survives
+  a sign-in rotation. The errors card shows a forwarders row.
+- **Client:** retries transport failures only (3 attempts, 5 s then 10 s, `HUB_CLIENT_RETRY` on
+  stderr). Writes retry only what provably never arrived. A gateway page counts as unreachable,
+  never as the Hub's answer.
+- **Audit:** results carry `evaluated`. `hubaudit` prints the denominator, and a run that evaluated
+  nothing is an `INCONCLUSIVE` blocking finding.
+- **Patterns:** `error-visibility.md` rewritten (every class forwards, automatic producers,
+  designed degradation, arming row, wire contract without an `agent` field). `conformance-scan.md`
+  gains honest-count rules. `deploy-contract.md` gains gate hygiene: verify inside the release
+  lease, the readiness payload contract, narrow loud advisory dependencies, and prune-first
+  snapshot retention.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw
