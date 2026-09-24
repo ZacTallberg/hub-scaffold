@@ -64,3 +64,20 @@ def message(problems: list) -> str:
             "backslash escape eaten between the source and this call (\\a, \\b, \\f, \\v "
             "inside a Windows path or a regex). The ledger is append-only and the text would "
             "reach every reader corrupted; fix the SOURCE and resend." % where)
+
+
+_ANSI = None
+
+
+def neutralize(text: str) -> str:
+    """Make machine output SAFE TO POST, for a writer that relays text it did not author (a
+    session's last words, a tool's log). Terminal colour/cursor sequences are removed outright;
+    any other C0 control is rewritten as a visible ``\\xNN`` so the evidence survives without
+    tripping the guard above. Newline, carriage return and tab pass. Authored text should be
+    fixed at its source instead -- this is for relayed bytes only."""
+    global _ANSI
+    if _ANSI is None:
+        import re
+        _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+    cleaned = _ANSI.sub("", str(text or ""))
+    return "".join("\\x%02x" % ord(ch) if _bad(ch) else ch for ch in cleaned)
