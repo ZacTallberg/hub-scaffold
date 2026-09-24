@@ -33,7 +33,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   transcript. A pass that finished but will not exit is reaped as finished.
 - **Worktrees and escalation.** Tasks run in their own worktree of a dedicated clone. The worktree
   is removed only when it provably holds nothing. Questions carry a structured `hop`. Hop 1 is
-  retaken once after a cooldown, and hop 2 is a person's.
+  retaken once after a cooldown, and hop 2 is a person's. Hop 1 is retaken only when the
+  client is proven to stamp the next hop, by building a real `ask` payload with a sentinel
+  `HUB_RESPONDER_HOP`. Searching the client's source for the variable name is not enough.
 - **Doctrine.** `patterns/unattended-responder.md` and `patterns/doctrine-publish.md`. A
   `docs/TESTING.md` section says why a green signal is not evidence. `PROJECT/DOCTRINE.md` §5.5
   says to ask only for what you may not do. `skills/README.md` sets the skills contract (text only,

@@ -164,7 +164,11 @@ N" chip on the thread.
 - hop ≥ 2 — a person's.
 
 Refusing every escalation bounds chains too, but turns them all into a person-only queue of
-mechanical follow-ups. The launcher fails closed if its client cannot stamp the next hop.
+mechanical follow-ups. The launcher fails closed if its client cannot stamp the next hop, and
+it asks the client, not its source: it parses a real `ask` through the client's own parser with a
+sentinel `HUB_RESPONDER_HOP`, runs the payload builder, and requires the sentinel in
+`payload["hop"]`. A text search for the variable name passes with the stamping deleted, because
+a comment or a help string still names it.
 
 ## The charter (what the session is told)
 
