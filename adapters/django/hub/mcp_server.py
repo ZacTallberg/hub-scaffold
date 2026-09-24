@@ -121,7 +121,9 @@ TOOLS = [
                     "pass anyway=true for a genuinely different question.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "question": {"type": "string"},
-         "context": {"type": "string"}, "anyway": {"type": "boolean"}},
+         "context": {"type": "string"}, "anyway": {"type": "boolean"},
+         "idem_key": {"type": "string", "description": "repeat it on a retry: a call that "
+                      "already landed replays instead of being refused as its own duplicate"}},
          "required": ["agent", "question"]}},
     {"name": "check_inbox",
      "description": "What is addressed to this agent right now — directives aimed at it and the "
@@ -133,7 +135,8 @@ TOOLS = [
                     "inbox, and a directive acked by every named target retires itself.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
-         "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+         "note": {"type": "string"}, "idem_key": {"type": "string"}},
+         "required": ["agent", "directive"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -306,7 +309,7 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/complete", payload, auth_headers)
     elif name == "ask_operator":
         payload = {"agent": args["agent"], "question": args["question"]}
-        for key in ("context", "anyway"):
+        for key in ("context", "anyway", "idem_key"):
             if args.get(key):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/ask", payload, auth_headers)
@@ -315,8 +318,9 @@ def _call_tool(name, args, auth_headers):
                              method="get")
     elif name == "ack_directive":
         payload = {"agent": args["agent"], "directive": args["directive"]}
-        if args.get("note"):
-            payload["note"] = args["note"]
+        for key in ("note", "idem_key"):
+            if args.get(key):
+                payload[key] = args[key]
         status, body = _seam("/hub/api/ack", payload, auth_headers)
     elif name == "search_board":
         status, body = _seam("/hub/search.json",

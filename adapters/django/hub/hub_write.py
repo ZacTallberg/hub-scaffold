@@ -17,6 +17,7 @@ from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import agent_auth, collision, flow, ids, schedule, secretscan, validate
+from hub_core.canonical import content_hash
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
@@ -188,7 +189,27 @@ def _evidence_problem(ev):
     return "not a resolvable URL, commit sha, or existing path from WORK_ROOT"
 
 
-def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype):
+def _request_scoped_idem(idem, payload):
+    """Bind an idempotency key to the CONTENT it was sent with.
+
+    An idempotency key identifies a REQUEST, and the store's contract is that a repeated key
+    replays the first event verbatim. Several keys minted on this write path are derived from an
+    ENTITY instead (``ack:<id>``, a caller's per-record key), so a later, genuinely different
+    write to the same entity would collide with the key of the ORIGINAL one and be discarded --
+    answered 200 with the first event's id, success-shaped, while nothing landed.
+
+    Salting with a content hash fixes the class once, at the choke point:
+      - a genuine retry (a POST whose response was lost) carries an IDENTICAL payload, so an
+        identical key -- it still replays, which is the property the key exists for;
+      - a distinct write carries a different payload, so a different key -- it lands.
+    """
+    if not idem:
+        return idem
+    return "%s#%s" % (idem, content_hash(payload)[:12])
+
+
+def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype,
+                       idem_scope=None, allocate=None):
     """Validate the MERGED entity, then append. Returns (response_dict, http_status)."""
     state = hub_app.current_state(s)
     existing = state["entities"].get(eid, {})
@@ -206,22 +227,77 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     try:
         before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(), idem_key=idem, **_event_identity(agent))
+                      git_sha=hub_app._git_head(), idem_key=_request_scoped_idem(idem, payload),
+                      idem_scope=idem_scope, allocate=allocate, **_event_identity(agent))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
+    data = {"id": ev.get("aggregate") or eid, "version": ev["result_version"],
+            "event": ev["event_id"]}
     if ev.get("seq", 0) > before:
         hub_app.publish_event(ev)
-    return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)
+    else:
+        # A replay: this exact request already landed (a retry whose first response was lost).
+        # Said out loud so a client can report "already recorded" rather than a second write.
+        data["replayed"] = True
+    return ({"data": data}, 200)
 
 
-def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
+def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_scope=None,
+            allocate=None):
     """Append using a request-owned store and always release its database handle."""
     s = hub_app.store()
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
-                                  agent=agent, idem=idem, etype=etype)
+                                  agent=agent, idem=idem, etype=etype, idem_scope=idem_scope,
+                                  allocate=allocate)
     finally:
         s.close()
+
+
+# Bounded retries for the id races that remain possible OUTSIDE the store lock (the answer
+# path's find-or-create). Jittered so a burst of concurrent writers de-synchronises instead of
+# re-colliding on the same freshly read state.
+CREATE_ATTEMPTS = 8
+
+
+def _create_backoff(attempt):
+    import random
+    time.sleep(random.uniform(0.005, 0.03) * attempt)
+
+
+def _id_allocator(type_, first_guess):
+    """The allocator ``EventStore.append(allocate=...)`` calls INSIDE its write transaction: the
+    first numeric id at or above ``first_guess`` that the index does not hold."""
+    def allocate(taken):
+        number = first_guess
+        while taken("%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, number)):
+            number += 1
+        return "%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, number)
+    return allocate
+
+
+def _append_create(type_, payload, *, agent, idem, etype):
+    """Create a record under a SERVER-numbered id, allocated under the store's write lock.
+
+    Deriving the id from one read and appending it later is a check-then-act: a concurrent
+    create mints the same id in between, and either the loser is refused (its caller sees a
+    failure for a write it never got to make) or -- with no expected_version -- its ``created``
+    event silently overwrites the winner's record. Measured on the example board before this
+    shape: twelve parallel creates, twelve 200s, eight tasks. The snapshot high-water mark is
+    therefore only a first guess; the store picks the first id at or above it that its index
+    does not hold while it holds the lock, and the event names the id that was used. The
+    append still carries ``expected_version=0`` so a create can never land on an existing id.
+
+    The idempotency key is scoped to the type's id prefix, so a client retry of a create whose
+    response was lost replays the ORIGINAL record (under its original id) instead of minting a
+    twin under a freshly allocated one."""
+    scope = "%s:%s:" % (hub_app.PROJECT_KEY, type_)
+    state = hub_app.current_state()
+    first = ids.high_water(state["entities"], hub_app.PROJECT_KEY, type_) + 1
+    guess = "%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, first)
+    return _append(type_, guess, payload, expected_version=0, agent=agent, idem=idem,
+                   etype=etype, idem_scope=scope if idem else None,
+                   allocate=_id_allocator(type_, first))
 
 
 @writer(scope="task:write")
@@ -248,7 +324,7 @@ def task(request, b):
         # what hub_core.collision compares. This WARNS and never refuses: a false positive that
         # blocks a legitimate mint is worse than a duplicate the operator can see and fold.
         twins = collision.mint_collisions(b, state)
-        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "task")
+        eid = None                          # allocated under the store lock by _append_create
         b.setdefault("status", "todo")
     else:
         eid = b["id"]
@@ -264,8 +340,12 @@ def task(request, b):
     payload = {k: v for k, v in b.items()
                if k not in ("agent", "expected_version", "idem_key", "token")}
     payload["type"] = "task"
-    resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"), agent=agent,
-                           idem=b.get("idem_key"), etype="task.created" if is_create else "task.updated")
+    if is_create:
+        resp, status = _append_create("task", payload, agent=agent, idem=b.get("idem_key"),
+                                      etype="task.created")
+    else:
+        resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"),
+                               agent=agent, idem=b.get("idem_key"), etype="task.updated")
     if twins and status < 400:
         resp["warnings"] = [{"code": "possible_twin",
                              "msg": "this task shares surfaces with existing work; fold if duplicate",
@@ -496,15 +576,19 @@ def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None)
                 eid = ids.make_id(hub_app.PROJECT_KEY, type_,
                                   _slug(b[natural_key], type_))
             elif numeric:
-                eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, type_)
+                eid = None                  # allocated under the store lock by _append_create
             else:
                 eid = ids.make_id(hub_app.PROJECT_KEY, type_,
                                   b.get("local") or _slug(b[name_field], type_))
         payload = {k: v for k, v in b.items()
                    if k not in ("agent", "expected_version", "idem_key", "local")}
         payload["type"] = type_
-        resp, status = _append(type_, eid, payload, expected_version=b.get("expected_version"),
-                               agent=agent, idem=b.get("idem_key"), etype=etype)
+        if eid is None:
+            resp, status = _append_create(type_, payload, agent=agent, idem=b.get("idem_key"),
+                                          etype=etype)
+        else:
+            resp, status = _append(type_, eid, payload, expected_version=b.get("expected_version"),
+                                   agent=agent, idem=b.get("idem_key"), etype=etype)
         return JsonResponse(resp, status=status)
     view.__name__ = type_
     return view
@@ -1120,8 +1204,14 @@ def ask(request, b):
     if not text:
         return JsonResponse({"errors": [{"code": "need_question"}]}, status=400)
     state = hub_app.current_state()
+    local = "q-%s-%s" % (_slug(agent, "agent"),
+                         hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
+    eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     if not b.get("anyway"):
-        dups = _already_covered(state, text)
+        # THIS asker's identical wording is the same entity, not a duplicate: a retry of an ask
+        # whose response was lost must replay (or update in place), never be refused as a copy
+        # of itself -- that is a write that landed being reported as a failure.
+        dups = [hit for hit in _already_covered(state, text) if hit.get("id") != eid]
         if dups:
             return JsonResponse({"errors": [{"code": "duplicate_question",
                 "msg": "the board already has this question — read the matches first; if "
@@ -1129,9 +1219,6 @@ def ask(request, b):
                        "same one still unanswered, add to that thread instead of filing "
                        "another copy",
                 "matches": dups}]}, status=409)
-    local = "q-%s-%s" % (_slug(agent, "agent"),
-                         hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
-    eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     existing = state["entities"].get(eid)
     payload = {"type": "note", "category": "context", "title": text[:300],
                "asker": agent, "status": "standing", "tags": ["question", "open"],
@@ -1186,21 +1273,35 @@ def answer(request, b):
         "status": "active",
         "answers": question_id,
     }
-    existing_dir = next(
-        (e for e in state["entities"].values()
-         if isinstance(e, dict) and e.get("type") == "directive"
-         and e.get("answers") == question_id),
-        None)
     agent = b.get("agent", request.hub_auth.subject)
-    if existing_dir:
-        eid = existing_dir["id"]
-        resp, status = _append("directive", eid, payload,
-                               expected_version=existing_dir.get("version"),
-                               agent=agent, idem=b.get("idem_key"), etype="directive.issued")
-    else:
-        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
-        resp, status = _append("directive", eid, payload, expected_version=None,
-                               agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+    # The whole find-or-create is RE-RUN on an OCC refusal (409/428): both the id and the version
+    # it derives come from a read a concurrent writer can beat -- including a parallel attempt of
+    # THIS answer, in which case the re-read finds its directive and the retry becomes the
+    # in-place update. Bounded: a race that survives every fresh read is returned loudly.
+    resp, status = {"errors": [{"code": "occ_retry_exhausted"}]}, 409
+    for attempt in range(CREATE_ATTEMPTS):
+        if attempt:
+            _create_backoff(attempt)
+            state = hub_app.current_state()
+        existing_dir = next(
+            (e for e in state["entities"].values()
+             if isinstance(e, dict) and e.get("type") == "directive"
+             and e.get("answers") == question_id),
+            None)
+        if existing_dir:
+            eid = existing_dir["id"]
+            resp, status = _append("directive", eid, payload,
+                                   expected_version=existing_dir.get("version"),
+                                   agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+        else:
+            # The id is allocated under the store lock (see _append_create); what can still
+            # race is a parallel attempt of THIS answer creating its directive first, which the
+            # re-read above turns into the in-place update.
+            resp, status = _append_create("directive", payload, agent=agent,
+                                          idem=b.get("idem_key"), etype="directive.issued")
+            eid = (resp.get("data") or {}).get("id")
+        if status not in (409, 428):
+            break
     if status not in (200, 201):
         return JsonResponse(resp, status=status)
 
@@ -1264,17 +1365,17 @@ def directive(request, b):
     agent = b.get("agent", request.hub_auth.subject)
     is_create = not b.get("id")
     if is_create:
-        state = hub_app.current_state()
-        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
         b.setdefault("status", "active")
         b.setdefault("targets", ["all"])
-    else:
-        eid = b["id"]
     payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key")}
     payload["type"] = "directive"
-    resp, status = _append("directive", eid, payload, expected_version=b.get("expected_version"),
-                           agent=agent, idem=b.get("idem_key"),
-                           etype="directive.issued" if is_create else "directive.updated")
+    if is_create:
+        resp, status = _append_create("directive", payload, agent=agent, idem=b.get("idem_key"),
+                                      etype="directive.issued")
+    else:
+        resp, status = _append("directive", b["id"], payload,
+                               expected_version=b.get("expected_version"), agent=agent,
+                               idem=b.get("idem_key"), etype="directive.updated")
     return JsonResponse(resp, status=status)
 
 

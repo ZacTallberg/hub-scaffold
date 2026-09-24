@@ -275,6 +275,9 @@ class EventStore:
             c.execute("CREATE TABLE idem (aggregate TEXT, idem_key TEXT, seq INTEGER, PRIMARY KEY(aggregate, idem_key))")
         c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_events_agg ON events(aggregate)")
+        # A CREATE has no aggregate until the server allocates one, so its replay is looked up by
+        # key across a type prefix (append(idem_scope=...)); this index keeps that a seek.
+        c.execute("CREATE INDEX IF NOT EXISTS ix_idem_key ON idem(idem_key)")
         self._install_trigger()
 
     def _install_trigger(self):
@@ -596,11 +599,26 @@ class EventStore:
 
     def append(self, *, aggregate, type, payload, expected_version=None, agent_id=None,
                session_id=None, parent_event_id=None, actor_kind="agent", model_version=None,
-               repo_build=None, git_sha=None, idem_key=None) -> dict:
+               repo_build=None, git_sha=None, idem_key=None, idem_scope=None,
+               allocate=None) -> dict:
         """Append one event with OCC + idempotency + hash-chain. Returns the stored event.
 
         Raises ConflictError if expected_version != current head for the aggregate.
         Replaying the same idem_key is a safe no-op that returns the original event.
+
+        ``idem_scope`` is for a CREATE, whose aggregate the server allocates per attempt: a retry
+        of the same create arrives with a NEW aggregate, so the per-aggregate check can never see
+        its first attempt and the retry would land as a second record. With a scope (an id prefix
+        such as ``"<project>:task:"``) the key is looked up across that prefix under the same
+        write lock, so a retry racing its own first attempt waits and then replays it. The
+        returned event's ``aggregate`` is then the ORIGINAL one, not the id the retry allocated.
+
+        ``allocate`` is for a create whose id the SERVER numbers: a callable
+        ``allocate(taken) -> aggregate`` invoked INSIDE the write transaction, where ``taken(agg)``
+        answers whether the index already holds that aggregate. An id derived from a read taken
+        before the lock can be beaten by any concurrent create; an id chosen under the lock
+        cannot, so N simultaneous creates land N distinct records instead of N-1 conflicts.
+        ``aggregate`` is then only the caller's first guess, and the event names the real one.
 
         Runs under LedgerLock (serialize-ledger-file-rewrites): the sqlite BEGIN IMMEDIATE
         serializes appenders against each other, but only the file lock serializes them against
@@ -615,7 +633,7 @@ class EventStore:
                 expected_version=expected_version, agent_id=agent_id, session_id=session_id,
                 parent_event_id=parent_event_id, actor_kind=actor_kind,
                 model_version=model_version, repo_build=repo_build, git_sha=git_sha,
-                idem_key=idem_key)
+                idem_key=idem_key, idem_scope=idem_scope, allocate=allocate)
 
     def append_batch(self, operations) -> list[dict]:
         """Commit multiple aggregate events at one canonical-file boundary.
@@ -737,7 +755,7 @@ class EventStore:
 
     def _append_locked(self, *, aggregate, type, payload, expected_version, agent_id,
                        session_id, parent_event_id, actor_kind, model_version, repo_build,
-                       git_sha, idem_key):
+                       git_sha, idem_key, idem_scope=None, allocate=None):
         import json
         # Tail-consistency guard: a crashed sync/heal can leave the FILE ahead of this handle's
         # SQLite view (the lock died with the crasher). Re-heal before allocating seq/prev_hash
@@ -760,9 +778,17 @@ class EventStore:
             if idem_key:
                 r = c.execute("SELECT raw FROM events WHERE aggregate=? AND idem_key=?",
                               (aggregate, idem_key)).fetchone()
+                if not r and idem_scope:
+                    r = c.execute(
+                        "SELECT e.raw FROM idem i JOIN events e ON e.seq = i.seq "
+                        "WHERE i.idem_key = ? AND substr(i.aggregate, 1, ?) = ? "
+                        "ORDER BY i.seq LIMIT 1",
+                        (idem_key, len(idem_scope), idem_scope)).fetchone()
                 if r:
                     c.execute("COMMIT")
                     return json.loads(r["raw"])
+            if allocate is not None:
+                aggregate = allocate(lambda agg: self.head_version(agg) > 0)
             head = self.head_version(aggregate)
             if expected_version is not None and expected_version != head:
                 c.execute("ROLLBACK")

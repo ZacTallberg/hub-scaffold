@@ -51,9 +51,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 
@@ -79,8 +82,45 @@ def _auth_headers() -> dict[str, str]:
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
 
 
+# Operations whose server path honours `idem_key` (a repeated key with an identical payload
+# replays the first event instead of writing again). Only these are retried automatically: a
+# retry of anything else could double-apply, and a retry that reports failure for a write that
+# landed is worse than the failure it was avoiding.
+RETRY_SAFE_OPERATIONS = frozenset({"task", "directive", "answer", "ask", "ack", "gap", "note"})
+RETRY_ATTEMPTS = 3
+RETRY_STATUSES = frozenset({502, 503, 504})   # the edge lost the response or the hub was busy
+
+
 def _post(base: str, operation: str, payload: dict[str, Any],
           extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
+    """POST one write. For a retry-safe operation the request carries an idempotency key
+    (minted here when the caller supplied none) and a transport failure -- timeout, reset,
+    502/503/504 -- is retried with the SAME key and payload. The server replays a request that
+    already landed, so the caller sees one success (`data.replayed` says so) instead of a
+    failure for a write that happened, or a second copy of it."""
+    if operation not in RETRY_SAFE_OPERATIONS:
+        return _post_once(base, operation, payload, extra_headers)
+    payload = dict(payload)
+    payload.setdefault("idem_key", "cli:" + uuid.uuid4().hex)
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return _post_once(base, operation, payload, extra_headers)
+        except _Transient as error:
+            if attempt == RETRY_ATTEMPTS:
+                raise RuntimeError(str(error)) from error
+            delay = 0.5 * attempt + random.uniform(0, 0.5)
+            print(json.dumps({"transient": str(error)[:200], "retry": attempt,
+                              "retry_in_s": round(delay, 2)}), file=sys.stderr)
+            time.sleep(delay)
+    raise RuntimeError("unreachable")
+
+
+class _Transient(RuntimeError):
+    """A failure that says nothing about whether the write landed (the response was lost)."""
+
+
+def _post_once(base: str, operation: str, payload: dict[str, Any],
+               extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -106,9 +146,12 @@ def _post(base: str, operation: str, payload: dict[str, Any],
             body: Any = json.loads(detail)
         except json.JSONDecodeError:
             body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+        kind = _Transient if error.code in RETRY_STATUSES else RuntimeError
+        raise kind(json.dumps({"status": error.code, "response": body})) from error
     except urllib.error.URLError as error:
-        raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+        raise _Transient(f"Hub is unreachable at {base}: {error.reason}") from error
+    except (TimeoutError, ConnectionError) as error:
+        raise _Transient(f"Hub connection failed at {base}: {error}") from error
 
 
 def _optional_auth_headers() -> dict[str, str]:

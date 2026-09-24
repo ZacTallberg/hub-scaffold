@@ -251,6 +251,20 @@ Every write on every endpoint above is additionally screened for secret shapes a
 `422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
 be removed, only rotated. Recognizable redaction placeholders pass.
 
+### Retries and idempotency
+
+Every entity write accepts `idem_key`. The server binds it to the payload it arrived with (a
+content hash is folded into the stored key), so an exact retry — a POST whose response was lost —
+replays the first event and answers `200` with `data.replayed: true`, while a genuinely different
+write that happens to reuse a key still lands. Creates of server-numbered entities (`task`,
+`directive`, `gap`, an answer's first directive) scope the key to the type's id prefix, so a
+retried create returns the ORIGINAL id instead of minting a twin under a newly allocated one. The
+numeric id itself is chosen by the store UNDER its write lock (the first number the index does not
+hold), so simultaneous creates land as distinct records -- never a refusal, never one silently
+overwriting another. `python -m hub_core.client` mints a key for `create`, `ask`, `answer`,
+`directive` and `ack` when none is given and retries a transport failure (timeout, reset,
+502/503/504) with the same key and payload, so a write that landed is reported once, as landed.
+
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
 (dereferenceable-evidence mode).
 
