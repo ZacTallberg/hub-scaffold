@@ -28,6 +28,13 @@ urlpatterns = [
     path("inbox.json", R(hub_api.inbox_json), name="inbox"),
     path("inbox/wait", R(hub_api.inbox_wait), name="inbox-wait"),
     path("errors.json", R(hub_api.errors_json), name="errors"),
+    # The error stream FOLDED into owned problems, every service's observability verdict,
+    # one service diagnosed, live-console crossovers, and a credential's enrollment state.
+    path("problems.json", R(hub_api.problems_json), name="problems"),
+    path("app_health.json", R(hub_api.app_health_json), name="app-health"),
+    path("doctor.json", R(hub_api.doctor_json), name="doctor"),
+    path("overlap.json", R(hub_api.overlap_json), name="overlap"),
+    path("enroll/status.json", R(hub_api.enroll_status_json), name="enroll-status"),
     path("search.json", R(hub_api.search_json), name="search"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
     path("agent-updates.json", R(hub_api.agent_updates_json), name="agent-updates"),
@@ -108,6 +115,15 @@ urlpatterns = [
     path("api/clear-errors", hub_write.clear_errors),
     # CI results: gated by the CI webhook secret, not an agent credential (the sender is CI).
     path("api/ci-event", hub_write.ci_event, name="ci-event"),
+    # The problem queue's verbs: a console claims, resolves (acks every row behind it),
+    # releases, or escalates a diagnosed problem onto the ask/task it waits for.
+    path("api/problem/claim", hub_write.problem_claim),
+    path("api/problem/resolve", hub_write.problem_resolve),
+    path("api/problem/release", hub_write.problem_release),
+    path("api/problem/escalate", hub_write.problem_escalate),
+    path("api/overlap/seen", hub_write.overlap_seen),
+    # A machine un-enrolls itself: its scoped credential revokes itself.
+    path("api/leave", hub_write.leave),
     path("api/client-error", hub_api.client_error, name="client-error"),
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
@@ -132,6 +148,8 @@ VISIBILITY = {
     "attention.json": "veiled", "consoles.json": "veiled",
     "project/<str:slug>/tasks.json": "veiled", "held.json": "veiled",
     "item-claims.json": "veiled", "components.json": "veiled",
+    "problems.json": "veiled", "app_health.json": "veiled", "doctor.json": "veiled",
+    "overlap.json": "veiled", "enroll/status.json": "veiled",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

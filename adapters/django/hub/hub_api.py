@@ -17,11 +17,13 @@ from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpRespon
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
 
-from hub_core import (activity as activity_core, adherence, attention as attention_core,
-                      checkpoints, cost, dag, errorlog, failure_taxonomy, flow, liveness,
-                      inbox as inbox_core, offer, overlap, plan as plan_rows,
-                      presence as _presence, project, projections, task_health, task_rows,
-                      telemetry, upcast, updates, wip)
+from hub_core import (activity as activity_core, adherence, app_health,
+                      attention as attention_core, checkpoints, cost, dag, errorlog,
+                      failure_taxonomy, flow, liveness, inbox as inbox_core, offer, overlap,
+                      plan as plan_rows, presence as _presence, problems as problems_core,
+                      project, projections, task_health, task_rows, telemetry, upcast,
+                      updates, wip)
+from hub_core import overlap as overlap_core
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, prewarm, realtime, roles
@@ -232,31 +234,21 @@ _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 
 # The board's copy about its operational error stream promises only critical and high
 # problems — warnings, foreign-scanner traffic and transient transport blips never reach it.
-# The promise is enforced HERE, at read, in the one predicate every consumer shares: a bar
-# kept only in the renderer lies to every machine reader. Applied at READ, never at write,
-# so improving the predicate reclassifies the whole retained window retroactively.
-_BLIP = re.compile(r"^(HTTP 5|HTTP 0|Failed to fetch|NetworkError|Load failed|"
-                   r"Live stream unavailable)", re.I)
+# The promise is enforced at READ, in the one predicate every consumer shares
+# (hub_core.errorlog.passes_bar): a bar kept only in the renderer lies to every machine
+# reader, and a bar applied at read reclassifies the whole retained window retroactively.
 
 
 def _error_bar(row):
-    """(on_bar, reason). One shared predicate for the board, the JSON API and the rail."""
-    if row.get("external"):
-        return False, "foreign client, not this system"
-    sev = str(row.get("severity") or "error").lower()
-    if sev not in ("critical", "error"):
-        return False, "severity %s" % sev
-    # A tab that briefly could not reach the hub is the board losing its connection, not a
-    # defect anybody can be asked to fix.
-    if str(row.get("source") or "").startswith("browser.") and _BLIP.match(str(row.get("message") or "")):
-        return False, "transport blip that recovered"
-    return True, ""
+    """(on_bar, reason). One shared predicate for the board, the JSON API, the problem fold
+    and the rail."""
+    return errorlog.passes_bar(row)
 
 
-def _errors_block():
+def _errors_block(limit=errorlog.READ_LIMIT):
     """The operational error stream, bar-annotated, plus the SHAPE a reader actually needs:
     is it getting worse, which source is responsible, and is any of it even ours."""
-    rows, metadata = errorlog.read(hub_app.HUB_DIR)
+    rows, metadata = errorlog.read(hub_app.HUB_DIR, limit=limit)
     now = time.time()
     # A problem somebody HOLDS is not unclaimed (hub_core.item_claims): a machine's live claim on
     # a fingerprint moves it from "needs you" to "in flight: <machine>", so no second agent is
@@ -329,7 +321,7 @@ def _errors_block():
         # "Is this everything?" is the one question a list of errors can never answer about
         # itself, and the one a reader must have answered before an empty card may be read
         # as good news.
-        "coverage": errorlog.coverage(rows),
+        "coverage": errorlog.coverage(rows, hub_app.HUB_DIR),
     })
     return rows, metadata, unclaimed
 
@@ -426,11 +418,18 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
 
     # UNCLAIMED operational errors that clear the bar. The same set a human sees — the rail
     # must never hand a machine a longer list than the person who would be asked about it.
-    for r in (error_unclaimed or [])[:5]:
-        where = (r.get("context") or {}).get("app") or r.get("origin_app") or r.get("origin") or ""
+    # Folded into PROBLEMS: one line per thing somebody fixes, not per occurrence.
+    for p in (error_unclaimed or [])[:5]:
+        if "state" in p:
+            add(2, "problem-unclaimed",
+                "[%s] %s  (x%d, last %s ago)" % (p.get("where") or "?", str(p.get("title") or "")[:140],
+                                                int(p.get("count") or 1), _fmt_age(p.get("since_last_s"))),
+                None, p.get("id"), route={"view": "overview", "focus": "problems"})
+            continue
+        where = (p.get("context") or {}).get("app") or p.get("origin_app") or p.get("origin") or ""
         add(2, "error-unclaimed",
-            (f"[{where}] " if where else "") + str(r.get("message") or "")[:140],
-            None, str(r.get("source") or "error"),
+            (f"[{where}] " if where else "") + str(p.get("message") or "")[:140],
+            None, str(p.get("source") or "error"),
             route={"view": "overview", "focus": "errors"})
 
     # DELIVERY: a done task master never received is a worker's finished work sitting outside the
@@ -1012,6 +1011,21 @@ def _file_overlaps(sessions_live):
         return []
 
 
+def _crossover_block(state):
+    """Every crossover pair between live consoles, for the board — the board is read by the
+    operator, who is told every pair; each console is told only its own (inbox/overlap.json).
+    Fail-soft."""
+    try:
+        rows, sigs, _titles = _crossovers(state)
+    except Exception as exc:                                 # noqa: BLE001
+        return {"pairs": [], "consoles": 0, "available": False, "reason": type(exc).__name__}
+    pairs = [{"id": s["id"], "kind": s["kind"], "detail": s["detail"],
+              "a": {k: s["a"].get(k) for k in ("agent", "machine", "session", "name", "project")},
+              "b": {k: s["b"].get(k) for k in ("agent", "machine", "session", "name", "project")}}
+             for s in sigs[:20]]
+    return {"pairs": pairs, "count": len(sigs), "consoles": len(rows)}
+
+
 def _live_side_blocks(state, lease_rows=None):
     """The addressed plane, the operational stream, and the live consoles — computed once
     per live payload so the attention rail, the cockpit cards, and the JSON endpoints all
@@ -1030,6 +1044,24 @@ def _live_side_blocks(state, lease_rows=None):
         pass
     error_rows, error_meta, error_unclaimed = _errors_block()
     sessions_live = _activity_rows(state, lease_rows)
+    # THE QUEUE, FOLDED: rows are occurrences, problems are what somebody fixes. The rail
+    # reads unclaimed PROBLEMS; the raw rows stay one card away.
+    try:
+        probs, prob_meta = problems_core.read(hub_app.HUB_DIR, state)
+        error_meta["problems"] = {"items": probs[:20], **prob_meta}
+        error_unclaimed = [p for p in probs if p["state"] == "unclaimed"]
+    except Exception as exc:                                 # noqa: BLE001 - never break a read
+        error_meta["problems"] = {"items": [], "available": False,
+                                  "reason": type(exc).__name__}
+    # EVERY SERVICE, OBSERVED? — the one card that says whether an empty queue means anything.
+    try:
+        apps = hub_app.apps_config()
+        health, health_meta = app_health.rows(hub_app.HUB_DIR, state, apps=apps,
+                                              native=hub_app.native_slug(),
+                                              native_deploy=hub_app.native_deploy(state))
+        error_meta["app_health"] = {"rows": health[:30], **health_meta}
+    except Exception as exc:                                 # noqa: BLE001
+        error_meta["app_health"] = {"rows": [], "available": False, "reason": type(exc).__name__}
     return asks, error_rows, error_meta, error_unclaimed, sessions_live
 
 
@@ -1223,6 +1255,7 @@ def _live_blocks(events, state, audit, deliv, cursor):
         "file_overlaps": _file_overlaps(sessions_live),
         "distribution": hub_app.distribution_report()[0],
         "built": _built_summary(events, state),
+        "crossovers": _crossover_block(state),
         "attention": _attention(state, audit, inflight, adher, deliv,
                                 asks=asks, error_unclaimed=error_unclaimed),
         "telemetry": telemetry.read_aggregate(hub_dir),
@@ -1334,6 +1367,7 @@ def _snapshot(served=None):
             "file_overlaps": _file_overlaps(side_sessions),
             "distribution": hub_app.distribution_report()[0],
             "built": _built_summary(events, state),
+            "crossovers": _crossover_block(state),
             "attention": _attention(state, audit, inflight, adher, deliv,
                                     asks=side_asks, error_unclaimed=side_unclaimed),
             # Task health (moving / ready-to-close / stalled / orphaned), the attended vs
@@ -2155,9 +2189,25 @@ def _addressed(state, snap, agent, **kwargs):
         health = live.get("task_health") or {}
         extra += list(health.get("hygiene") or []) + list(health.get("unstarted") or [])
     extra += attention_core.items_for(agent, live.get("needs_attention"))
+    # Fresh unclaimed PROBLEMS this agent owns (and, for the operator, anything unclaimed too
+    # long) — the folded queue delivers itself like everything else.
     try:
-        sigs = overlap.signals(_consoles(state), state.get("by_type", {}).get("task", []))
-        extra += overlap.unseen(hub_app.HUB_DIR, overlap.items_for_agent(sigs, agent))
+        extra += problems_core.items_for_agent(hub_app.HUB_DIR, state, agent, operator,
+                                               apps=hub_app.apps_config(),
+                                               live_rows=hub_app.live_sessions())
+    except Exception:                                        # noqa: BLE001
+        pass
+    # Crossovers this side has not been told: with a named console, only that console's;
+    # otherwise every attended console of the agent. Problem claims count as shared work.
+    try:
+        titles = _live_titles(state)
+        sigs = overlap.signals(_consoles(state), state.get("by_type", {}).get("task", []),
+                               titles=titles, claims=problems_core.read_claims(hub_app.HUB_DIR))
+        mine = overlap.items_for_agent(sigs, agent)
+        session = str(kwargs.get("session") or "")[:8]
+        if session:
+            mine = [i for i in mine if i.get("session") == session]
+        extra += overlap.unseen(hub_app.HUB_DIR, mine)
     except Exception:                                        # noqa: BLE001
         pass
     visible = kwargs.get("visible")
@@ -2175,6 +2225,27 @@ def _operator_extra(agent):
     if (agent or "").strip().lower() != _operator_agent():
         return []
     return hub_app.distribution_inbox_items()
+
+
+def _addressee(request):
+    """Which console/computer is asking — a pinned directive is delivered only there."""
+    return {"machine": (request.GET.get("machine") or "").strip().lower()[:120],
+            "session": (request.GET.get("session") or "").strip()[:64]}
+
+
+def _live_titles(state):
+    return {eid: str(e.get("title") or "") for eid, e in (state.get("entities") or {}).items()
+            if isinstance(e, dict) and e.get("type") == "task"}
+
+
+def _crossovers(state):
+    """(consoles, signals) over the live fleet — computed once on the hub."""
+    titles = _live_titles(state)
+    rows = overlap_core.consoles(hub_app.live_sessions(), hub_app.leases(), titles)
+    claims = problems_core.read_claims(hub_app.HUB_DIR)
+    return rows, overlap_core.signals(rows, titles=titles, claims=claims), titles
+
+
 
 
 @require_GET
@@ -2205,7 +2276,9 @@ def inbox_wait(request):
         # The cheap fingerprint of everything the snapshot depends on — the wait loop must
         # not fold the whole ledger per poll tick. The presence stamp rides it BUCKETED
         # (session routing, crossovers and attention read presence, and presence moves on
-        # every request), and leases ride it because a claim moves no ledger head. "" on error
+        # every request), leases ride it because a claim moves no ledger head, and problems and
+        # crossovers change with NO ledger event, so the error stream's stamp and a minute bucket
+        # (problem freshness) ride it too. "" on error
         # never equals a real signal, so a failed read degrades to always-fold rather than
         # skipping a real change.
         try:
@@ -2224,7 +2297,12 @@ def inbox_wait(request):
             leases_fp = _leases_fp()
         except Exception:                                    # noqa: BLE001
             leases_fp = ""
-        return inbox_core.change_signal(seq, stamp, leases_fp)
+        try:
+            errors_stamp = errorlog.stamp(hub_app.HUB_DIR)
+        except Exception:                                    # noqa: BLE001
+            errors_stamp = ""
+        return inbox_core.change_signal(seq, stamp, leases_fp, errors_stamp,
+                                        int(time.time() // 60))
 
     payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn,
                               signal_fn=signal_fn, key=(agent, machine, session, tier))
@@ -2489,11 +2567,22 @@ def errors_json(request):
     """The operational error stream with the bar applied at read. Deferred rows are never
     DROPPED — a stream that silently discards two thirds of its input is one whose "all
     clear" cannot be trusted; they are one query param away (?include=deferred)."""
-    rows, metadata, _unclaimed = _errors_block()
+    try:
+        limit = max(1, min(errorlog.KEEP_ROWS, int(request.GET.get("limit") or errorlog.READ_LIMIT)))
+    except (TypeError, ValueError):
+        limit = errorlog.READ_LIMIT
+    rows, metadata, _unclaimed = _errors_block(limit)
     include = (request.GET.get("include") or "").lower()
     data = rows if include in ("deferred", "all") else [r for r in rows if r.get("bar") == "on"]
+    # ?app= narrows to ONE service's rows — "is anything broken in budget-app?" must not
+    # need the whole window downloaded and filtered by hand.
+    app = re.sub(r"[^a-z0-9-]", "", (request.GET.get("app") or "").strip().lower())[:60]
+    if app:
+        data = [r for r in data if r.get("origin_app") == app
+                or str(r.get("source") or "").lower().startswith("app.%s." % app)]
+        metadata["app"] = app
     metadata["bar"] = ("every row recorded in the window; `bar` says which are on the board"
-                       if data is rows else
+                       if include in ("deferred", "all") else
                        "critical and high problems in this system's own surfaces; add "
                        "?include=deferred for everything the bar held back")
     return JsonResponse({"data": data, "metadata": metadata})
@@ -2608,15 +2697,28 @@ def client_error(request):
         return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
     if not isinstance(body, dict):
         return JsonResponse({"errors": [{"code": "object_required"}]}, status=400)
-    source = str(body.get("source") or "board")[:120]
+    source = re.sub(r"[^a-z0-9_.-]", "", str(body.get("source") or "board").lower())[:120] or "board"
+    context = {"component": "hub-board",
+               "operation": str(body.get("operation") or source)[:120],
+               "path": request.path_info}
+    # WHERE in the board's own script an uncaught exception fired: a same-origin PATH plus
+    # line/column, never a stack, never a foreign script's URL (a cross-origin script's
+    # details are opaque to the page by design, and an absolute URL could carry a query).
+    loc = body.get("location") if isinstance(body.get("location"), dict) else {}
+    loc_path = str(loc.get("path") or "")
+    if loc_path.startswith("/") and not loc_path.startswith("//") and "?" not in loc_path:
+        context["path"] = loc_path[:240]
+        for key in ("line", "col"):
+            try:
+                context[key] = str(max(0, int(loc.get(key))))
+            except (TypeError, ValueError):
+                pass
     row = hub_app.record_error(
         f"browser.{source}",
         str(body.get("message") or "Browser operation failed")[:800],
         severity=str(body.get("severity") or "error").lower(),
         code=str(body.get("code") or "client_error")[:120],
-        context={"component": "hub-board",
-                 "operation": str(body.get("operation") or source)[:120],
-                 "path": request.path_info},
+        context=context,
     )
     return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
 
@@ -2624,3 +2726,122 @@ def client_error(request):
 # Marker consumed by the computed route audit: a same-origin, CSRF-protected, bounded
 # browser telemetry capability, not general write authority.
 client_error._hub_origin_gated = True
+
+
+# ── Problems, service health, doctor and crossovers: the folded, owned, reachable queue ──
+
+@require_GET
+def problems_json(request):
+    """The error stream FOLDED into problems — one line per thing somebody fixes, with its
+    state (unclaimed / in_flight / escalated / resolved), holder, occurrence count, recency
+    and the exact command to claim or resolve it. ?include=resolved|all, ?app=<slug>,
+    ?id=<p-id> for one problem with its full stored trace. The counts describe the QUEUE,
+    whatever the listing includes."""
+    state, _ = _snapshot()
+    include = (request.GET.get("include") or "").strip().lower()
+    app = re.sub(r"[^a-z0-9._-]", "", (request.GET.get("app") or "").strip().lower())[:60]
+    pid = (request.GET.get("id") or "").strip().lower()
+    if pid:
+        found = problems_core.find(hub_app.HUB_DIR, pid, state)
+        if not found:
+            return JsonResponse({"errors": [{"code": "no_such_problem", "id": pid}]}, status=404)
+        found["holder_phrase"] = problems_core.holder_phrase(found)
+        found["owners"] = sorted(problems_core.owners_of(found, hub_app.apps_config(),
+                                                         hub_app.live_sessions()))
+        return JsonResponse({"data": found})
+    probs, meta = problems_core.read(hub_app.HUB_DIR, state, include=include, app=app)
+    apps = hub_app.apps_config()
+    live_rows = hub_app.live_sessions()
+    for p in probs:
+        # The trace is the heavy field; the list carries the cause line and a pointer.
+        p["details"] = (p.get("details") or "")[:400]
+        p["holder_phrase"] = problems_core.holder_phrase(p)
+        p["owners"] = sorted(problems_core.owners_of(p, apps, live_rows))
+    meta["include"] = include or "queue"
+    if app:
+        meta["app"] = app
+    return JsonResponse({"data": probs, "metadata": meta})
+
+
+@require_GET
+def app_health_json(request):
+    """Every service, and whether its failures can reach the board: observed / partial /
+    dark / unbuilt, with the gap NAMED as an observation. Reading it starts a bounded
+    background liveness sweep of every declared health_url; each row says how old its probe
+    is, so a stale "up" is never spent as news."""
+    state, _ = _snapshot()
+    apps = hub_app.apps_config()
+    app_health.sweep_in_background(hub_app.HUB_DIR, apps)
+    rows, meta = app_health.rows(hub_app.HUB_DIR, state, apps=apps, native=hub_app.native_slug(),
+                                 native_deploy=hub_app.native_deploy(state))
+    return JsonResponse({"data": rows, "metadata": meta})
+
+
+@require_GET
+def doctor_json(request):
+    """One service diagnosed from evidence: synthesized even when nobody declared it (if it
+    ever reported), its OPEN problems (resolved ones are history, listed apart), and a plain
+    reading — BLOCKED on unclaimed problems, WAITING on held/escalated ones."""
+    slug = re.sub(r"[^a-z0-9._-]", "", (request.GET.get("app") or "").strip().lower())[:60]
+    if not slug:
+        return JsonResponse({"errors": [{"code": "need_app", "msg": "pass ?app=<slug>"}]}, status=400)
+    state, _ = _snapshot()
+    data = app_health.doctor(hub_app.HUB_DIR, slug, state, apps=hub_app.apps_config(),
+                             native=hub_app.native_slug(),
+                             native_deploy=hub_app.native_deploy(state))
+    return JsonResponse({"data": data}, status=200 if data["verdict"] != "unknown" else 404)
+
+
+@require_GET
+def overlap_json(request):
+    """Crossovers between live consoles. With ?session= (or ?agent=) only the signals that
+    concern that side, phrased from it, with unseen ones flagged; with neither, every live
+    console and every pair — the roster, which is only paid for when somebody asks."""
+    state, _ = _snapshot()
+    rows, sigs, titles = _crossovers(state)
+    agent = (request.GET.get("agent") or "").strip().lower()
+    session = (request.GET.get("session") or "").strip()[:8]
+    if agent or session:
+        mine = overlap_core.items(sigs, agent=agent, session=session, titles=titles)
+        fresh = {it["id"] for it in overlap_core.unseen(hub_app.HUB_DIR, mine)}
+        for it in mine:
+            it["unseen"] = it["id"] in fresh
+        return JsonResponse({"data": mine, "metadata": {"agent": agent, "session": session,
+                                                       "consoles": len(rows),
+                                                       "systems": list(overlap_core.systems())}})
+    pairs = [{"id": s["id"], "kind": s["kind"], "detail": s["detail"],
+              "a": {k: s["a"].get(k) for k in ("agent", "machine", "session", "name", "project")},
+              "b": {k: s["b"].get(k) for k in ("agent", "machine", "session", "name", "project")}}
+             for s in sigs]
+    consoles = [{k: r.get(k) for k in ("agent", "machine", "session", "name", "project", "focus",
+                                       "files", "task_id", "task_title", "unattended", "age_s")}
+                for r in rows]
+    return JsonResponse({"data": {"consoles": consoles, "pairs": pairs},
+                         "metadata": {"consoles": len(consoles), "pairs": len(pairs),
+                                      "systems": list(overlap_core.systems())}})
+
+
+@require_GET
+def enroll_status_json(request):
+    """Is this credential still enrolled? Answers active / revoked / expired / unknown for
+    ?credential=<id> and never anything secret — a machine that was un-enrolled from the
+    board learns it on its next check instead of retrying a dead token forever."""
+    from hub_core import agent_auth
+    cid = (request.GET.get("credential") or "").strip()[:80]
+    if not cid:
+        return JsonResponse({"errors": [{"code": "need_credential"}]}, status=400)
+    now = time.time()
+    for rec in agent_auth.CredentialRegistry(hub_app.HUB_DIR).list_public():
+        if rec.get("credential_id") != cid:
+            continue
+        if rec.get("revoked_at"):
+            status = "revoked"
+        elif rec.get("expires_at") and _epoch(rec.get("expires_at")) and _epoch(rec.get("expires_at")) < now:
+            status = "expired"
+        else:
+            status = "active"
+        return JsonResponse({"data": {"credential_id": cid, "status": status,
+                                      "subject": rec.get("subject"),
+                                      "revoked_at": rec.get("revoked_at"),
+                                      "expires_at": rec.get("expires_at")}})
+    return JsonResponse({"data": {"credential_id": cid, "status": "unknown"}}, status=404)

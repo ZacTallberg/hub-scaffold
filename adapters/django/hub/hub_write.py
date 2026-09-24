@@ -17,6 +17,7 @@ from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, validate
+from hub_core import errorlog as _errorlog
 from hub_core.canonical import content_hash
 from hub_core.process_lock import LockBusy, ProcessFileLock
 from hub_core.store import ConflictError, StoreBusy
@@ -53,6 +54,7 @@ def _lock_refusal(fn):
 _AUTH = ContextVar("hub_write_auth", default=None)
 # The request being written, so a refusal recorded deep in the append names its route.
 _REQUEST = ContextVar("hub_write_request", default=None)
+_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
 
 
 def _record_refusal(request, code, message):
@@ -2080,6 +2082,35 @@ def directive(request, b):
     worker credential is issued it only deliberately."""
     agent = b.get("agent", request.hub_auth.subject)
     is_create = not b.get("id")
+    # PINNED DELIVERY. `machine` pins to one computer; `session` pins to one console and may
+    # be given as the console's NAME. Either way the addressed console must be LIVE now: a
+    # pinned message to a window nobody has open is delivered nowhere while reporting 201.
+    pin_session = str(b.get("session") or "").strip()
+    pin_machine = str(b.get("machine") or "").strip().lower()[:120]
+    if pin_machine:
+        b["machine"] = pin_machine
+    if pin_session:
+        targets = [str(t).strip().lower() for t in (b.get("targets") or [])]
+        live = [s for s in hub_app.live_sessions()
+                if (not targets or "all" in targets or str(s.get("agent") or "").lower() in targets)
+                and (not pin_machine or str(s.get("machine") or "").lower() == pin_machine)]
+        by_id = [s for s in live if str(s.get("session") or "") == pin_session[:8]]
+        by_name = [s for s in live if str(s.get("name") or "") == pin_session]
+        hits = by_id or by_name
+        if len(hits) != 1:
+            return JsonResponse({"errors": [{
+                "code": "console_not_live" if not hits else "console_ambiguous",
+                "msg": ("no live console %r for %s%s — it must be open now; read "
+                        "overlap.json for the roster" if not hits else
+                        "%d live consoles answer to %r; pin by session id") % (
+                    (pin_session, ", ".join(targets) or "any agent",
+                     (" on " + pin_machine) if pin_machine else "") if not hits
+                    else (len(hits), pin_session)),
+                "live": [{k: s.get(k) for k in ("agent", "machine", "session", "name")}
+                         for s in (hits or live)[:8]]}]}, status=409)
+        b["session"] = str(hits[0].get("session") or "")[:8]
+        if not pin_machine and hits[0].get("machine"):
+            b["machine"] = str(hits[0]["machine"]).lower()
     if is_create:
         b.setdefault("status", "active")
         b.setdefault("targets", ["all"])
@@ -2373,18 +2404,23 @@ def app_error(request, b):
     if not slug:
         return JsonResponse({"errors": [{"code": "need_app", "msg": "app slug is required"}]}, status=400)
     kind = re.sub(r"[^a-z_]", "", str(b.get("kind") or "server").strip().lower())[:20] or "server"
+    # The store owns the limits (message 4000, a trace kept head AND tail up to 32000,
+    # redacted before any cut). Cutting here first would throw away the end of a traceback —
+    # the exception line and the frame that raised — before the store could keep it.
     row = hub_app.record_error(
         "app.%s.%s" % (slug, kind),
-        str(b.get("message") or "Application error")[:800],
+        str(b.get("message") or "Application error")[:_errorlog.MESSAGE_LIMIT],
         severity=str(b.get("severity") or "error").lower(),
         code=str(b.get("code") or "app_error")[:120],
-        details=str(b.get("details") or "")[:2000],
+        details=str(b.get("details") or "")[:_errorlog.DETAILS_LIMIT * 2],
         context={
             "app": slug,
             "component": str(b.get("component") or "app")[:120],
             "operation": str(b.get("operation") or "")[:120],
             "path": str(b.get("path") or "")[:240],
             "machine": str(b.get("host") or "")[:120],
+            "url": str(b.get("url") or "")[:600],
+            "project": str(b.get("project") or "")[:120],
         },
     )
     return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
@@ -2440,15 +2476,16 @@ def agent_error(request, b):
     agent = b.get("agent") or request.hub_auth.subject or "unknown-agent"
     row = hub_app.record_error(
         "agent.%s.%s" % (agent, str(b.get("source") or "worker")[:60]),
-        str(b.get("message") or "Worker reported an operational error")[:800],
+        str(b.get("message") or "Worker reported an operational error")[:_errorlog.MESSAGE_LIMIT],
         severity=str(b.get("severity") or "error").lower(),
         code=str(b.get("code") or "agent_error")[:120],
-        details=str(b.get("details") or "")[:2000],
+        details=str(b.get("details") or "")[:_errorlog.DETAILS_LIMIT * 2],
         context={
             "component": str(b.get("component") or "worker")[:120],
             "operation": str(b.get("operation") or "")[:120],
             "agent": str(agent)[:120],
-            "machine": str(b.get("machine") or "")[:120],
+            "machine": str(b.get("machine") or request.headers.get("X-Hub-Machine") or "")[:120],
+            "project": str(b.get("project") or "")[:120],
         },
     )
     return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
@@ -2459,10 +2496,17 @@ def ack_error(request, b):
     """Acknowledge (or reopen) one recurring error signature — the button of the error
     queue. Reporting is truthful both ways: reopening a signature that was never acked is
     a refusal, not a 200 over a row nothing touched."""
-    from hub_core import errorlog as _errorlog
-    fingerprint = str(b.get("fingerprint") or "")[:32]
+    fingerprint = str(b.get("fingerprint") or "").strip().lower()
     if not fingerprint:
         return JsonResponse({"errors": [{"code": "need_fingerprint"}]}, status=400)
+    # SHAPE GATE: an ack CREATES the record it is handed, so an id that is not a signature
+    # (a mistyped directive id, a problem id) would mint an acknowledged row for something
+    # nothing ever reported, and answer 201. A fingerprint is 16 hex characters.
+    if not _FINGERPRINT.fullmatch(fingerprint):
+        return JsonResponse({"errors": [{"code": "not_a_fingerprint",
+            "msg": "an error signature is 16 hex characters (errors.json `fingerprint`); a "
+                   "problem id (p-...) is resolved with api/problem/resolve, a directive "
+                   "with api/ack"}]}, status=422)
     if b.get("reopen"):
         if not _errorlog.unack(hub_app.HUB_DIR, fingerprint):
             return JsonResponse({"errors": [{"code": "not_acked", "msg":
@@ -2782,6 +2826,141 @@ def unclaim(request, b):
     return _let_go(request, b, kind="lease_released")
 
 
+# ── Problems: claim / resolve / release / escalate — the folded queue's four verbs ──
+
+def _problem_actor(request, b):
+    """(agent, machine, session, name) of the CONSOLE acting: a holder is a console, so the
+    X-Hub-* headers the client already sends identify it."""
+    agent = str(b.get("agent") or request.hub_auth.subject or "").strip().lower()
+    return (agent,
+            (request.headers.get("X-Hub-Machine") or b.get("machine") or "")[:60],
+            (request.headers.get("X-Hub-Session") or b.get("session") or "")[:64],
+            (request.headers.get("X-Hub-Console-Name") or b.get("name") or "")[:40])
+
+
+def _problem_or_404(pid):
+    from hub_core import problems as _problems
+    pid = str(pid or "").strip().lower()
+    if not _problems.PID_RE.fullmatch(pid):
+        return pid, None, JsonResponse({"errors": [{"code": "bad_problem_id",
+            "msg": "a problem id looks like p-<12 hex>; read /hub/problems.json"}]}, status=422)
+    found = _problems.find(hub_app.HUB_DIR, pid, hub_app.current_state())
+    if not found:
+        return pid, None, JsonResponse({"errors": [{"code": "no_such_problem", "id": pid}]}, status=404)
+    return pid, found, None
+
+
+def _operator_name():
+    return str(hub_app._dj_setting("HUB_OPERATOR_AGENT")
+               or os.environ.get("HUB_OPERATOR_AGENT") or "operator").strip().lower()
+
+
+@writer(scope="problem:claim")
+def problem_claim(request, b):
+    """Put this console's name on a problem for every other console. Another console's live
+    claim is refused (409 claimed_elsewhere, naming the holder and how long it has held it —
+    the refusal IS the coordination); `take:true` displaces it deliberately and the entry
+    records whom it displaced. A claim whose console has been provably gone for the grace
+    window frees itself."""
+    from hub_core import problems as _problems
+    pid, found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    agent, machine, session, name = _problem_actor(request, b)
+    entry, refusal = _problems.claim(hub_app.HUB_DIR, pid, agent=agent, machine=machine,
+                                     session=session, name=name, note=str(b.get("note") or ""),
+                                     take=bool(b.get("take")))
+    if refusal:
+        return JsonResponse({"errors": [refusal]}, status=409)
+    hub_app.errors_changed()
+    return JsonResponse({"data": {"problem": pid, "claim": entry, "title": found.get("title"),
+                                  "rows": len(found.get("rows") or [])}}, status=201)
+
+
+@writer(scope="problem:resolve")
+def problem_resolve(request, b):
+    """Acknowledge EVERY row behind a problem at once and record the root cause where the next
+    person will look. A fix closes a problem whoever holds it; the note then names both. A
+    recurrence after this reopens it — the resolve covers what it saw."""
+    from hub_core import problems as _problems
+    pid, found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    note = str(b.get("note") or "").strip()
+    if not note:
+        return JsonResponse({"errors": [{"code": "need_note",
+            "msg": "resolve records the ROOT CAUSE; pass note (and evidence: a sha or URL)"}]},
+            status=422)
+    agent, _machine, session, name = _problem_actor(request, b)
+    entry = _problems.resolve(hub_app.HUB_DIR, pid, found.get("rows") or [], agent=agent,
+                              note=note, evidence=str(b.get("evidence") or ""),
+                              session=session, name=name)
+    hub_app.errors_changed()
+    return JsonResponse({"data": {"problem": pid, "resolved": entry}})
+
+
+@writer(scope="problem:claim")
+def problem_release(request, b):
+    """Hand a problem back: a live claim by its own agent (the operator may release any), or
+    a problem that reopened under the console that last resolved it. Releasing nothing is a
+    409, never a 200 over an untouched record."""
+    from hub_core import problems as _problems
+    pid, _found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    agent, _m, _s, _n = _problem_actor(request, b)
+    operator = request.hub_auth.mode != "scoped-agent" or agent == _operator_name()
+    if not _problems.release(hub_app.HUB_DIR, pid, agent=agent, operator=operator):
+        return JsonResponse({"errors": [{"code": "not_held",
+            "msg": "no claim (or presumed reopen) by %s to release" % agent}]}, status=409)
+    hub_app.errors_changed()
+    return JsonResponse({"data": {"problem": pid, "released": True}})
+
+
+@writer(scope="problem:escalate")
+def problem_escalate(request, b):
+    """Park a DIAGNOSED problem on the ask or task it is waiting for. It leaves the unclaimed
+    queue (state `escalated`) until that blocker closes — an answered ask or a done task
+    returns it at exactly the moment it became workable. The blocker must be an ask or task
+    that exists and is still open: free text cannot close, so it is refused."""
+    from hub_core import problems as _problems
+    pid, _found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    blocked_on = str(b.get("blocked_on") or "").strip()
+    if blocked_on and ":" not in blocked_on:
+        kind = "note" if blocked_on.startswith("q-") else "task"
+        local = blocked_on.zfill(4) if blocked_on.isdigit() else blocked_on
+        try:
+            blocked_on = ids.make_id(hub_app.PROJECT_KEY, kind, local)
+        except ValueError:
+            # Free text ("waiting for finance") is not a blocker: nothing can ever close it.
+            return JsonResponse({"errors": [{"code": "bad_blocker",
+                "msg": "blocked_on must name an open ask (q-...) or a task id; free text can "
+                       "never close, so it would keep a live failure off the queue forever",
+                "id": blocked_on}]}, status=422)
+    state = hub_app.current_state()
+    ent = (state.get("entities") or {}).get(blocked_on)
+    if not ent or ent.get("type") not in ("note", "task"):
+        return JsonResponse({"errors": [{"code": "bad_blocker",
+            "msg": "blocked_on must name an existing ask (question note) or task",
+            "id": blocked_on}]}, status=422)
+    if not _problems.blocker_open(blocked_on, state):
+        return JsonResponse({"errors": [{"code": "blocker_closed",
+            "msg": "that ask/task is already closed: the problem is workable now, claim it"}]},
+            status=409)
+    agent, machine, session, name = _problem_actor(request, b)
+    entry = _problems.escalate(hub_app.HUB_DIR, pid, agent=agent, blocked_on=blocked_on,
+                               note=str(b.get("note") or ""), machine=machine, session=session,
+                               name=name)
+    try:                                   # the escalation replaces this console's lease on it
+        _problems.release(hub_app.HUB_DIR, pid, agent=agent, claims_only=True)
+    except Exception:                                        # noqa: BLE001
+        pass
+    hub_app.errors_changed()
+    return JsonResponse({"data": {"problem": pid, "escalation": entry}}, status=201)
+
+
 @writer(scope="presence:write")
 def overlap_seen(request, b):
     """Record that these crossover signals reached their console (sidecar only, never the
@@ -2825,7 +3004,7 @@ def webhook_secret_gated(fn):
 
 
 @webhook_secret_gated
-def ci_event(request):
+def ci_event_webhook(request):
     """POST /hub/api/ci-event — a CI pipeline/job/deploy result. Failures become rows on the
     operational stream; a later green on the same job and ref retires them."""
     from hub_core import ci_events
@@ -2851,3 +3030,69 @@ def ci_event(request):
     out.pop("event", None)
     ci_events.retain(hub_app.HUB_DIR, body, out, record=hub_app.record_error)
     return JsonResponse({"data": out})
+
+
+@writer(scope="enroll:leave")
+def leave(request, b):
+    """Un-enroll THIS machine: the presented scoped credential revokes ITSELF and the seat's
+    presence rows for this machine are dropped. Self-revocation only ever reduces authority,
+    so it needs no second party; the shared-root compatibility token is not a machine and
+    cannot leave. dry_run reports what would happen and changes nothing."""
+    from hub_core import presence as _presence
+    auth = request.hub_auth
+    if auth.mode != "scoped-agent":
+        return JsonResponse({"errors": [{"code": "not_a_machine_credential",
+            "msg": "only a scoped agent credential can un-enroll itself"}]}, status=409)
+    machine = (request.headers.get("X-Hub-Machine") or b.get("machine") or "").strip().lower()[:120]
+    plan = {"credential_id": auth.credential_id, "subject": auth.subject, "machine": machine}
+    if b.get("dry_run"):
+        return JsonResponse({"data": {"dry_run": True, "would": plan}})
+    try:
+        record = agent_auth.CredentialRegistry(hub_app.HUB_DIR).revoke(
+            auth.credential_id, revoked_by=auth.subject)
+    except agent_auth.CredentialError as exc:
+        return JsonResponse({"errors": [{"code": "credential", "msg": str(exc)}]}, status=422)
+    forgotten = _presence.forget(hub_app.HUB_DIR, machine=machine, agent=auth.subject) if machine else 0
+    try:
+        hub_app._publish_realtime("presence.observed")
+    except Exception:                                        # noqa: BLE001
+        pass
+    return JsonResponse({"data": {"left": True, "credential": record,
+                                  "presence_forgotten": forgotten, **plan}})
+
+
+@writer(scope="error:report")
+def ci_event_agent(request, b):
+    """One CI pipeline event in the neutral shape (hub_core.ci): {project, ref, sha, status:
+    failed|success, jobs: [{name, status, url}], url, actor, source, details}. An adopter's CI
+    adapter translates its own webhook into this. A failed job becomes a problem keyed on
+    (project, job); a pass is stamped per job and retires that job's earlier failures on the
+    same ref — only a pass of THAT job does, never a later green deploy."""
+    from hub_core import ci as _ci
+    result = _ci.ingest(hub_app.HUB_DIR, b, record=hub_app.record_error)
+    if not result.get("ok"):
+        return JsonResponse({"errors": [{"code": "bad_ci_event", "msg": result.get("error")}]},
+                            status=422)
+    if result.get("retired"):
+        hub_app.errors_changed()
+    return JsonResponse({"data": result}, status=201 if result.get("recorded") else 200)
+
+
+@csrf_exempt
+def ci_event(request):
+    """``POST /hub/api/ci-event`` — one route, two senders, told apart by the credential:
+
+    * a CI SYSTEM presents the shared webhook secret (``X-Hub-Webhook-Token`` or the forge's own
+      token header) and is answered by ``ci_event_webhook`` (hub_core.ci_events);
+    * an AGENT credential posts the neutral event shape and is answered by ``ci_event_agent``
+      (hub_core.ci; scope ``error:report``).
+
+    Each branch keeps its own gate and refusals; this dispatcher authenticates nothing."""
+    if request.headers.get("X-Hub-Webhook-Token") or request.headers.get("X-Gitlab-Token"):
+        return ci_event_webhook(request)
+    return ci_event_agent(request)
+
+
+ci_event._hub_token_gated = True
+ci_event._hub_secret_gated = True
+ci_event._hub_required_scope = "error:report"
