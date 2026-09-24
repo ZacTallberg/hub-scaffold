@@ -49,7 +49,11 @@ a rare critical boundary.
   failures, browser diagnostics, recorded auth refusals — with a read-time severity bar shared
   by the board and the API, truthful ack/reopen, bounded clears, and per-channel coverage so an
   empty card says whether it is everything.
-- Ranked full-board search (`search.json`) and a request-identity probe (`whoami.json`).
+- Knowledge by kind (lessons admitted and tagged for overlap, findings, methods, reviews), BM25F
+  search with an optional dense channel (`search.json`), a per-prompt knowledge block ranked by a
+  console's focus (`guidance.json`, `client prompt-context --hook`), a mirror feed
+  (`knowledge/since`), a capability catalog published from another repository, and a
+  request-identity probe (`whoami.json`) — `patterns/knowledge-retrieval.md`.
 - Every write is refused if it looks like it contains a secret — the append-only ledger can
   never unlearn one.
 - A focused computed audit for schemas, references, ADR numbering, event integrity, build

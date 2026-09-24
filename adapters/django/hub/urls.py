@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, mcp_server, run_api
+from . import hub_api, hub_write, hubsite, knowledge_api, knowledge_write, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -25,7 +25,13 @@ urlpatterns = [
     path("inbox.json", hub_api.inbox_json, name="inbox"),
     path("inbox/wait", hub_api.inbox_wait, name="inbox-wait"),
     path("errors.json", hub_api.errors_json, name="errors"),
-    path("search.json", hub_api.search_json, name="search"),
+    path("search.json", knowledge_api.search_json, name="search"),
+    # Knowledge: related records, the per-prompt memory index, the mirror feed, and the
+    # published capability catalog. Above the catch-all for the same reason as the rest.
+    path("related.json", knowledge_api.related_json, name="related"),
+    path("guidance.json", knowledge_api.guidance_json, name="guidance"),
+    path("knowledge/since", knowledge_api.knowledge_since, name="knowledge-since"),
+    path("capabilities.json", knowledge_api.capabilities_json, name="capabilities"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
@@ -42,6 +48,12 @@ urlpatterns = [
     path("api/gap", hub_write.gap),
     path("api/feat", hub_write.feat),
     path("api/note", hub_write.note),
+    # Knowledge records: a lesson is admitted and TAGGED with what it may overlap (never
+    # refused for resemblance); finding / method / review say which kind of record they are.
+    path("api/lesson", knowledge_write.lesson),
+    path("api/finding", knowledge_write.finding),
+    path("api/method", knowledge_write.method),
+    path("api/review", knowledge_write.review),
     path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
