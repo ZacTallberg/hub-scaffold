@@ -98,17 +98,22 @@ def announcements(notes: list, terms: list[str]) -> list[dict]:
         if "built-on-request" not in tags:
             continue
         body = str(n.get("body_md") or "")
-        blob = (str(n.get("title") or "") + " " + body).lower()
-        if not any(t in blob for t in terms):
+        in_title = any(t in str(n.get("title") or "").lower() for t in terms)
+        in_body = any(t in body.lower() for t in terms)
+        if not (in_title or in_body):
             continue
+        where = "title and body" if in_title and in_body else ("title" if in_title else "body")
         first = re.split(r"(?<=[.!?])\s", body.strip())[0] if body.strip() else ""
         provenance = n.get("provenance") or {}
+        date = str(provenance.get("created_at") or "")[:10]
         out.append({
             "id": n.get("id"),
-            "date": str(provenance.get("created_at") or "")[:10],
+            "date": date,
             "kind": "built",
             "title": n.get("title") or "Built on request",
             "detail": _preview(first, 240) or None,
+            "meta": " · ".join(x for x in (date, "matched on " + where) if x),
+            "matched_on": where,
         })
     out.sort(key=lambda x: x["date"] or "", reverse=True)
     return out
