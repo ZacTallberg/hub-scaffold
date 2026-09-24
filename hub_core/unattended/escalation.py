@@ -60,16 +60,34 @@ def workable(item: dict) -> tuple[bool, str]:
 
 
 def client_stamps_hops() -> bool:
-    """Can the client a session will use stamp the next hop? Fail closed if not: a session whose
-    client drops the stamp would raise questions that read as hop 0 again, and the chain the hop
-    count exists to bound would not be. The launcher points sessions at THIS package's client
-    (PYTHONPATH), so this reads that file."""
-    from pathlib import Path
+    """Does the client a session will use actually stamp the next hop? Fail closed if not: a
+    session whose client drops the stamp would raise questions that read as hop 0 again, and the
+    chain the hop count exists to bound would not be.
+
+    This checks BEHAVIOUR, not text: it parses a real ``ask`` command line through the client's own
+    parser, with a sentinel ``HUB_RESPONDER_HOP`` in the environment, runs the payload builder the
+    parser dispatches to, and requires the sentinel back in ``payload["hop"]``. A file that merely
+    MENTIONS the variable (a comment, a help string) passes a text search with the stamping code
+    deleted; it cannot pass this. The launcher points sessions at THIS package's client
+    (PYTHONPATH), so this exercises that module. Any exception is a no."""
+    import os
+
+    sentinel = MAX_HOP + 5  # a value no default, argument or cached stamp could produce
+    previous = os.environ.get("HUB_RESPONDER_HOP")
     try:
-        source = (Path(__file__).resolve().parent.parent / "client.py").read_text(encoding="utf-8")
-    except OSError:
+        from .. import client
+
+        os.environ["HUB_RESPONDER_HOP"] = str(sentinel)
+        arguments = client._parser().parse_args(["ask", "--question", "hop stamp self-check"])
+        verb, payload = arguments.payload(arguments)
+        return verb == "ask" and payload.get("hop") == sentinel
+    except (Exception, SystemExit):  # argparse exits via SystemExit; every failure is a no
         return False
-    return "HUB_RESPONDER_HOP" in source
+    finally:
+        if previous is None:
+            os.environ.pop("HUB_RESPONDER_HOP", None)
+        else:
+            os.environ["HUB_RESPONDER_HOP"] = previous
 
 
 def next_hop(item: dict) -> int:
