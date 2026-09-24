@@ -1701,9 +1701,67 @@
       el("div", { class: "integrity-grid" }, integrityCards)
     ]);
     scroll.appendChild(integrity);
+    scroll.appendChild(componentsCard());
 
     pane.appendChild(scroll);
     return pane;
+  }
+
+  /* ---- HOSTED COMPONENTS: what this hub serves to the apps around it ----
+     Read once per page load from components/ (presentation files, not ledger state, so it does
+     not ride the event stream). Versions are MEASURED from the served bytes and adopters are
+     the apps OBSERVED loading a component, so the card never claims a version or an adopter
+     the hub did not see. Loading, failure and "hosts nothing" are three different states. */
+  var COMPONENTS_STATE = { status: "idle", rows: [], error: "" };
+  function componentsBody() {
+    var body = el("div", { class: "card-body" });
+    var st = COMPONENTS_STATE;
+    if (st.status === "idle" || st.status === "loading") {
+      body.appendChild(el("p", { class: "cell-sub", text: "Loading the hosted components\u2026" }));
+    } else if (st.status === "failed") {
+      body.appendChild(el("div", { class: "callout warn" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
+        el("div", { text: "Could not read components/: " + st.error })]));
+    } else if (!st.rows.length) {
+      body.appendChild(el("p", { class: "cell-sub", text: "This hub hosts no components. Add one under hub_core/components/<name>/." }));
+    } else {
+      st.rows.forEach(function (c) {
+        var users = Object.keys(c.used_by || {});
+        body.appendChild(el("div", { class: "comp-row" }, [
+          el("div", { class: "comp-head" }, [
+            el("strong", { text: c.title || c.name }),
+            el("code", { class: "comp-ver", title: "hash of the served files", text: c.name + " \u00b7 " + c.version })
+          ]),
+          c.what ? el("p", { class: "cell-sub comp-what", text: clip(c.what, 220) }) : null,
+          el("p", { class: "cell-sub", text: (c.files || []).length + " file(s)" + (c.props ? " \u00b7 per-app properties" : "") +
+            " \u00b7 " + (users.length ? "loaded by " + users.join(", ") : "no app observed loading it yet") })
+        ].filter(Boolean)));
+      });
+    }
+    return body;
+  }
+  function componentsCard() {
+    var st = COMPONENTS_STATE;
+    var card = el("section", { class: "card comp-card", id: "componentsCard", "aria-labelledby": "componentsTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "componentsTitle" }, [icon("stack"), doc.createTextNode("Hosted components")]),
+        el("span", { class: "badge b-" + (st.status === "failed" ? "warn" : "info"),
+          text: st.status === "ready" ? String(st.rows.length) : st.status === "failed" ? "unreadable" : "loading" })
+      ]),
+      componentsBody()
+    ]);
+    if (st.status === "idle") {
+      st.status = "loading";
+      timedFetch("components/", { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (b) { st.status = "ready"; st.rows = b.data || []; })
+        .catch(function (e) { st.status = "failed"; st.error = String(e && e.message || e); })
+        .then(function () {
+          var old = doc.getElementById("componentsCard");
+          if (old && old.parentNode) old.parentNode.replaceChild(componentsCard(), old);
+        });
+    }
+    return card;
   }
 
   /* ============================ MODAL ============================ */

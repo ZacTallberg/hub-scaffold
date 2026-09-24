@@ -31,6 +31,14 @@ in silence::
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
 
+Services to the apps around the hub::
+
+    python -m hub_core.client components                         # hosted UI components
+    python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
+    python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
+    python -m hub_core.client profile --person alice --set theme=dark
+    python -m hub_core.client agent-ask --question "..." --person alice --app budget-app
+
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
     python -m hub_core.client next                       # top ready + needs-spec + snoozed
@@ -463,6 +471,79 @@ def _run_whoami(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "whoami.json")
 
 
+# ── Services to the apps around the hub: hosted components, per-app component properties,
+# one app's slice of the board, a person's cross-app preferences, the brokered agent ──
+
+def _pairs(items: list[str] | None) -> dict[str, Any]:
+    """`key=value` flags into a dict; a value that parses as JSON (a number, a list) is used as
+    that JSON, otherwise as the literal string."""
+    out: dict[str, Any] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError("expected key=value, got %r" % item)
+        key, value = item.split("=", 1)
+        try:
+            out[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key.strip()] = value
+    return out
+
+
+def _run_components(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _get(base, "components/")
+
+
+def _run_component_props(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read one app's component properties, or REPLACE them with --set component.key=value
+    (a full set: properties not named return to their defaults, so current values are read
+    first and the named ones laid over them)."""
+    from urllib.parse import quote
+    current = _get(base, f"components/props/{quote(arguments.app)}.json")
+    if not arguments.set:
+        return current
+    props = {c: dict(v) for c, v in (current.get("props") or {}).items()}
+    for dotted, value in _pairs(arguments.set).items():
+        if "." not in dotted:
+            raise ValueError("name the property as component.key, got %r" % dotted)
+        component, key = dotted.split(".", 1)
+        props.setdefault(component, {})[key] = value
+    return _post(base, "component-props", {"app": arguments.app, "props": props,
+                                           "agent": _agent(arguments)})
+
+
+def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {"app": arguments.app}
+    if arguments.name:
+        query["name"] = arguments.name
+    return _get(base, "app-feed.json?" + urlencode(query))
+
+
+def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    path = "profile?person=" + quote(arguments.person)
+    if arguments.set:
+        return _post(base, path, {"prefs": _pairs(arguments.set)})
+    return _get(base, "api/" + path)
+
+
+def _run_agent_ask(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {"question": arguments.question}
+    for name in ("person", "app", "conversation_id"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    return _post(base, "agent/ask", payload)
+
+
+def _run_agent_history(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {"person": arguments.person, "scope": arguments.scope}
+    if arguments.app:
+        query["app"] = arguments.app
+    return _get(base, "api/agent/history?" + urlencode(query))
+
+
 # ── The worker LOOP: next -> start -> step -> finish, with compaction-proof regrounding ──
 # Extracted from two adopter fleets that each rebuilt this loop independently; the converged
 # core belongs to the template. The deployment-specific halves those tools also carried
@@ -781,6 +862,41 @@ def _parser() -> argparse.ArgumentParser:
     whoami = commands.add_parser("whoami",
                                  help="what the hub resolves your credential and headers to")
     whoami.set_defaults(runner=_run_whoami)
+
+    components = commands.add_parser("components",
+                                     help="the hosted UI components: versions, files, adopters")
+    components.set_defaults(runner=_run_components)
+
+    cprops = commands.add_parser("component-props",
+                                 help="one app's component properties; --set comp.key=value replaces them")
+    cprops.add_argument("--app", required=True, help="the app slug")
+    cprops.add_argument("--set", action="append", metavar="COMPONENT.KEY=VALUE")
+    cprops.add_argument("--agent")
+    cprops.set_defaults(runner=_run_component_props)
+
+    feed = commands.add_parser("app-feed", help="one app's slice of the board (checklist, announcements)")
+    feed.add_argument("--app", required=True)
+    feed.add_argument("--name", help="the app's display name, matched as well as the slug")
+    feed.set_defaults(runner=_run_app_feed)
+
+    prof = commands.add_parser("profile",
+                               help="a person's cross-app preferences; --set key=value merges (profile:write)")
+    prof.add_argument("--person", required=True)
+    prof.add_argument("--set", action="append", metavar="KEY=VALUE")
+    prof.set_defaults(runner=_run_profile)
+
+    ask_agent = commands.add_parser("agent-ask", help="ask the brokered agent (agent:ask)")
+    ask_agent.add_argument("--question", required=True)
+    ask_agent.add_argument("--person")
+    ask_agent.add_argument("--app")
+    ask_agent.add_argument("--conversation-id", dest="conversation_id")
+    ask_agent.set_defaults(runner=_run_agent_ask)
+
+    agent_hist = commands.add_parser("agent-history", help="a person's past agent conversations (agent:history)")
+    agent_hist.add_argument("--person", required=True)
+    agent_hist.add_argument("--app")
+    agent_hist.add_argument("--scope", choices=["app", "all"], default="app")
+    agent_hist.set_defaults(runner=_run_agent_history)
 
     # The worker loop: next -> start -> step -> finish (+ reground after compaction).
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")

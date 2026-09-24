@@ -60,6 +60,10 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 
 | Endpoint | Returns |
 |---|---|
+| `GET /hub/components/` | The UI components this hub HOSTS for the apps around it: name, version (a hash of the served bytes, never a declared number), files, how to link and mount it, whether it takes per-app properties, and `used_by` — the apps OBSERVED loading it (from the component's own properties fetch). |
+| `GET /hub/components/<name>/<file>` | One file of one component (`.css .js .json .svg .png .map` only; anything not on disk under that component is 404 — there is no caller-controlled path). `ETag` + `X-Component-Version`, cached 5 minutes, so a change reaches every linking app within minutes and with no app deploy. |
+| `GET /hub/components/props/<slug>.json[?component=<name>]` | One app's component properties with the schema that bounds them (each component declares its own in its `manifest.json`). Revalidated every load. |
+| `GET /hub/app-feed.json?app=<slug>[&name=<display name>]` | One app's slice of the board: `checklist` (open tasks naming the app), `announcements` (notes tagged `built-on-request` naming it), `whats-new` (empty by design — a deploy record is not a change note; the app supplies its own). Every row names the field that matched; `metadata.counts` (shown) sits beside `metadata.matched` (before the 25-row cap). |
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`. The running identity comes from the artifact's pre-build `HUB_BUILD_STAMP`; optional `?served=<sha>` adds an external comparison and a mismatch is explicit. |
 | `GET /hub/hub.json` | Full snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. |
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
@@ -238,6 +242,21 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | `/hub/api/ack` (`ack:write`) | `agent`, `directive` (id or local), optional `note` | One agent's record that delivery landed. Stable id (replay-safe). The item leaves that agent's inbox; a directive whose every NAMED target has acked retires itself to `fulfilled`. |
 | `/hub/api/presence` (`presence:write`) | `agent` (+ the `X-Hub-*` headers) | The seat heartbeat; the response carries the shared freshness contract. Ordinary writes stamp activity on their own. |
 | `/hub/api/forget-presence` (`presence:manage`) | `machine` and/or `target` (the agent name) | Drop a phantom or retired seat row — a decommissioned laptop otherwise sits on the fleet strip looking like a teammate until the retirement horizon. Refuses to drop everything (`422 need_machine_or_target`); connected cockpits wake immediately. |
+
+### Services to the apps around the hub
+
+These are called by an APP's server, never a browser: the app authenticates with its own scoped
+credential and names the person its own sign-in resolved. The hub authenticates the app; the app
+vouches for the person. `patterns/app-services.md` is the adopter's guide (component hosting, the
+bridge an app writes, the agent's upstream contract).
+
+| Endpoint (scope) | Key fields | Behaviour |
+|---|---|---|
+| `POST /hub/api/component-props` (`component:configure`) | `app` (slug), `props: {component: {key: value}}` | REPLACES the app's properties — a key left out returns to its default. Values outside a field's closed set or length cap are refused and listed in `refused` (never clamped); only non-default values are stored, with a short who/what/when history. |
+| `GET /hub/api/profile?person=` (`profile:read`) · `POST` (`profile:write`) | `prefs: {kind, image, theme, motion, text, ui, agent}` | A person's cross-app presentation choices. Every key is a closed set; out-of-range values are dropped and listed in `ignored`. The mark is initials or a small PNG/JPEG/WebP data URL (SVG refused: it can carry script). Stored in `HUB_DIR/profiles.json`, not the ledger. |
+| `POST /hub/api/agent/ask` (`agent:ask`) | `question`, optional `thread`, `person`, `conversation_id`, `app` | The hub forwards to the configured agent service with the ONE agent key it holds. Answers `{ok, answer, citations, conversation_id, history}`; `reason:"unconfigured"` names the missing setting; a refused, unreachable or slow service and an EMPTY answer are `reason:"failed"` with the cause. A deleted conversation is answered as a new one; a key that may not act for people still answers, with `history:"unconfigured"`. |
+| `GET /hub/api/agent/history?person=&app=&scope=app\|all` (`agent:history`) | | The person's past conversations for this app, or all. |
+| `GET /hub/api/agent/conversation?person=&id=` (`agent:history`) | | One conversation's turns. |
 
 ### The operational error stream
 

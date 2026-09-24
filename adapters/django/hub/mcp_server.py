@@ -134,6 +134,29 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
          "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+    {"name": "app_feed",
+     "description": "One app's slice of the board: open tasks and built-on-request notes that name "
+                    "the app, each row saying which field matched.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string"}, "name": {"type": "string"}}, "required": ["app"]}},
+    {"name": "list_components",
+     "description": "The UI components this hub hosts for its apps: measured versions, files, how "
+                    "to link them, and the apps observed loading them.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_component_props",
+     "description": "One app's component properties plus the schema that bounds them.",
+     "inputSchema": {"type": "object", "properties": {"app": {"type": "string"}},
+                     "required": ["app"]}},
+    {"name": "set_component_props",
+     "description": "REPLACE one app's component properties ({component: {key: value}}; keys left "
+                    "out return to defaults). Needs component:configure. Refused keys are listed.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string"}, "props": {"type": "object"}}, "required": ["app", "props"]}},
+    {"name": "ask_agent",
+     "description": "Ask the brokered agent service a question (the hub holds its key). Answers "
+                    "carry citations; an unconfigured or failing lane says exactly why.",
+     "inputSchema": {"type": "object", "properties": {
+         "question": {"type": "string"}, "app": {"type": "string"}}, "required": ["question"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -322,6 +345,24 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
                              auth_headers, method="get")
+    elif name == "app_feed":
+        query = {"app": args["app"]}
+        if args.get("name"):
+            query["name"] = args["name"]
+        status, body = _seam("/hub/app-feed.json", query, auth_headers, method="get")
+    elif name == "list_components":
+        status, body = _seam("/hub/components/", {}, auth_headers, method="get")
+    elif name == "get_component_props":
+        status, body = _seam("/hub/components/props/%s.json" % str(args["app"]).strip().lower(),
+                             {}, auth_headers, method="get")
+    elif name == "set_component_props":
+        status, body = _seam("/hub/api/component-props",
+                             {"app": args["app"], "props": args["props"]}, auth_headers)
+    elif name == "ask_agent":
+        payload = {"question": args["question"]}
+        if args.get("app"):
+            payload["app"] = args["app"]
+        status, body = _seam("/hub/api/agent/ask", payload, auth_headers)
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

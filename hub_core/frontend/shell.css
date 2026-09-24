@@ -2115,3 +2115,11 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 /* Evidence references, one per line (a sentence of evidence renders as plain prose). */
 .evidence-list { margin: 0; padding-left: 16px; }
 .evidence-list li { overflow-wrap: anywhere; }
+
+/* Hosted components card: one row per component, version and adopters measured. */
+.comp-card { margin-top: 16px; }
+.comp-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.comp-row:first-child { border-top: 0; padding-top: 0; }
+.comp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.comp-ver { font-size: 11.5px; color: var(--muted); }
+.comp-what { margin: 4px 0 2px; }

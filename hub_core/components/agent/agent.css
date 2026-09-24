@@ -1,0 +1,174 @@
+/* Agent interface — hosted component styles. Every colour is a token with a neutral fallback,
+   so an app that defines the hub's tokens gets its own look and one that does not still reads
+   well. Light and dark follow the app's data-theme when set, else the system preference. */
+:root {
+  --hub-agent-bg: var(--surface, #ffffff);
+  --hub-agent-bg-2: var(--surface-2, #f4f5f7);
+  --hub-agent-text: var(--text, #1d2330);
+  --hub-agent-muted: var(--muted, #5d6677);
+  --hub-agent-border: var(--border, #d9dde5);
+  --hub-agent-accent: var(--accent, #2f5bd3);
+  --hub-agent-on-accent: #ffffff;
+  --hub-agent-warn-bg: #fff6e0;
+  --hub-agent-warn-text: #6b4a00;
+  --hub-agent-fail-bg: #fdecec;
+  --hub-agent-fail-text: #8a1c1c;
+  --hub-agent-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+  --hub-agent-dock: 0px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --hub-agent-bg: var(--surface, #161b24);
+    --hub-agent-bg-2: var(--surface-2, #1f2632);
+    --hub-agent-text: var(--text, #e7ebf2);
+    --hub-agent-muted: var(--muted, #9aa4b5);
+    --hub-agent-border: var(--border, #2d3542);
+    --hub-agent-accent: var(--accent, #7aa2ff);
+    --hub-agent-on-accent: #0b1020;
+    --hub-agent-warn-bg: #3a2e10;
+    --hub-agent-warn-text: #f3d68c;
+    --hub-agent-fail-bg: #3b1818;
+    --hub-agent-fail-text: #f6b4b4;
+    --hub-agent-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+}
+:root[data-theme="dark"] {
+  --hub-agent-bg: var(--surface, #161b24);
+  --hub-agent-bg-2: var(--surface-2, #1f2632);
+  --hub-agent-text: var(--text, #e7ebf2);
+  --hub-agent-muted: var(--muted, #9aa4b5);
+  --hub-agent-border: var(--border, #2d3542);
+  --hub-agent-accent: var(--accent, #7aa2ff);
+  --hub-agent-on-accent: #0b1020;
+  --hub-agent-warn-bg: #3a2e10;
+  --hub-agent-warn-text: #f3d68c;
+  --hub-agent-fail-bg: #3b1818;
+  --hub-agent-fail-text: #f6b4b4;
+  --hub-agent-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* Docked: the page makes room instead of being covered. */
+html.hub-agent-docked body { margin-right: var(--hub-agent-dock); transition: margin-right .18s ease; }
+
+.hub-agent-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 2147483000;
+  width: 400px; max-width: 100vw; display: flex; flex-direction: column;
+  background: var(--hub-agent-bg); color: var(--hub-agent-text);
+  border-left: 1px solid var(--hub-agent-border); box-shadow: var(--hub-agent-shadow);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.hub-agent-panel[hidden] { display: none; }
+/* The host page's own element rules (header, section, h2, ul, button) must not restyle the
+   panel: everything inside it is sized and coloured here. */
+.hub-agent-panel, .hub-agent-panel *, .hub-agent-launch { box-sizing: border-box; }
+.hub-agent-panel h2, .hub-agent-panel p, .hub-agent-panel ul { letter-spacing: normal; text-transform: none; }
+.hub-agent-panel.is-resizing { user-select: none; transition: none; }
+.hub-agent-grip {
+  position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1;
+}
+.hub-agent-grip:hover, .hub-agent-grip:focus-visible { background: linear-gradient(90deg, transparent 3px, var(--hub-agent-accent) 3px, var(--hub-agent-accent) 5px, transparent 5px); outline: none; }
+.hub-agent-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--hub-agent-border);
+  background: var(--hub-agent-bg); color: var(--hub-agent-text);
+}
+.hub-agent-title { font-weight: 650; font-size: 15px; }
+.hub-agent-tools { display: flex; gap: 6px; align-items: center; }
+.hub-agent-tool {
+  font: inherit; font-size: 12.5px; padding: 4px 9px; border-radius: 7px; cursor: pointer;
+  background: var(--hub-agent-bg-2); color: var(--hub-agent-text); border: 1px solid var(--hub-agent-border);
+}
+.hub-agent-tool:hover { border-color: var(--hub-agent-accent); }
+.hub-agent-tool[aria-pressed="true"] { background: var(--hub-agent-accent); color: var(--hub-agent-on-accent); border-color: var(--hub-agent-accent); }
+.hub-agent-close { font-size: 17px; line-height: 1; padding: 3px 9px; }
+.hub-agent-tool:focus-visible, .hub-agent-send:focus-visible, .hub-agent-chip:focus-visible,
+.hub-agent-launch:focus-visible, .hub-agent-past-row:focus-visible, .hub-agent-seg button:focus-visible {
+  outline: 2px solid var(--hub-agent-accent); outline-offset: 2px;
+}
+
+.hub-agent-past { border-bottom: 1px solid var(--hub-agent-border); padding: 10px 14px; max-height: 45%; overflow-y: auto; }
+.hub-agent-past[hidden] { display: none; }
+.hub-agent-seg { display: inline-flex; border: 1px solid var(--hub-agent-border); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+.hub-agent-seg button { font: inherit; font-size: 12.5px; padding: 4px 12px; border: 0; background: transparent; color: var(--hub-agent-text); cursor: pointer; }
+.hub-agent-seg button[aria-pressed="true"] { background: var(--hub-agent-accent); color: var(--hub-agent-on-accent); }
+.hub-agent-past-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left;
+  font: inherit; padding: 8px 10px; margin-top: 4px; border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--hub-agent-text); border: 1px solid transparent;
+}
+.hub-agent-past-row:hover, .hub-agent-past-row.is-current { background: var(--hub-agent-bg-2); border-color: var(--hub-agent-border); }
+.hub-agent-past-title { font-weight: 600; overflow-wrap: anywhere; }
+.hub-agent-muted { color: var(--hub-agent-muted); font-size: 12.5px; margin: 4px 0; }
+
+.hub-agent-log { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.hub-agent-empty { margin: auto 0; padding: 8px 2px; }
+.hub-agent-greet { font-size: 18px; margin: 0 0 6px; }
+.hub-agent-empty p { margin: 0 0 12px; color: var(--hub-agent-muted); }
+.hub-agent-chips { display: flex; flex-direction: column; gap: 6px; }
+.hub-agent-chip {
+  font: inherit; text-align: left; padding: 8px 11px; border-radius: 10px; cursor: pointer;
+  background: var(--hub-agent-bg-2); color: var(--hub-agent-text); border: 1px solid var(--hub-agent-border);
+}
+.hub-agent-chip:hover { border-color: var(--hub-agent-accent); }
+.hub-agent-msg { max-width: 92%; padding: 9px 12px; border-radius: 12px; overflow-wrap: anywhere; }
+.hub-agent-msg.is-you { align-self: flex-end; background: var(--hub-agent-accent); color: var(--hub-agent-on-accent); border-bottom-right-radius: 4px; }
+.hub-agent-msg.is-agent { align-self: flex-start; background: var(--hub-agent-bg-2); border: 1px solid var(--hub-agent-border); border-bottom-left-radius: 4px; }
+.hub-agent-who { display: block; font-size: 11px; font-weight: 650; opacity: .8; margin-bottom: 2px; }
+.hub-agent-text p { margin: 0 0 6px; }
+.hub-agent-text p:last-child { margin-bottom: 0; }
+.hub-agent-cites { margin: 8px 0 0; padding: 8px 0 0 16px; border-top: 1px solid var(--hub-agent-border); font-size: 12.5px; }
+.hub-agent-cites a { color: var(--hub-agent-accent); }
+.hub-agent-notice { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 10px; font-size: 13px; }
+.hub-agent-notice.is-unconfigured, .hub-agent-notice.is-info { background: var(--hub-agent-warn-bg); color: var(--hub-agent-warn-text); }
+.hub-agent-notice.is-failed { background: var(--hub-agent-fail-bg); color: var(--hub-agent-fail-text); }
+.hub-agent-notice .hub-agent-tool { align-self: flex-start; margin-top: 4px; }
+.hub-agent-typing { align-self: flex-start; display: flex; gap: 4px; padding: 10px 12px; }
+.hub-agent-typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--hub-agent-muted); animation: hub-agent-dot 1s infinite ease-in-out; }
+.hub-agent-typing i:nth-child(2) { animation-delay: .15s; }
+.hub-agent-typing i:nth-child(3) { animation-delay: .3s; }
+@keyframes hub-agent-dot { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+.hub-agent-compose { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--hub-agent-border); }
+.hub-agent-input {
+  flex: 1; resize: vertical; min-height: 42px; max-height: 40vh; font: inherit; padding: 8px 10px; border-radius: 9px;
+  background: var(--hub-agent-bg); color: var(--hub-agent-text); border: 1px solid var(--hub-agent-border);
+}
+.hub-agent-input:focus { outline: 2px solid var(--hub-agent-accent); outline-offset: 0; border-color: transparent; }
+.hub-agent-send {
+  font: inherit; font-weight: 650; padding: 0 16px; border-radius: 9px; cursor: pointer; border: 0;
+  background: var(--hub-agent-accent); color: var(--hub-agent-on-accent);
+}
+.hub-agent-send:disabled { opacity: .55; cursor: progress; }
+
+/* Launchers */
+.hub-agent-launch { font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif; cursor: pointer; }
+.hub-agent-launch.is-hidden { display: none; }
+.hub-agent-launch.is-float {
+  position: fixed; right: 24px; bottom: 24px; z-index: 2147482999; width: 52px; height: 52px; border-radius: 50%;
+  border: 0; background: var(--hub-agent-accent); color: var(--hub-agent-on-accent); box-shadow: var(--hub-agent-shadow);
+  display: grid; place-items: center;
+}
+.hub-agent-launch.is-sidebar {
+  position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 2147482999;
+  writing-mode: vertical-rl; padding: 14px 8px; border-radius: 10px 0 0 10px; display: flex; gap: 8px; align-items: center;
+  border: 1px solid var(--hub-agent-border); border-right: 0; background: var(--hub-agent-bg); color: var(--hub-agent-text);
+  box-shadow: var(--hub-agent-shadow);
+}
+.hub-agent-launch.is-header {
+  padding: 6px 12px; border-radius: 8px; border: 1px solid var(--hub-agent-border);
+  background: var(--hub-agent-bg-2); color: var(--hub-agent-text);
+}
+.hub-agent-launch.is-header[aria-expanded="true"] { border-color: var(--hub-agent-accent); }
+.hub-agent-glyph { width: 20px; height: 20px; display: inline-block; background: currentColor;
+  -webkit-mask: radial-gradient(circle at 50% 42%, #000 58%, transparent 60%) , linear-gradient(#000, #000) 30% 88% / 30% 22% no-repeat;
+          mask: radial-gradient(circle at 50% 42%, #000 58%, transparent 60%) , linear-gradient(#000, #000) 30% 88% / 30% 22% no-repeat; }
+.hub-agent-launch.is-sidebar .hub-agent-glyph { width: 16px; height: 16px; }
+
+@media (max-width: 719px) {
+  .hub-agent-panel { width: 100vw !important; border-left: 0; }
+  .hub-agent-grip { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html.hub-agent-docked body { transition: none; }
+  .hub-agent-typing i { animation: none; opacity: .7; }
+}
