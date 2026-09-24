@@ -1238,6 +1238,13 @@ require project-specific wiring.
 3. **Anti-stall:** cap per-item effort in bulk sweeps; close as INSUFFICIENT and continue rather than spiral.
 4. **No filler traffic:** no "ready to X" posts, no permission-seeking, no context/compaction
    narration — continuity lives in `HANDOFF.md`/seat `STATE.md`, not in worry.
+5. **Ask only for what you may not do.** Before asking, check whether anything is left that you
+   are not ALLOWED to do; landing, verifying and recording your own finished work is never a
+   blocker. Credentials the operator provisioned for the work are yours to use — look where the
+   project keeps them before asking. A figure, rate, category or definition is RESEARCH (the
+   source the work was built from, the data, the project's documents, the board's search), not a
+   question; only a genuine choice with no recorded answer is the operator's, and the ask says
+   where you already looked.
 
 ## §6 Project laws (append below; each cites its ADR)
 <!-- Crystallized, project-specific laws land here as they are born. Format:

@@ -512,6 +512,34 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   does not fire, one owner plus one integrator, reuse verification —
   `patterns/multi-agent-coordination.md`.
 
+### The unattended responder: one bounded session per board item, then gone
+
+- **`python -m hub_core.unattended`** (`scan [--launch]`, `respond`, `sweep`, `status`, `lanes`)
+  runs Claude Code or Codex headless against one task or question, under a written charter
+  (`hub_core/unattended/RESPONDER.md`). A task is taken only when its routing requires the
+  `unattended` capability. The outcome is read from the board, never from the exit code; a task
+  a finished run left in progress is re-offered as RESUMING.
+- **`POST /hub/api/hand-back`** (client `hand-back`, MCP `hand_back_task`) returns an unfinished
+  task to `todo` with the fenced lease as proof and ONE self-counting `handed_back` plan row.
+  Rows marked `lifecycle` are shown but never counted as done steps anywhere progress is shown.
+  `GET /hub/task/<n>.json` now carries `holder`, `readiness` and `handed_back`; `claim`/`start`
+  journal granted leases to `HUB_RUN_LEASES` so a launcher hands back only what its run held.
+- **Lanes and faults.** Lane locks are single-flight and kept alive by a heartbeat. There is a
+  short lane and a long lane, and the long lane gets one slot per machine-sized share. A usage
+  limit, a harness that never ran, or an API-ended run pauses the lane, reaches the board as an
+  agent-error, and charges no attempt. A pass killed at its ceiling is explained from its own
+  transcript. A pass that finished but will not exit is reaped as finished.
+- **Worktrees and escalation.** Tasks run in their own worktree of a dedicated clone. The worktree
+  is removed only when it provably holds nothing. Questions carry a structured `hop`. Hop 1 is
+  retaken once after a cooldown, and hop 2 is a person's. Hop 1 is retaken only when the
+  client is proven to stamp the next hop, by building a real `ask` payload with a sentinel
+  `HUB_RESPONDER_HOP`. Searching the client's source for the variable name is not enough.
+- **Doctrine.** `patterns/unattended-responder.md` and `patterns/doctrine-publish.md`. A
+  `docs/TESTING.md` section says why a green signal is not evidence. `PROJECT/DOCTRINE.md` §5.5
+  says to ask only for what you may not do. `skills/README.md` sets the skills contract (text only,
+  size caps, binaries resolved beside the skill). `adapters/windows/keep_awake.py` holds a wake lock
+  for a long unattended window.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

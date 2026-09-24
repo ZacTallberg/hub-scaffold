@@ -203,7 +203,15 @@ def _plan_progress(ent):
     return {"plan_done": done, "plan_total": total, "plan_lifecycle": lifecycle,
             "step": (preview(step, 70) if step else None),
             "plan_pct": (round(done * 100 / total) if total else None),
-            "last_note": (preview(noted[-1].get("note"), 90) if noted else None)}
+            "last_note": (preview(noted[-1].get("note"), 90) if noted else None),
+            # Runs that ended with this task unfinished (the hand-back row's own count).
+            "handed_back": _handed_back_count(plan)}
+
+
+def _handed_back_count(plan):
+    """Runs that ended with this task unfinished (the hand-back row's own count)."""
+    return sum(int(s.get("times") or 1) for s in (plan or [])
+               if isinstance(s, dict) and s.get("kind") == "handed_back")
 
 
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
@@ -1759,6 +1767,11 @@ def entity_json(request, type, local):
     data = {**ent, **flags}
     if type == "task":
         data = {**_annotated_tasks(state, [ent])[0], **flags}
+        # Whether it can be taken — the same classification as next.json, read off the live
+        # lease: `stale_reclaim` tells an unattended launcher "a run that ended left this in
+        # progress" without attempting a claim. The fencing token never leaves the claims dir.
+        lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
+        data["readiness"] = flow.classify(ent, flags, lease)
     # The evidence ladder is ASKED FOR, never automatic: it can put several questions to git,
     # and an ordinary record read must not pay for that. A failure inside it annotates the
     # record instead of taking it down -- the entity still answers, and the failure is named.

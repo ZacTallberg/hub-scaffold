@@ -121,6 +121,9 @@ urlpatterns = [
     # (unclaim) — including a lease an orphaned console of the same agent still holds.
     # `api/hand` dispatches on the body: with `to` it assigns, without it it hands back.
     path("api/hand", hub_write.hand),
+    path("api/hand-to-queue", hub_write.hand_to_queue),
+    # A run that ended with its task unfinished: back to todo with ONE self-counting row, the
+    # fenced lease proven (an unattended launcher's hand-back; hub_core/unattended/board.py).
     path("api/hand-back", hub_write.hand_back),
     path("api/unclaim", hub_write.unclaim),
     # A person decides a decision task (file the build task / close / reply); agents are refused.

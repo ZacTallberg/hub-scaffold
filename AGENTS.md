@@ -64,7 +64,10 @@ from a working multi-project system. Nothing here names any specific person, hos
   per item that actually happened — a question, a fresh error, a task marked `--unattended` —
   never a rotting task or a timer), and **multi-agent coordination**
   (`multi-agent-coordination.md`: crossover between consoles, the five record kinds, and
-  audience-fenced doctrine).
+  audience-fenced doctrine), the **unattended responder** (`unattended-responder.md` +
+  `python -m hub_core.unattended`: one bounded Claude Code or Codex session per board item,
+  outcome read from the board, hand-back with proof, lane faults never charged, hop-bounded
+  escalation), and **doctrine publish** (`doctrine-publish.md`).
   Operating write-ups for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys
   that CI never cancels, push-only change triggers, job ceilings, publications from the protected
   ref), `app-slots.md` (allocate / stage / cut over / retire / re-adopt an app's port, service and

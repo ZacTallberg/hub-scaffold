@@ -276,10 +276,14 @@
     var all = (task && task.plan) || [];
     var plan = all.filter(isWorkStep);
     if (!plan.length) return null;
-    var done = plan.filter(function (s) { return s && s.done; }).length;
+    var done = plan.filter(function (s) { return s.done; }).length;
     return { done: done, total: plan.length, pct: Math.round(done * 100 / plan.length),
              lifecycle: all.length - plan.length,
              step: (plan.filter(function (s) { return s && !s.done; })[0] || {}).step || null };
+  }
+  function handBack(task) {
+    // The one self-counting hand-back row, when a run ended with this task unfinished.
+    return ((task && task.plan) || []).filter(function (s) { return s && s.kind === "handed_back"; })[0] || null;
   }
   function taskStatusBadge(task) {
     // `done` means the real operation completed. A receipt is required only when this task
@@ -1568,6 +1572,7 @@
         id: n.id, asker: asker, title: n.title || "", context: n.body_md || "",
         to: String(n.to || "").toLowerCase(),
         gate: tags.indexOf("human-only") >= 0,
+        hop: parseInt(n.hop, 10) || 0,
         open: tags.indexOf("open") >= 0,
         answered: !!reply,
         answer: answerText,
@@ -2969,6 +2974,18 @@
           el("div", { class: "tcard-track" }, [el("div", { class: "tcard-fill", style: "width:" + prog.pct + "%" })]),
           el("div", { class: "cell-sub", text: "step " + prog.done + "/" + prog.total + (prog.step ? (" — " + prog.step) : "") })
         ])));
+      }
+      var back = handBack(r);
+      if (back) {
+        var times = back.times || 1;
+        liveRows.push(row("Handed back", el("div", { class: "callout" + (times > 1 ? " warn" : "") }, [
+          el("span", { class: "b-glyph", "aria-hidden": "true", text: times > 1 ? GLYPH.warn : GLYPH.info }),
+          el("div", null, [
+            el("div", { text: times === 1 ? "A run ended with this task unfinished; it went back to the queue."
+                                         : times + " runs ended with this task unfinished — a pattern about the task, not one bad run." }),
+            back.note ? el("div", { class: "cell-sub", text: back.note }) : null,
+            back.note_at ? el("div", { class: "cell-sub mono", text: back.note_at }) : null
+          ].filter(Boolean))])));
       }
       if (proof.declared) liveRows.push(rowMono("Declared critical probe", proof.command));
       if (rec) {
