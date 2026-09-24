@@ -44,7 +44,12 @@ from a working multi-project system. Nothing here names any specific person, hos
   that keeps failures in its own log can only be debugged from a shell on its host), and
   **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
-  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
+  the barren ladder it climbs when a cycle produces nothing). Operating write-ups for what an
+  adopter wires itself: `ci-pipeline.md` (forward-only deploys that CI never cancels, push-only
+  change triggers, job ceilings, publications from the protected ref), `app-slots.md` (allocate /
+  stage / cut over / retire / re-adopt an app's port, service and route), `directory-sign-in.md`
+  (401 vs 503, one bind per rejected credential), and `shared-app-banner.md` (one linked header
+  master for many apps). None runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook

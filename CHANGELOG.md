@@ -14,6 +14,44 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Operations core: authenticated reads, CI verdicts, deploy records that survive, components
+
+- **Reads are authenticated by default.** Every read route is wrapped by `read_auth.reader`; an
+  anonymous read answers 401 (or redirects to a sign-in page that actually exists) and is
+  recorded. `HUB_READ_AUTH = "public"` is the only way to open a board, a typo never does, and
+  the audit flags it outside DEBUG. The deploy runbook adds the anonymous-request check.
+- **Server-side read-then-append retries both concurrency refusals** (409 and the 428 of a
+  first-ever write that lost its create race), bounded; when attempts run out the last status and
+  code travel on the response and into the error stream.
+- **A failed CI job is classified by what its log says** (`hub_core/ci_trace.py`):
+  `POST /hub/api/ci-failure`, the `ci-failure` client verb and the `report_ci_failure` MCP tool.
+- **Deploy records survive a cold hub.** `python -m hub_core.client deploy` posts the immutable
+  release closure with growing per-attempt timeouts (20/45/90 s), one `DEPLOY_RECORD_RETRY` line
+  per transport failure, never a retry of a refusal — safe only because the record is
+  idempotent by sha, so a lost reply comes back `idempotent: true`. `record_deploy` joins the MCP
+  tools.
+- **Standard components and app skeletons.** A `cap` of `kind: component` carries what/when/get/
+  entry/delivery/exemplar/depends_on; a `kind: skeleton` names components (`applies`) or takes
+  all of them in dependency order (`applies_all`). `GET /hub/components.json` resolves skeletons
+  on every read — each component's CURRENT get/entry, `missing[]`, and `order_problems[]` for an
+  unknown dependency or a cycle, never guessed around. Reachable from the `components` and
+  `capability` client verbs, the `list_components` / `register_component` MCP tools, and a
+  panel leading the Capabilities view.
+- **The board reads records whole and patches instead of rebuilding** (`surfaces.js`): the detail
+  dialog loads the full record and renders every field it carries (checkpoint notes as a
+  timeline, structured values as structure, record ids as in-place links, only http(s) as
+  external links); any `?tab=<view>#<type>-<local>` address resolves even outside the snapshot,
+  at load and whenever the address changes in place, with an explicit failed-read state and retry; live changes reconcile rows by record identity so
+  focus and scroll survive; reads of one URL in flight share one request; the palette ranks an
+  exact record address above fuzzy matches.
+- **New operating write-ups:** `patterns/ci-pipeline.md` (never auto-cancel a pending
+  forward-only deploy, change triggers on push only, job ceilings that count the fetch,
+  publications from the protected ref), `patterns/app-slots.md` (stage / cut over / retire /
+  re-adopt), `patterns/directory-sign-in.md` (401 vs 503, one bind per rejected credential),
+  `patterns/shared-app-banner.md` (one linked header master), and deploy-runbook additions for
+  cold-start probes with printed latency, one-deadline rendered-page passes, vault skips that
+  run before the prune.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw
