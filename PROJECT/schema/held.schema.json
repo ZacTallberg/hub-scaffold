@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hub:held",
+  "title": "Held commit (the promotion lane)",
+  "description": "A commit that is finished but deliberately NOT live yet, because it belongs to a class of change that must be rebuilt, re-indexed or re-materialized and proven before it ships. Without this record 'held' means a commit in somebody's local worktree: no age, no owner, invisible to the board, and gone when the worktree is cleaned. A held record names the sha, why it is held, what must be proven before it can go live, and who holds it -- so it ages in public and is promoted with evidence rather than forgotten.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "hub:common#/$defs/id" },
+    "type": { "const": "held" },
+    "title": { "type": "string", "minLength": 1, "description": "One line a reader can act on: repo, short sha and the subject." },
+    "repo": { "type": "string", "minLength": 1, "description": "The project path a reader can fetch from, e.g. team/budget-app." },
+    "sha": { "type": "string", "minLength": 7, "maxLength": 40, "pattern": "^[0-9a-f]{7,40}$", "description": "The held commit. It must exist on a ref a reader can fetch; a commit only in one worktree is what this record exists to prevent." },
+    "branch": { "type": "string", "description": "The ref it was parked on, e.g. `staging`." },
+    "status": { "enum": ["held", "promoted", "abandoned"] },
+    "reason": { "type": "string", "minLength": 1, "description": "Why it may not go live yet, in the holder's own words." },
+    "rebuild": { "type": "string", "minLength": 1, "description": "What must be rebuilt, re-indexed or re-materialized -- and PROVEN -- before this can go live. Nothing to rebuild means it was never a held-class change." },
+    "reachable": { "type": "string", "enum": ["client", "resolver", "both", "unpushed"], "description": "How the sha was proven fetchable: attested by the client that holds the repo (a remote branch contains it), confirmed by the Hub's own commit resolver, or both. `unpushed` is the recorded exception -- the commit exists on ONE DISK and the record says why it could not be parked anywhere safe." },
+    "unpushed_reason": { "type": "string", "minLength": 1, "description": "Why this commit is on no remote. Required when reachable is `unpushed`: the alternative is a hold that looks exactly like a safe one while being one deleted directory from gone. A repository can legitimately have nowhere safe to park a commit (a push to any branch triggers a job against production, say)." },
+    "local_path": { "type": "string", "description": "The directory the unpushed commit exists in, so a reader can go and get it." },
+    "from_gap": { "$ref": "hub:common#/$defs/idref", "description": "The gap this hold answers. Before a fix is a commit the honest record is an OPEN GAP; the commit can arrive days later, and naming the gap keeps the queue and the Gaps tab telling ONE story." },
+    "promoted_evidence": { "$ref": "hub:common#/$defs/evidenceUri" },
+    "promoted_note": { "type": "string", "description": "The rebuild that actually ran, with its counts." },
+    "promoted_at": { "$ref": "hub:common#/$defs/isoDate" },
+    "abandoned_reason": { "type": "string" },
+    "version": { "type": "integer", "minimum": 0 },
+    "provenance": { "$ref": "hub:common#/$defs/provenance" }
+  },
+  "required": ["id", "type", "title", "repo", "sha", "status", "reason", "rebuild", "version"],
+  "allOf": [
+    {
+      "description": "A promotion is a claim about production, so it carries the evidence that it ran -- the same rule a gap obeys when it calls itself closed.",
+      "if": { "properties": { "status": { "const": "promoted" } }, "required": ["status"] },
+      "then": { "required": ["promoted_evidence"] }
+    },
+    {
+      "description": "Abandoning held work is a decision, and a decision states its reason.",
+      "if": { "properties": { "status": { "const": "abandoned" } }, "required": ["status"] },
+      "then": { "required": ["abandoned_reason"] }
+    },
+    {
+      "description": "A commit on no remote is allowed, never silently: it says why, so the exception is a recorded decision rather than an accident that reads as fine.",
+      "if": { "properties": { "reachable": { "const": "unpushed" } }, "required": ["reachable"] },
+      "then": { "required": ["unpushed_reason"] }
+    }
+  ]
+}
