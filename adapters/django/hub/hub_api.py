@@ -15,14 +15,16 @@ from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpRespon
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
 
-from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
-                      inbox as inbox_core, project, projections, telemetry, upcast, wip)
+from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow, liveness, offer,
+                      inbox as inbox_core, plan as plan_rows, project, projections, telemetry,
+                      upcast, wip)
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
 
 _COLLECTION = {"task": "tasks", "run": "runs", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
-               "deploy": "deploys", "note": "notes", "directive": "directives", "ack": "acks"}
+               "deploy": "deploys", "note": "notes", "directive": "directives", "ack": "acks",
+               "held": "held"}
 
 
 def _epoch(value):
@@ -129,6 +131,12 @@ def _inflight(state, stall_s=STALL_S):
     if not cdir or not cdir.exists():
         return rows
     ents = state.get("entities", {})
+    # WHO IS ACTUALLY THERE, resolved once for every row: a lease is held by a live console, and
+    # the clock is only the backstop when liveness cannot be established (hub_core.liveness).
+    try:
+        roster = hub_app.roster()
+    except Exception:                                        # noqa: BLE001 - never break a read
+        roster = None
     for p in cdir.glob("*.json"):
         try:
             lease = json.loads(p.read_text(encoding="utf-8"))
@@ -154,6 +162,9 @@ def _inflight(state, stall_s=STALL_S):
             "expires_in_s": max(0, int(lease.get("expires", 0) - now)),
             "last_heartbeat": heartbeat,
             "stalled": bool(heartbeat_age is not None and heartbeat_age > stall_s),
+            **(liveness.holder(roster, lease, now) if roster is not None else
+               {"holder_session": lease.get("session"), "holder_machine": lease.get("machine"),
+                "holder_state": liveness.UNPROVABLE, "holder_gone_s": None}),
             **_plan_progress(ent),
         })
     rows.sort(key=lambda r: (r.get("age_s") or 0), reverse=True)
@@ -164,14 +175,17 @@ def _plan_progress(ent):
     """Per-task sub-progress from the worker's own plan checklist — so a task visibly climbs
     0->100 as the worker steps through it instead of flipping binary at done. plan_pct is None
     when the task carries no plan (nothing to show yet, which is not the same as no progress)."""
-    plan = ent.get("plan") or []
-    total = len(plan)
-    done = sum(1 for s in plan if isinstance(s, dict) and s.get("done"))
-    step = next((s.get("step") for s in plan if isinstance(s, dict) and not s.get("done")), None)
+    # WORK checkpoints only: a row a scheduler wrote about its own run (a hand-back, a reaped
+    # worker) is shown elsewhere but never counted, or a task would read MORE complete every
+    # time a worker died on it (hub_core.plan).
+    work = plan_rows.work_steps(ent)
+    done, total, lifecycle = plan_rows.plan_progress(ent)
+    step = next((s.get("step") for s in work if not s.get("done")), None)
     # The last checkpoint note is the CONTEXT that turns "working on X" into "working on X,
     # last did Y" — the fact a peer needs to decide whether to coordinate, wait, or move on.
-    noted = [s for s in plan if isinstance(s, dict) and s.get("note")]
-    return {"plan_done": done, "plan_total": total, "step": (str(step)[:70] if step else None),
+    noted = [s for s in work if s.get("note")]
+    return {"plan_done": done, "plan_total": total, "plan_lifecycle": lifecycle,
+            "step": (str(step)[:70] if step else None),
             "plan_pct": (round(done * 100 / total) if total else None),
             "last_note": (str(noted[-1].get("note"))[:90] if noted else None)}
 
@@ -234,6 +248,16 @@ def _errors_block():
     is it getting worse, which source is responsible, and is any of it even ours."""
     rows, metadata = errorlog.read(hub_app.HUB_DIR)
     now = time.time()
+    # A problem somebody HOLDS is not unclaimed (hub_core.item_claims): a machine's live claim on
+    # a fingerprint moves it from "needs you" to "in flight: <machine>", so no second agent is
+    # sent to dig at work that is already held. Unreadable claims leave everything unclaimed --
+    # the safe direction.
+    from hub_core import item_claims
+    try:
+        claims = item_claims.live(hub_app.HUB_DIR, now)
+    except Exception:                                        # noqa: BLE001
+        claims = {}
+    in_flight = 0
     buckets = [0] * 24
     severities = {"critical": 0, "error": 0, "warning": 0}
     sources, external, on_bar_n, unclaimed = {}, 0, 0, []
@@ -244,7 +268,11 @@ def _errors_block():
             row["defer_reason"] = why
         else:
             on_bar_n += 1
-            if not row.get("acked"):
+            held = claims.get(str(row.get("fingerprint") or ""))
+            if held and not row.get("acked"):
+                row["claimed_by"] = held
+                in_flight += 1
+            elif not row.get("acked"):
                 unclaimed.append(row)
         try:
             age_h = int((now - float(row.get("epoch") or 0)) // 3600)
@@ -282,7 +310,7 @@ def _errors_block():
         "top_sources": sorted(sources.values(), key=lambda s: -s["count"])[:6],
         "external_rows": external, "app_rows": max(0, len(rows) - external),
         "trend": trend, "last_24h": sum(buckets),
-        "on_board": on_bar_n, "unclaimed": len(unclaimed),
+        "on_board": on_bar_n, "unclaimed": len(unclaimed), "in_flight": in_flight,
         # "Is this everything?" is the one question a list of errors can never answer about
         # itself, and the one a reader must have answered before an empty card may be read
         # as good news.
@@ -327,10 +355,29 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
 
     # OPEN QUESTIONS are operator work: an ask nobody sees is a worker blocked on one fact,
     # and the cost of a question compounds for as long as it sits.
+    # A question a machine has CLAIMED is waiting, not unclaimed: it drops down the rail and names
+    # who holds it, instead of reading as "nobody has looked" (hub_core.item_claims).
     for q in (asks or []):
+        held = q.get("claimed_by")
+        if held:
+            add(4, "question-in-flight",
+                f"in flight on {held.get('machine')} ({_fmt_age(held.get('age_s'))}): "
+                f"{str(q.get('title') or '')[:100]}", q.get("id"), q.get("title"),
+                route={"view": "overview", "focus": "asks"})
+            continue
         add(1, "open-question",
             f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}", q.get("id"),
             q.get("title"), route={"view": "overview", "focus": "asks"})
+
+    # HELD WORK AGES IN PUBLIC (hub_core.held): every open hold is on the rail with who holds it
+    # and how long, its rank climbing with its age -- faster for a commit on one disk only.
+    from hub_core import held as _held
+    for h in _held.queue(state, time.time())[:8]:
+        rank = {"critical": 1, "warn": 3}.get(h["urgency"], 5)
+        add(rank, "held-" + h["urgency"],
+            "held %s by %s: %s" % (_fmt_age(h["age_s"]), h.get("agent") or "someone",
+                                   _held.detail(h)[:160]),
+            h["id"], h.get("title"))
 
     # OVERDUE directives: `deadline` is documented as "surfaced, never enforced" — this is
     # the surfacing. An active directive past its deadline with targets still unacked is an
@@ -790,12 +837,32 @@ def _live_side_blocks(state):
     read ONE answer to "what is open" and "what is broken". Fail-soft: a sidecar problem
     must never take the board down."""
     asks = inbox_core.question_items(state)
+    # A question a machine has claimed is IN FLIGHT, not waiting on nobody (hub_core.item_claims).
+    try:
+        from hub_core import item_claims
+        claims = item_claims.live(hub_app.HUB_DIR)
+        for q in asks:
+            if q.get("id") in claims:
+                q["claimed_by"] = claims[q["id"]]
+    except Exception:                                        # noqa: BLE001
+        pass
     error_rows, error_meta, error_unclaimed = _errors_block()
     try:
         sessions_live = hub_app.live_sessions()
     except Exception:                                        # noqa: BLE001
         sessions_live = []
     return asks, error_rows, error_meta, error_unclaimed, sessions_live
+
+
+def _held_rows(state):
+    from hub_core import held as _held
+    try:
+        rows = _held.queue(state, time.time())
+        for row in rows:
+            row["detail"] = _held.detail(row)
+        return rows[:20]
+    except Exception:                                        # noqa: BLE001 - never break a read
+        return []
 
 
 def _live_blocks(events, state, audit, deliv, cursor):
@@ -834,6 +901,8 @@ def _live_blocks(events, state, audit, deliv, cursor):
         # EVERY LIVE CONSOLE, flat: the surface that stops two sessions from unknowingly
         # working the same thing. The per-agent fleet cards roll these up.
         "sessions_live": sessions_live[:12],
+        # THE PROMOTION LANE: finished work held back from live, oldest first (hub_core.held).
+        "held": _held_rows(state),
         "attention": _attention(state, audit, inflight, adher, deliv,
                                 asks=asks, error_unclaimed=error_unclaimed),
         "telemetry": telemetry.read_aggregate(hub_dir),
@@ -842,7 +911,19 @@ def _live_blocks(events, state, audit, deliv, cursor):
     }
 
 
+def _sweep_leases():
+    """A task nobody holds is handed back HERE, on the board's own read path, not by whatever
+    died holding it (hub_core.lease_sweep). Throttled inside; never breaks a read."""
+    try:
+        from . import lease_sweep
+        lease_sweep.sweep()
+    except Exception:                                        # noqa: BLE001
+        import logging
+        logging.getLogger("hub.lease_sweep").warning("sweep pass failed", exc_info=True)
+
+
 def _snapshot(served=None):
+    _sweep_leases()
     s = hub_app.store()
     try:
         cur = s.latest_cursor()
@@ -912,6 +993,7 @@ def _snapshot(served=None):
             "errors": side_error_rows[:40],
             "error_log": side_error_meta,
             "sessions_live": side_sessions[:12],
+            "held": _held_rows(state),
             "attention": _attention(state, audit, inflight, adher, deliv,
                                     asks=side_asks, error_unclaimed=side_unclaimed),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
@@ -1016,7 +1098,19 @@ def entity_json(request, type, local):
     if not ent:
         raise Http404("no entity %s" % eid)
     flags = state.get("flags", {}).get(eid, {})
-    return JsonResponse({"data": {**ent, **flags}})
+    data = {**ent, **flags}
+    # The evidence ladder is ASKED FOR, never automatic: it can put several questions to git,
+    # and an ordinary record read must not pay for that. A failure inside it annotates the
+    # record instead of taking it down -- the entity still answers, and the failure is named.
+    if type == "task" and str(request.GET.get("lineage") or "").strip() in ("1", "true", "yes"):
+        from hub_core import lineage as _lineage
+        try:
+            data["lineage"] = _lineage.ladder(ent, state, hub_app.commit_resolver(),
+                                              hub_app.HUB_DIR / "ancestry.json")
+        except Exception as exc:                             # noqa: BLE001
+            data["lineage"] = {"hops": [], "complete": False,
+                               "error": "%s: %s" % (exc.__class__.__name__, str(exc)[:160])}
+    return JsonResponse({"data": data})
 
 
 def graph_json(request):
@@ -1147,6 +1241,7 @@ def next_json(request):
     # A CLI worker is a fresh process for every pull, so the snapshot memo is cold every time.
     # DISCOVER needs only the folded task graph — building the audit, telemetry, cost and DAG
     # blocks here would put the whole cockpit on the critical path of every claim.
+    _sweep_leases()        # an abandoned in-progress task is re-offered with its reason
     s = hub_app.store()
     try:
         events = s.events()
@@ -1163,10 +1258,22 @@ def next_json(request):
     entities = state.get("entities", {})
     lease_map = {row.get("task"): row for row in live_leases}
     tasks = state["by_type"].get("task", [])
-    ready, needs_spec = [], []
+    ready, needs_spec, withheld = [], [], {}
+    # WHO IS ASKING decides what is offered (hub_core.offer, the same rule `take` applies):
+    # work given to somebody else by name, work only another machine can do, and an
+    # unattended run's escalation that is a person's. A withheld row is COUNTED by reason in
+    # the metadata, never silently dropped -- a rail that hides work reads as an empty one.
+    who = offer.caller(request.GET, request.headers)
+    now_s = time.time()
     for t in tasks:
         cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]))
         if cls["available"]:
+            why = offer.withheld(t, agent=who["agent"], machine=who["machine"],
+                                 unattended=who["unattended"], now=now_s)
+            if why:
+                key = why.split(":")[0].split(" (")[0]
+                withheld[key] = withheld.get(key, 0) + 1
+                continue
             ready.append(dict(t, flow_state=cls["state"], flow_reason=cls["reason"],
                               stale_reclaim=cls["stale_reclaim"]))
         elif cls["state"] == "needs_spec":
@@ -1201,6 +1308,7 @@ def next_json(request):
                                       "ready": len(ready), "needs_spec": len(needs_spec),
                                       "snoozed": len(snoozed),
                                       "snoozed_next": snoozed[0]["not_before"] if snoozed else None,
+                                      "withheld": withheld, "caller": who,
                                       **wip_st}})
 
 
@@ -1396,6 +1504,16 @@ def errors_json(request):
                        "critical and high problems in this system's own surfaces; add "
                        "?include=deferred for everything the bar held back")
     return JsonResponse({"data": data, "metadata": metadata})
+
+
+@require_GET
+def item_claims_json(request):
+    """Every live per-machine item claim (hub_core.item_claims): which machine is on which
+    question or error fingerprint, for how long, and when the claim releases on its own."""
+    from hub_core import item_claims
+    rows = item_claims.live(hub_app.HUB_DIR)
+    return JsonResponse({"data": rows, "count": len(rows),
+                         "metadata": {"ttl_s": item_claims.TTL_S}})
 
 
 @require_GET
