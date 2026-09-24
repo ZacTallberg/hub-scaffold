@@ -28,8 +28,9 @@ in silence::
     python -m hub_core.client ack project:directive:0001 --agent worker-1
 
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
-HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
-error stream.
+HUB_SESSION_ID, or flags), `app-error` / `agent-error` / `ack-error` feed the operational
+error stream, and `errors [--app SLUG] [--include deferred]` reads it back with the queue's own
+counts first (what is on the queue, what is unclaimed, and what the bar held back).
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
@@ -335,6 +336,45 @@ def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
             print(json.dumps(data, sort_keys=True), flush=True)
 
 
+def _age(seconds) -> str:
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return "-"
+    if seconds < 60:
+        return "<1m"
+    hours, rest = divmod(seconds, 3600)
+    return "%dh%02dm" % (hours, rest // 60) if hours else "%dm" % (rest // 60)
+
+
+def _run_errors(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read the operational error stream. COUNT THE QUEUE, NOT THE LISTING: the summary is
+    taken from each row's own `bar` verdict and the server's queue counts, whatever this call
+    asked to list — a listing that includes deferred rows must never print them as unclaimed
+    work. The remainder the bar held back is named on its own line."""
+    from urllib.parse import urlencode
+    query = {k: v for k, v in (("app", arguments.app), ("include", arguments.include)) if v}
+    payload = _get(base, "errors.json" + ("?" + urlencode(query) if query else ""))
+    meta = payload.get("metadata") or {}
+    rows = payload.get("data") or []
+    listed_off = sum(1 for r in rows if r.get("bar") == "deferred")
+    summary = ["%d on the queue%s: %d unclaimed, %d claimed -- oldest unclaimed %s"
+               % (int(meta.get("on_board") or 0),
+                  (" for " + meta["app"]) if meta.get("app") else "",
+                  int(meta.get("unclaimed") or 0), int(meta.get("claimed") or 0),
+                  _age(meta.get("oldest_unclaimed_s")))]
+    deferred = int(meta.get("deferred") or 0)
+    if deferred:
+        summary.append("  + %d below the bar (counted, kept, not queued -- nobody is expected "
+                       "to work these)%s" % (deferred, "" if listed_off else
+                                             "; --include deferred lists them"))
+    if meta.get("available") is False:
+        summary.append("  ! the error store is IMPAIRED (%s) -- quiet here is not healthy"
+                       % (meta.get("reason") or "write failure"))
+    for line in summary:
+        print(line, file=sys.stderr)
+    return {"summary": summary, **payload}
+
+
 def _run_search(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
     return _get(base, f"search.json?q={quote(arguments.query)}&limit={arguments.limit}")
@@ -628,6 +668,13 @@ def _parser() -> argparse.ArgumentParser:
     ack_error.add_argument("--note")
     ack_error.add_argument("--reopen", action="store_true")
     ack_error.set_defaults(payload=_payload_ack_error)
+
+    errors = commands.add_parser("errors",
+                                 help="read the error stream: the queue's counts, then the rows")
+    errors.add_argument("--app", help="one service's slice (its slug)")
+    errors.add_argument("--include", choices=("deferred", "all"),
+                        help="also list the rows the bar held back")
+    errors.set_defaults(runner=_run_errors)
 
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)

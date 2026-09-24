@@ -211,8 +211,27 @@ _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 # The promise is enforced HERE, at read, in the one predicate every consumer shares: a bar
 # kept only in the renderer lies to every machine reader. Applied at READ, never at write,
 # so improving the predicate reclassifies the whole retained window retroactively.
+#
+# A bare AbortError is the BROWSER cancelling a fetch — a navigation, Stop, a frozen or
+# discarded tab — never this board failing: the board's own timeout aborts with a NAMED
+# reason ("Hub did not answer ... within N seconds"), which is its own blip. Each engine words
+# the cancellation differently, so all of them are listed. Anchored, so a real fault whose
+# message merely CONTAINS the phrase still queues.
+_ABORT = (r"(AbortError: )?(The user aborted a request|The operation was aborted|"
+          r"signal is aborted without reason|Fetch is aborted)")
 _BLIP = re.compile(r"^(HTTP 5|HTTP 0|Failed to fetch|NetworkError|Load failed|"
-                   r"Live stream unavailable)", re.I)
+                   r"Live stream unavailable|Realtime stream unavailable|"
+                   r"Hub did not answer .+ within \d+ seconds|" + _ABORT + r")", re.I)
+# A SERVICE's browser reporter (app.<slug>.browser) wraps the same no-response failure in its
+# own words first — "request failed: GET <path> - Failed to fetch", "live stream failed:
+# TypeError: Failed to fetch" — so a rule anchored only at ^ never sees it and a dropped
+# background poll reopens on the queue every few minutes. The wrapped rule is anchored at the
+# END of the bare transport text: a reporter that says "(2 consecutive background attempts, no
+# response)" is describing a SUSTAINED outage, and that row still queues.
+_WRAPPED_TRANSPORT = r"(TypeError: )?(Failed to fetch|NetworkError[^()]*|Load failed)$"
+_APP_BLIP = re.compile(r"^(Failed to fetch|NetworkError|Load failed|"
+                       r"request failed: [A-Z]+ \S* - " + _WRAPPED_TRANSPORT + r"|"
+                       r"live stream failed: " + _WRAPPED_TRANSPORT + r"|" + _ABORT + r")", re.I)
 
 
 def _error_bar(row):
@@ -224,28 +243,52 @@ def _error_bar(row):
         return False, "severity %s" % sev
     # A tab that briefly could not reach the hub is the board losing its connection, not a
     # defect anybody can be asked to fix.
-    if str(row.get("source") or "").startswith("browser.") and _BLIP.match(str(row.get("message") or "")):
+    source, message = str(row.get("source") or ""), str(row.get("message") or "")
+    if source.startswith("browser.") and _BLIP.match(message):
+        return False, "transport blip that recovered"
+    if source.startswith("app.") and source.endswith(".browser") and _APP_BLIP.match(message):
         return False, "transport blip that recovered"
     return True, ""
 
 
-def _errors_block():
+def _row_app(row):
+    """Which service a row belongs to — the reported app beats the one decoded from source."""
+    return str((row.get("context") or {}).get("app") or row.get("origin_app") or "").lower()
+
+
+def _errors_block(app=""):
     """The operational error stream, bar-annotated, plus the SHAPE a reader actually needs:
-    is it getting worse, which source is responsible, and is any of it even ours."""
+    is it getting worse, which source is responsible, and is any of it even ours.
+
+    COUNT THE QUEUE, NOT THE LISTING. Every count below comes from the bar's own verdict on
+    each row, never from whatever subset a caller asked to SEE: a listing that includes the
+    deferred rows must not report them as unassigned work (a live board once answered "67
+    unclaimed" about a queue holding zero, every one of the 67 a startup notice or a
+    transport blip the bar had already dismissed). `app` narrows the stream to one service
+    before anything is counted, so a per-service reader gets that service's truth."""
     rows, metadata = errorlog.read(hub_app.HUB_DIR)
+    app = str(app or "").strip().lower()
+    if app:
+        rows = [r for r in rows if _row_app(r) == app]
     now = time.time()
     buckets = [0] * 24
     severities = {"critical": 0, "error": 0, "warning": 0}
     sources, external, on_bar_n, unclaimed = {}, 0, 0, []
+    claimed_n, deferred_n, deferred_open, reasons = 0, 0, 0, {}
     for row in rows:
         ok, why = _error_bar(row)
         row["bar"] = "on" if ok else "deferred"
         if not ok:
             row["defer_reason"] = why
+            deferred_n += 1
+            deferred_open += 0 if row.get("acked") else 1
+            reasons[why] = reasons.get(why, 0) + 1
         else:
             on_bar_n += 1
             if not row.get("acked"):
                 unclaimed.append(row)
+            else:
+                claimed_n += 1
         try:
             age_h = int((now - float(row.get("epoch") or 0)) // 3600)
         except (TypeError, ValueError):
@@ -282,7 +325,16 @@ def _errors_block():
         "top_sources": sorted(sources.values(), key=lambda s: -s["count"])[:6],
         "external_rows": external, "app_rows": max(0, len(rows) - external),
         "trend": trend, "last_24h": sum(buckets),
-        "on_board": on_bar_n, "unclaimed": len(unclaimed),
+        "on_board": on_bar_n, "unclaimed": len(unclaimed), "claimed": claimed_n,
+        # The queue's oldest unclaimed row. A below-bar row ageing for a day is not a queue
+        # that has been ignored for a day, and this figure is read as exactly that.
+        "oldest_unclaimed_s": max((int(now - float(r.get("epoch") or now)) for r in unclaimed),
+                                  default=0),
+        # What the bar held back, broken out under its own key rather than folded into the
+        # queue's numbers — counted, kept, one query away, and never mistaken for work.
+        "deferred": deferred_n,
+        "off_board": {"rows": deferred_n, "open": deferred_open,
+                      "reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1]))},
         # "Is this everything?" is the one question a list of errors can never answer about
         # itself, and the one a reader must have answered before an empty card may be read
         # as good news.
@@ -1388,9 +1440,16 @@ def errors_json(request):
     """The operational error stream with the bar applied at read. Deferred rows are never
     DROPPED — a stream that silently discards two thirds of its input is one whose "all
     clear" cannot be trusted; they are one query param away (?include=deferred)."""
-    rows, metadata, _unclaimed = _errors_block()
+    app = re.sub(r"[^a-z0-9-]", "", (request.GET.get("app") or "").strip().lower())[:60]
+    rows, metadata, _unclaimed = _errors_block(app=app)
     include = (request.GET.get("include") or "").lower()
     data = rows if include in ("deferred", "all") else [r for r in rows if r.get("bar") == "on"]
+    if app:
+        # One service's own slice — what an app's chrome shows as "recent errors". The counts
+        # above were already computed over this slice, so they describe the same rows.
+        metadata["app"] = app
+        cov = metadata.get("coverage") or {}
+        cov["channels"] = [c for c in cov.get("channels") or [] if c.get("key") == "app"]
     metadata["bar"] = ("every row recorded in the window; `bar` says which are on the board"
                        if data is rows else
                        "critical and high problems in this system's own surfaces; add "
