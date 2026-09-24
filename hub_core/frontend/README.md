@@ -10,6 +10,15 @@ There is no manual sync affordance because a connected Hub is already current. K
 idempotent, keep an open entity dialog live, preserve focus and scroll position, and never animate
 a heartbeat, replay, or no-op. Connection status says exactly `Connected` or `Disconnected`.
 
+`surfaces.js` owns record reading and live reconciliation for every view: a detail dialog reads
+the WHOLE record (`<type>/<local>.json`) and renders every field it carries — structured values
+as structure, record ids as links that open in place, only http(s) as external links, never
+record text as HTML — and a live change patches the attached DOM by record identity
+(`data-entity-id`, `data-record-version`) instead of rebuilding it, so focus, scroll, open
+sections and filters survive. Reads of one URL already in flight share one request. Any record
+has an address (`?tab=<view>#<type>-<local>`) that resolves even when the snapshot does not
+carry it; a failed read says so with a retry.
+
 Semantic tokens—not one-off colors and dimensions—carry project identity, hierarchy, spacing,
 surface depth, state, and motion. Preserve the zero-CDN runtime floor unless an ADR records the
 exception. Tabs and dialogs follow the keyboard/focus contracts in the canonical document; status
