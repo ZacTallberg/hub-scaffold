@@ -59,8 +59,19 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   capability"; `metadata.scored` is the denominator of what is shown.
 - Components: `search-bar` (one search box any app links; suggest, learned top match, an
   app-computed smart pass, three distinct failure states) and `header-takeover` (the banner
-  hides the header an app names, warns about one it did not, and hides duplicate controls only
-  while it draws their counterpart) — `patterns/app-search-and-header-takeover.md`.
+  hides the header an app names, warns about one it did not, hides duplicate controls only
+  while it draws their counterpart, keeps one tour / read-me / People and Permissions row in the
+  drawer, and reads `hide_custom` from `/hub/components/props/<slug>.json`), both served from
+  `/hub/components/` — `patterns/app-search-and-header-takeover.md`. The example's
+  `/demo/reporting/` page adopts both, with its own suggest endpoint.
+- A record written since the last `semantic_index` run is ranked by its wording at full weight
+  instead of as "meaning = 0", so a just-written exact match ranks first before it is indexed
+  (it had ranked below records sharing none of its words).
+- One definition of a retired record (`hub_core/record_state`, now including `removed`) serves
+  search, the prompt index, the mirror feed and the overlap tagger alike.
+- Table tabs say when their collection last changed ("newest 4m ago"), with a `snapshot` badge
+  once nothing has been written for a week. `client gap` and MCP `record_gap` take a `note`
+  like the other record verbs.
 - A secret-shape check no longer refuses a documented placeholder containing spaces
   (`TOKEN=<supplied by the deploy>`).
 - Patterns: `knowledge-retrieval.md`, `vendored-app-kits.md`, and stale `index.lock` recovery in
