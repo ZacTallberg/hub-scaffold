@@ -323,7 +323,7 @@ project key are renameable bindings; the rules are not.
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
-      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." } }, "required": ["step", "done"] },
+      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." }, "kind": { "type": "string", "maxLength": 40, "description": "Row class; `handed_back` is the one self-counting row a hand-back writes." }, "lifecycle": { "type": "boolean", "description": "A lifecycle row (a hand-back): shown on the task, never counted as a done step." }, "times": { "type": "integer", "minimum": 1, "description": "How many times this lifecycle event happened; a hand-back row counts itself." } }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
@@ -704,6 +704,7 @@ project key are renameable bindings; the rules are not.
     "tags": { "type": "array", "items": { "type": "string" } },
     "relates_to": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "task/adr/feat this came from or informs." },
     "asker": { "type": "string", "description": "For a note tagged `question`: who asked, stamped once by the ask endpoint. First-class on purpose — provenance.agent becomes whoever LAST touched the note (the answerer, after an answer), so deriving the asker from provenance mis-addresses every re-answered reply." },
+    "hop": { "type": "integer", "minimum": 0, "maximum": 9, "description": "For a question raised by an unattended run: how many unattended hops deep it is (absent/0 = a person or an attended session). Bounds agent-to-agent escalation chains." },
     "found_at": { "type": "string", "description": "when/where it was learned." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }
@@ -1159,6 +1160,13 @@ require project-specific wiring.
 3. **Anti-stall:** cap per-item effort in bulk sweeps; close as INSUFFICIENT and continue rather than spiral.
 4. **No filler traffic:** no "ready to X" posts, no permission-seeking, no context/compaction
    narration — continuity lives in `HANDOFF.md`/seat `STATE.md`, not in worry.
+5. **Ask only for what you may not do.** Before asking, check whether anything is left that you
+   are not ALLOWED to do; landing, verifying and recording your own finished work is never a
+   blocker. Credentials the operator provisioned for the work are yours to use — look where the
+   project keeps them before asking. A figure, rate, category or definition is RESEARCH (the
+   source the work was built from, the data, the project's documents, the board's search), not a
+   question; only a genuine choice with no recorded answer is the operator's, and the ask says
+   where you already looked.
 
 ## §6 Project laws (append below; each cites its ADR)
 <!-- Crystallized, project-specific laws land here as they are born. Format:
