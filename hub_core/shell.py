@@ -28,7 +28,7 @@ def _asset(name):
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def render(snap, brand, csrf_token=""):
+def render(snap, brand, csrf_token="", csrf_cookie=""):
     """Return the full single-file HTML for the hub. `snap` = the /hub.json snapshot dict; `brand`
     = the navbar title (e.g. 'Project · Hub'). Escapes the JSON island (< -> \\u003c so a stray
     </script in any field can't close it) and inlined JS (</script -> <\\/script)."""
@@ -43,6 +43,8 @@ def render(snap, brand, csrf_token=""):
     repl = {
         "brand": _html.escape(str(brand)),
         "csrf_token": _html.escape(str(csrf_token or ""), quote=True),
+        # The cookie NAME the board reads its token from at send time (settings-rendered).
+        "csrf_cookie": _html.escape(str(csrf_cookie or ""), quote=True),
         "project_key": ident["key"],
         "visual_mark": visual["mark"],
         "accent_h": str(visual["accent_h"]),
