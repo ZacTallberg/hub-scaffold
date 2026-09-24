@@ -14,8 +14,10 @@
     const timer = window.setTimeout(function () { inflight && inflight.abort(); }, 10000);
     try {
       const url = body.dataset.poll + "?fp=" + encodeURIComponent(body.dataset.fp || "");
-      const r = await fetch(url, { credentials: "same-origin", signal: inflight.signal,
+      const request = fetch(url, { credentials: "same-origin", signal: inflight.signal,
                                    headers: { "X-Requested-With": "fetch" } });
+      /* Counted as busy, so an intent warm-up never competes with the swap. */
+      const r = await (window.AppShell && window.AppShell.track ? window.AppShell.track(request) : request);
       if (r.status === 204) return;
       if (!r.ok) throw new Error("HTTP " + r.status);
       body.innerHTML = await r.text();

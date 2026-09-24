@@ -48,7 +48,10 @@ SKIP = {".git", "__pycache__", "node_modules", "migrations", ".venv", "venv", "s
 #: kit's own docstrings as the app's tool registry would hold an app with no assistant to three
 #: assistant MUST rules it structurally cannot clear.
 SUBSTRATE = {"assistant"}
-SUFFIXES = (".py", ".html", ".js", ".css", ".md", ".ps1", ".sh", ".yml", ".yaml")
+SUFFIXES = (".py", ".html", ".js", ".css", ".md", ".ps1", ".sh", ".yml", ".yaml", ".json")
+#: The .json files a rule reads. Every other .json (lockfiles, fixtures, data) is skipped: the
+#: suffix is admitted only so the deploy manifest is not invisible to the deploy rule.
+MANIFESTS = {"services.json"}
 
 
 def _declared_dirs(root: Path, key: str):
@@ -112,6 +115,11 @@ class Corpus:
             return set()
 
     def _add(self, rel: str, path: Path, text: str) -> None:
+        if path.suffix == ".json":
+            if path.name in MANIFESTS:
+                self.files[rel] = text
+                self.ops += "\n" + text
+            return
         self.files[rel] = text
         suffix = path.suffix
         if suffix == ".py" and not path.name.startswith("test"):
@@ -570,10 +578,24 @@ def _auth(c):
       "The deploy itself asserts the app's root refuses an anonymous request.",
       "kits/service-runner --verify <name>: 'AUTH POSTURE FAILED' when a gated root answers 200.")
 def _auth_deploy(c):
-    if not c.has(r"services\.json|deploy", where="ops") and not any(
-            n.endswith("services.json") for n in c.files):
+    manifests = [n for n in c.files if n.rsplit("/", 1)[-1] == "services.json"]
+    if not manifests and not c.has(r"services\.json|deploy", where="ops"):
         return None, "no deploy lane in this tree"
-    return c.has(r"--verify|AUTH POSTURE", where="ops"), "deploy verifies anonymous refusal"
+    gates, unreadable = [], []
+    for name in manifests:
+        try:
+            services = json.loads(c.files[name]).get("services") or []
+        except (ValueError, AttributeError):
+            unreadable.append(name)
+            continue
+        gates += [s.get("gate") if isinstance(s, dict) else None for s in services]
+    undeclared = sum(1 for g in gates if g not in ("required", "public"))
+    runner = any(n.rsplit("/", 1)[-1] == "service_runner.py" for n in c.files)
+    scripted = c.has(r"--verify|AUTH POSTURE", where="ops")
+    ok = not unreadable and not undeclared and (runner or scripted) and (gates or scripted)
+    return ok, (f"{len(gates)} service(s), {len(gates) - undeclared} with a declared gate"
+                + (f"; unreadable manifest {', '.join(unreadable)}" if unreadable else "")
+                + ("; verifier present" if runner or scripted else "; no verifier in the tree"))
 
 
 @rule("health-endpoints", "proof", 3, True,

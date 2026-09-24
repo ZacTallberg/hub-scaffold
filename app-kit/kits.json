@@ -80,14 +80,14 @@
   "service-runner": {
    "files": {
     "KIT.json": "d135522947fbffad3165335a8f4feecbb424c3f5",
-    "README.md": "51b534920e620aa164edd05870530a9226f9df67",
+    "README.md": "dc1b62bb587f490137b0bb3e1e95f9eab5d33919",
     "REQUIRES.md": "a60ebc00d7117cde7473160174a080d5a87c19f7",
-    "service_runner.py": "86222a0a62a9db08121b7edb6176a00c2aac1097"
+    "service_runner.py": "63746f4bc711c2e0006ded3f38319caab67e3ef9"
    },
    "installs": [
     "service_runner.py"
    ],
-   "kit_sha": "9ed86ac96debec77179da5b944ee9177dc15583d",
+   "kit_sha": "47bf8b633d0062d3f64a3f12d4fa18a49b9a207f",
    "replaced_by": "",
    "state": "active",
    "summary": "Run, supervise and verify declared services from one strict manifest; a requested stop is not a crash"
@@ -118,9 +118,9 @@
     "app_shell/apps.py": "36327e2a096bc7985444d10c9a689ea568821263",
     "app_shell/checks.py": "6c17ba133c23b6df1b87253a98e43e19f954e03e",
     "app_shell/context_processors.py": "171a15adff0054f0b3e221629b8b8f81cc66431b",
-    "app_shell/static/app_shell/prefetch.js": "e36f40bc082de80a7f092991f2b974f5317272e8",
+    "app_shell/static/app_shell/prefetch.js": "3917d4ebd4a5c6beddb7edcaa537290c1e6b7a93",
     "app_shell/static/app_shell/shell.css": "567b240f8c70736534e6bb921aa02f8c84d8f994",
-    "app_shell/static/app_shell/shell.js": "c96c5a1cbc9827829a66e8471756611b8e3d75d8",
+    "app_shell/static/app_shell/shell.js": "0184072f28fb616f6378921d9ab0701fab2ea2c6",
     "app_shell/templates/app_shell/_confirm.html": "0a901717609d4f0ec8dba7baf9b174983372b7d3",
     "app_shell/templates/app_shell/_drawer.html": "10a0e8fab70f967659cf9b575935f8503222b7b9",
     "app_shell/templates/app_shell/_live.html": "f702a8e2092966ab39ec74f9f319a997389f2bb7",
@@ -131,7 +131,7 @@
    "installs": [
     "app_shell"
    ],
-   "kit_sha": "ad3ef8834d452c8f8b8dcef8f802597456e344d4",
+   "kit_sha": "eab25f6da8e130bfa43d0c49500261d0dc67a479",
    "replaced_by": "",
    "state": "active",
    "summary": "App shell whose capabilities (toasts, palette, live, drawer, confirm, transitions, prefetch) are declared, not always-on"

@@ -45,6 +45,13 @@ standing test suite.
   current / stale / edited / retired.
 - **`app-kit/example/`**: a small budget app assembled from the kits, forwarding server errors to
   the hub's `app-error` stream.
+- **Corrections after review.** The service runner imports the manifest's `entry` from the app
+  root (the parent of `deploy/`), so the documented command runs without `PYTHONPATH`; the shell
+  raises the shared busy count for its own drawer fetches and exposes `AppShell.track(promise)`,
+  so intent prefetch stands aside for a request a person is waiting on with or without htmx; the
+  audit reads `services.json`, so `auth-deploy-verified` applies to a kit-built app and checks
+  every service declares its gate; `kits.py record` refuses a retired kit whose `replaced_by` is
+  not an existing active kit.
 
 ### The upsert, completed to every seam the scaffold already speaks
 
