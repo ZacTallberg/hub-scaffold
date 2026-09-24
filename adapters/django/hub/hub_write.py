@@ -1207,18 +1207,6 @@ def ask(request, b):
     local = "q-%s-%s" % (_slug(agent, "agent"),
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
-    if not b.get("anyway"):
-        # THIS asker's identical wording is the same entity, not a duplicate: a retry of an ask
-        # whose response was lost must replay (or update in place), never be refused as a copy
-        # of itself -- that is a write that landed being reported as a failure.
-        dups = [hit for hit in _already_covered(state, text) if hit.get("id") != eid]
-        if dups:
-            return JsonResponse({"errors": [{"code": "duplicate_question",
-                "msg": "the board already has this question — read the matches first; if "
-                       "yours is genuinely different, retry with anyway=true; if it is the "
-                       "same one still unanswered, add to that thread instead of filing "
-                       "another copy",
-                "matches": dups}]}, status=409)
     existing = state["entities"].get(eid)
     payload = {"type": "note", "category": "context", "title": text[:300],
                "asker": agent, "status": "standing", "tags": ["question", "open"],
@@ -1226,6 +1214,31 @@ def ask(request, b):
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:
         payload["relates_to"] = related
+    if not b.get("anyway"):
+        # THIS asker's identical wording is the same entity, not a duplicate, in exactly two
+        # cases: the question is STILL OPEN (a keyless retry of an ask whose response was lost
+        # updates it in place), or this exact keyed request already landed (the store replays
+        # it). Refusing either would report a write that landed as a failure. Once the question
+        # is answered, a keyless re-ask is a duplicate like any other: it must never overwrite
+        # the answer and silently reopen the thread.
+        still_open = (bool(existing) and existing.get("status") == "standing"
+                      and "open" in (existing.get("tags") or []))
+        own_replay = False
+        if existing and b.get("idem_key"):
+            ledger = hub_app.store()
+            try:
+                own_replay = ledger.has_idem(eid, _request_scoped_idem(b.get("idem_key"), payload))
+            finally:
+                ledger.close()
+        dups = [hit for hit in _already_covered(state, text)
+                if not ((still_open or own_replay) and hit.get("id") == eid)]
+        if dups:
+            return JsonResponse({"errors": [{"code": "duplicate_question",
+                "msg": "the board already has this question — read the matches first; if "
+                       "yours is genuinely different, retry with anyway=true; if it is the "
+                       "same one still unanswered, add to that thread instead of filing "
+                       "another copy",
+                "matches": dups}]}, status=409)
     resp, status = _append("note", eid, payload,
                            expected_version=existing.get("version") if existing else None,
                            agent=agent, idem=b.get("idem_key"), etype="note.created")
