@@ -16,7 +16,7 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import agent_auth, collision, flow, ids, schedule, secretscan, validate
+from hub_core import agent_auth, collision, flow, ids, schedule, secretscan, textguard, validate
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
@@ -108,6 +108,16 @@ def writer(fn=None, *, scope=None):
                        f"is append-only and hash-chained — a secret written here can never be "
                        f"removed. Redact it and retry. If a real secret already reached the "
                        f"ledger, ROTATE it; editing the chain is not possible."}]}, status=422)
+        # CONTROL-BYTE REFUSAL, same choke point, same reasoning: a backslash escape eaten
+        # between an author's source and this call (\a inside a Windows path) lands raw BEL
+        # bytes in the ledger, invisible on the page and corrupting every reader's copy. The
+        # operational error stream is exempt — it never enters the ledger, and a stack trace
+        # with ESC colour codes refused at the door is a failure nobody would ever see.
+        if scope != "error:report":
+            controls = textguard.control_char_problems(b)
+            if controls:
+                return JsonResponse({"errors": [{"code": "control_chars",
+                    "msg": textguard.message(controls), "found": controls}]}, status=422)
         requested_agent = b.get("agent")
         if auth.mode == "scoped-agent":
             if requested_agent not in (None, "", auth.subject):
