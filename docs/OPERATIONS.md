@@ -68,12 +68,40 @@ loss of the complete board is acceptable.
 
 ## Backup and restore
 
-1. Stop or drain Hub writers, or take a filesystem snapshot with atomic snapshot semantics.
-2. Copy the whole `HUB_DIR` to protected storage.
-3. During an explicitly scoped disaster-recovery operation, restore into a disposable separate
-   path, set `HUB_DIR`, and open the EventStore.
-4. Because restore is a destructive-data boundary, use one decisive integrity observation such as
-   `hubaudit`, retain its receipt, and delete the disposable restored copy before commit.
+`python manage.py hubbackup` takes a full, VERIFIED backup while the Hub keeps serving:
+
+- **What it carries:** the whole `HUB_DIR` tree minus an exclude list (locks, temp files, the
+  rebuildable `events.db*` index), plus the Django database when it is SQLite (`VACUUM INTO` on its
+  own connection, `integrity_check`, a per-table row-count floor). Exclusion, not an include
+  list: a file added to `HUB_DIR` later is carried automatically instead of silently missing.
+- **What "verified" means:** the bundled ledger is extracted into an isolated directory, folded,
+  and compared entity by entity with the live board at the copy's head
+  (`hub_core.reconstruct.verify`). An empty fold, a comparison that examined zero entities, or any
+  differing entity refuses the backup and names the entities. The manifest records the board
+  digest, the entity count compared, the head seq/hash and the bundle's sha256.
+- **Where it goes:** `HUB_BACKUP_VAULT`. The vault is proven writable with a probe file; if it is
+  not, the backup falls back to `<BASE_DIR>/.hub-backups` (git-ignored), keeps at most 3 there,
+  and prints `HUBBACKUP_VAULT_FALLBACK` with the reason. Retention (`--keep`, default 7) is pruned
+  BEFORE the copy and free space is checked first, so a full disk is a state the next run recovers
+  from rather than one it is stuck in. A failed run removes its half-written folder.
+- **Off-host copy:** `HUB_BACKUP_MIRROR` is a directory (a mounted share or another disk; the copy
+  is re-hashed after it lands) or `module:function`, an adapter seam
+  `function(folder, manifest) -> location` for object storage, a database table, anything else.
+  `--require-mirror` fails the run when the off-host copy did not land: a job that reports a
+  backup protecting nothing must not exit 0.
+- **Freshness:** `hubbackup --status` lists the newest backup per vault and exits 1
+  (`HUBBACKUP_STALE`) when no OFF-HOST copy is newer than 26 hours. Schedule both (daily
+  `hubbackup --require-mirror`, then `--status`) where your scheduler raises a failed job.
+
+**Before a deploy** that swaps the checkout or runs migrations, take one with
+`--reason pre-deploy`; see `patterns/deploy-runbook.md`.
+
+**Restore** is an explicit disaster-recovery operation. `hubbackup --restore-into <empty-dir>`
+extracts the newest VERIFIED backup across every vault into an empty directory and refuses a
+non-empty target or the live `HUB_DIR`. Review it, open it once (`EventStore` rebuilds the index
+from `events.jsonl`), take one decisive observation such as `hubaudit` against it, and only then
+point `HUB_DIR` at it with writers stopped. Never copy a backup over a live ledger that is LONGER
+than the backup: that deletes history the backup never saw.
 5. Start serving only after the actual restored board matches the pre-loss record.
 
 `events.db` may be deleted from an offline restored copy; the EventStore rebuilds it from
