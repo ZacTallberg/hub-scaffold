@@ -26,6 +26,8 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   with; creates scope it to the type's id prefix and answer `data.replayed`; the store allocates
   server-numbered ids under its write lock (`append(allocate=...)`), so parallel creates land as
   distinct records. `python -m hub_core.client` retries transport failures with the same key.
+  A keyless re-ask of an ANSWERED question is refused as a duplicate; only a still-open question
+  is its own retry.
 - **Errors fold by cause.** Fingerprints ignore uuids, ids, numbers and quoted values; the
   newest row of a signature carries the repeats folded since it was written.
 - **Reads scale.** `hub.json` carries a weak ETag that ignores clock fields, accepted from
@@ -37,7 +39,9 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   projections off the request process; `hub.prewarm.start()` warms the served process;
   `GET /hub/perf.json` / `client perf` names the answering process.
 - **Verified backups.** `manage.py hubbackup` bundles `HUB_DIR` by exclusion, verifies by
-  REBUILDING the board (`hub_core.reconstruct`), prunes before copying, falls back to a
+  REBUILDING the board (`hub_core.reconstruct`) at a live cursor recorded before bundling (a
+  copy shorter than the source is refused, never compared only as far as it reaches), prunes
+  before copying, falls back to a
   git-ignored vault, ships an off-host copy, and reports staleness; restore goes only into an
   empty directory. The deploy runbook gains the pre-deploy backup and a fast-push-path section.
 - **Also:** the scrub gate refuses stray control bytes; `patterns/read-access-grants.md`

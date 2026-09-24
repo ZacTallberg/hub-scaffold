@@ -14,10 +14,13 @@ Forgetting to exclude something only makes the backup larger. The Django databas
 when it is SQLite (``VACUUM INTO`` on its own connection, then ``integrity_check`` and a per-table
 row-count floor); another engine is recorded as such and belongs to that engine's own tooling.
 
-WHAT "VERIFIED" MEANS: the bundled ledger is extracted into an isolated directory, folded, and
-compared entity by entity with the live board at the copy's head (``hub_core.reconstruct``). An
+WHAT "VERIFIED" MEANS: the live ledger's cursor (head seq, that event's hash, the file's size) is
+recorded BEFORE bundling. The bundled events.jsonl must be at least that many bytes, and its event
+at that seq must carry that hash -- a copy shorter than the source is refused, never compared only
+as far as it reaches. The bundled ledger is then extracted into an isolated directory, folded, and
+compared entity by entity with the live board at the recorded cursor (``hub_core.reconstruct``). An
 empty fold, a comparison that examined nothing, or any differing entity refuses the backup; the
-manifest records the board digest and how many entities were compared.
+manifest records the cursor, both sizes, the board digest and how many entities were compared.
 
 WHERE IT GOES: ``HUB_BACKUP_VAULT`` (setting or environment). The vault is PROVEN writable by
 creating a probe file -- a parent directory that exists says nothing about whether this identity
@@ -332,13 +335,23 @@ class Command(BaseCommand):
         dest.mkdir(parents=True)
         try:
             database = _copy_database(dest)
+            # The live cursor (head seq, its hash, the file's size) is recorded BEFORE bundling:
+            # the copy must reach at least this far. Anything compared only as far as the copy
+            # itself reaches would pass a truncated ledger as identical.
+            cursor = reconstruct.live_cursor(hub_dir)
             carried = _bundle(hub_dir, dest / "hub.zip")
             if "events.jsonl" not in carried:
                 raise CommandError("the bundle does not carry events.jsonl")
+            with zipfile.ZipFile(dest / "hub.zip") as bundle:
+                bundled_bytes = bundle.getinfo("events.jsonl").file_size
+            if bundled_bytes < cursor["bytes"]:
+                raise CommandError("backup refused: copy shorter than source -- the bundled "
+                                   "events.jsonl is %d bytes, the live file was %d before bundling"
+                                   % (bundled_bytes, cursor["bytes"]))
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
                 with zipfile.ZipFile(dest / "hub.zip") as bundle:
                     bundle.extract("events.jsonl", scratch)
-                report = reconstruct.verify(hub_dir, scratch)
+                report = reconstruct.verify(hub_dir, scratch, cursor=cursor)
             if not report["ok"]:
                 raise CommandError("backup refused: %s" % report["why"])
             manifest = {
@@ -348,7 +361,9 @@ class Command(BaseCommand):
                 "hub_zip_bytes": (dest / "hub.zip").stat().st_size,
                 "database": database,
                 "reconstruct": {k: report[k] for k in ("ok", "compared", "head_seq", "head_hash",
-                                                       "rebuilt_digest", "live_entities")},
+                                                       "copy_head_seq", "rebuilt_digest",
+                                                       "live_entities")},
+                "ledger": {"live_bytes_before": cursor["bytes"], "bundled_bytes": bundled_bytes},
                 "vault": str(root), "fallback": is_fallback, "mirror": "",
             }
             (dest / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

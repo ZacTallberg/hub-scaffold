@@ -74,11 +74,15 @@ loss of the complete board is acceptable.
   rebuildable `events.db*` index), plus the Django database when it is SQLite (`VACUUM INTO` on its
   own connection, `integrity_check`, a per-table row-count floor). Exclusion, not an include
   list: a file added to `HUB_DIR` later is carried automatically instead of silently missing.
-- **What "verified" means:** the bundled ledger is extracted into an isolated directory, folded,
-  and compared entity by entity with the live board at the copy's head
-  (`hub_core.reconstruct.verify`). An empty fold, a comparison that examined zero entities, or any
-  differing entity refuses the backup and names the entities. The manifest records the board
-  digest, the entity count compared, the head seq/hash and the bundle's sha256.
+- **What "verified" means:** the live ledger's cursor (head seq, that event's hash, the file's
+  size) is recorded BEFORE bundling. A bundled `events.jsonl` smaller than that size, or one whose
+  event at that seq is missing or carries another hash, is refused as `copy shorter than source`
+  -- a copy is never compared only as far as it happens to reach. The bundled ledger is then
+  extracted into an isolated directory, folded, and compared entity by entity with the live board
+  at the recorded cursor (`hub_core.reconstruct.verify`). An empty fold, a comparison that
+  examined zero entities, or any differing entity refuses the backup and names the entities. The
+  manifest records the board digest, the entity count compared, the cursor seq/hash, both ledger
+  sizes and the bundle's sha256.
 - **Where it goes:** `HUB_BACKUP_VAULT`. The vault is proven writable with a probe file; if it is
   not, the backup falls back to `<BASE_DIR>/.hub-backups` (git-ignored), keeps at most 3 there,
   and prints `HUBBACKUP_VAULT_FALLBACK` with the reason. Retention (`--keep`, default 7) is pruned

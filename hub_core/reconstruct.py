@@ -5,11 +5,17 @@ question a backup exists for: IF WE RESTORED THIS, WOULD WE GET THE SAME BOARD? 
 a ledger copy in isolation and compares it with the live fold entity by entity, and the result
 names the exact entities that differ instead of returning a bare verdict.
 
-The live fold is taken AT THE COPY'S HEAD (events with ``seq`` up to the copy's last seq), so a
-write that lands while the backup is being taken is not reported as a difference: the copy is
-compared with the board as it stood when the copy was cut.
+Both folds are taken AT A CURSOR RECORDED FROM THE LIVE LEDGER BEFORE THE COPY WAS CUT
+(``live_cursor``: its head seq, that event's hash, and the file's size). A write that lands while
+the backup is being taken is therefore not a difference, and -- the reason the cursor comes from
+the SOURCE and never from the copy -- a copy missing a suffix of the ledger cannot pass by being
+compared with the board only as far as it happens to reach. Folding "up to the copy's own head"
+would call a truncated copy identical, and a short copy is the most likely damage there is.
 
-Three refusals, each one a way this check could otherwise pass while proving nothing:
+Four refusals, each one a way this check could otherwise pass while proving nothing:
+
+* COPY SHORTER THAN SOURCE -- the copy's head seq is below the recorded live cursor, or its event
+  at that seq does not carry the recorded hash (a different or rewritten history).
 
 * EMPTY SOURCE -- a copy that folds to no entities is a backup of nothing; with no entities, no
   entity differs, so agreement would be trivial.
@@ -78,17 +84,44 @@ def compare(live: dict, rebuilt: dict) -> dict:
     }
 
 
-def verify(live_root, rebuilt_root) -> dict:
-    """Fold the copy at ``rebuilt_root`` and the live ledger at ``live_root`` up to the copy's head,
-    and compare. ``ok`` is true only when entities were compared and none differed; otherwise
-    ``why`` says what failed in words a backup log can print."""
-    rebuilt_events = _events(rebuilt_root)
-    head = rebuilt_events[-1]["seq"] if rebuilt_events else 0
+def live_cursor(live_root) -> dict:
+    """The live ledger's head as it stands NOW: ``{"seq", "hash", "bytes"}``. Take it BEFORE
+    bundling a copy and hand it to ``verify``; the copy must reach at least this far."""
+    root = Path(live_root)
+    jsonl = root / "events.jsonl"
+    size = jsonl.stat().st_size if jsonl.is_file() else 0
+    store = EventStore(root)
+    try:
+        head = store.latest_cursor()
+    finally:
+        store.close()
+    return {"seq": int(head.get("seq") or 0), "hash": str(head.get("hash") or ""), "bytes": size}
+
+
+def verify(live_root, rebuilt_root, cursor: dict | None = None) -> dict:
+    """Fold the copy at ``rebuilt_root`` and the live ledger at ``live_root`` up to ``cursor`` (a
+    ``live_cursor`` recorded before the copy was cut; taken now when omitted), and compare. ``ok``
+    is true only when the copy reaches the cursor with the same event there, entities were
+    compared, and none differed; otherwise ``why`` says what failed in words a backup log can
+    print."""
+    if cursor is None:
+        cursor = live_cursor(live_root)
+    head, head_hash = int(cursor.get("seq") or 0), str(cursor.get("hash") or "")
+    rebuilt_all = _events(rebuilt_root)
+    copy_head = rebuilt_all[-1]["seq"] if rebuilt_all else 0
+    at_head = next((e for e in rebuilt_all if e.get("seq") == head), None)
+    rebuilt_events = [e for e in rebuilt_all if e.get("seq", 0) <= head]
     live_events = [e for e in _events(live_root) if e.get("seq", 0) <= head]
     report = compare(project.fold(live_events), project.fold(rebuilt_events))
-    report.update({"source": str(rebuilt_root), "head_seq": head,
-                   "head_hash": rebuilt_events[-1].get("hash", "") if rebuilt_events else ""})
-    if not report["rebuilt_entities"]:
+    report.update({"source": str(rebuilt_root), "head_seq": head, "head_hash": head_hash,
+                   "copy_head_seq": copy_head})
+    if copy_head < head:
+        report.update(ok=False, why="copy shorter than source: the copy ends at seq %d, the live "
+                      "ledger was at seq %d before the copy was cut" % (copy_head, head))
+    elif head and (at_head is None or (head_hash and at_head.get("hash") != head_hash)):
+        report.update(ok=False, why="copy diverges from source: its event at seq %d does not "
+                      "carry the live hash %s" % (head, head_hash[:12] or "-"))
+    elif not report["rebuilt_entities"]:
         report.update(ok=False, why="the ledger copy folded to NO entities -- a backup that "
                                     "rebuilds an empty board proves nothing")
     elif not report["compared"]:

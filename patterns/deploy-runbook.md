@@ -48,7 +48,8 @@ command for each, keep it beside the runbook, and every step below becomes liter
    and read its `HUBBACKUP_TAKEN` line. The protection must work on the host as it IS: prove the
    vault writable rather than assuming it, fall back to a git-ignored path inside the checkout
    (one a reset does not delete) when it is not, prune BEFORE copying (and keep fewer in the
-   fallback, which shares the disk), verify the copy is not shorter than the source, and remove a
+   fallback, which shares the disk), verify the copy is not shorter than the source (record the
+   live head and size BEFORE copying; refuse a copy that does not reach both), and remove a
    half-written copy. A protection step that fails on a permission error while the pipeline stays
    green is the same as having none — make that failure red.
 3. **Stamp the build identity, then read it back** (only if your platform needs `SET_BUILD_ID`).
