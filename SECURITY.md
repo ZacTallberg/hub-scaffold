@@ -136,6 +136,23 @@ only its `@writer` decorator decides whether that credential's scopes permit the
 - Protect and back up `HUB_DIR`. It contains the event ledger, hashed agent-credential registry,
   and the launch signing secret when worker launch has been used.
 
+## App-service boundary
+
+The services the hub offers the apps around it (`patterns/app-services.md`) split along one line:
+
+- `/hub/components/…` serves presentation files and per-app component properties openly. Nothing
+  there is a board record or identity; keep secrets out of component properties, because every
+  reader of an adopting app can fetch them. Only files on disk under a component directory with
+  an allowed suffix are served.
+- `/hub/api/profile` and `/hub/api/agent/*` authenticate the calling APP (scoped credential) and
+  trust it to name the person. They must be reached only from an app's server, behind that app's
+  own sign-in. A credential holding `profile:write` can change any person's preferences, and
+  `agent:ask` spends the agent service's quota — issue them per app, scoped, and expiring.
+- The agent service key (`HUB_AGENT_KEY`) is held by the hub alone and never returned. TLS to the
+  agent service is verified unless `HUB_AGENT_TLS_VERIFY` is explicitly false.
+- `HUB_DIR/profiles.json`, `component-props.json` and `component-adopters.json` are mutable
+  sidecars, not ledger history; back them up with `HUB_DIR`.
+
 ## Worker-launch boundary
 
 Worker launch is disabled by default. When enabled:

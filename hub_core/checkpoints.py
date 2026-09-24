@@ -136,7 +136,8 @@ def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_
     target["done"] = True
     target.pop("auto", None)
     if note:
-        target["note"] = str(note)[:600]
+        # Whole: the next reader acts on it; a surface that must fit a line shows a preview.
+        target["note"] = str(note)
     if at:
         target["note_at"] = at
     if kind != "checkpoint" or target.get("kind"):

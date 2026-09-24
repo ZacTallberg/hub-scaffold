@@ -55,7 +55,11 @@ from a working multi-project system. Nothing here names any specific person, hos
   (`machine-push-identity.md`), and the **presence gate** (`presence-gate.py`: a harness hook that
   derives the files a console edited, so the board can name two consoles editing one file), and **read access grants**
   (`read-access-grants.md`: a private board admits its static allowlist plus the ledger's own
-  active grants — bounded, fail-soft, never wider on a failed read).
+  active grants — bounded, fail-soft, never wider on a failed read), and **app services**
+  (`app-services.md`: hosted UI components apps link instead of copy, per-app component
+  properties, each app's slice of the board, per-person preferences, and the hub as the one
+  credential broker to an agent service — its routes ship mounted but do nothing until an app
+  links a component or `HUB_AGENT_URL` is set).
   Operating write-ups for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys
   that CI never cancels, push-only change triggers, job ceilings, publications from the protected
   ref), `app-slots.md` (allocate / stage / cut over / retire / re-adopt an app's port, service and

@@ -396,7 +396,7 @@ def directive_items(state, agent: str, now=None, *, machine: str = "", session: 
             "kind": "answer" if answered else "directive",
             "id": eid,
             "from": _text(prov.get("agent") or "the operator", 60),
-            "title": _text(ent.get("title"), 300),
+            "title": body_text(ent.get("title"), 4000),
             "body": body_text(ent.get("body_md")),
             "body_complete": len(str(ent.get("body_md") or "")) <= INBOX_BODY_LIMIT,
             "at": at,

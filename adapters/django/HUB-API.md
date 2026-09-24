@@ -61,11 +61,20 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
   `version+sha`) and `X-Hub-Artifacts` (`name=sha16,...` for every artifact the seat runs). A row
   that names a machine but carries neither kit header is a CALLER, not a computer: it is listed
   under `phantoms` and kept out of every device list, count and distribution grade.
+  `X-Hub-Cwd` and `X-Hub-Repo` are ONE fact: a report that
+  names a cwd sets the repo to whatever accompanies it, and a missing repo header beside a cwd
+  means "this directory is in no repository" (a report with no cwd changes neither).
+  `X-Hub-Files` (comma-separated recent files) replaces the stored list only when sent, is
+  stamped on arrival, and reads as empty once older than 15 minutes.
 
 ## READ endpoints (GET, public)
 
 | Endpoint | Returns |
 |---|---|
+| `GET /hub/components/` | The UI components this hub HOSTS for the apps around it: name, version (a hash of the served bytes, never a declared number), files, how to link and mount it, whether it takes per-app properties, and `used_by` — the apps OBSERVED loading it (from the component's own properties fetch). |
+| `GET /hub/components/<name>/<file>` | One file of one component (`.css .js .json .svg .png .map` only; anything not on disk under that component is 404 — there is no caller-controlled path). `ETag` + `X-Component-Version`, cached 5 minutes, so a change reaches every linking app within minutes and with no app deploy. |
+| `GET /hub/components/props/<slug>.json[?component=<name>]` | One app's component properties with the schema that bounds them (each component declares its own in its `manifest.json`). Revalidated every load. |
+| `GET /hub/app-feed.json?app=<slug>[&name=<display name>]` | One app's slice of the board: `checklist` (open tasks naming the app), `announcements` (notes tagged `built-on-request` naming it), `whats-new` (empty by design — a deploy record is not a change note; the app supplies its own). Every row names the field that matched; `metadata.counts` (shown) sits beside `metadata.matched` (before the 25-row cap). |
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`. The running identity comes from the artifact's pre-build `HUB_BUILD_STAMP`; optional `?served=<sha>` adds an external comparison and a mismatch is explicit. |
 | `GET /hub/hub.json` | Snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. `collection_counts` is exact for every collection; `partial` names each collection served as a HEAD (see below). |
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
@@ -142,7 +151,7 @@ source of truth, and every ratio carries its denominator.
 | `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
 | `fleet` | per-agent cards: current lease, plan step, the last checkpoint note, recent action trail, completions, machine, and every live console (`sessions`). An agent with no claim but a fresh console focus reads `active` — working, just not on a board task — never `idle`. |
 | `updates` | the newest 40 lines of the agents' own feed (what they fixed, answered, acked or shipped, with evidence). |
-| `sessions_live` | every live console, flat: agent, machine, session id, cwd, focus, age. The surface that stops two sessions from unknowingly working the same thing. |
+| `sessions_live` | every live console, flat: agent, machine, session id, cwd, repo, recent files (empty once older than 15 minutes), focus, age. The surface that stops two sessions from unknowingly working the same thing. |
 | `asks` / `asks_open` | open questions (who, what, since when). They also ride the attention rail. |
 | `errors` / `error_log` | the operational stream (bar-annotated rows) and its shape — histogram, trend, top sources, unclaimed count, per-channel coverage. |
 | `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. Readiness comes from actionable acceptance and dependencies, never from the presence of a test command. |
@@ -150,6 +159,7 @@ source of truth, and every ratio carries its denominator.
 | `dag` | critical path length, widest frontier, layer widths, the critical `path` itself, and the min-makespan `eta_tasks` for the fleet actually present. `acyclic: false` means the numbers are a floor, not a schedule. |
 | `progress` | done/total/pct plus MONOTONIC signals — `completed_total`, `last_1h`, `last_24h`, and a per-bucket `spark`. A ratio alone does not climb when the fleet discovers work as fast as it finishes it. |
 | `delivery` | Per-task accepted-operation proof / `landed` / `deployed` / `live`. For ordinary done work, required `verified_by` plus `evidence_uri` is its proof; only a task that explicitly declares a critical `verification_command` additionally needs a matching exit-0 transient receipt. Production delivery is the exact immutable deploy closure (`sha == served_sha`, task in `tasks_closed`) matching this running artifact's normalized build SHA; Git ancestry is optional legacy/source enrichment. |
+| `host_disk` | the drive holding the hub's own ledger: host, drive, `total_gb`, `free_gb`, `free_pct`, thresholds and `state` (`ok`/`warn`/`critical`/`unmeasured`). Always reported; cached 120 s. Below `HUB_DISK_WARN_GB` (default 15) a `host-disk-low` item joins the attention rail, ranked most-urgent below `HUB_DISK_CRITICAL_GB` (default 8). |
 | `attention` | the ranked "needs the operator" rail. |
 | `worker_health` | receipt outcomes and completions per seat, with denominators. |
 | `failure_modes` | what KIND of refusal the fleet keeps hitting, plus the unclassified count. |
@@ -398,6 +408,21 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | Endpoint (scope) | Key body fields | Behaviour |
 |---|---|---|
 | `/hub/api/agent-update` (`update:write`) | `summary`, optional `kind` (`fixed`/`answered`/`acked`/`shipped`/`escalated`/`noop`), `evidence`, `item`, `by` | `201 {row}`. The agent is the write seam's bound identity (a scoped credential cannot post as someone else); the machine comes from `X-Hub-Machine`. Stored append-only, so a reader holding the file cannot cost a write; a write genuinely lost to contention is `503 update_write_failed` with its `reason` (retry is safe) plus a `hub.agent-updates` warning row. `hub_core.client update --note … --evidence …` posts one; under `HUB_AUTOWORKER=1` the client's `answer`, `ack` and `finish` post their own line. MCP: `post_update`. |
+
+### Services to the apps around the hub
+
+These are called by an APP's server, never a browser: the app authenticates with its own scoped
+credential and names the person its own sign-in resolved. The hub authenticates the app; the app
+vouches for the person. `patterns/app-services.md` is the adopter's guide (component hosting, the
+bridge an app writes, the agent's upstream contract).
+
+| Endpoint (scope) | Key fields | Behaviour |
+|---|---|---|
+| `POST /hub/api/component-props` (`component:configure`) | `app` (slug), `props: {component: {key: value}}` | REPLACES the app's properties — a key left out returns to its default. Values outside a field's closed set or length cap are refused and listed in `refused` (never clamped); only non-default values are stored, with a short who/what/when history. |
+| `GET /hub/api/profile?person=` (`profile:read`) · `POST` (`profile:write`) | `prefs: {kind, image, theme, motion, text, ui, agent}` | A person's cross-app presentation choices. Every key is a closed set; out-of-range values are dropped and listed in `ignored`. The mark is initials or a small PNG/JPEG/WebP data URL (SVG refused: it can carry script). Stored in `HUB_DIR/profiles.json`, not the ledger. |
+| `POST /hub/api/agent/ask` (`agent:ask`) | `question`, optional `thread`, `person`, `conversation_id`, `app` | The hub forwards to the configured agent service with the ONE agent key it holds. Answers `{ok, answer, citations, conversation_id, history}`; `reason:"unconfigured"` names the missing setting; a refused, unreachable or slow service and an EMPTY answer are `reason:"failed"` with the cause. A deleted conversation is answered as a new one; a key that may not act for people still answers, with `history:"unconfigured"`. |
+| `GET /hub/api/agent/history?person=&app=&scope=app\|all` (`agent:history`) | | The person's past conversations for this app, or all. |
+| `GET /hub/api/agent/conversation?person=&id=` (`agent:history`) | | One conversation's turns. |
 
 ### The operational error stream
 

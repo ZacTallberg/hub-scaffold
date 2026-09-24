@@ -1,0 +1,34 @@
+{
+  "title": "Agent interface",
+  "what": "A chat panel an app links to put the brokered agent on its pages: a launcher (floating button, right-edge tab or header button), a docked, resizable sidebar that pushes the page instead of covering it, past conversations for this app or all apps, and distinct unconfigured / failed / empty states. It talks only to the APP's own bridge endpoints; the app's server forwards to /hub/api/agent/* with its hub credential, and the agent key never leaves the hub.",
+  "link": [
+    "<link rel=\"stylesheet\" href=\"/hub/components/agent/agent.css\">",
+    "<script src=\"/hub/components/agent/agent.js\" defer></script>"
+  ],
+  "mount": "<div data-hub-agent data-app=\"<slug>\" data-ask=\"<bridge POST url>\" data-history=\"<bridge GET url>\" data-conversation=\"<bridge GET url>\" data-profile=\"<bridge GET url, optional>\" data-props=\"/hub/components/props/<slug>.json\" data-title=\"Assistant\"></div>. Optional: an element with data-hub-agent-header receives the header button; any element with data-hub-agent-open opens the panel.",
+  "bridge": {
+    "ask": "POST JSON {question, thread, conversation_id} -> forward to POST /hub/api/agent/ask adding {app, person} from the app's own sign-in; return the hub's JSON unchanged.",
+    "history": "GET ?scope=app|all -> forward to GET /hub/api/agent/history?person=&app=&scope=.",
+    "conversation": "GET ?id= -> forward to GET /hub/api/agent/conversation?person=&id=.",
+    "profile": "GET -> forward to GET /hub/api/profile?person= and return its data (the person's `agent` placement is honoured when the app allows it)."
+  },
+  "events": {
+    "hub:component-props": "window event, detail {app, props}; props.agent overrides the fetched values without a reload",
+    "hub:agent-open": "dispatch on window to open the panel; detail {question} pre-fills and sends"
+  },
+  "props": [
+    {"key": "greeting", "label": "Welcome title", "type": "text", "max": 80, "default": "",
+     "hint": "The heading of an empty conversation; blank keeps the component's own."},
+    {"key": "intro", "label": "Welcome text", "type": "text", "max": 300, "lines": 3, "default": "",
+     "hint": "What this agent knows about, shown before anyone asks. Blank keeps the component's own."},
+    {"key": "prompts", "label": "Suggested questions", "type": "list", "max": 120, "max_items": 4, "default": [],
+     "hint": "Up to four, one per line."},
+    {"key": "placeholder", "label": "Question box pre-text", "type": "text", "max": 60, "default": "",
+     "hint": "A concrete example question beats 'Ask me anything'."},
+    {"key": "entry", "label": "Where the agent can be opened from", "type": "multi", "default": ["float"],
+     "hint": "Any combination. A person's own placement preference is honoured when it is one of these; none ticked means only the app's own control opens it.",
+     "options": [{"value": "float", "label": "Floating button, bottom right"},
+                 {"value": "sidebar", "label": "Tab on the right edge"},
+                 {"value": "header", "label": "Button in the app's header slot"}]}
+  ]
+}
