@@ -69,6 +69,12 @@ HUB_BRAND = "{{BRAND}}"               # human title, e.g. "Acme" -> navbar reads
 HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (see section 8)
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
+# HUB_PROJECT_REPOS = {"budget-app": "/srv/checkouts/budget-app"}  # other projects' checkouts:
+#                                         # their commits count as evidence/lineage for their tasks
+# HUB_COMMIT_RESOLVER = "pkg.module:fn"   # fn(project, sha) -> True/False/None for a project with
+#                                         # no checkout; None means "could not ask", never "no"
+# HUB_LEASE_SWEEP_GRACE_S = 3600          # hand back an in-progress task this long after its lease
+# HUB_LEASE_SWEEP_UNHELD_S = 14400        # ...or this long after it went quiet with no lease
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
 # HUB_LEDGER_WAIT_S = 30               # request wait for the ledger lock before 503 busy
 # Addressed delivery (all optional):

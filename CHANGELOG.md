@@ -122,6 +122,45 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - MCP gains `create_task`, `hand_task`, `unclaim_task`, `recall_task`, `decide_task`,
   `board_attention`, `board_consoles`, `project_tasks`, `step_task`, `plan_task`.
 
+### Tasks: who work is offered to, who is really holding it, and where it went
+
+- **One offer rule** (`hub_core.offer`) for `next.json` and `take`: a task GIVEN to a named agent
+  (`POST /hub/api/hand`, client `hand --to`, MCP `hand_task`) is offered only to them and sits in
+  their inbox until claimed; a task with MACHINE AFFINITY (`machine`, client `create/hand
+  --only-on`) only to a caller on that machine; an unattended run's escalation (`hop`, stamped by
+  the Hub from `HUB_UNATTENDED`/`HUB_RESPONDER_HOP`) once more after a cooldown at hop 1 and never
+  at hop 2. Withheld rows are counted by reason, never dropped silently.
+- **A lease is held by a live console** (`hub_core.liveness`): another console of the same agent
+  cannot renew a live one's lease; absence from a partial roster is never read as gone; in-flight
+  rows and the board name the holding console and whether it is gone. **A GONE console releases
+  what it held** after `HUB_GONE_GRACE_S` from its last-seen stamp: the sweep hands its task back
+  and voids that lease, a claim or item claim takes it over (`took_over_from`), a renewal from
+  another console takes over the recorded holder, and every refusal inside the grace says when it
+  frees. UNPROVABLE never releases.
+- **The Hub hands back abandoned work** (`hub_core.lease_sweep`) with one self-counting
+  `handed_back` row, and **lifecycle rows are never counted as work** (`hub_core.plan`).
+- **A lock timeout names its holder**: claims-lock waits that run out answer `503 lock_busy`
+  with the holder pid (alive/dead), lock age and which lock ran out.
+- **Evidence in the task's own project** (`hub_core.commits`, `HUB_PROJECT_REPOS`,
+  `HUB_COMMIT_RESOLVER`): strict completion accepts a commit of the project the task is about,
+  and "could not be asked" is never reported as "not a commit".
+- **Lineage ladder** (`?lineage=1`, client `lineage`, MCP `task_lineage`, a Trace button on the
+  task drawer): recorded commit → verified deploy → first release → serving now, with an
+  ancestry cache that never stores an unknown.
+- **The promotion lane** (new `held` entity, `hold`/`promote`/`abandon`/`held` verbs, MCP tools, a
+  Held tab, rail items that escalate with age): finished work held back from live ages in public
+  and is freed only with evidence; a commit on no remote is allowed only with a recorded reason.
+  The Hub confirms a hold by FETCHABILITY (a remote-tracking ref or the forge resolver), never by
+  a commit merely existing in a local checkout (`hub_saw: "local_only"` is kept on the record).
+- **One responder per item** (`POST /hub/api/item-claim`, client `item-claim`, MCP
+  `claim_item`): a per-machine TTL claim on a question or error fingerprint; a claimed item reads
+  "in flight on <machine>" on the rail and the error card instead of "unclaimed".
+- **Unattended answers are stamped** (`unattended: true` plus one line in the text).
+- **The client survives non-latin-1 header values** (transliterated) and reports a request it
+  could not build as a local fault, never as an unreachable Hub.
+- `patterns/ci-evidence.md`: zero-job pipelines, raw event retention (rotate before write),
+  fail-soft vs fail-silent, line writers, skipped schedules.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

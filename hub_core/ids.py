@@ -11,7 +11,7 @@ _PAD = 4
 # PROJECT/schema/common.schema.json. Adding four of the five leaves a route and a schema that
 # both exist while every write 422s. Counted the hard way — the first version of this comment
 # said FOUR and was wrong within a minute.
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack):[a-z0-9][a-z0-9._-]*$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack|held):[a-z0-9][a-z0-9._-]*$")
 
 
 def valid_id(s) -> bool:

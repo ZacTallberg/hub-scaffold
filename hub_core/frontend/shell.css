@@ -1317,6 +1317,11 @@ body.hub-app {
 .lease-chip.is-stalled { border-color: var(--warn-solid, #d99a2b); color: var(--warn-solid, #d99a2b); background: var(--warn, rgba(217,154,43,.12)); }
 .lease-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; animation: lease-breathe 2s ease-in-out infinite; }
 .lease-chip.is-stalled .lease-dot { animation: none; }
+/* The holder's console is provably gone: the lease is only waiting out its clock. */
+.lease-chip.is-gone { border-style: dashed; color: var(--muted); border-color: var(--muted); background: transparent; }
+.lease-chip.is-gone .lease-dot { animation: none; opacity: .5; }
+/* Given to a named agent, not yet started: an owner without a lease. */
+.lease-chip.is-assigned { background: transparent; border-style: dotted; }
 @keyframes lease-breathe { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
 
 /* ---- in-flight task cards (the live stage above the tasks table) ---- */
@@ -2137,3 +2142,17 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .update-summary { margin: 2px 0 0; font-size: 13px; line-height: var(--leading); color: var(--text); overflow-wrap: anywhere; }
 .update-ev { display: inline-block; margin-top: 4px; font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 a.update-ev { color: var(--accent); text-decoration: underline; }
+/* ---- lineage ladder, held commits, escalation hop (tokens only; both themes) ---- */
+.btn-ghost { font: inherit; font-size: 12px; padding: 6px 12px; margin: 6px 0; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+.btn-ghost:hover { background: var(--surface-2); }
+.btn-ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn-ghost[disabled] { opacity: .6; cursor: progress; }
+.lineage-hop { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--border); }
+.lineage-hop:first-child { border-top: 0; }
+.lineage-hop .badge { flex: none; white-space: nowrap; }
+.lineage-detail { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.held-disk { margin-left: 8px; font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 10px; background: var(--fail); color: var(--fail-fg); white-space: nowrap; }
+.ask-hop { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap;
+  padding: 1px 6px; border-radius: 10px; background: var(--warn); color: var(--warn-fg); }

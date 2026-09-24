@@ -70,7 +70,11 @@ TOOLS = [
                     "`unattended: true` returns only the unattended lane (marked tasks, P0-P2, never a decision).",
      "inputSchema": {"type": "object", "properties": {
          "n": {"type": "integer", "description": "how many rows (default 3)"},
-         "unattended": {"type": "boolean"}}}},
+         "unattended": {"type": "boolean"},
+         "agent": {"type": "string",
+                   "description": "the calling agent; hides work given to somebody else"},
+         "machine": {"type": "string",
+                     "description": "the calling machine; hides work only another machine can do"}}}},
     {"name": "create_task",
      "description": "File a task. `unattended` offers it to unattended workers (P0-P2); `decision` makes it a "
                     "person's call, delivered to the deciders and never to an unattended worker. Pass the same "
@@ -82,11 +86,17 @@ TOOLS = [
          "idem_key": {"type": "string"}},
          "required": ["title", "acceptance", "agent"]}},
     {"name": "hand_task",
-     "description": "Hand a task back to the queue for an unattended worker (todo, unattended, lease released). "
-                    "Without a lease token it releases only a lease an orphaned console of the same agent holds.",
+     "description": "Hand a task off. With `to`: GIVE it to that named agent (to=\"\" clears it) -- `agent` is "
+                    "who is writing, the recipient is shown as owner and their inbox carries it until they "
+                    "claim it; `machine` also sets MACHINE AFFINITY. Without `to`: hand it BACK to the queue "
+                    "for an unattended worker (todo, unattended, lease released); without a lease token it "
+                    "releases only a lease an orphaned console of the same agent holds.",
      "inputSchema": {"type": "object", "properties": {
-         "id": {"type": "string"}, "agent": {"type": "string"}, "lease_token": {"type": "string"},
-         "note": {"type": "string"}}, "required": ["id", "agent"]}},
+         "id": {"type": "string"}, "agent": {"type": "string"}, "to": {"type": "string"},
+         "machine": {"type": "string",
+                     "description": "with `to`: also set MACHINE AFFINITY (only this machine can do it)"},
+         "lease_token": {"type": "string"}, "note": {"type": "string"}},
+         "required": ["id"]}},
     {"name": "unclaim_task",
      "description": "Let go of a task (lease released, in-progress back to todo); same orphaned-lease remedy as hand_task.",
      "inputSchema": {"type": "object", "properties": {
@@ -133,6 +143,43 @@ TOOLS = [
          "ttl_s": {"type": "integer", "minimum": 1, "maximum": 86400},
          "session": {"type": "string", "description": "the claiming console's session id"},
          "worker": schedule.WORKER_PROFILE_SCHEMA}, "required": ["agent"]}},
+    {"name": "task_lineage",
+     "description": "Trace a task hop by hop to what is serving it: the commits it recorded, the "
+                    "verified deploy that carries one, the first release to carry it, and whether "
+                    "the newest verified deploy still contains it. Unknown hops say why.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}},
+                     "required": ["id"]}},
+    {"name": "hold_commit",
+     "description": "Record a finished commit deliberately NOT live yet (it must be rebuilt/"
+                    "proven first) so it ages in public. Refused for a commit nobody else can "
+                    "fetch unless unpushed_reason records why.",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "sha": {"type": "string"}, "reason": {"type": "string"},
+         "rebuild": {"type": "string"}, "branch": {"type": "string"},
+         "from_gap": {"type": "string"}, "attested": {"type": "boolean"},
+         "unpushed_reason": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["repo", "sha", "reason", "rebuild"]}},
+    {"name": "promote_held",
+     "description": "Free a held commit: the rebuild ran; evidence is the pipeline, sha or URL "
+                    "that proves it.",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "sha": {"type": "string"}, "evidence": {"type": "string"},
+         "note": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["repo", "sha", "evidence"]}},
+    {"name": "held_queue",
+     "description": "The promotion queue: every open hold, oldest first, with its age and urgency.",
+     "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}}},
+    {"name": "claim_item",
+     "description": "Claim a non-task item (a question id or an error fingerprint) for ONE machine "
+                    "so two machines never work the same thing; the same machine re-claims "
+                    "idempotently. release=true gives it back. session names the console "
+                    "holding it: a claim whose console is provably gone frees itself after the "
+                    "grace, and a refusal says when.",
+     "inputSchema": {"type": "object", "properties": {
+         "item": {"type": "string"}, "machine": {"type": "string"},
+         "release": {"type": "boolean"}, "agent": {"type": "string"},
+         "session": {"type": "string"}},
+         "required": ["item", "machine"]}},
     {"name": "heartbeat_task",
      "description": "Renew a live task lease; this proves liveness, not progress.",
      "inputSchema": {"type": "object", "properties": {
@@ -325,6 +372,11 @@ def _seam(path, payload, auth_headers, method="post"):
         forwarded["HTTP_X_AGENT_TOKEN"] = auth_headers["agent"]
     elif auth_headers.get("root"):
         forwarded["HTTP_X_WRITE_TOKEN"] = auth_headers["root"]
+    # The caller's console and machine ride through, so a lease an MCP client takes is bound
+    # to that console exactly like one taken over plain HTTP (hub_core.liveness).
+    for name, value in (auth_headers.get("presence") or {}).items():
+        if value:
+            forwarded["HTTP_" + name.upper().replace("-", "_")] = value
     if method == "get":
         response = client.get(path, payload, **forwarded)
     else:
@@ -385,6 +437,9 @@ def _call_tool(name, args, auth_headers):
         query = {"n": int(args.get("n", 3))}
         if args.get("unattended"):
             query["unattended"] = "1"
+        for key in ("agent", "machine"):
+            if args.get(key):
+                query[key] = args[key]
         status, body = _seam("/hub/next.json", query, auth_headers, method="get")
     elif name == "create_task":
         payload = {k: args[k] for k in ("title", "acceptance", "agent", "priority", "project",
@@ -394,13 +449,19 @@ def _call_tool(name, args, auth_headers):
         elif args.get("unattended"):
             payload["unattended"] = True
         status, body = _seam("/hub/api/task", payload, auth_headers)
+    elif name == "hand_task" and "to" in args:
+        payload = {"id": args["id"], "to": args["to"]}
+        for key in ("agent", "machine"):
+            if args.get(key) is not None:
+                payload[key] = args[key]
+        status, body = _seam("/hub/api/assign", payload, auth_headers)
     elif name in ("hand_task", "unclaim_task"):
-        payload = {"id": args["id"], "agent": args["agent"]}
+        payload = {"id": args["id"], "agent": args.get("agent") or "agent"}
         if args.get("lease_token"):
             payload["token"] = args["lease_token"]
         if args.get("note"):
             payload["note"] = args["note"]
-        status, body = _seam("/hub/api/" + ("hand" if name == "hand_task" else "unclaim"),
+        status, body = _seam("/hub/api/" + ("hand-back" if name == "hand_task" else "unclaim"),
                              payload, auth_headers)
     elif name == "recall_task":
         local = str(args["id"]).rsplit(":", 1)[-1]
@@ -439,6 +500,29 @@ def _call_tool(name, args, auth_headers):
             if args.get(key) is not None:
                 payload[key] = args[key]
         status, body = _seam("/hub/api/take", payload, auth_headers)
+    elif name == "task_lineage":
+        local = str(args["id"]).rsplit(":", 1)[-1]
+        status, body = _seam("/hub/task/%s.json" % local, {"lineage": "1"}, auth_headers,
+                             method="get")
+        if status < 400:
+            body = {"data": (body.get("data") or {}).get("lineage") or {}}
+    elif name == "hold_commit":
+        payload = {k: args[k] for k in ("repo", "sha", "reason", "rebuild", "branch", "from_gap",
+                                        "attested", "unpushed_reason", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/held", payload, auth_headers)
+    elif name == "promote_held":
+        payload = {k: args[k] for k in ("repo", "sha", "evidence", "note", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/held/promote", payload, auth_headers)
+    elif name == "held_queue":
+        status, body = _seam("/hub/held.json",
+                             {"repo": args["repo"]} if args.get("repo") else {},
+                             auth_headers, method="get")
+    elif name == "claim_item":
+        payload = {k: args[k] for k in ("item", "machine", "release", "agent", "session")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/item-claim", payload, auth_headers)
     elif name == "heartbeat_task":
         payload = {"id": args["id"], "token": args["lease_token"]}
         if args.get("ttl_s") is not None:
@@ -608,7 +692,13 @@ def mcp_endpoint(request, b):
     if not isinstance(params, dict):
         return _rpc(rid, error={"code": -32602, "message": "params must be an object"})
     auth_headers = {"agent": request.headers.get("X-Agent-Token", ""),
-                    "root": request.headers.get("X-Write-Token", "")}
+                    "root": request.headers.get("X-Write-Token", ""),
+                    "presence": {name: request.headers.get(name, "")
+                                 for name in ("X-Hub-Machine", "X-Hub-Session",
+                                              "X-Hub-Cwd", "X-Hub-Focus",
+                                              # an unattended caller's depth rides through,
+                                              # so what it raises is stamped (hub_core.offer)
+                                              "X-Hub-Unattended", "X-Hub-Hop")}}
 
     if method == "initialize":
         return _rpc(rid, {

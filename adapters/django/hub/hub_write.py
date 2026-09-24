@@ -16,11 +16,37 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import agent_auth, collision, flow, ids, schedule, secretscan, validate
-from hub_core.process_lock import ProcessFileLock
+from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, validate
+from hub_core.process_lock import LockBusy, ProcessFileLock
 from hub_core.store import ConflictError, StoreBusy
 
 from . import hub_app
+
+
+def _lock_refusal(fn):
+    """A claims-lock wait that runs out answers 503 WITH ITS DIAGNOSIS, never a bare 500.
+
+    The lock's own timeout names the holder pid (alive or dead), the lock file's age and which
+    lock ran out (hub_core.process_lock.LockBusy); a caller that receives it can tell a slow live
+    holder from a dead one and retry sensibly. The full message (with the server path) goes to
+    the operational stream; the caller sees the path-free form."""
+    @wraps(fn)
+    def w(request, b):
+        try:
+            return fn(request, b)
+        except LockBusy as exc:
+            try:
+                hub_app.record_error("hub.claims", str(exc), severity="warning",
+                                     code="lock_busy",
+                                     context={"component": "hub-write",
+                                              "path": request.path_info})
+            except Exception:                                # noqa: BLE001 - never mask the refusal
+                pass
+            response = JsonResponse({"errors": [{"code": "lock_busy", "msg": exc.public,
+                                                 "retry_after_s": 2}]}, status=503)
+            response["Retry-After"] = "2"
+            return response
+    return w
 
 
 _AUTH = ContextVar("hub_write_auth", default=None)
@@ -117,9 +143,19 @@ def writer(fn=None, *, scope=None):
         requested_agent = b.get("agent")
         if auth.mode == "scoped-agent":
             if requested_agent not in (None, "", auth.subject):
+                # State only what is ESTABLISHED: the credential resolved, so it is valid and
+                # bound; the payload named someone else. Two readings, most common first --
+                # never "your identity is stale, re-enroll", which sends a working seat to
+                # rebuild itself and still cannot do what it meant.
                 return JsonResponse({"errors": [{"code": "identity",
-                    "msg": "agent must match the immutable credential subject",
-                    "subject": auth.subject}]}, status=403)
+                    "msg": ("this credential is VALID and bound to %r, but the payload declares "
+                            "agent %r. `agent` is WHO IS WRITING, never who the write is about. "
+                            "(1) If you meant the RECIPIENT of a task, use POST /hub/api/hand "
+                            "with to=%r (client: `hand <task> --to %s`); (2) if this seat is "
+                            "configured with the wrong agent name, fix that configuration. "
+                            "Writes that omit `agent` land normally."
+                            % (auth.subject, requested_agent, requested_agent, requested_agent)),
+                    "subject": auth.subject, "declared": requested_agent}]}, status=403)
             b["agent"] = auth.subject
         else:
             # Compatibility keeps legacy seat labels only as labels. The event and lease actor is
@@ -184,12 +220,18 @@ def _own_repo_name() -> str:
 _EVIDENCE_SHA = re.compile(r"[0-9a-f]{7,40}")
 
 
-def _evidence_problem(ev):
+def _evidence_problem(ev, project: str = "", resolver=None):
     """Return None if the evidence string dereferences to something real, else the reason it
-    doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
-    file path resolved from WORK_ROOT. This proves existence, not confinement: strict URL evidence
-    is fetched from the Hub service account's network. 'done' evidence that cannot resolve is
-    decoration.
+    doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this Hub's repository OR
+    in the task's own project (hub_core.commits), or an existing file path resolved from
+    WORK_ROOT. This proves existence, not confinement: strict URL evidence is fetched from the
+    Hub service account's network. 'done' evidence that cannot resolve is decoration.
+
+    THE TASK'S OWN PROJECT COUNTS. A task about another project ends with a commit in THAT
+    project's repository, and its worker finishes with that sha. Resolving a bare sha against the
+    Hub's own repository only refused every such completion as "not a commit in this repo" -- and
+    an unattended worker has nobody to re-send it. And "could not be asked" (no checkout, no
+    resolver) is said as such, never as "not a commit".
 
     A LIST IS ORDINARY EVIDENCE: a task spanning six commits is normal, and refusing the list
     teaches people to put the proof in the accept note and leave the evidence field empty — an
@@ -206,7 +248,7 @@ def _evidence_problem(ev):
     if len(parts) > 1 and all(_EVIDENCE_SHA.fullmatch(x) or x.startswith(("http://", "https://"))
                               for x in parts):
         for part in parts:
-            why = _evidence_problem(part)
+            why = _evidence_problem(part, project, resolver)
             if why:
                 return "%s: %s" % (part[:60], why)
         return None
@@ -223,25 +265,44 @@ def _evidence_problem(ev):
         return f"URL did not resolve (<400): {err}"
     if re.fullmatch(r"[0-9a-f]{7,40}", ev):
         try:
-            r = subprocess.run(["git", "-C", str(hub_app.WORK_ROOT), "cat-file", "-e", ev + "^{commit}"],
-                               capture_output=True, timeout=10)
-            if r.returncode == 0:
-                return None
-            # NAME THE REPOSITORY. "not a commit in this repo" reads as "your sha is wrong" to a
-            # worker whose commit lives in another project, where a bare sha can NEVER resolve
-            # against this hub's checkout. Say which repo was searched and what to send instead.
-            return ("not a commit in %s (the only repository this hub resolves bare shas "
-                    "against). For work in another repository, send the commit's URL on its "
-                    "forge, e.g. https://git.example.com/<repo>/commit/%s"
-                    % (_own_repo_name(), ev[:12]))
-        except Exception as e:
+            resolver = resolver or hub_app.commit_resolver()
+            found, searched = resolver.has(ev, project)
+        except Exception as e:                               # noqa: BLE001
             return str(e)[:120]
+        if found:
+            return None
+        where = "; ".join(searched) or _own_repo_name()
+        if found is None:
+            return ("could not establish whether %s is a commit (searched: %s). Configure "
+                    "HUB_PROJECT_REPOS / HUB_COMMIT_RESOLVER for the task's project, or give a "
+                    "URL that dereferences" % (ev[:12], where))
+        return ("not a commit in %s. For work in a repository this hub does not resolve, send "
+                "the commit's URL on its forge, e.g. https://git.example.com/<repo>/commit/%s"
+                % (where, ev[:12]))
     try:
         if (hub_app.WORK_ROOT / ev).exists():
             return None
     except OSError:
         pass
     return "not a resolvable URL, commit sha, or existing path from WORK_ROOT"
+
+
+def _unattended_hop(request, b) -> int:
+    """How many unattended hops deep THIS write is: 0 for a person or an attended session.
+
+    An unattended launcher marks its run (the client sends ``X-Hub-Unattended: 1`` and the
+    ``X-Hub-Hop`` its launcher set, from HUB_UNATTENDED / HUB_RESPONDER_HOP); a payload ``hop``
+    is honoured too. The DEEPEST value wins, so a hop-2 run whose model also typed a bare marker
+    can never re-open the chain it was meant to end (hub_core.offer)."""
+    hops = []
+    for raw in (b.get("hop"), request.headers.get("X-Hub-Hop")):
+        try:
+            hops.append(max(0, min(9, int(raw))))
+        except (TypeError, ValueError):
+            pass
+    flagged = str(request.headers.get("X-Hub-Unattended") or "").strip().lower() in ("1", "true")
+    hop = max(hops or [0])
+    return max(hop, 1) if flagged else hop
 
 
 def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype,
@@ -365,6 +426,22 @@ def task(request, b):
                if k not in ("agent", "expected_version", "idem_key", "token")}
     payload["type"] = "task"
     if is_create:
+        # A task an UNATTENDED run raises carries its depth, so no unattended caller is ever
+        # offered a chain deeper than one hop (hub_core.offer). Stamped once, at birth.
+        hop = _unattended_hop(request, b)
+        if hop:
+            payload["hop"] = hop
+        else:
+            payload.pop("hop", None)
+    elif "hop" in payload:
+        # Depth only ever grows: an update may never make an escalation look attended.
+        try:
+            prior = int((existing or {}).get("hop") or 0)
+            if int(payload["hop"]) <= prior:
+                payload.pop("hop")
+        except (TypeError, ValueError):
+            payload.pop("hop")
+    if is_create:
         resp, status = _append_create("task", payload, agent=agent, idem=b.get("idem_key"),
                                       etype="task.created")
     else:
@@ -430,6 +507,7 @@ def _commit_done(eid, token, agent, payload, *, verified_version, auth, idem=Non
 
 
 @writer(scope="task:complete")
+@_lock_refusal
 def complete(request, b):
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
     if not isinstance(eid, str) or not eid.strip():
@@ -460,17 +538,24 @@ def complete(request, b):
     #               typed exit-0 receipt (the Hub never runs it).
     #   "strict"  — evidence must dereference. It never manufactures a test requirement.
     strict = str(hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")).lower() == "strict"
+    ent = hub_app.current_state().get("entities", {}).get(eid)
+    if not ent:
+        return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
     if strict:
         # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.
+        # A commit in the task's OWN project dereferences too (hub_core.commits).
+        resolver = hub_app.commit_resolver()
+        project = resolver.project_of(ent)
         bad = {}
         for e in evidence:
-            problem = _evidence_problem(e)
+            problem = _evidence_problem(e, project, resolver)
             if problem:
                 bad[str(e)[:200]] = problem
         if bad:
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from WORK_ROOT)",
-                "bad": bad}]}, status=422)
+                "msg": "every evidence_uri must dereference (URL <400 / commit in this Hub's "
+                       "repository or the task's project / existing path from WORK_ROOT)",
+                "project": project or None, "bad": bad}]}, status=422)
     ent = hub_app.entity(eid)
     if not ent:
         return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
@@ -894,6 +979,7 @@ def decision(request, b):
 
 
 @writer(scope="task:claim")
+@_lock_refusal
 def claim(request, b):
     eid, agent = b.get("id"), b.get("agent")
     if (not isinstance(eid, str) or not eid.strip() or
@@ -916,6 +1002,15 @@ def claim(request, b):
         status = ent.get("status")
         flags = state.get("flags", {}).get(eid, {})
         live = hub_app.leases()
+        # A lease whose console is provably GONE past its grace holds nothing (hub_core.liveness):
+        # it neither blocks this task nor counts against its agent or the WIP ceiling. hub_app.claim
+        # applies the same verdict and records whom the new lease took over from.
+        if any(lease.get("session") for lease in live):
+            roster_ = hub_app.roster()
+            live = [lease for lease in live
+                    if not (lease.get("session") and lease.get("session") !=
+                            (request.headers.get("X-Hub-Session") or "") and
+                            hub_app.lease_verdict(lease, roster_)["released"])]
         existing = next((lease for lease in live if lease.get("task") == eid), None)
         same_lease = bool(
             existing and existing.get("agent") == agent and
@@ -932,8 +1027,22 @@ def claim(request, b):
                                              "msg": "configured WIP ceiling reached"}]}, status=429)
         verdict = flow.classify(ent, flags, existing)
         if not same_lease and not verdict["available"]:
-            return JsonResponse({"errors": [{"code": verdict["state"],
-                                             "msg": verdict["reason"]}]}, status=409)
+            error = {"code": verdict["state"], "msg": verdict["reason"]}
+            if verdict["state"] == "leased" and existing:
+                # Say WHEN it frees: a gone holder's lease is released once its grace runs out,
+                # a live or unprovable one only by its clock.
+                v = hub_app.lease_verdict(existing)
+                frees = (v["frees_in_s"] if v["state"] == "gone" else
+                         max(0, int(float(existing.get("expires") or 0) - time.time())))
+                error.update({"holder_session": existing.get("session"),
+                              "holder_state": v["state"], "gone_s": v["gone_s"],
+                              "frees_in_s": frees})
+                error["msg"] += ("; its console %s is GONE (not seen for %ds) and the claim "
+                                 "frees itself in %ds" % (existing.get("session"), v["gone_s"],
+                                                          frees)
+                                 if v["state"] == "gone" else
+                                 "; the lease frees itself in %ds unless renewed" % frees)
+            return JsonResponse({"errors": [error]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
@@ -987,6 +1096,7 @@ def _claim_session(request, b) -> str:
 
 
 @writer(scope="task:release")
+@_lock_refusal
 def release(request, b):
     eid, token = b.get("id"), b.get("token")
     if not isinstance(eid, str) or not eid.strip() or not isinstance(token, str) or not token.strip():
@@ -1028,6 +1138,7 @@ def _schedule_failure_retry(task_id, not_before):
 
 
 @writer(scope="task:fail")
+@_lock_refusal
 def fail(request, b):
     """Atomically turn one real failed attempt into bounded, specialist-routable repair work."""
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
@@ -1181,6 +1292,7 @@ def fail(request, b):
 
 
 @writer(scope="task:claim")
+@_lock_refusal
 def take(request, b):
     agent = b.get("agent")
     if not isinstance(agent, str) or not agent.strip() or len(agent) > 256:
@@ -1199,15 +1311,30 @@ def take(request, b):
         if hub_app.wip_status(len(live))["saturated"]:
             return JsonResponse({"errors": [{"code": "board_saturated"}]}, status=429)
         lease_ids = {row.get("task") for row in live}
-        candidates = []
+        candidates, withheld = [], {}
+        # The same offer rule the readiness rail applies (hub_core.offer): given to somebody
+        # else by name, only another machine can do it, or an unattended run's escalation that
+        # is a person's. Counted by reason so an empty pull says WHY it is empty.
+        machine = str(b.get("machine") or request.headers.get("X-Hub-Machine") or "")
+        unattended = (b.get("unattended") is True or str(
+            request.headers.get("X-Hub-Unattended") or "").strip().lower() in ("1", "true"))
+        now_s = time.time()
         for task in state.get("entities", {}).values():
             if task.get("type") != "task" or task.get("id") in lease_ids:
                 continue
             verdict = flow.classify(task, state.get("flags", {}).get(task.get("id"), {}), None)
-            if verdict["available"]:
-                candidates.append(task)
+            if not verdict["available"]:
+                continue
+            why = offer.withheld(task, agent=agent, machine=machine, unattended=unattended,
+                                 now=now_s)
+            if why:
+                key = why.split(":")[0].split(" (")[0]
+                withheld[key] = withheld.get(key, 0) + 1
+                continue
+            candidates.append(task)
         if not candidates:
-            return JsonResponse({"errors": [{"code": "no_ready_task"}]}, status=409)
+            return JsonResponse({"errors": [{"code": "no_ready_task",
+                                             "withheld": withheld}]}, status=409)
         busy_touches = set()
         entities = state.get("entities", {})
         for lease in live:
@@ -1251,7 +1378,156 @@ def take(request, b):
     return JsonResponse(res)
 
 
+def known_agents():
+    """``(names, readable)``: every agent this board knows -- issued credential subjects, seats
+    presence has seen, and lease holders.
+
+    An EMPTY or unreadable roster proves nothing (a board that answered nothing looks like one
+    with no members), so a caller treats ``readable=False`` or an empty set as "cannot check",
+    never as "no such agent". Widening a check until it passes is how a typo becomes work that
+    is offered to nobody; refusing on an unreadable roster is how assignment stops working the
+    day a sidecar is unreadable."""
+    names, readable = set(), True
+    try:
+        names.update(str(row.get("subject") or "").strip().lower()
+                     for row in agent_auth.CredentialRegistry(hub_app.HUB_DIR).list_public())
+    except Exception:                                        # noqa: BLE001
+        readable = False
+    try:
+        names.update(str(k).strip().lower() for k in (hub_app.read_presence() or {}))
+    except Exception:                                        # noqa: BLE001
+        readable = False
+    try:
+        names.update(str(row.get("agent") or "").strip().lower()
+                     for row in hub_app.leases(include_expired=True))
+    except Exception:                                        # noqa: BLE001
+        readable = False
+    names.discard("")
+    return names, readable
+
+
+@writer(scope="task:claim")
+def item_claim(request, b):
+    """POST /hub/api/item-claim {item, machine, [release]} -> 200 granted | 409 held elsewhere.
+
+    One responder per NON-task item (a question, an error fingerprint) across every machine
+    (hub_core.item_claims). Behind the explicit @writer gate like every other write -- never
+    reliant on a middleware alone -- which also binds `agent` to the authenticated credential
+    instead of trusting the payload. Same authority class as claiming a task, so the same scope.
+    A caller that cannot reach this route decides for itself whether to proceed; the route is
+    strict."""
+    from hub_core import item_claims
+    item = str(b.get("item") or "").strip()
+    machine = str(b.get("machine") or request.headers.get("X-Hub-Machine") or "").strip()
+    if not item or not machine:
+        return JsonResponse({"errors": [{"code": "need_item_and_machine",
+            "msg": "item (a question id or error fingerprint) and machine are required"}]},
+            status=400)
+    session = str(b.get("session") or request.headers.get("X-Hub-Session") or "").strip()
+    try:
+        roster = hub_app.roster()
+    except Exception:                                        # noqa: BLE001 - unprovable, not gone
+        roster = None
+    try:
+        granted, row = item_claims.claim(hub_app.HUB_DIR, item, machine,
+                                         b.get("agent") or request.hub_auth.subject,
+                                         release=b.get("release") is True, session=session,
+                                         roster=roster, grace_s=hub_app.gone_grace_s())
+    except ValueError as exc:
+        return JsonResponse({"errors": [{"code": "bad_claim", "msg": str(exc)}]}, status=400)
+    if not granted:
+        who = row.get("machine") or "another machine"
+        if row.get("session"):
+            who += " (console %s)" % row["session"]
+        if row.get("holder_state") == "gone":
+            msg = ("%s is GONE (not seen for %ds); the claim frees itself in %ds -- claim again "
+                   "then" % (who, row.get("gone_s") or 0, row.get("frees_in_s") or 0))
+        else:
+            msg = ("%s claimed it %ds ago; it releases in %ds unless renewed"
+                   % (who, row.get("age_s") or 0, row.get("releases_in_s") or 0))
+        return JsonResponse({"errors": [{"code": "claimed_elsewhere", "msg": msg}],
+            "data": {"holder": row.get("machine"), "holder_session": row.get("session"),
+                     "agent": row.get("agent"), "age_s": row.get("age_s"),
+                     "releases_in_s": row.get("releases_in_s"),
+                     "holder_state": row.get("holder_state"), "gone_s": row.get("gone_s"),
+                     "frees_in_s": (row.get("frees_in_s") if row.get("holder_state") == "gone"
+                                    else row.get("releases_in_s"))}},
+            status=409)
+    hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
+                              released=bool(row.get("released")))
+    return JsonResponse({"data": {"granted": True, **row}})
+
+
+@writer(scope="task:assign")
+def assign(request, b):
+    """GIVE a task to a named agent (or clear the assignment with ``to: ""``).
+
+    The payload's ``agent`` is always WHO IS WRITING; the recipient is ``to``. Conflating the two
+    is the failure this route exists to end: an assignment verb that put the recipient in the
+    identity field was refused on every call, so assignment lived in prose only a person read.
+
+    Until the recipient claims it the task carries ``assigned_to``: the board shows them as its
+    owner, their inbox (and its long-poll) carries it, and atomic pull never hands it to anybody
+    else. The recipient is checked against the known roster; an unreadable roster is "cannot
+    check" (the assignment lands with a warning), never "no such agent"."""
+    eid = b.get("id")
+    to = b.get("to")
+    if not isinstance(eid, str) or not eid.strip() or not isinstance(to, str):
+        return JsonResponse({"errors": [{"code": "need_id_to",
+            "msg": "id and to (the recipient agent; empty string clears) are required"}]},
+            status=400)
+    to = to.strip().lower()
+    if to and not _valid_agent_name(to):
+        return JsonResponse({"errors": [{"code": "bad_recipient",
+            "msg": "to must be a lowercase agent name (letters, digits, . _ -)"}]}, status=422)
+    state = hub_app.current_state()
+    ent = state.get("entities", {}).get(eid)
+    if not ent or ent.get("type") != "task":
+        return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]},
+                            status=404)
+    if ent.get("status") in ("done", "dropped", "shadow"):
+        return JsonResponse({"errors": [{"code": "terminal",
+            "msg": "task is %s; there is nothing left to hand" % ent.get("status")}]}, status=409)
+    lease = hub_app._read_lease(eid)
+    if lease and lease.get("expires", 0) > time.time():
+        return JsonResponse({"errors": [{"code": "held",
+            "msg": "%s is holding this task right now; a lease beats an assignment -- ask them "
+                   "to release it first" % (lease.get("agent") or "a worker"),
+            "held_by": lease.get("agent")}]}, status=409)
+    warnings = []
+    if to:
+        known, readable = known_agents()
+        if readable and known and to not in known:
+            return JsonResponse({"errors": [{"code": "unknown_agent",
+                "msg": "no agent named %r is known to this board; a task given to a name nobody "
+                       "answers to is offered to no one" % to,
+                "known": sorted(known)[:50]}]}, status=422)
+        if not readable or not known:
+            warnings.append({"code": "recipient_unchecked",
+                             "msg": "the roster could not be read, so %r was not checked" % to})
+    expected = b.get("expected_version", ent.get("version"))
+    delta = {"type": "task", "assigned_to": to}
+    if isinstance(b.get("machine"), str):
+        # MACHINE AFFINITY rides the hand-off when the recipient's work only exists on one
+        # machine; an empty string clears it (hub_core.offer).
+        machine = b["machine"].strip().lower()[:120]
+        if machine and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,119}", machine):
+            return JsonResponse({"errors": [{"code": "bad_machine",
+                "msg": "machine is a lowercase host name (letters, digits, . _ -)"}]},
+                status=422)
+        delta["machine"] = machine
+    resp, status = _append("task", eid, delta,
+                           expected_version=expected, agent=b.get("agent") or "operator",
+                           idem=b.get("idem_key"), etype="task.updated")
+    if status < 400:
+        resp.setdefault("data", {})["assigned_to"] = to or None
+        if warnings:
+            resp["warnings"] = warnings
+    return JsonResponse(resp, status=status)
+
+
 @writer(scope="task:heartbeat")
+@_lock_refusal
 def heartbeat(request, b):
     if (not isinstance(b.get("id"), str) or not b.get("id").strip() or
             not isinstance(b.get("token"), str) or not b.get("token").strip()):
@@ -1479,6 +1755,9 @@ def ask(request, b):
     if tier and tier != "member":
         # A contributor's ask says so, so an answer is checked against what that tier may see.
         payload["tier"] = tier
+    hop = _unattended_hop(request, b)
+    if hop:
+        payload["hop"] = hop
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:
         payload["relates_to"] = related
@@ -1551,6 +1830,13 @@ def answer(request, b):
             pass
 
     question_text = str(note_ent.get("title") or "")
+    # HONEST ATTRIBUTION, mechanically -- the mirror of the ask's hop stamp. An answer an
+    # unattended run wrote reads identically to one a person wrote unless it SAYS so, and the
+    # asker deserves to know which they got. Structured (`unattended`) for every surface, and
+    # one line in the text for any reader that only sees the body.
+    unattended = bool(b.get("unattended") is True or _unattended_hop(request, b))
+    if unattended and "unattended run" not in text:
+        text += "\n\n[answered by an unattended run -- verify against the source if it matters]"
     payload = {
         "type": "directive",
         "title": ("Answer: %s" % question_text)[:300],
@@ -1563,6 +1849,13 @@ def answer(request, b):
     asking_session = str(note_ent.get("from_session") or "")
     if _SESSION_ID.fullmatch(asking_session):
         payload["session"] = asking_session
+    if unattended:
+        payload["unattended"] = True
+    existing_dir = next(
+        (e for e in state["entities"].values()
+         if isinstance(e, dict) and e.get("type") == "directive"
+         and e.get("answers") == question_id),
+        None)
     agent = b.get("agent", request.hub_auth.subject)
     # One question has exactly ONE answer directive; the find-or-create is re-run on an OCC
     # refusal, because both the id and the version it derives come from a read a concurrent
@@ -2284,11 +2577,30 @@ def _let_go(request, b, *, kind):
 
 
 @writer(scope="task:release")
-def hand(request, b):
+def hand_back(request, b):
     """Put a task back on the queue FOR AN UNATTENDED WORKER: status todo, ``unattended: true``,
     the lease released (the caller's own, or one an orphaned console of the same agent holds),
     and one counted ``handed_back`` scheduler row on the plan — never a work checkpoint."""
     return _let_go(request, b, kind="handed_back")
+
+
+@csrf_exempt
+def hand(request):
+    """``POST /hub/api/hand`` — one verb, two hand-offs, told apart by the body:
+
+    * with ``to``: GIVE the task to that named agent (``assign``, scope ``task:assign``);
+    * without it: hand it BACK to the queue for an unattended worker (``hand_back``, scope
+      ``task:release``).
+
+    Each branch runs its own writer, so authentication, scope and every refusal are exactly
+    those of ``/api/assign`` and ``/api/hand-back``."""
+    try:
+        peek = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        peek = None
+    if isinstance(peek, dict) and "to" in peek:
+        return assign(request)
+    return hand_back(request)
 
 
 @writer(scope="task:release")

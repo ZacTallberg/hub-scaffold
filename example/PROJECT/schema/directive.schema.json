@@ -20,6 +20,7 @@
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
+    "unattended": { "type": "boolean", "description": "True when an UNATTENDED run wrote this (an answer from an automated responder). The asker is told which kind of answer they got: it calibrates how much to double-check, and nobody should discover later that the operator who answered them was a machine." },
     "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
     "session": { "type": "string", "description": "Deliver to one console only. An answer carries the asking console's session so the reply lands where the question was asked, never broadcast." },
     "delivery_revision": { "type": "integer", "minimum": 1, "description": "Bumped each time an answer is corrected. An ack must name the revision it read; an ack of an older revision never closes a corrected answer." },

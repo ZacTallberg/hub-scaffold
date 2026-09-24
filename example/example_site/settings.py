@@ -6,6 +6,7 @@ general Hub mutations are token-gated via the HUB_WRITE_TOKEN environment variab
 unauthenticated in this example, and the optional launch mint uses its narrow CSRF gate. This file is also what
 `manage.py hubaudit` AST-scans, so it doubles as the reference shape for a mounted project.
 """
+import json
 import os
 import secrets
 from pathlib import Path
@@ -77,7 +78,16 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 HUB_PROJECT_KEY = "example"        # entity-id prefix -> example:task:0001
 HUB_BRAND = "Example"              # navbar reads "Example · Hub"
 HUB_BUILD_STAMP = "build_sha.txt"  # BASE_DIR-relative build-identity stamp (written by the build)
-HUB_DONE_STRICTNESS = "tracked"    # ordinary work records evidence; checks remain exceptional
+HUB_DONE_STRICTNESS = os.environ.get("HUB_DONE_STRICTNESS", "tracked")  # evidence dial
+
+# Commits from OTHER projects count as evidence and lineage for tasks about them: map each project
+# slug to a local checkout (read with plain git). A project with no checkout can instead be asked
+# through HUB_COMMIT_RESOLVER = "package.module:function" (function(project, sha) -> True/False/None).
+HUB_PROJECT_REPOS = json.loads(os.environ.get("HUB_PROJECT_REPOS", "") or "{}")
+
+# How long a console the Hub can PROVE is gone keeps what it held (task leases and item claims)
+# before they are released, measured from its last-seen stamp. Default 30 minutes.
+HUB_GONE_GRACE_S = int(os.environ.get("HUB_GONE_GRACE_S", "1800") or 1800)
 
 # Optional local-worker bridge. Adopters enable it only after wiring their own launch protocol.
 HUB_WORKER_LAUNCH_ENABLED = False
