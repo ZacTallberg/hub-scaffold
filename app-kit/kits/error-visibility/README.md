@@ -34,7 +34,13 @@ nothing to call. With `HUB_API_BASE`, `HUB_AGENT_TOKEN` or `APP_SLUG` unset the 
 (rows on `/errors/`, a red "forwarding NOT armed" chip) — never an error.
 
 Issue the app its own scoped credential, never the root token:
-`POST /hub/api/agent-credential {"action":"issue","subject":"budget-app","scopes":["error:report"]}`.
+`POST /hub/api/agent-credential {"action":"issue","subject":"budget-app","scopes":["error:report"],"ttl_s":31536000}`
+from a `credential:manage` holder. `ttl_s` is required (60..31536000 seconds) and the credential
+EXPIRES: issue its replacement, swap `HUB_AGENT_TOKEN`, then revoke the old one before the
+`expires_at` in the issue answer. A lapsed or revoked token is refused with HTTP 403, and that
+refusal shows up in `forwarding_status()` (`failed` climbing, `last_ok: false`,
+`last_detail: "HTTP 403"`), on the `/errors/` forwarding chip, and as a `hub.auth` refusal row on
+the Hub's error stream — never as a silent stop.
 
 If several apps share one database, rename `APP_ERROR_TABLE` in `models.py` BEFORE the first
 migrate.

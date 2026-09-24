@@ -26,6 +26,10 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   fires every producer for real without leaking to the board. `kits/health` emits the readiness
   payload shape the deploy gate reads. `kits/csrf` reads the CSRF cookie by its configured name at
   send time.
+- **Forwarder credential setup:** the kit README and the pattern issue the scoped
+  `error:report` credential with the required `ttl_s`, say that it expires and how to rotate it,
+  and name where a lapsed token shows up (`forwarding_status()` failed count with `HTTP 403`, the
+  forwarding chip, a `hub.auth` refusal row).
 - **Error stream:** `info` is a real severity that never passes the bar. `coverage.forwarders`
   lists each satellite that armed (and whether one degraded). Details keep a traceback's head AND
   tail (32 KB, gap stated) and lift its `ExceptionType: message` line onto the row as `cause`. A
