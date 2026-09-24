@@ -40,6 +40,23 @@ The worker LOOP rides the same seam — the converged core of two adopter fleets
       --accept-note "export live" --evidence https://app.example/export --charter-sha <sha>
     python -m hub_core.client reground                   # after context compaction
 
+Task lifecycle beyond the loop::
+
+    python -m hub_core.client create --title "..." --acceptance "..." --priority P2 --unattended
+    python -m hub_core.client create --title "Pick the retention window" --acceptance "..." --decision
+    python -m hub_core.client step proj:task:0042 --note "pushed" --sha 3f9c2e1 --pipeline 812
+    python -m hub_core.client hand proj:task:0042 --agent worker-1     # back to the unattended queue
+    python -m hub_core.client unclaim proj:task:0042 --agent worker-1  # just let go
+    python -m hub_core.client recall proj:task:0042                    # state, holder, checkpoints
+    python -m hub_core.client decide proj:task:0050 --then file --decision "keep 30 days"
+    python -m hub_core.client attention                                # what needs a person, and the fix
+    python -m hub_core.client consoles --session 1a2b3c4d              # live consoles + crossovers
+    python -m hub_core.client feed billing                             # one project's task feed
+
+Every call sends X-Hub-Client-Version (a digest of this client). The hub shows seats running a
+different client than it serves; HUB_CLIENT_SELF_UPDATE=1 lets a stale client fast-forward its
+own checkout (rate-limited, detached, fail-soft).
+
 When the board ships CHARTER-CORE.md, `finish` refuses a completion whose held charter sha is
 stale or absent — compaction drift is detected at the gate, never discovered later in the work.
 A task that declared a critical-boundary verification_command has it run BY `finish` on this
@@ -58,6 +75,80 @@ from typing import Any
 
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; HubLiveClient/1.0)"
+_CLIENT_FILES = ("client.py", "checkpoints.py", "verifier.py")
+_SEEN = {"hub_client": ""}
+CONVERGE_EVERY_S = 15 * 60
+
+
+def client_version() -> str:
+    """A digest of the client this process runs: this module and the modules its verbs import,
+    EOL-normalized so a CRLF checkout and an LF server agree on the same commit. The hub computes
+    the same digest over the client it serves and names seats that differ."""
+    import hashlib
+    from pathlib import Path
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in _CLIENT_FILES:
+        try:
+            digest.update((root / name).read_bytes().replace(b"\r\n", b"\n"))
+        except OSError:
+            pass
+    return digest.hexdigest()[:12]
+
+
+def _telemetry_headers() -> dict[str, str]:
+    return {"X-Hub-Client-Version": client_version(), "X-Hub-Client": "hub_core.client"}
+
+
+def _note_hub_client(response) -> None:
+    try:
+        current = response.headers.get("X-Hub-Client-Current") or ""
+    except Exception:                                        # noqa: BLE001
+        current = ""
+    if current:
+        _SEEN["hub_client"] = current
+
+
+def _maybe_converge() -> dict[str, Any] | None:
+    """Pull a STALE client forward, opt-in (HUB_CLIENT_SELF_UPDATE=1), and never in the way.
+
+    * Only when the hub said which client it serves and ours differs.
+    * Rate-limited to one attempt per CONVERGE_EVERY_S, and the stamp is written BEFORE the
+      attempt, so a failing update can never become a retry storm on every verb.
+    * Only a git checkout, and only `pull --ff-only`: git itself refuses a pull that would
+      clobber local work or merge divergent history. A client never rewrites files it did not
+      get from its own repository.
+    * Detached and fail-soft: the verb the worker ran returns at once; the pull writes its
+      outcome to a log next to the stamp."""
+    import subprocess
+    import time as _time
+    from pathlib import Path
+    want = _SEEN.get("hub_client") or ""
+    if os.environ.get("HUB_CLIENT_SELF_UPDATE") != "1" or not want or want == client_version():
+        return None
+    state_dir = Path(os.environ.get("HUB_CLIENT_STATE_DIR") or (Path.home() / ".hub-client"))
+    stamp = state_dir / "converge.stamp"
+    try:
+        if _time.time() - float(stamp.read_text(encoding="utf-8")) < CONVERGE_EVERY_S:
+            return None
+    except (OSError, ValueError):
+        pass
+    root = Path(__file__).resolve().parent.parent
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(_time.time()), encoding="utf-8")
+        probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                               capture_output=True, text=True, timeout=10)
+        if probe.stdout.strip() != "true":
+            return {"converge": "skipped", "why": "this client is not a git checkout"}
+        log = open(state_dir / "converge.log", "ab")
+        flags = 0x00000008 if os.name == "nt" else 0          # DETACHED_PROCESS on Windows
+        subprocess.Popen(["git", "-C", str(root), "pull", "--ff-only", "--quiet"],
+                         stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                         creationflags=flags, start_new_session=(os.name != "nt"))
+        return {"converge": "started", "from": client_version(), "to": want}
+    except Exception as error:                               # noqa: BLE001
+        return {"converge": "failed", "why": str(error)[:120]}
 
 
 def _base_url(value: str | None) -> str:
@@ -89,6 +180,7 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         # adopter to name its own operational client at the edge.
         "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
         **_auth_headers(),
+        **_telemetry_headers(),
         **(extra_headers or {}),
     }
     request = urllib.request.Request(
@@ -99,8 +191,10 @@ def _post(base: str, operation: str, payload: dict[str, Any],
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
+            _note_hub_client(response)
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
+        _note_hub_client(error)
         detail = error.read().decode("utf-8", errors="replace")
         try:
             body: Any = json.loads(detail)
@@ -126,6 +220,13 @@ def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, 
         "X-Hub-Session": os.environ.get("HUB_SESSION_ID", ""),
         "X-Hub-Cwd": os.environ.get("HUB_CWD") or os.getcwd(),
         "X-Hub-Focus": os.environ.get("HUB_FOCUS", ""),
+        # What the crossover detector and the attended/unattended split read. A supervisor that
+        # launches an unattended run sets HUB_SESSION_KIND (and HUB_RUN_ID / HUB_SUBJECT).
+        "X-Hub-Project": os.environ.get("HUB_PROJECT", ""),
+        "X-Hub-Files": os.environ.get("HUB_FILES", ""),
+        "X-Hub-Session-Kind": os.environ.get("HUB_SESSION_KIND", ""),
+        "X-Hub-Run": os.environ.get("HUB_RUN_ID", ""),
+        "X-Hub-Subject": os.environ.get("HUB_SUBJECT", ""),
     }
     if arguments is not None:
         if getattr(arguments, "machine", None):
@@ -140,10 +241,11 @@ def _get(base: str, path: str, timeout: int = 30) -> dict[str, Any]:
         f"{base}/{path.lstrip('/')}",
         headers={"Accept": "application/json",
                  "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
-                 **_optional_auth_headers()},
+                 **_optional_auth_headers(), **_telemetry_headers()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            _note_hub_client(response)
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
@@ -169,6 +271,19 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
     }
     if arguments.phase:
         payload["phase"] = arguments.phase
+    if arguments.project:
+        payload["project"] = arguments.project
+    if arguments.decision:
+        # A decision is a person's call: it goes to the deciders' inbox, never the unattended lane.
+        payload["work_kind"] = "decision"
+    elif arguments.work_kind:
+        payload["work_kind"] = arguments.work_kind
+    if arguments.unattended:
+        payload["unattended"] = True
+    # ONE KEY PER INTENT: stamped once here and sent on every retry of THIS create, so a retried
+    # request (a response that timed out) replays the first record instead of minting a twin.
+    import uuid
+    payload["idem_key"] = arguments.idem_key or ("create-" + uuid.uuid4().hex)
     if arguments.touch:
         payload["touches"] = arguments.touch
     if arguments.plan_item:
@@ -252,8 +367,20 @@ def _payload_ack(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     return "ack", payload
 
 
+#: The session digest a supervisor may report with a heartbeat: what it distilled from the
+#: session's own activity, and for an unattended run its lifecycle. The hub bounds every field.
+_DIGEST_FLAGS = ("phase", "doing", "narration", "last_result", "targets", "kind", "run",
+                 "subject", "subject_title", "outcome", "state", "started", "ended", "bounded_s",
+                 "project", "files")
+
+
 def _payload_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
-    return "presence", {"agent": _agent(arguments)}
+    payload: dict[str, Any] = {"agent": _agent(arguments)}
+    digest = {name: getattr(arguments, name) for name in _DIGEST_FLAGS
+              if getattr(arguments, name, None) not in (None, "")}
+    if digest:
+        payload["session_state"] = digest
+    return "presence", payload
 
 
 def _payload_forget_presence(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -292,9 +419,129 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     return "ack-error", payload
 
 
+_INBOX_HEADINGS = (("decision", "DECISIONS WAITING ON YOU"), ("question", "QUESTIONS"),
+                   ("answer", "ANSWERS"), ("directive", "DIRECTIVES"),
+                   ("task-stall", "TASK ROT"), ("attention", "NEEDS ATTENTION"),
+                   ("overlap", "CROSSOVERS"))
+
+
+def render_inbox(data: dict[str, Any]) -> str:
+    """The addressed set as text a person reads: grouped by kind, each with its reply command."""
+    items = data.get("items") or []
+    if not items:
+        return "Nothing is addressed to you."
+    lines = []
+    for kind, heading in _INBOX_HEADINGS:
+        rows = [i for i in items if i.get("kind") == kind]
+        if not rows:
+            continue
+        lines.append("%s (%d)" % (heading, len(rows)))
+        for item in rows:
+            lines.append("  - %s" % (item.get("title") or item.get("id")))
+            if item.get("reply_cmd"):
+                lines.append("      %s" % item["reply_cmd"])
+    return "\n".join(lines)
+
+
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
-    return _get(base, f"inbox.json?agent={quote(arguments.agent)}")
+    payload = _get(base, f"inbox.json?agent={quote(arguments.agent)}")
+    if getattr(arguments, "text", False):
+        return {"text": render_inbox(payload.get("data") or {})}
+    return payload
+
+
+def _payload_create_retry(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """create, retried ONCE on a transport failure with the SAME idempotency key: the hub
+    answers the retry with the record the first attempt made (``replayed: true``)."""
+    operation, payload = _payload_create(arguments)
+    try:
+        result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+    except RuntimeError as error:
+        if "unreachable" not in str(error):
+            raise
+        result = _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+    result["idem_key"] = payload["idem_key"]
+    return result
+
+
+def _run_let_go(operation: str):
+    def run(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+        payload: dict[str, Any] = {"id": arguments.task_id, "agent": _agent(arguments)}
+        token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
+        if token:
+            payload["token"] = token
+        if arguments.note:
+            payload["note"] = arguments.note
+        return _post(base, operation, payload, extra_headers=_presence_headers(arguments))
+    return run
+
+
+def _run_recall(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Everything a peer needs to pick up or check a task, from the hub's own joined row:
+    state, holder, run, commits, the checkpoints IN ORDER (lifecycle rows labelled), evidence."""
+    from . import checkpoints as _cp
+    task = _fetch_task(base, arguments.task_id)
+    counts = _cp.progress(task)
+    trail = []
+    for n, s in enumerate(task.get("plan") or [], 1):
+        if not isinstance(s, dict):
+            continue
+        tag = ("scheduler" if _cp.is_lifecycle(s) else
+               "placeholder" if _cp.is_placeholder(s) else s.get("kind") or "checkpoint")
+        trail.append("%d. [%s] %s %s%s%s" % (
+            n, tag, "done" if s.get("done") else "open", s.get("step") or "",
+            (" — " + str(s.get("note"))) if s.get("note") else "",
+            (" (commit %s)" % s["sha"]) if s.get("sha") else ""))
+    return {"id": task.get("id"), "title": task.get("title"), "status": task.get("status"),
+            "priority": task.get("priority"), "work_kind": task.get("work_kind"),
+            "unattended": bool(task.get("unattended")), "project": task.get("project"),
+            "owner": (task.get("provenance") or {}).get("agent"),
+            "holder": task.get("holder"), "responder": task.get("responder"),
+            "pushed": task.get("pushed"), "deployed": task.get("deployed"),
+            "handed_back": task.get("handed_back"), "auto_close": task.get("auto_close"),
+            "decision": task.get("decision"),
+            "progress": "%d/%d work checkpoints" % (counts["done"], counts["total"]),
+            "checkpoints": trail, "evidence": task.get("evidence_uri") or [],
+            "acceptance": task.get("acceptance")}
+
+
+def _run_decide(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _post(base, "task/decide", {"id": arguments.task_id, "decision": arguments.decision,
+                                        "then": arguments.then},
+                 extra_headers=_presence_headers(arguments))
+
+
+def _run_attention(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    payload = _get(base, "attention.json")
+    data = payload.get("data") or {}
+    if getattr(arguments, "mine", None):
+        who = arguments.mine.lower()
+        data["items"] = [i for i in data.get("items") or [] if i.get("agent") == who]
+    return {"verdict": data.get("verdict"), "counts": data.get("counts"),
+            "items": [{k: i.get(k) for k in ("severity", "title", "who", "fix", "age_s",
+                                              "evidence", "id")}
+                      for i in data.get("items") or []],
+            "recently_cleared": (data.get("recently_cleared") or [])[:5],
+            "sources": data.get("sources")}
+
+
+def _run_consoles(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    path = "consoles.json"
+    if arguments.session:
+        path += "?session=" + quote(arguments.session)
+    return _get(base, path)
+
+
+def _run_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    return _get(base, f"project/{quote(arguments.project)}/tasks.json")
+
+
+def _run_overlap_seen(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _post(base, "overlap-seen", {"ids": arguments.ids, "agent": _agent(arguments)},
+                 extra_headers=_presence_headers(arguments))
 
 
 def _run_wait(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -414,45 +661,116 @@ def _run_start(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
                          "note": "no charter core here — the finish regrounding gate is not in force"})}
 
 
-def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
-    """Mark one plan step done, with the checkpoint note the fleet card surfaces. The write is
-    a full-entity upsert under OCC (the fold replaces payloads; a partial write would drop the
-    fields it omitted)."""
+def _conflict(error: RuntimeError) -> bool:
+    """Is this refusal an optimistic-concurrency race (worth re-reading and re-applying)?"""
+    try:
+        detail = json.loads(str(error))
+    except (TypeError, ValueError):
+        return False
+    body = detail.get("response") if isinstance(detail, dict) else None
+    codes = [e.get("code") for e in ((body or {}).get("errors") or []) if isinstance(e, dict)]
+    return detail.get("status") in (409, 428) and bool({"conflict", "precondition_required"} & set(codes))
+
+
+def _task_write(base: str, task_id: str, mutate, arguments: argparse.Namespace,
+                attempts: int = 3) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read the task, apply `mutate(entity) -> delta`, write the delta under OCC -- and on a
+    version race, re-read and re-apply (bounded). A plan write that lost a race used to
+    dead-letter the checkpoint it carried; re-applying the SAME intent to the fresh record is
+    correct because the delta is recomputed from what the record now says, never replayed
+    blind. Returns (write_result, delta)."""
+    last: RuntimeError | None = None
+    for _attempt in range(max(1, attempts)):
+        entity = _fetch_task(base, task_id)
+        delta = mutate(entity)
+        body: dict[str, Any] = {"id": entity["id"], "agent": _agent(arguments),
+                                "expected_version": entity.get("version"), **delta}
+        token = getattr(arguments, "lease_token", None) or os.environ.get("HUB_LEASE_TOKEN")
+        if token:
+            body["token"] = token
+        try:
+            return _post(base, "task", body, extra_headers=_presence_headers(arguments)), delta
+        except RuntimeError as error:
+            if not _conflict(error):
+                raise
+            last = error
+    raise RuntimeError(f"gave up after {attempts} version races on {task_id}: {last}")
+
+
+def _now_iso() -> str:
     import datetime as _dt
-    entity = _fetch_task(base, arguments.task_id)
-    plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
-    if not plan:
-        raise RuntimeError(f"{arguments.task_id} has no plan — record one first (progress on a "
-                           f"planless task is invisible to the whole board)")
-    target = None
-    if arguments.step:
-        wanted = arguments.step.strip()
-        if wanted.isdigit() and 1 <= int(wanted) <= len(plan):
-            target = plan[int(wanted) - 1]
-        else:
-            target = next((s for s in plan if wanted.lower() in str(s.get("step", "")).lower()), None)
-        if target is None:
-            raise RuntimeError(f"no plan step matches {wanted!r}")
-    else:
-        target = next((s for s in plan if not s.get("done")), None)
-        if target is None:
-            raise RuntimeError("every plan step is already done — use `finish`")
-    target["done"] = True
-    if arguments.note:
-        target["note"] = arguments.note[:600]
-        target["note_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    # A MINIMAL delta, exactly like the claim seam's own in_progress append: the fold merges
-    # payloads last-write-wins per key, so echoing the whole entity back would both trip the
-    # status guards and clobber concurrent field changes this client never read.
-    body: dict[str, Any] = {"id": entity["id"], "plan": plan, "agent": _agent(arguments),
-                            "expected_version": entity.get("version")}
-    token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
-    if token:
-        body["token"] = token
-    result = _post(base, "task", body, extra_headers=_presence_headers(arguments))
-    done = sum(1 for s in plan if s.get("done"))
-    return {"updated": result, "step": target.get("step"),
-            "progress": f"{done}/{len(plan)}"}
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Record one checkpoint: mark a plan step done with the note the board surfaces.
+
+    Targeting: `--step N` (1-based) or a text fragment; default = the first undone WORK step.
+    A number past the end GROWS the plan with `auto` placeholders so the report lands where the
+    worker numbered it -- placeholders never count toward "N of N done". A planless task, or one
+    whose plan is complete, takes a report carrying --note as a NEW checkpoint instead of
+    refusing it: progress narrated into a planless task used to be dropped, which made the
+    task invisible.
+
+    Structured fields ride the checkpoint so no reader parses prose: `--sha` (+ `--pipeline`,
+    `--pipeline-url`) records a `pushed` checkpoint naming the commit; `--kind` sets any other
+    schema kind. The write is a minimal delta under OCC, re-applied on a version race."""
+    from . import checkpoints as _cp
+    kind = arguments.kind or ("pushed" if arguments.sha else "checkpoint")
+    picked: dict[str, Any] = {}
+
+    def mutate(entity: dict[str, Any]) -> dict[str, Any]:
+        try:
+            plan, target = _cp.apply_step(
+                entity.get("plan") or [], step=arguments.step, note=arguments.note or "",
+                kind=kind, sha=arguments.sha or "", pipeline_id=arguments.pipeline or "",
+                pipeline_url=arguments.pipeline_url or "", at=_now_iso())
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        picked.clear()
+        picked.update(target)
+        return {"plan": plan}
+
+    result, delta = _task_write(base, arguments.task_id, mutate, arguments)
+    counts = _cp.progress(delta["plan"])
+    out: dict[str, Any] = {"updated": result, "step": picked.get("step"),
+                           "kind": picked.get("kind") or "checkpoint",
+                           "progress": f"{counts['done']}/{counts['total']}"}
+    if counts["lifecycle"] or counts["placeholders"]:
+        out["not_counted"] = {"lifecycle": counts["lifecycle"],
+                              "placeholders": counts["placeholders"]}
+    return out
+
+
+def _run_plan(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Declare (or extend) a task's checklist: `--steps "a|b|c"`. Steps already on the plan keep
+    their done state and notes; new ones are appended in order. A leased task's plan belongs to
+    its holder, so writing it needs the lease token -- `--take` claims the task first (and only
+    then does `plan` claim), handing back the token to carry."""
+    steps = [s.strip() for s in (arguments.steps or "").split("|") if s.strip()]
+    if not steps:
+        raise ValueError('--steps is required, e.g. --steps "schema|endpoint|board card"')
+    claimed: dict[str, Any] = {}
+    if arguments.take:
+        payload: dict[str, Any] = {"id": arguments.task_id, "agent": _agent(arguments)}
+        claimed = _post(base, "claim", payload, extra_headers=_presence_headers(arguments))
+        arguments.lease_token = claimed.get("token") or arguments.lease_token
+
+    def mutate(entity: dict[str, Any]) -> dict[str, Any]:
+        plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
+        have = {str(s.get("step") or "").strip().lower() for s in plan}
+        for step in steps:
+            if step.lower() not in have:
+                plan.append({"step": step[:200], "done": False})
+                have.add(step.lower())
+        return {"plan": plan}
+
+    result, delta = _task_write(base, arguments.task_id, mutate, arguments)
+    out: dict[str, Any] = {"updated": result, "plan": [s.get("step") for s in delta["plan"]]}
+    if claimed:
+        out["claim"] = claimed
+        out["lease_token"] = claimed.get("token")
+    return out
 
 
 def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -522,8 +840,11 @@ def _run_finish(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
 
 def _parser() -> argparse.ArgumentParser:
+    # allow_abbrev=False everywhere: an abbreviated flag that silently resolves to a DIFFERENT
+    # option (`--pipe` for `--pipeline-url`) records the wrong field without a word.
     parser = argparse.ArgumentParser(
-        description="Mutate a running Hub through the same HTTP seam that publishes realtime state."
+        description="Mutate a running Hub through the same HTTP seam that publishes realtime state.",
+        allow_abbrev=False,
     )
     parser.add_argument("--url", help="served Hub URL; defaults to HUB_API_BASE")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -536,7 +857,17 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--touch", action="append", default=[])
     create.add_argument("--plan-item", action="append", default=[])
     create.add_argument("--agent")
-    create.set_defaults(payload=_payload_create)
+    create.add_argument("--project", help="the app/component slug this task is about")
+    create.add_argument("--unattended", action="store_true",
+                        help="offer it to unattended workers (P0-P2 only; never a decision)")
+    create.add_argument("--decision", action="store_true",
+                        help="a person's call: delivered to the deciders, never an unattended worker")
+    create.add_argument("--work-kind", dest="work_kind")
+    create.add_argument("--idem-key", dest="idem_key",
+                        help="reuse the key a timed-out create printed to replay, not duplicate")
+    create.add_argument("--machine")
+    create.add_argument("--focus")
+    create.set_defaults(runner=_payload_create_retry)
 
     claim = commands.add_parser("claim", help="claim a task and receive its fencing token")
     claim.add_argument("task_id")
@@ -597,6 +928,25 @@ def _parser() -> argparse.ArgumentParser:
     presence.add_argument("--agent")
     presence.add_argument("--machine")
     presence.add_argument("--focus")
+    digest = presence.add_argument_group(
+        "session digest", "what this session is doing, as a supervisor distilled it; an "
+        "unattended run adds its lifecycle (--kind responder|scheduled|autoworker|unattended)")
+    digest.add_argument("--phase", help="e.g. reading, editing, testing, waiting")
+    digest.add_argument("--doing", help="one line: what it is doing right now")
+    digest.add_argument("--narration", help="its own latest words")
+    digest.add_argument("--last-result", dest="last_result", help="e.g. 'exit 0' or '12 passed'")
+    digest.add_argument("--targets", help="comma list of files/areas it is on")
+    digest.add_argument("--kind", help="omit for a person's console")
+    digest.add_argument("--run", help="the supervisor's run id")
+    digest.add_argument("--subject", help="the task/ask the run was started for")
+    digest.add_argument("--subject-title", dest="subject_title")
+    digest.add_argument("--state", choices=("working", "waiting", "done", "gone"))
+    digest.add_argument("--outcome", help="how a finished run ended (finished, handed back, suspended…)")
+    digest.add_argument("--started", type=float, help="epoch seconds the run started")
+    digest.add_argument("--ended", type=float, help="epoch seconds the run ended")
+    digest.add_argument("--bounded-s", dest="bounded_s", type=float, help="the run's time bound")
+    digest.add_argument("--project", help="the project this session is in (crossover detection)")
+    digest.add_argument("--files", help="comma list of files edited recently (crossover detection)")
     presence.set_defaults(payload=_payload_presence)
 
     forget = commands.add_parser("forget-presence",
@@ -631,7 +981,49 @@ def _parser() -> argparse.ArgumentParser:
 
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)
+    inbox.add_argument("--text", action="store_true",
+                       help="grouped for a person: decisions, questions, TASK ROT, attention, crossovers")
     inbox.set_defaults(runner=_run_inbox)
+
+    for verb, operation, helptext in (
+            ("hand", "hand", "hand a task back to the queue for an unattended worker"),
+            ("unclaim", "unclaim", "let go of a task (also an orphaned console's lease of yours)")):
+        let_go = commands.add_parser(verb, help=helptext)
+        let_go.add_argument("task_id")
+        let_go.add_argument("--agent")
+        let_go.add_argument("--note")
+        let_go.add_argument("--lease-token", dest="lease_token")
+        let_go.add_argument("--machine")
+        let_go.add_argument("--focus")
+        let_go.set_defaults(runner=_run_let_go(operation))
+
+    recall = commands.add_parser("recall", help="a task's state, holder, commits and checkpoints")
+    recall.add_argument("task_id")
+    recall.set_defaults(runner=_run_recall)
+
+    decide = commands.add_parser("decide", help="decide a decision task (a person's credential)")
+    decide.add_argument("task_id")
+    decide.add_argument("--decision", required=True)
+    decide.add_argument("--then", required=True, choices=("file", "close", "reply"))
+    decide.set_defaults(runner=_run_decide)
+
+    attention = commands.add_parser("attention",
+                                    help="what needs a person: owner, exact fix, values, age")
+    attention.add_argument("--mine", help="only items owned by this agent")
+    attention.set_defaults(runner=_run_attention)
+
+    consoles = commands.add_parser("consoles", help="live consoles and crossovers between them")
+    consoles.add_argument("--session", help="only the signals addressed to this console")
+    consoles.set_defaults(runner=_run_consoles)
+
+    feed = commands.add_parser("feed", help="one project's annotated task feed")
+    feed.add_argument("project")
+    feed.set_defaults(runner=_run_feed)
+
+    seen = commands.add_parser("overlap-seen", help="record that crossover signals were delivered")
+    seen.add_argument("ids", nargs="+")
+    seen.add_argument("--agent")
+    seen.set_defaults(runner=_run_overlap_seen)
 
     wait = commands.add_parser("wait",
                                help="long-poll the inbox; --follow loops and prints arrivals")
@@ -671,16 +1063,32 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--focus")
     start.set_defaults(runner=_run_start)
 
-    step = commands.add_parser("step", help="mark one plan step done with a checkpoint note")
+    step = commands.add_parser("step", help="record a checkpoint: mark a plan step done with a note")
     step.add_argument("task_id")
     step.add_argument("--agent")
-    step.add_argument("--step", help="step text fragment or 1-based index; default = first undone")
+    step.add_argument("--step", help="step text fragment or 1-based index (grows the plan); "
+                                     "default = first undone work step")
     step.add_argument("--note", help="what actually happened at this checkpoint")
+    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed)")
+    step.add_argument("--pipeline", help="the numeric id of the pipeline that built --sha")
+    step.add_argument("--pipeline-url", dest="pipeline_url")
+    step.add_argument("--kind", help="checkpoint kind (default checkpoint, or pushed with --sha)")
     step.add_argument("--lease-token", dest="lease_token",
                       help="the held lease's fencing token (or HUB_LEASE_TOKEN)")
     step.add_argument("--machine")
     step.add_argument("--focus")
     step.set_defaults(runner=_run_step)
+
+    plan = commands.add_parser("plan", help='declare or extend a checklist: --steps "a|b|c"')
+    plan.add_argument("task_id")
+    plan.add_argument("--steps", required=True)
+    plan.add_argument("--agent")
+    plan.add_argument("--take", action="store_true",
+                      help="claim the task first (the only way plan claims)")
+    plan.add_argument("--lease-token", dest="lease_token")
+    plan.add_argument("--machine")
+    plan.add_argument("--focus")
+    plan.set_defaults(runner=_run_plan)
 
     finish = commands.add_parser("finish",
                                  help="complete the loop's task: charter gate + the declared probe (if any) + the real complete()")
@@ -694,6 +1102,8 @@ def _parser() -> argparse.ArgumentParser:
     finish.add_argument("--machine")
     finish.add_argument("--focus")
     finish.set_defaults(runner=_run_finish)
+    for sub in commands.choices.values():
+        sub.allow_abbrev = False
     return parser
 
 
@@ -711,6 +1121,12 @@ def main() -> int:
         print(str(error), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        return 0
+    converged = _maybe_converge()
+    if converged and isinstance(result, dict):
+        result["client_converge"] = converged
+    if isinstance(result, dict) and set(result) == {"text"}:
+        print(result["text"])
         return 0
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
