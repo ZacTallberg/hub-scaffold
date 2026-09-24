@@ -109,6 +109,9 @@ if path.startswith("/hub/") and not request.user.is_authenticated:
     return HttpResponseNotFound()  # or the adopter's existing identical private-login response
 ```
 
+To admit viewers from the ledger's own reviewable grants instead of a redeployed allowlist, see
+`patterns/read-access-grants.md`.
+
 This pre-authentication grants no read or write authority, creates no user session, and must never
 be cached as authorization. Do not exempt any read route. A valid credential reaches the endpoint;
 only its `@writer` decorator decides whether that credential's scopes permit the operation.

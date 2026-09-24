@@ -43,7 +43,9 @@ from a working multi-project system. Nothing here names any specific person, hos
   that keeps failures in its own log can only be debugged from a shell on its host), and
   **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
-  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
+  the barren ladder it climbs when a cycle produces nothing), and **read access grants**
+  (`read-access-grants.md`: a private board admits its static allowlist plus the ledger's own
+  active grants — bounded, fail-soft, never wider on a failed read). None runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook
