@@ -63,6 +63,11 @@ HUB_BUILD_STAMP = "build_sha.txt"     # BASE_DIR-relative build-identity stamp (
 # HUB_BUILD_SHA = os.environ.get("HUB_BUILD_SHA", "")  # optional immutable platform revision
 HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see below
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
+# HUB_DECIDERS = "alice,bob"          # who may decide decision tasks (credential subjects);
+#                                       # default: the operator. Agents and shared-root never may.
+# HUB_VCS_ANCESTRY = "git"            # how a verified deploy asks "is this task's commit in the
+#                                       # build?" — "git" at HUB_WORK_ROOT, or "none" when the
+#                                       # image carries no repository (then only an exact sha closes)
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling

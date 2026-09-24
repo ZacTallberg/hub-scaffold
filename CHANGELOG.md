@@ -14,6 +14,49 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Tasks that say what is happening to them
+
+- **Claims are fenced and attributed.** A retried claim keeps the lease it renewed (only a lease
+  the request CREATED is released when the transition loses a race), and a lease records the
+  console that claimed it, so one of several consoles in a repo binds to its own task.
+- **Typed checkpoints.** Plan items take `kind` (`checkpoint`, `pushed`, `deployed`, and scheduler
+  kinds that are shown but never counted), `sha`, `pipeline_id`, `pipeline_url`; grown `auto`
+  placeholders leave the denominator. `client step --sha --pipeline`, `plan --take`, and a bounded
+  re-apply on a version race. One definition (`hub_core.checkpoints`) feeds every counter.
+- **Task health.** `live.task_health` buckets every in-progress task as moving / ready to close /
+  stalled / orphaned (moving wins; "ready to close" never claims the outcome and is withheld when a
+  checkpoint says work remains); the board's Workstream card and the operator inbox (`task-stall`,
+  `client inbox --text` → TASK ROT) read it, including unattended requests nobody started.
+- **The unattended lane.** `task.unattended`, `next.json?unattended=1` (P0–P2, never a decision,
+  never a task a live run is on), `client create --unattended`, `hand`, `unclaim`, and the
+  orphaned-lease remedy: a lease held by a non-live console of the same agent can be let go of
+  without its token; a live console's never.
+- **Decisions are a person's call.** `work_kind: decision` is never unattended; open decisions reach
+  the deciders' inbox with a board link; `POST /hub/api/task/decide` (`file | close | reply`) only
+  for a `HUB_DECIDERS` credential, closing through the one done path; `task.decision` records it.
+- **Annotated task rows and a per-project feed.** Rows carry holder, responder, pushed, handed-back,
+  deployed and a CI problem joined on the task's own sha/pipeline; `GET /hub/project/<slug>/tasks.json`
+  with an ETag that moves only when a reader-visible fact does; `client recall` prints the trail.
+- **A verified deploy closes the loop.** Tasks whose recorded commit is an ancestor of the deployed
+  sha are stepped once per commit; unattended ones are finished by the hub; unanswerable ancestry is
+  reported, never read as "no" (`HUB_VCS_ANCESTRY`).
+- **Evidence lists.** Completion evidence may be a comma/space list of shas or URLs, each
+  dereferenced and a bad one named; an unknown bare sha names the repository searched.
+- **Idempotent create.** A create's idem key is looked up across every task (`idem_scope`), so a
+  retried create answers `replayed: true` with the first record instead of minting a twin.
+- **Consoles, honestly.** Presence takes a supervisor's session digest; `consoles.json` splits
+  attended / unattended / finished runs with "idle N min, last did …"; crossovers between consoles
+  (file, task, subsystem, configured topic) carry peer evidence and a suggested split, delivered
+  once per side through the inbox (`patterns/coordination.md`).
+- **Needs attention.** `hub_core.attention` → `GET /hub/attention.json`, `client attention`, MCP
+  `board_attention` and a board card: each fixable condition with owner, exact fix, values and a
+  persisted age, delivered to its owner and then the operator; unreadable sources silence only
+  their own detectors.
+- **Client telemetry.** Every client call sends `X-Hub-Client-Version`; stale seats are named, and
+  `HUB_CLIENT_SELF_UPDATE=1` opts a client into a rate-limited, fail-soft `pull --ff-only`.
+- MCP gains `create_task`, `hand_task`, `unclaim_task`, `recall_task`, `decide_task`,
+  `board_attention`, `board_consoles`, `project_tasks`, `step_task`, `plan_task`.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw
