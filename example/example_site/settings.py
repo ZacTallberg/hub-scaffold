@@ -46,6 +46,9 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",
+    # A momentarily held ledger lock answers 503 + Retry-After and a WARNING row, never a
+    # 500 and a red problem on the queue.
+    "hub.middleware.LedgerBusyMiddleware",
 ]
 
 ROOT_URLCONF = "example_site.urls"
@@ -84,3 +87,15 @@ HUB_WORKER_GRANT_TTL_S = 120
 # fleet has migrated; reads remain unauthenticated and the narrow launch mint remains CSRF-gated.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lower() == "true"
+
+# The host app's own 5xx reach the hub's operational stream (the "Host app 5xx" channel on
+# the board's coverage strip). The handler writes to the same runtime directory the hub uses.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"hub_errors": {"()": "hub_core.errorlog.HubErrorHandler",
+                                "hub_dir": os.environ.get("HUB_DIR") or str(BASE_DIR / "PROJECT" / ".hub"),
+                                "level": "ERROR"}},
+    "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR",
+                                   "propagate": True}},
+}
