@@ -24,7 +24,11 @@ Three rules hold the boundary honest:
 * OMISSION, NEVER MARKING -- a hidden block leaves no placeholder, count or heading behind; the
   narrower reader cannot learn that something was withheld.
 * FAIL CLOSED BY SHAPE -- an unterminated fence hides everything to the end of the document; a
-  malformed spec hides its block. A fence mistake costs the narrow reader text, never leaks it.
+  malformed spec hides its block; and any line that LOOKS like a fence attempt (``<!-- facet``,
+  ``<!-- /facets``, ``# <facet``, in any case, anywhere on the line) but is not exactly a
+  well-formed marker hides everything from that line to the end of the document, for every
+  reader below ``*``. A fence mistake costs the narrow reader text, never leaks it. (A document
+  that wants to MENTION the syntax in prose writes it escaped, e.g. ``&lt;!-- facet: x --&gt;``.)
 * THE BOUNDARY IS AUTHORITY, NOT A REQUEST PARAMETER -- which facets are visible is decided by
   the caller's credential (the adapter maps scope ``facet:<name>``, ``facet:*`` or ``*``), never
   by a query string the caller controls. An anonymous reader sees no facet at all.
@@ -36,10 +40,14 @@ from __future__ import annotations
 
 import re
 
-_MD_OPEN = re.compile(r"^[ \t]*<!--\s*facet\s*:\s*([^>]*?)\s*-->[ \t]*$")
-_MD_CLOSE = re.compile(r"^[ \t]*<!--\s*/facet\s*-->[ \t]*$")
-_SRC_OPEN = re.compile(r"^[ \t]*#\s*<facet\s*:\s*([^>]*?)\s*>[ \t]*$")
-_SRC_CLOSE = re.compile(r"^[ \t]*#\s*</facet\s*>[ \t]*$")
+_I = re.IGNORECASE
+_MD_OPEN = re.compile(r"^[ \t]*<!--\s*facet\s*:\s*([^>]*?)\s*-->[ \t]*$", _I)
+_MD_CLOSE = re.compile(r"^[ \t]*<!--\s*/facet\s*-->[ \t]*$", _I)
+_SRC_OPEN = re.compile(r"^[ \t]*#\s*<facet\s*:\s*([^>]*?)\s*>[ \t]*$", _I)
+_SRC_CLOSE = re.compile(r"^[ \t]*#\s*</facet\s*>[ \t]*$", _I)
+# Anything that smells like a fence. A line matching this but none of the strict markers above
+# is a fence MISTAKE, and a mistake must hide, never show.
+_ATTEMPT = re.compile(r"<!--\s*/?\s*facets?\b|#\s*</?\s*facets?\b", _I)
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
@@ -83,6 +91,12 @@ def render(text: str, visible) -> str:
     out, stack = [], []
     for line in str(text or "").splitlines(keepends=True):
         bare = line.rstrip("\r\n")
+        strict = (_MD_OPEN.match(bare) or _SRC_OPEN.match(bare)
+                  or _MD_CLOSE.match(bare) or _SRC_CLOSE.match(bare))
+        if not strict and _ATTEMPT.search(bare):
+            if "*" in visible:
+                continue      # the fully-privileged reader loses only the broken marker line
+            break             # everyone else: a malformed fence hides the rest of the document
         opened = _MD_OPEN.match(bare) or _SRC_OPEN.match(bare)
         if opened:
             stack.append(_spec_visible(opened.group(1), visible))

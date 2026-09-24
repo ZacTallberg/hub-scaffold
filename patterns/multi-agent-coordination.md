@@ -104,6 +104,10 @@ supply honestly).
   document rendered for the presenting credential: a credential with scope `facet:ops` (or
   `facet:*`, or `*`) sees the first block, anyone else the second, an anonymous reader no facet
   at all. Hidden blocks are omitted without a trace, an unterminated fence hides to the end of
-  the document, and the marker lines vanish for everyone. Visibility is decided by the
+  the document, and the marker lines vanish for everyone. Markers match in any case, and a line
+  that looks like a fence attempt but is not exactly a marker (trailing text, a typo'd form)
+  hides everything after it from every reader below `*` — a fence mistake costs the narrow
+  reader text, never leaks it. To mention the syntax in served prose, escape it
+  (`&lt;!-- facet: x --&gt;`). Visibility is decided by the
   credential, never by a request parameter. Name the served documents with `HUB_DOCTRINE_FILES`
   (default: `PROJECT/DOCTRINE.md`, `CHARTER-CORE.md`, `AGENTS.md`).
