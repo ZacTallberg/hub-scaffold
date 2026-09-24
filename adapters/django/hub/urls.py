@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, veil, mcp_server, run_api
+from . import held, hub_api, hub_write, hubsite, veil, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -38,6 +38,10 @@ urlpatterns = [
     path("attention.json", hub_api.attention_json, name="attention"),
     path("consoles.json", hub_api.consoles_json, name="consoles"),
     path("project/<str:slug>/tasks.json", hub_api.project_tasks_json, name="project-tasks"),
+    # The promotion lane's queue (open holds, oldest first) and the per-machine item claims.
+    # Both sit ABOVE the generic <type>.json catch-all.
+    path("held.json", held.held_json, name="held"),
+    path("item-claims.json", hub_api.item_claims_json, name="item-claims"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -57,11 +61,21 @@ urlpatterns = [
     path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
+    # Give a task to a named agent: `to` is the recipient, `agent` stays the writer.
+    path("api/assign", hub_write.assign),
+    # One responder per non-task item (a question, an error fingerprint) across machines.
+    path("api/item-claim", hub_write.item_claim),
+    # The promotion lane: hold a finished commit back from live; promote it with evidence.
+    path("api/held", held.hold),
+    path("api/held/promote", held.promote),
+    path("api/held/abandon", held.abandon),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
     # Letting go of a task: back to the queue for an unattended worker (hand) or just released
     # (unclaim) — including a lease an orphaned console of the same agent still holds.
+    # `api/hand` dispatches on the body: with `to` it assigns, without it it hands back.
     path("api/hand", hub_write.hand),
+    path("api/hand-back", hub_write.hand_back),
     path("api/unclaim", hub_write.unclaim),
     # A person decides a decision task (file the build task / close / reply); agents are refused.
     path("api/task/decide", hub_write.decide_task),
@@ -105,7 +119,8 @@ VISIBILITY = {
     "inbox/wait": "veiled", "errors.json": "veiled", "search.json": "veiled",
     "agent-updates.json": "veiled", "activity.json": "veiled",
     "attention.json": "veiled", "consoles.json": "veiled",
-    "project/<str:slug>/tasks.json": "veiled",
+    "project/<str:slug>/tasks.json": "veiled", "held.json": "veiled",
+    "item-claims.json": "veiled",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.

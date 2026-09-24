@@ -401,6 +401,38 @@ def _parked_on_reply(task) -> bool:
     return str(last.get("step") or "") == "Reply"
 
 
+def assignment_items(state, agent: str) -> list:
+    """Tasks GIVEN to this agent by name (POST /hub/api/hand) that it has not started yet.
+
+    A board field nobody is pushed is an assignment its recipient finds by luck, so the same
+    addressed set -- and its long-poll -- carries it. It leaves the inbox the moment the task
+    moves on (claimed, finished, or handed to someone else); no ack is needed, the claim IS
+    the acknowledgement."""
+    agent = (agent or "").strip().lower()
+    if not agent:
+        return []
+    out = []
+    for eid, ent in (state.get("entities") or {}).items():
+        if not isinstance(ent, dict) or ent.get("type") != "task":
+            continue
+        if str(ent.get("assigned_to") or "").strip().lower() != agent:
+            continue
+        if ent.get("status") not in ("todo", "blocked"):
+            continue
+        prov = ent.get("provenance") or {}
+        out.append({
+            "kind": "assignment",
+            "id": eid,
+            "from": _text(prov.get("agent") or "the operator", 60),
+            "title": _text(ent.get("title"), 300),
+            "body": body_text(ent.get("acceptance")),
+            "at": _text(prov.get("updated_at") or prov.get("created_at") or "", 40),
+            "priority": _text(ent.get("priority"), 4),
+        })
+    out.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return out
+
+
 def decision_items(state) -> list:
     """Open decisions (work_kind ``decision``, no recorded decision), addressed to whoever
     decides, each with a deep link that opens it on the board. A decision never goes to an
@@ -443,7 +475,8 @@ def items_for(state, agent: str, operator: str, *, machine: str = "", session: s
     questions = questions_for(question_items(state, human_gate=human_gate,
                                              gate_satisfied=gate_satisfied, now=now),
                               agent, operator)
-    items = message_items(state, agent, machine, now) + questions + directive_items(state, agent, now)
+    items = (message_items(state, agent, machine, now) + questions
+             + directive_items(state, agent, now) + assignment_items(state, agent))
     routed = []
     for item in items:
         kept = _route(item, agent, session, live)
@@ -604,6 +637,9 @@ def render_line(item) -> str:
         return "Message from %s: %s" % (item.get("from") or "a board member", item.get("title") or "")
     if item.get("kind") in ("decision", "task-stall", "attention", "overlap"):
         return str(item.get("title") or "")
+    if item.get("kind") == "assignment":
+        return "%s gave you %s: %s" % (item.get("from") or "the operator", item.get("id") or "",
+                                       item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 

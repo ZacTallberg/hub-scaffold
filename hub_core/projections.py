@@ -38,6 +38,9 @@ def hub_snapshot(st, *, build, audit, generated_at=None, live=None) -> dict:
         # delivery acks, so the inbox, the board, and the JSON API read one truth.
         "directives": _sorted(st, "directive"),
         "acks": _sorted(st, "ack"),
+        # The promotion lane: held commits (open, promoted, abandoned), so the board, the JSON
+        # API and /hub/held.json read one truth.
+        "held": _sorted(st, "held"),
         "graph": st["graph"],
         "dangling": st["dangling"],
         "live": live or {},

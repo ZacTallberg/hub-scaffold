@@ -730,6 +730,67 @@ def _write_lease(task_id, lease):
     _os.replace(tmp, p)
 
 
+def commit_resolver():
+    """Where commit questions are put: this Hub's own repository (WORK_ROOT), each configured
+    project's checkout (``HUB_PROJECT_REPOS = {"budget-app": "/srv/checkouts/budget-app"}``),
+    and an optional remote resolver (``HUB_COMMIT_RESOLVER = "package.module:function"``, called
+    as ``function(project, sha) -> True | False | None``) for a project with no local checkout.
+
+    A resolver that cannot be imported is "could not ask", never a crash and never a "no"."""
+    from hub_core import commits
+    repos = _dj_setting("HUB_PROJECT_REPOS", None) or {}
+    if not isinstance(repos, dict):
+        repos = {}
+    resolved = {}
+    for key, path in repos.items():
+        p = Path(str(path))
+        resolved[str(key)] = p if p.is_absolute() else BASE_DIR / p
+    remote = None
+    dotted = str(_dj_setting("HUB_COMMIT_RESOLVER", "") or "").strip()
+    if dotted:
+        module_name, _, attr = dotted.partition(":")
+        try:
+            import importlib
+            remote = getattr(importlib.import_module(module_name), attr)
+        except Exception:                                    # noqa: BLE001
+
+            def remote(project, sha):                        # noqa: ARG001 - an honest "unknown"
+                return None
+    return commits.Resolver(WORK_ROOT, resolved, remote)
+
+
+def gone_grace_s():
+    """How long a provably GONE console keeps what it held (``HUB_GONE_GRACE_S``, default
+    hub_core.liveness.GONE_GRACE_S). One number for every claim kind, so the board, the sweep,
+    the task claim and the item claim can never disagree about when a claim frees."""
+    from hub_core import liveness
+    try:
+        return max(60, int(_dj_setting("HUB_GONE_GRACE_S", liveness.GONE_GRACE_S)))
+    except (TypeError, ValueError):
+        return liveness.GONE_GRACE_S
+
+
+def lease_verdict(lease, roster_=None, now=None) -> dict:
+    """``{state, gone_s, frees_in_s, released}`` for one lease's holder (hub_core.liveness):
+    released is True only when its console is provably GONE past ``gone_grace_s()``. Fails
+    closed to UNPROVABLE -- which releases nothing -- when presence cannot be read."""
+    from hub_core import liveness
+    lease = lease or {}
+    try:
+        roster_ = roster_ if roster_ is not None else roster()
+    except Exception:                                        # noqa: BLE001 - unprovable, not gone
+        roster_ = None
+    return liveness.verdict(roster_, lease.get("session"), lease.get("machine") or "",
+                            floor=float(lease.get("last_heartbeat") or lease.get("claimed") or 0),
+                            now=now, grace_s=gone_grace_s())
+
+
+def roster():
+    """Who is live on this board right now, with its own completeness (hub_core.liveness)."""
+    from hub_core import liveness
+    return liveness.resolve(HUB_DIR)
+
+
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
           actor_kind=None, session="", machine=""):
     """Grant or renew the fenced lease on one task.
@@ -744,14 +805,72 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
     from a directory — and anyone who reads a repository then looks like its owner.
     """
     session = str(session or "").strip()[:64]
+    machine = str(machine or "").strip().lower()[:120]
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
+        took_over = None
+        if (cur and cur.get("expires", 0) > now and cur.get("session")
+                and str(cur.get("session")) != session):
+            # A lease whose console is provably GONE past its grace is released here exactly as
+            # the sweep would release it, so a claim never waits on a sweep that has not run yet.
+            if lease_verdict(cur, now=now)["released"]:
+                took_over = {"session": cur.get("session"), "machine": cur.get("machine"),
+                             "agent": cur.get("agent"), "at": now}
+                cur = None
         if cur and cur.get("expires", 0) > now:
             if (cur.get("agent") != agent or
                     (cur.get("auth_subject") and cur.get("auth_subject") != auth_subject) or
                     (cur.get("credential_id") and cur.get("credential_id") != credential_id)):
-                return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
+                refusal = {"ok": False, "reason": "held", "held_by": cur.get("agent"),
+                           "expires": cur.get("expires")}
+                if cur.get("session"):
+                    # Say WHEN it frees: a gone holder's lease is released by the sweep once its
+                    # grace runs out, well before the clock; a live one only by the clock.
+                    from hub_core import liveness
+                    v = liveness.holder(roster(), cur, now, grace_s=gone_grace_s())
+                    refusal.update({"held_by_session": cur.get("session"),
+                                    "holder_state": v["holder_state"],
+                                    "holder_gone_s": v["holder_gone_s"],
+                                    "frees_in_s": (v["holder_frees_in_s"]
+                                                   if v["holder_state"] == liveness.GONE
+                                                   else max(0, int(cur.get("expires", now) - now)))})
+                return refusal
+            # ONE AGENT'S CONSOLES ARE NOT ONE WORKER. The checks above are per agent/credential,
+            # so a second console of the same agent used to renew this lease in place, receive
+            # its fencing token, and close work the first console was still doing. A renewal
+            # from a DIFFERENT console is refused while the recorded one is provably LIVE. When
+            # liveness cannot be established (presence unreadable, the holder's machine quiet)
+            # the renewal still goes through -- refusing there would strand work whose holder
+            # really is gone -- but it never rewrites the recorded holder, because every
+            # surface that says who is on this task keys on it.
+            holder = str(cur.get("session") or "")
+            if session and holder and session != holder:
+                from hub_core import liveness
+                state, _seen = roster().state(holder, cur.get("machine") or "")
+                if state == liveness.LIVE:
+                    return {"ok": False, "reason": "held_by_console",
+                            "held_by": cur.get("agent"), "held_by_session": holder,
+                            "held_by_machine": cur.get("machine") or None,
+                            "expires": cur.get("expires")}
+                if state == liveness.GONE:
+                    # The recorded console is PROVABLY gone and this one is doing the work now:
+                    # the record names the console actually on it, so the board stops naming a
+                    # dead session and holder_state reads live again.
+                    cur["took_over_from"] = {"session": holder,
+                                             "machine": cur.get("machine") or None, "at": now}
+                    cur["session"] = session
+                    if machine:
+                        cur["machine"] = machine
+                    holder = session
+                else:
+                    # UNPROVABLE: renew (refusing would strand work whose holder really is
+                    # gone) but keep the recorded holder; do not claim to be it.
+                    session = machine = ""
+            if session and not holder:
+                cur["session"] = session
+            if machine and not cur.get("machine"):
+                cur["machine"] = machine
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
             if not cur.get("auth_subject"):
@@ -776,8 +895,14 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                  "actor_kind": actor_kind,
                  "session": str(session or "")[:64], "machine": str(machine or "").lower()[:120],
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
+        # The console and machine that took it: the one record that survives the holder's
+        # disappearance, so liveness can later say LIVE / GONE / UNPROVABLE about it.
         if session:
             lease["session"] = session
+        if machine:
+            lease["machine"] = machine
+        if took_over:
+            lease["took_over_from"] = took_over
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
                           expires=lease["expires"])
@@ -870,6 +995,23 @@ def heartbeat(task_id, token, ttl_s=900, *, auth_subject=None, credential_id=Non
         _schedule_lease_truth(cur)
         return {"ok": True, "expires": cur["expires"], "last_heartbeat": now,
                 "heartbeat_after_s": max(1, ttl_s // 3)}
+
+
+def void_lease(task_id, token, why="") -> bool:
+    """Expire exactly the lease named by its fencing token, in place, recording why. Used when
+    its holder's console is provably gone (hub_core.lease_sweep): the record stays readable, the
+    token stops fencing, and a successor's lease is never touched."""
+    with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
+        cur = _read_lease(task_id)
+        if not cur or not token or cur.get("token") != token:
+            return False
+        now = _time.time()
+        cur["expires"] = min(float(cur.get("expires") or now), now)
+        cur["voided_at"] = now
+        cur["voided_why"] = str(why or "")[:300]
+        _write_lease(task_id, cur)
+    _publish_realtime("lease.voided", task=task_id, agent=cur.get("agent"))
+    return True
 
 
 def release_lease(task_id, token) -> bool:
