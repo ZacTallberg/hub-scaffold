@@ -2330,8 +2330,9 @@
     if (!global.AbortController) return fetch(url, options);
     var controller = new global.AbortController();
     // Abort with a NAMED reason: a bare AbortError can then only mean the browser cancelled
-    // the request (navigation, Stop, a discarded tab), and the error bar defers both shapes as
-    // transport blips instead of queueing a cancelled poll as a board failure.
+    // the request (navigation, Stop, a discarded tab). The board does not forward its own fetch
+    // failures; this is the wording a forwarding reporter should copy, and the error bar defers
+    // it bare or as String(err) ("TimeoutError: Hub did not answer ...").
     var timer = setTimeout(function () {
       var reason = new Error("Hub did not answer " + String(url).split("?")[0] + " within 9 seconds");
       reason.name = "TimeoutError";

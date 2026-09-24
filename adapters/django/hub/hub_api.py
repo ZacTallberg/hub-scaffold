@@ -213,25 +213,29 @@ _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 # so improving the predicate reclassifies the whole retained window retroactively.
 #
 # A bare AbortError is the BROWSER cancelling a fetch — a navigation, Stop, a frozen or
-# discarded tab — never this board failing: the board's own timeout aborts with a NAMED
-# reason ("Hub did not answer ... within N seconds"), which is its own blip. Each engine words
-# the cancellation differently, so all of them are listed. Anchored, so a real fault whose
-# message merely CONTAINS the phrase still queues.
+# discarded tab — never this board failing. Each engine words the cancellation differently, so
+# all of them are listed. The board's own fetch timeout aborts with a NAMED reason ("Hub did not
+# answer <path> within N seconds"), accepted bare or with the TimeoutError:/AbortError: prefix a
+# reporter adds when it writes String(err). Every blip alternative is anchored at BOTH ends: the
+# message must be the transport wording and nothing else, so a real fault that merely BEGINS
+# with the phrase ("The operation was aborted because the store is corrupt") still queues.
 _ABORT = (r"(AbortError: )?(The user aborted a request|The operation was aborted|"
-          r"signal is aborted without reason|Fetch is aborted)")
-_BLIP = re.compile(r"^(HTTP 5|HTTP 0|Failed to fetch|NetworkError|Load failed|"
-                   r"Live stream unavailable|Realtime stream unavailable|"
-                   r"Hub did not answer .+ within \d+ seconds|" + _ABORT + r")", re.I)
+          r"signal is aborted without reason|Fetch is aborted)\.?")
+_BARE_TRANSPORT = r"(TypeError: )?(Failed to fetch|NetworkError[^()]*|Load failed)\.?"
+# A 5xx/0 status line and a stream-unavailable notice are statuses, not wordings of a fault,
+# so they keep their prefix form; everything a real fault could start with is end-anchored.
+_BLIP = re.compile(r"^(HTTP (5\d\d|0)\b.*|(Live|Realtime) stream unavailable\b.*|"
+                   + _BARE_TRANSPORT + r"|"
+                   r"((TimeoutError|AbortError): )?Hub did not answer \S+ within \d+ seconds\.?|"
+                   + _ABORT + r")$", re.I)
 # A SERVICE's browser reporter (app.<slug>.browser) wraps the same no-response failure in its
 # own words first — "request failed: GET <path> - Failed to fetch", "live stream failed:
-# TypeError: Failed to fetch" — so a rule anchored only at ^ never sees it and a dropped
-# background poll reopens on the queue every few minutes. The wrapped rule is anchored at the
-# END of the bare transport text: a reporter that says "(2 consecutive background attempts, no
+# TypeError: Failed to fetch" — so the wrapped forms are listed too. Still anchored at the END
+# of the bare transport text: a reporter that says "(2 consecutive background attempts, no
 # response)" is describing a SUSTAINED outage, and that row still queues.
-_WRAPPED_TRANSPORT = r"(TypeError: )?(Failed to fetch|NetworkError[^()]*|Load failed)$"
-_APP_BLIP = re.compile(r"^(Failed to fetch|NetworkError|Load failed|"
-                       r"request failed: [A-Z]+ \S* - " + _WRAPPED_TRANSPORT + r"|"
-                       r"live stream failed: " + _WRAPPED_TRANSPORT + r"|" + _ABORT + r")", re.I)
+_APP_BLIP = re.compile(r"^(" + _BARE_TRANSPORT + r"|"
+                       r"request failed: [A-Z]+ \S* - " + _BARE_TRANSPORT + r"|"
+                       r"live stream failed: " + _BARE_TRANSPORT + r"|" + _ABORT + r")$", re.I)
 
 
 def _error_bar(row):
