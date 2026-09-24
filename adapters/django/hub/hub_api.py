@@ -10,6 +10,7 @@ import json
 import re
 import threading
 import time
+from pathlib import Path
 
 from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_protect
@@ -1425,6 +1426,62 @@ def whoami_json(request):
     else:
         data.update({"mode": None, "subject": None, "problem": problem})
     return JsonResponse({"data": data})
+
+
+def _doctrine_files() -> dict:
+    """name -> path of the documents this board serves through its facet fences. Adopters name
+    their own with HUB_DOCTRINE_FILES ({"name": "relative/or/absolute/path.md"}); relative
+    paths resolve from HUB_WORK_ROOT. Only files that exist are offered."""
+    import os as _os
+    configured = hub_app._dj_setting("HUB_DOCTRINE_FILES")
+    if not configured and _os.environ.get("HUB_DOCTRINE_FILES"):
+        try:
+            configured = json.loads(_os.environ["HUB_DOCTRINE_FILES"])
+        except ValueError:
+            configured = None
+    if isinstance(configured, dict) and configured:
+        pairs = {str(k): Path(str(v)) for k, v in configured.items()}
+    else:
+        pairs = {"doctrine": hub_app.PROJECT / "DOCTRINE.md",
+                 "charter": hub_app.WORK_ROOT / "CHARTER-CORE.md",
+                 "agents": hub_app.WORK_ROOT / "AGENTS.md"}
+    out = {}
+    for name, path in pairs.items():
+        path = path if path.is_absolute() else hub_app.WORK_ROOT / path
+        if path.is_file():
+            out[name] = path
+    return out
+
+
+@require_GET
+def doctrine_json(request):
+    """One standing document, rendered through its facet fences for THIS caller.
+
+    Which fenced blocks a reader sees is decided by the credential it presents (scope
+    ``facet:<name>``, ``facet:*`` or ``*``), never by a parameter it chooses; an anonymous read
+    sees no facet. Hidden blocks are omitted without a trace — the response names only the
+    facets this caller CAN see, never the ones withheld."""
+    import hashlib
+    from hub_core import facets as _facets
+    from . import hub_write
+    files = _doctrine_files()
+    name = (request.GET.get("doc") or "doctrine").strip().lower()
+    if name not in files:
+        return JsonResponse({"errors": [{"code": "unknown_doc", "msg": "pass ?doc= one of the "
+                                         "served documents", "served": sorted(files)}]},
+                            status=404)
+    auth, _problem = hub_write._authenticate(request)
+    visible = _facets.visible_from_scopes(getattr(auth, "scopes", ()) if auth else ())
+    try:
+        raw = files[name].read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        return JsonResponse({"errors": [{"code": "unreadable", "msg": type(exc).__name__}]},
+                            status=503)
+    text = _facets.render(raw, visible)
+    return JsonResponse({"data": {
+        "doc": name, "served": sorted(files),
+        "facets_visible": sorted(visible), "subject": getattr(auth, "subject", None),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text}})
 
 
 _SEARCH_STOP = {"the", "a", "an", "is", "of", "to", "and", "or", "in", "on", "for", "it",
