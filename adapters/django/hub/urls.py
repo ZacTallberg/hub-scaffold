@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, mcp_server, run_api
+from . import held, hub_api, hub_write, hubsite, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -27,6 +27,10 @@ urlpatterns = [
     path("errors.json", hub_api.errors_json, name="errors"),
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    # The promotion lane's queue (open holds, oldest first) and the per-machine item claims.
+    # Both sit ABOVE the generic <type>.json catch-all.
+    path("held.json", held.held_json, name="held"),
+    path("item-claims.json", hub_api.item_claims_json, name="item-claims"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -45,6 +49,14 @@ urlpatterns = [
     path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
+    # Give a task to a named agent: `to` is the recipient, `agent` stays the writer.
+    path("api/hand", hub_write.hand),
+    # One responder per non-task item (a question, an error fingerprint) across machines.
+    path("api/item-claim", hub_write.item_claim),
+    # The promotion lane: hold a finished commit back from live; promote it with evidence.
+    path("api/held", held.hold),
+    path("api/held/promote", held.promote),
+    path("api/held/abandon", held.abandon),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
     # The ask/answer loop and the directive plane (delivery closed by acks).

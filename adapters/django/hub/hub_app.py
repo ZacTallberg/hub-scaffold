@@ -574,8 +574,45 @@ def _write_lease(task_id, lease):
     _os.replace(tmp, p)
 
 
+def commit_resolver():
+    """Where commit questions are put: this Hub's own repository (WORK_ROOT), each configured
+    project's checkout (``HUB_PROJECT_REPOS = {"budget-app": "/srv/checkouts/budget-app"}``),
+    and an optional remote resolver (``HUB_COMMIT_RESOLVER = "package.module:function"``, called
+    as ``function(project, sha) -> True | False | None``) for a project with no local checkout.
+
+    A resolver that cannot be imported is "could not ask", never a crash and never a "no"."""
+    from hub_core import commits
+    repos = _dj_setting("HUB_PROJECT_REPOS", None) or {}
+    if not isinstance(repos, dict):
+        repos = {}
+    resolved = {}
+    for key, path in repos.items():
+        p = Path(str(path))
+        resolved[str(key)] = p if p.is_absolute() else BASE_DIR / p
+    remote = None
+    dotted = str(_dj_setting("HUB_COMMIT_RESOLVER", "") or "").strip()
+    if dotted:
+        module_name, _, attr = dotted.partition(":")
+        try:
+            import importlib
+            remote = getattr(importlib.import_module(module_name), attr)
+        except Exception:                                    # noqa: BLE001
+
+            def remote(project, sha):                        # noqa: ARG001 - an honest "unknown"
+                return None
+    return commits.Resolver(WORK_ROOT, resolved, remote)
+
+
+def roster():
+    """Who is live on this board right now, with its own completeness (hub_core.liveness)."""
+    from hub_core import liveness
+    return liveness.resolve(HUB_DIR)
+
+
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
-          actor_kind=None):
+          actor_kind=None, session="", machine=""):
+    session = str(session or "").strip()[:64]
+    machine = str(machine or "").strip().lower()[:120]
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
@@ -584,6 +621,28 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                     (cur.get("auth_subject") and cur.get("auth_subject") != auth_subject) or
                     (cur.get("credential_id") and cur.get("credential_id") != credential_id)):
                 return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
+            # ONE AGENT'S CONSOLES ARE NOT ONE WORKER. The checks above are per agent/credential,
+            # so a second console of the same agent used to renew this lease in place, receive
+            # its fencing token, and close work the first console was still doing. A renewal
+            # from a DIFFERENT console is refused while the recorded one is provably LIVE. When
+            # liveness cannot be established (presence unreadable, the holder's machine quiet)
+            # the renewal still goes through -- refusing there would strand work whose holder
+            # really is gone -- but it never rewrites the recorded holder, because every
+            # surface that says who is on this task keys on it.
+            holder = str(cur.get("session") or "")
+            if session and holder and session != holder:
+                from hub_core import liveness
+                state, _seen = roster().state(holder, cur.get("machine") or "")
+                if state == liveness.LIVE:
+                    return {"ok": False, "reason": "held_by_console",
+                            "held_by": cur.get("agent"), "held_by_session": holder,
+                            "held_by_machine": cur.get("machine") or None,
+                            "expires": cur.get("expires")}
+                session = machine = ""           # keep the recorded holder; do not claim to be it
+            if session and not holder:
+                cur["session"] = session
+            if machine and not cur.get("machine"):
+                cur["machine"] = machine
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
             if not cur.get("auth_subject"):
@@ -601,6 +660,12 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                  "auth_subject": auth_subject, "credential_id": credential_id,
                  "actor_kind": actor_kind,
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
+        # The console and machine that took it: the one record that survives the holder's
+        # disappearance, so liveness can later say LIVE / GONE / UNPROVABLE about it.
+        if session:
+            lease["session"] = session
+        if machine:
+            lease["machine"] = machine
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
                           expires=lease["expires"])
