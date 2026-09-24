@@ -1,0 +1,16 @@
+{% extends "budget/base.html" %}
+{% block title %}How each number is counted{% endblock %}
+{% block content %}
+<div class="page">
+  <h1 class="page-title">{{ s.total }} open line{{ s.total|pluralize }}, and the four rules that count them</h1>
+  <div class="card prose">
+    <ol>
+      <li><strong>Open</strong> lines are every line not archived. Archived lines are counted separately ({{ s.archived }} now) and never mixed in.</li>
+      <li><strong>Over budget</strong> is the line's recorded status, set by the team that owns it, not recomputed here.</li>
+      <li><strong>Measured</strong> means an actual has been entered. A line with no actual shows a dash, never 0, and has no variance.</li>
+      <li><strong>Variance</strong> is actual minus planned, measured lines only. Nothing on these pages is modelled or estimated.</li>
+    </ol>
+    <p class="muted">Source: this app's own database, read on every page load.</p>
+  </div>
+</div>
+{% endblock %}

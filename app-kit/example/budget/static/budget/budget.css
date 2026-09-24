@@ -1,0 +1,19 @@
+/* The example's own styles: tokens only, so both themes come from the shell's token sets. */
+.notice { margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--surface-2); }
+.notice-ok { border-color: var(--ok); }
+.review { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  margin-bottom: var(--space-4); flex-wrap: wrap; }
+.pill-over { border-color: var(--danger); color: var(--danger); }
+.pill-open { border-color: var(--ok); color: var(--ok); }
+.pill-archived { color: var(--muted); }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-2) var(--space-4); margin: 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+.section-title { font-size: 14px; margin: var(--space-6) 0 var(--space-2); }
+.history { margin: 0; padding-left: var(--space-6); }
+.history time { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.prose li { margin-bottom: var(--space-2); line-height: 1.5; }
+.archived summary { cursor: pointer; font-weight: 600; }
+.archived ul { margin: var(--space-3) 0 0; padding-left: var(--space-6); }
+.card + .card { margin-top: var(--space-4); }
