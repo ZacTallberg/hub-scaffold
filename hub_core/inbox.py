@@ -2,55 +2,104 @@
 
 A board can RECORD a question and render it beautifully, and the asker is still blocked in
 silence if the only delivery mechanism is somebody happening to have a browser tab open.
-This module turns stored questions and directives into an ADDRESSED set per agent and lets
-a caller BLOCK until that set changes — a worker's supervisor loop (or the operator's own
-polling process) spends the sleep it was already doing held here instead, so an ask reaches
-the operator in about a second and the answer lands back the same way.
+This module turns stored questions, messages and directives into an ADDRESSED set per agent
+(and, when the caller names one, per console) and lets a caller BLOCK until that set changes —
+a worker's supervisor loop (or the operator's own polling process) spends the sleep it was
+already doing held here instead, so an ask reaches its answerer in about a second and the
+answer lands back the same way.
 
-Framework-free and pure over the folded state; the wait loop takes injected callables so
-the adapter owns store lifecycles. Two rules hold the wait honest:
+Framework-free and pure over the folded state; the wait loop takes injected callables so the
+adapter owns store lifecycles. The rules this module holds, each one paid for on an origin
+system:
 
-* It NEVER blocks a request thread longer than MAX_WAIT_S, and never more than MAX_WAITERS
-  at once — past the ceiling it degrades to an immediate answer (an honest poll), rather
-  than starving the server of workers. `degraded` is reported so the caller can tell a
-  real quiet period from a hub that declined to hold the connection.
-* The FINGERPRINT of the addressed set, not the event cursor, decides whether to wake a
-  caller. Unrelated board traffic advances the cursor constantly; waking every waiter for
-  a task status change makes the channel expensive and teaches people to ignore it.
+* THE WAIT IS BOUNDED, AND THE SLOT COMES FIRST. It never blocks a request thread longer than
+  MAX_WAIT_S, never more than MAX_WAITERS at once, and a caller turned away at the ceiling is
+  answered from the last projection built for it (when young enough) instead of paying for a
+  fresh fold the hub has just decided it cannot afford. `degraded` says so.
+* THE FINGERPRINT, not the event cursor, decides whether to wake a caller. Unrelated board
+  traffic advances the cursor constantly; waking every waiter for a task status change makes
+  the channel expensive and teaches people to ignore it.
+* EVERY QUESTION CARRIES ITS AGE, LONGEST WAIT FIRST. An item without `waited_s` cannot be
+  triaged, and a detector keyed on that field is silent forever without it. An unreadable
+  stamp is None — never 0 — and sorts last, so "unknown" is never mistaken for "just arrived".
+* ASKS NEVER GET STUCK. Addressed -> that agent's; unaddressed -> the operator's; unanswered
+  past ASK_UNSTICK_S -> EVERY console's (except the asker's own). A human-only gate is never
+  widened — handing it to every console just spends sessions proving nobody else can act.
+* DETECTORS SEE EVERYTHING; ONLY DELIVERY NARROWS. question_items() is the whole queue;
+  questions_for() is the per-reader filter. Filtering inside the producer silences every
+  caller that needs the whole queue.
+* A SESSION-ADDRESSED ITEM REACHES ITS CONSOLE, and mail for a console that has ended falls
+  through to that agent's most recently active live console, naming the original session —
+  a console that closed is not a reason for mail to reach nobody.
+* A CORRECTED ANSWER IS A NEW DELIVERY. Answers carry `delivery_revision`; an ack of an older
+  revision does not close the correction.
 
 The representation is deliberately first-class: a question is a note tagged
-``question``+``open`` carrying its asker in an ``asker`` field (stable across rewrites —
-provenance.agent becomes whoever last touched the note, which is the answerer after an
-answer, so deriving the asker from provenance mis-addresses every re-answered reply). An
-answer is a directive with ``answers`` naming the question and ``targets`` naming the
-asker. An ack is that agent's record that delivery landed.
+``question``+``open`` carrying its asker in a stable ``asker`` field (provenance.agent becomes
+whoever last touched the note, which is the answerer after an answer). A message is a note
+tagged ``message``+``open`` with ``to``. An answer is a directive with ``answers`` naming the
+question and ``targets`` naming the asker. An ack is that agent's record that delivery landed.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
+import os
+import re
 import threading
 import time
 
+
+def _env_int(name, default, low, high):
+    try:
+        return max(low, min(int(os.environ.get(name, default)), high))
+    except (TypeError, ValueError):
+        return default
+
+
 MAX_WAIT_S = 25          # under common proxy read timeouts and the SSE lifetime
-MAX_WAITERS = 4          # past this the wait degrades to a poll instead of starving the server
+# PER PROCESS: what this cap protects is this process's own request threads.
+MAX_WAITERS = _env_int("HUB_INBOX_WAITERS_MAX", 4, 1, 16)
 POLL_S = 0.35            # change-signal cadence while blocked
+# How old a remembered projection may be and still answer a wait. Some items age on the clock
+# alone (an ask turns stuck, then unsticks), so nothing is served older than this.
+SNAPSHOT_REUSE_S = 30.0
+# Presence moves on every request; the inbox only derives session routing from it, so its
+# stamp in the change signal is bucketed — a waiter wakes at most once per bucket for it.
+PRESENCE_SIGNAL_S = 15
+# An ask nobody has answered in this long stops being one agent's backlog and reaches every
+# console — and therefore every unattended responder that takes work from its inbox.
+ASK_UNSTICK_S = _env_int("HUB_ASK_UNSTICK_S", 4 * 3600, 60, 30 * 86400)
+# An open ask waiting this long is STUCK: the board and the attention rail say so, with its age.
+ASK_STUCK_S = _env_int("HUB_ASK_STUCK_S", 2 * 3600, 60, 30 * 86400)
+# A delivery older than this says when it was WRITTEN, so a reader does not act on stale mail
+# as though it just arrived.
+WRITTEN_NOTICE_S = 600
+INBOX_BODY_LIMIT = 8000
 
 _WAITERS = threading.BoundedSemaphore(MAX_WAITERS)
+_LAST_SNAPSHOT: dict = {}          # key -> (signal, snapshot, monotonic at)
+_LAST_SNAPSHOT_LOCK = threading.Lock()
+_LAST_OFFERED: dict = {}           # (agent, session) -> fingerprint last offered
 
 # A note carrying any of these was written BY AUTOMATION, so it is telemetry and can never
 # be an item addressed to a person. Relying on every future caller to pick the right verb
 # is not a control — this is, and it holds for automation written by somebody who never
 # read the lesson that created it.
 AUTOMATION_TAGS = {"probe", "selfcheck", "automated", "healthcheck", "heartbeat", "canary"}
+# An ask only a PERSON can satisfy (an approval, a physical action). Filed with this tag, or
+# matched by the adopter's gate pattern, it is delivered as a gate: never widened to every
+# console, never handed to a responder that would retire it before a human saw it.
+HUMAN_ONLY_TAG = "human-only"
 
 
 def _text(value, limit=2000) -> str:
     return str(value or "").replace("\x00", " ")[:limit]
 
 
-def body_text(value, limit=8000) -> str:
+def body_text(value, limit=INBOX_BODY_LIMIT) -> str:
     """A body carries the INSTRUCTION, so it gets room — and says so when clipped. A silent
     cap once dropped the second half of a multi-step procedure addressed to the one person
     who could act on it, and nothing in the output said anything was missing — which is
@@ -62,121 +111,425 @@ def body_text(value, limit=8000) -> str:
                         % (limit, len(s)))
 
 
-def question_items(state) -> list:
-    """Open questions from a person, addressed to the operator, newest first."""
+def waited_since(stamp, now=None):
+    """Seconds since an ISO-8601 board timestamp, or None when it cannot be read — never 0,
+    so "we do not know how long" can never be mistaken for "it just arrived". A stamp in the
+    future (clock skew) is also None: an age the reader cannot trust is not an age."""
+    text = str(stamp or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    age = (time.time() if now is None else now) - parsed.timestamp()
+    return age if age >= -5 else None
+
+
+def age_phrase(seconds) -> str:
+    if seconds is None:
+        return ""
+    seconds = max(0, seconds)
+    if seconds < 3600:
+        return "%d min" % max(1, int(seconds // 60))
+    if seconds < 172800:
+        return "%d h" % int(seconds // 3600)
+    return "%d days" % int(seconds // 86400)
+
+
+def _written(at, now=None) -> dict:
+    """{"written": "written 42 min ago"} for a delivery older than WRITTEN_NOTICE_S; nothing
+    when the stamp is missing, unparseable, or in the future — a header that guesses is worse
+    than none."""
+    age = waited_since(at, now)
+    if age is None or age < WRITTEN_NOTICE_S:
+        return {}
+    return {"written": "written %s ago" % age_phrase(age)}
+
+
+def _norm(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _sid(value) -> str:
+    """Session ids compare on their first 8 characters — the width presence keeps."""
+    return str(value or "").strip()[:8]
+
+
+def _prov_at(ent) -> str:
+    prov = ent.get("provenance") or {}
+    return _text(prov.get("created_at") or prov.get("updated_at") or "", 40)
+
+
+# ── questions ────────────────────────────────────────────────────────────────────────────────
+
+def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> list:
+    """EVERY open question from a person — the whole queue, unfiltered, LONGEST WAIT FIRST.
+
+    Each row carries `to` (its addressee; empty = the operator's), `waited_s`/`age`, and
+    `unstuck` once it has waited past ASK_UNSTICK_S — which is what delivery narrows on.
+
+    `human_gate(text) -> bool` is the adopter's classifier for asks only a person can satisfy
+    (read over title AND body: an ask naming the approval only in its context is still one).
+    `gate_satisfied(text) -> str` names the evidence that such an approval has ALREADY landed;
+    it must read a cache only — this runs inside every inbox fold and every held wait, and a
+    read path that shells out or queries a remote system takes the whole hub down with it.
+    When it answers, the ask stops being a gate and becomes an ordinary question anybody can
+    close, carrying the evidence so whoever picks it up closes it instead of re-deriving it."""
+    now = time.time() if now is None else now
     out = []
     for eid, ent in (state.get("entities") or {}).items():
         if not isinstance(ent, dict) or ent.get("type") != "note":
             continue
-        tags = [str(t).lower() for t in (ent.get("tags") or [])]
+        tags = [_norm(t) for t in (ent.get("tags") or [])]
         if "question" not in tags or "open" not in tags:
             continue
         if AUTOMATION_TAGS.intersection(tags):
             continue
         prov = ent.get("provenance") or {}
-        asker = _text(ent.get("asker") or prov.get("agent") or "", 60)
+        asker = _text(ent.get("asker") or ent.get("from_agent") or prov.get("agent") or "", 60)
+        title = _text(ent.get("title"), 300)
+        body = body_text(ent.get("body_md"))
+        blob = "%s\n%s" % (title, str(ent.get("body_md") or ""))
+        human_only = HUMAN_ONLY_TAG in tags
+        if not human_only and human_gate is not None:
+            try:
+                human_only = bool(human_gate(blob))
+            except Exception:                                # noqa: BLE001 - never break delivery
+                human_only = False
+        granted = ""
+        if human_only and gate_satisfied is not None:
+            try:
+                granted = str(gate_satisfied(blob) or "")
+            except Exception:                                # noqa: BLE001
+                granted = ""
+            if granted:
+                human_only = False
+        at = _prov_at(ent)
+        waited = waited_since(at, now)
+        unstuck = waited is not None and waited >= ASK_UNSTICK_S and not human_only
+        tier = _norm(ent.get("tier"))
         out.append({
-            "kind": "question",
+            "kind": "gate" if human_only else "question",
             "id": eid,
             "from": asker or "a board member",
+            "from_session": _text(ent.get("from_session"), 64),
+            "to": _norm(ent.get("to"))[:60],
+            "title": ("[%s] " % tier if tier and tier != "member" else "") + title,
+            "body": body,
+            "body_complete": len(str(ent.get("body_md") or "")) <= INBOX_BODY_LIMIT,
+            "at": at,
+            "waited_s": int(waited) if waited is not None else None,
+            "age": age_phrase(waited),
+            "stuck": waited is not None and waited >= ASK_STUCK_S,
+            **({"unstuck": True} if unstuck else {}),
+            **({"human_only": True} if human_only else {}),
+            **({"granted": granted,
+                "granted_note": "the approval this ask wanted has landed (%s); close it with "
+                                "`answer`" % granted} if granted else {}),
+            **_written(at, now),
+        })
+    # Longest wait first; an unreadable stamp sorts LAST — promoting an unknown over a
+    # measured two-day wait would bury the very row this ordering exists to raise.
+    out.sort(key=lambda i: (i.get("waited_s") is not None, i.get("waited_s") or 0),
+             reverse=True)
+    return out
+
+
+def questions_for(questions, agent: str, operator: str) -> list:
+    """The DELIVERY filter over question_items() — who is shown which question:
+
+        addressed        -> that agent's, and nobody else's
+        unaddressed      -> the operator's
+        waited too long  -> EVERYBODY'S (never back to its own asker; never a human gate)
+    """
+    me = _norm(agent)
+    is_operator = bool(me) and me == _norm(operator)
+    out = []
+    for item in questions:
+        if item.get("unstuck") and _norm(item.get("from")) != me:
+            out.append(item)
+            continue
+        addressed = item.get("to") or ""
+        if addressed:
+            if addressed == me:
+                out.append(item)
+        elif is_operator:
+            out.append(item)
+    return out
+
+
+def stuck_summary(questions) -> dict:
+    """{stuck, stuck_after_seconds, stuck_ids, oldest_s} over an unfiltered question list."""
+    stuck = [q for q in questions if q.get("stuck")]
+    return {"stuck": len(stuck), "stuck_after_seconds": ASK_STUCK_S,
+            "stuck_ids": [q["id"] for q in stuck][:20],
+            "oldest_s": max((q.get("waited_s") or 0 for q in stuck), default=0)}
+
+
+# ── session routing ─────────────────────────────────────────────────────────────────────────
+
+def _route(item, agent: str, session: str, live) -> dict | None:
+    """Session routing for one item addressed to `agent`. Returns the item (possibly annotated)
+    or None when it belongs to a different live console.
+
+    * No `session` on the item, or no session named by the reader: delivered (an agent-wide
+      view — the CLI, the board, an older client — sees all of its agent's mail).
+    * The item's console is the reader: delivered.
+    * The item's console is LIVE elsewhere: not this reader's.
+    * The item's console has ENDED: it falls through to the agent's most recently active live
+      console, with `rerouted_from` naming the original — mail for a closed window must reach
+      the box, not nobody."""
+    target = _sid(item.get("session"))
+    me = _sid(session)
+    if not target or not me or target == me:
+        return item
+    mine = [row for row in (live or []) if _norm(row.get("agent")) == _norm(agent)]
+    if any(_sid(row.get("session")) == target for row in mine):
+        return None
+    freshest = min(mine, key=lambda row: row.get("age_s") if row.get("age_s") is not None
+                   else 10 ** 9, default=None)
+    if freshest is not None and _sid(freshest.get("session")) == me:
+        return dict(item, rerouted_from=target,
+                    reroute_note="addressed to console %s, which is no longer live" % target)
+    return None
+
+
+# ── messages and directives ─────────────────────────────────────────────────────────────────
+
+def message_items(state, agent: str, machine: str = "", now=None) -> list:
+    """Open messages ADDRESSED to this agent (agent -> agent, no operator in the loop). A
+    message pinned to a DIFFERENT machine of the same agent is not this machine's to deliver
+    or retire; a reader that names no machine sees it."""
+    agent, machine = _norm(agent), _norm(machine)
+    if not agent:
+        return []
+    now = time.time() if now is None else now
+    out = []
+    for eid, ent in (state.get("entities") or {}).items():
+        if not isinstance(ent, dict) or ent.get("type") != "note":
+            continue
+        tags = [_norm(t) for t in (ent.get("tags") or [])]
+        if "message" not in tags or "open" not in tags:
+            continue
+        if _norm(ent.get("to")) != agent:
+            continue
+        pinned = _norm(ent.get("machine"))
+        if pinned and machine and pinned != machine:
+            continue
+        prov = ent.get("provenance") or {}
+        sender = _text(ent.get("from_agent") or prov.get("agent") or "", 60)
+        sender_session = _text(ent.get("from_session"), 64)
+        at = _prov_at(ent)
+        out.append({
+            "kind": "message", "id": eid, "from": sender or "a board member",
+            "from_session": sender_session, "to": agent,
             "title": _text(ent.get("title"), 300),
             "body": body_text(ent.get("body_md")),
-            "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
+            "body_complete": len(str(ent.get("body_md") or "")) <= INBOX_BODY_LIMIT,
+            "session": _text(ent.get("session"), 64), "machine": pinned, "at": at,
+            "reply_cmd": "python -m hub_core.client msg %s%s --note \"<your reply>\"" % (
+                sender or "<agent>", (" --session " + sender_session) if sender_session else ""),
+            "ack_cmd": "python -m hub_core.client inbox --agent %s --ack %s"
+                       % (agent, eid.rsplit(":", 1)[-1]),
+            **_written(at, now),
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out
 
 
-def directive_items(state, agent: str) -> list:
-    """Active directives aimed at this agent — including the answer to its own question.
-    An item this agent has ALREADY ACKED is closed and not addressed to it any more;
-    without that, the asker's own machine keeps announcing a reply it acknowledged."""
-    agent = (agent or "").strip().lower()
-    acked = set()
-    for ent in (state.get("entities") or {}).values():
-        if isinstance(ent, dict) and ent.get("type") == "ack" \
-                and str(ent.get("agent") or "").lower() == agent:
-            acked.add(ent.get("directive"))
+def ack_covers(directive, ack) -> bool:
+    """One receipt covers one delivered answer revision, never a later correction."""
+    if not directive or not ack or ack.get("directive") != directive.get("id"):
+        return False
+    revision = directive.get("delivery_revision")
+    return revision is None or ack.get("delivery_revision") == revision
+
+
+def directive_items(state, agent: str, now=None) -> list:
+    """Active directives aimed at this agent — including the answer to its own question. An
+    item this agent has ALREADY ACKED (at its current revision) is closed and not addressed to
+    it any more; without that, the asker's own machine keeps announcing a reply it acknowledged."""
+    agent = _norm(agent)
+    now = time.time() if now is None else now
+    entities = state.get("entities") or {}
+    acks = {}
+    for ent in entities.values():
+        if isinstance(ent, dict) and ent.get("type") == "ack" and _norm(ent.get("agent")) == agent:
+            acks[ent.get("directive")] = ent
     out = []
-    for eid, ent in (state.get("entities") or {}).items():
+    for eid, ent in entities.items():
         if not isinstance(ent, dict) or ent.get("type") != "directive":
             continue
-        if ent.get("status") != "active" or eid in acked:
+        if ent.get("status") != "active" or ack_covers(ent, acks.get(eid)):
             continue
-        targets = [str(t).lower() for t in (ent.get("targets") or [])]
+        targets = [_norm(t) for t in (ent.get("targets") or [])]
         if agent not in targets and "all" not in targets:
             continue
         prov = ent.get("provenance") or {}
         answered = ent.get("answers") or ""
+        at = _text(prov.get("updated_at") or prov.get("created_at") or "", 40)
         out.append({
             "kind": "answer" if answered else "directive",
             "id": eid,
             "from": _text(prov.get("agent") or "the operator", 60),
             "title": _text(ent.get("title"), 300),
             "body": body_text(ent.get("body_md")),
-            "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
+            "body_complete": len(str(ent.get("body_md") or "")) <= INBOX_BODY_LIMIT,
+            "at": at,
             "answers": _text(answered, 120),
+            "session": _text(ent.get("session"), 64),
+            **({"delivery_revision": ent["delivery_revision"]}
+               if "delivery_revision" in ent else {}),
             "remediation_cmd": _text(ent.get("remediation_cmd"), 400),
+            **_written(at, now),
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out
 
 
-def items_for(state, agent: str, operator: str) -> list:
-    """Everything currently addressed to `agent`. The operator additionally receives every
-    open question — questions are addressed to whoever can answer them."""
-    agent = (agent or "").strip().lower()
-    items = directive_items(state, agent)
-    if agent and agent == (operator or "").strip().lower():
-        items = question_items(state) + items
-    return items
+# ── the addressed set ───────────────────────────────────────────────────────────────────────
+
+def items_for(state, agent: str, operator: str, *, machine: str = "", session: str = "",
+              live=None, human_gate=None, gate_satisfied=None, visible=None, now=None) -> list:
+    """Everything currently addressed to `agent` (and, when `session` is named, to that console).
+
+    Order: a message from a teammate leads (somebody reached out to THIS agent directly), then
+    human gates and questions (longest wait first), then directives and answers. `visible` is
+    the caller's visibility filter (the contributor veil); it runs BEFORE fingerprinting, so a
+    reader is never woken for — nor recorded as offered — an item it cannot see."""
+    agent = _norm(agent)
+    questions = questions_for(question_items(state, human_gate=human_gate,
+                                             gate_satisfied=gate_satisfied, now=now),
+                              agent, operator)
+    items = message_items(state, agent, machine, now) + questions + directive_items(state, agent, now)
+    routed = []
+    for item in items:
+        kept = _route(item, agent, session, live)
+        if kept is not None:
+            routed.append(kept)
+    if visible is not None:
+        try:
+            routed = [i for i in routed if visible(i)]
+        except Exception:                                    # noqa: BLE001 - fail closed
+            routed = []
+    return routed
 
 
 def fingerprint(items) -> str:
-    """Identity of the addressed SET, so unrelated board traffic never wakes a waiter."""
-    seed = "\n".join("%s|%s" % (i.get("id"), i.get("kind")) for i in items)
+    """Identity of the addressed SET, so unrelated board traffic never wakes a waiter. A
+    corrected answer (new delivery_revision) and a re-routed item are new deliveries."""
+    seed = "\n".join("%s|%s|%s|%s|%s" % (i.get("id"), i.get("kind"), i.get("session", ""),
+                                         i.get("delivery_revision", ""), i.get("unstuck", ""))
+                     for i in items)
     return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def snapshot(state, agent: str, operator: str) -> dict:
-    items = items_for(state, agent, operator)
-    return {"items": items, "fingerprint": fingerprint(items), "count": len(items)}
+def snapshot(state, agent: str, operator: str, *, hub_dir=None, **kwargs) -> dict:
+    """The addressed set + its fingerprint. With `hub_dir`, an OFFER receipt is written for
+    each item — only when the addressed set CHANGES: this is the wait loop's hot path and a
+    console polling every few seconds must not be able to flood the record of what it was
+    told. Fail-soft; receipts never break delivery."""
+    items = items_for(state, agent, operator, **kwargs)
+    fp = fingerprint(items)
+    if hub_dir is not None and items:
+        key = (_norm(agent), _sid(kwargs.get("session")))
+        if _LAST_OFFERED.get(key) != fp:
+            _LAST_OFFERED[key] = fp
+            if len(_LAST_OFFERED) > 2048:
+                _LAST_OFFERED.clear()
+            try:
+                from . import receipts
+                for item in items:
+                    receipts.record(hub_dir, str(item.get("kind") or "item"),
+                                    str(item.get("id") or ""), "offered", agent=_norm(agent),
+                                    detail=str(item.get("title") or "")[:200])
+            except Exception:                                # noqa: BLE001
+                pass
+    return {"items": items, "fingerprint": fp, "count": len(items)}
+
+
+def change_signal(seq, presence_stamp=None, *extra) -> str:
+    """The cheap change fingerprint a wait compares between folds: the ledger head plus the
+    presence stamp BUCKETED to PRESENCE_SIGNAL_S (every authenticated request rewrites a
+    presence row; a raw stamp would re-fold every waiter several times a second while the
+    fleet is busy), plus any sidecar stamps the adapter adds."""
+    bucket = ""
+    if presence_stamp:
+        try:
+            count, newest_ns = presence_stamp
+            bucket = "%d:%d" % (count, int(newest_ns // (PRESENCE_SIGNAL_S * 1_000_000_000)))
+        except (TypeError, ValueError):
+            bucket = ""
+    return "|".join([str(seq), bucket] + [repr(e) for e in extra])
+
+
+def _remember(key, signal, snap) -> None:
+    with _LAST_SNAPSHOT_LOCK:
+        if len(_LAST_SNAPSHOT) >= 512:
+            _LAST_SNAPSHOT.clear()
+        _LAST_SNAPSHOT[key] = (signal, snap, time.monotonic())
+
+
+def _remembered(key, signal=None):
+    """The last projection built for this caller, if young enough and — when a signal is
+    given — built at that same signal. A copy, so a caller cannot edit the memory."""
+    with _LAST_SNAPSHOT_LOCK:
+        hit = _LAST_SNAPSHOT.get(key)
+    if not hit or time.monotonic() - hit[2] > SNAPSHOT_REUSE_S:
+        return None
+    if signal is not None and (not signal or hit[0] != signal):
+        return None
+    return dict(hit[1])
 
 
 def wait(agent: str, known_fingerprint: str, timeout: float, *,
-         snapshot_fn, signal_fn) -> dict:
-    """Block until this agent's addressed set differs from `known_fingerprint`.
+         snapshot_fn, signal_fn, key=None) -> dict:
+    """Block until this caller's addressed set differs from `known_fingerprint`.
 
     `snapshot_fn(agent)` returns the current addressed snapshot (the EXPENSIVE fold);
-    `signal_fn()` returns a cheap change fingerprint of everything the snapshot depends on
-    (typically the ledger head seq) — the full projection is recomputed only when the
-    signal advances, never per poll tick. A signal_fn that errors must return "" — which
-    never equals a real signal, so a failed read degrades safely to always-fold rather
-    than silently skipping a real change.
+    `signal_fn()` returns a cheap change fingerprint of everything the snapshot depends on. A
+    signal_fn that errors must return "" — which never equals a real signal, so a failed read
+    degrades safely to always-fold rather than silently skipping a real change. `key` names the
+    caller for projection reuse (agent, machine, session, visibility tier).
 
-    Returns as soon as the set changes, at the timeout, or immediately when the waiter
-    ceiling is reached; `waited_s` and `degraded` are reported either way."""
+    THE SLOT COMES FIRST: a caller turned away at the waiter ceiling gets its last projection
+    (if younger than SNAPSHOT_REUSE_S) instead of a fresh fold; an admitted caller reuses its
+    remembered projection when nothing it depends on has moved. Returns as soon as the set
+    changes, at the timeout, or immediately when degraded; `waited_s` and `degraded` are
+    reported either way."""
     timeout = max(0.0, min(float(timeout or 0), MAX_WAIT_S))
     started = time.monotonic()
-    current = snapshot_fn(agent)
-    if current["fingerprint"] != known_fingerprint or timeout <= 0:
-        current["waited_s"] = 0.0
-        current["degraded"] = False
-        return current
+    key = key or (agent,)
     if not _WAITERS.acquire(blocking=False):
+        current = _remembered(key)
+        if current is None:
+            current = snapshot_fn(agent)
+            _remember(key, "", current)
         current["waited_s"] = 0.0
         current["degraded"] = True      # honest: this was a poll, not a wait
         return current
     try:
-        deadline = started + timeout
         last_signal = signal_fn()
+        current = _remembered(key, last_signal)
+        if current is None:
+            current = snapshot_fn(agent)
+            _remember(key, last_signal, current)
+        if current["fingerprint"] != known_fingerprint or timeout <= 0:
+            current["waited_s"] = 0.0
+            current["degraded"] = False
+            return current
+        deadline = started + timeout
         while time.monotonic() < deadline:
             time.sleep(POLL_S)
             signal = signal_fn()
             if signal and signal == last_signal:
-                continue                # nothing this agent depends on moved — no fold
+                continue                # nothing this caller depends on moved — no fold
             last_signal = signal
             current = snapshot_fn(agent)   # only NOW pay for the full projection
+            _remember(key, signal, current)
             if current["fingerprint"] != known_fingerprint:
                 break
     finally:
@@ -186,12 +539,30 @@ def wait(agent: str, known_fingerprint: str, timeout: float, *,
     return current
 
 
+def gate_pattern_classifier(pattern: str):
+    """A human_gate callable from a regex (the HUB_HUMAN_GATE_PATTERN setting), or None."""
+    if not pattern:
+        return None
+    try:
+        rx = re.compile(pattern, re.I)
+    except re.error:
+        return None
+    return lambda text: bool(rx.search(str(text or "")))
+
+
 def render_line(item) -> str:
     """One-line human form, shared by notifications and CLI consumers."""
-    if item.get("kind") == "question":
-        return "%s asks: %s" % (item.get("from") or "someone", item.get("title") or "")
-    if item.get("kind") == "answer":
+    kind = item.get("kind")
+    if kind == "gate":
+        return "Needs a person (%s): %s" % (item.get("age") or "new", item.get("title") or "")
+    if kind == "question":
+        return "%s asks%s: %s" % (item.get("from") or "someone",
+                                  (" (waiting %s)" % item["age"]) if item.get("age") else "",
+                                  item.get("title") or "")
+    if kind == "answer":
         return "Answer from %s: %s" % (item.get("from") or "the operator", item.get("title") or "")
+    if kind == "message":
+        return "Message from %s: %s" % (item.get("from") or "a board member", item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 

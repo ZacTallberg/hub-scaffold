@@ -46,8 +46,12 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # A busy ledger answers 503 + Retry-After on every hub path, reads included — never a 500.
+    # Per-route latency (worst process window, last hour) for /hub/perf.json and the rail.
+    "hub.middleware.RouteTimingMiddleware",
     "hub.middleware.LedgerBusyMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",
+    # The visibility veil: a no-op until PROJECT/facets.json declares hidden facets.
+    "hub.veil.VeilMiddleware",
 ]
 
 ROOT_URLCONF = "example_site.urls"

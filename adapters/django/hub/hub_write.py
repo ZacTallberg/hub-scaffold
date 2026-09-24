@@ -88,10 +88,14 @@ def writer(fn=None, *, scope=None):
         if not auth:
             _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
-        if not auth.allows(scope):
+        # A tuple scope is ANY-OF: a narrower operation scope that an older, broader grant
+        # must keep satisfying (answering a question was once directive:write-only).
+        scopes = scope if isinstance(scope, (tuple, list)) else (scope,)
+        if not any(auth.allows(one) for one in scopes):
             _record_refusal(request, "insufficient_scope",
                             "a write was refused: subject %r lacks scope %r" % (auth.subject, scope))
-            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+            return JsonResponse({"errors": [{"code": "insufficient_scope",
+                                              "required": scopes[0] if len(scopes) == 1 else list(scopes),
                                               "subject": auth.subject}]}, status=403)
         b = _body(request)
         if not isinstance(b, dict):
@@ -461,6 +465,25 @@ def agent_credential(request, b):
                                       "msg": "action must be issue, revoke, or list"}]}, status=422)
 
 
+@writer(scope="credential:manage")
+def tier(request, b):
+    """Set one agent's visibility tier: `{agent, tier}` with tier operator | member |
+    contributor (or "" to clear). Identity management, so it rides the credential scope. A tier
+    is a fact about an identity — never a header a reader sends about itself."""
+    from hub_core import veil as _veil
+    agent = str(b.get("target") or "").strip().lower()
+    value = str(b.get("tier") or "").strip().lower()
+    if not _valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_target",
+            "msg": "pass target (the agent whose tier to set)"}]}, status=422)
+    try:
+        tiers = _veil.set_tier(hub_app.HUB_DIR, agent, value)
+    except (ValueError, OSError, TimeoutError) as exc:
+        return JsonResponse({"errors": [{"code": "bad_tier", "msg": str(exc)}]}, status=422)
+    return JsonResponse({"data": {"agent": agent, "tier": tiers.get(agent, ""),
+                                  "tiers": tiers}})
+
+
 def _slug(text, fallback):
     s = "".join(c if c.isalnum() or c in "._-" else "-" for c in str(text or "").lower())
     s = re.sub(r"-{2,}", "-", s).strip("-._")[:48].strip("-._")
@@ -672,7 +695,9 @@ def claim(request, b):
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind)
+                            actor_kind=request.hub_auth.actor_kind,
+                            session=_session_header(request),
+                            machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if status != "in_progress":
@@ -936,7 +961,9 @@ def take(request, b):
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind)
+                            actor_kind=request.hub_auth.actor_kind,
+                            session=_session_header(request),
+                            machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if task.get("status") != "in_progress":
@@ -1103,19 +1130,41 @@ def _valid_agent_name(name) -> bool:
     return bool(isinstance(name, str) and _AGENT_NAME.fullmatch(name))
 
 
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _session_header(request) -> str:
+    """The sender's console id from X-Hub-Session, when it is shaped like one."""
+    value = str(request.headers.get("X-Hub-Session") or "").strip()
+    return value if _SESSION_ID.fullmatch(value) else ""
+
+
+def _reader_tier(agent) -> str:
+    try:
+        from . import veil as _veil
+        return _veil.tier_of(agent)
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 @writer(scope="ask:write")
 def ask(request, b):
-    """A worker's question to the operator, as a first-class board entity that DELIVERS.
+    """A question as a first-class board entity that DELIVERS.
 
     The note lands tagged `question`+`open`, carries its asker in a stable `asker` field
-    (never derived from provenance, which answering REWRITES — deriving the asker from the
-    last writer mis-addresses every re-answered reply), wakes connected cockpits through the
-    push plane the moment it exists, and is returned by /hub/inbox/wait for whoever answers.
-    Idempotent on the exact wording (the id is a digest of it), and guarded against
-    restatements: a question the board already has — open, answered, or crystallized — is
-    refused with the matching ids instead of minting another copy, because "search before
-    you ask" is a rule, and a rule that depends on every future caller remembering it is not
-    a control. `anyway: true` is the escape hatch for a question that genuinely is different."""
+    (never derived from provenance, which answering REWRITES), and the asking console's
+    session in `from_session`, so the answer is delivered back to the console that asked. It
+    wakes connected cockpits through the push plane the moment it exists and is returned by
+    /hub/inbox/wait for whoever should answer it:
+
+        to=<agent>       addressed: that agent's inbox, nobody else's
+        (no to)          the operator's
+        waited too long  every console's (HUB_ASK_UNSTICK_S; never a human-only gate)
+
+    `human_only: true` files a gate — something only a person can do — which is delivered to
+    the operator and never widened. Idempotent on the exact wording (the id is a digest of it),
+    and guarded against restatements: a question the board already has is refused with the
+    matching ids instead of minting another copy. `anyway: true` is the escape hatch."""
     agent = b.get("agent") or ""
     if not _valid_agent_name(agent):
         return JsonResponse({"errors": [{"code": "need_agent",
@@ -1124,6 +1173,13 @@ def ask(request, b):
     text = str(b.get("question") or "").strip()
     if not text:
         return JsonResponse({"errors": [{"code": "need_question"}]}, status=400)
+    to = str(b.get("to") or "").strip().lower()
+    if to and not _valid_agent_name(to):
+        return JsonResponse({"errors": [{"code": "bad_addressee",
+            "msg": "`to` must be a lowercase agent name"}]}, status=422)
+    if to and to == agent:
+        return JsonResponse({"errors": [{"code": "self_addressed",
+            "msg": "an ask addressed to its own asker reaches nobody"}]}, status=422)
     state = hub_app.current_state()
     if not b.get("anyway"):
         dups = _already_covered(state, text)
@@ -1138,9 +1194,19 @@ def ask(request, b):
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     existing = state["entities"].get(eid)
+    tags = ["question", "open"] + (["human-only"] if b.get("human_only") else [])
     payload = {"type": "note", "category": "context", "title": text[:300],
-               "asker": agent, "status": "standing", "tags": ["question", "open"],
+               "asker": agent, "from_agent": agent, "status": "standing", "tags": tags,
                "body_md": str(b.get("context") or "")}
+    if to:
+        payload["to"] = to
+    session = _session_header(request)
+    if session:
+        payload["from_session"] = session
+    tier = _reader_tier(agent)
+    if tier and tier != "member":
+        # A contributor's ask says so, so an answer is checked against what that tier may see.
+        payload["tier"] = tier
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:
         payload["relates_to"] = related
@@ -1150,18 +1216,23 @@ def ask(request, b):
     return JsonResponse(resp, status=status)
 
 
-@writer(scope="directive:write")
+@writer(scope=("ask:answer", "directive:write"))
 def answer(request, b):
     """Close a question: reply to the asker AND retire the open question, as ONE verb.
 
-    A half-done answer is worse than either half alone — a reply sent with the question
-    still open means the board's question count only ever grows; a question closed with no
-    reply means the asker learns nothing. The reply is a directive targeted at the asker
-    (so it is ADDRESSED: the asker's inbox wait returns it, and their ack closes delivery),
-    idempotent per question — re-answering updates the one answer directive in place, never
-    mints a second copy delivered who-knows-where. Requires the `directive:write` scope: an
-    instruction injected into an agent's working context is an authority tier above ordinary
-    board writes, and worker credentials are simply never issued it."""
+    ANYONE WHO MAY ANSWER, MAY ANSWER — the `ask:answer` scope (or the older, broader
+    `directive:write`). The gate is on the act, not the vehicle: the reply travels as a
+    directive, but this one is built here with `targets` = the asker read from the QUESTION
+    (never chosen by the caller) and `answers` = an existing question, so it cannot broadcast
+    and cannot carry a standing instruction. A single-answerer funnel is how a board's open
+    asks pile up behind the one person allowed to clear them.
+
+    The reply is ADDRESSED: to the asker, and to the asking CONSOLE when the question recorded
+    one (never broadcast to every window the asker has open). Re-answering updates the one
+    answer directive in place and bumps its `delivery_revision`, so a correction is a new
+    delivery that an ack of the old text does not close. A reply to a contributor that names a
+    hidden facet is refused unless the answerer passes `disclose: true` (and holds
+    `veil:disclose`), and the disclosure is recorded."""
     question_id = str(b.get("question") or "").strip()
     text = str(b.get("text") or "").strip()
     if not question_id or not text:
@@ -1175,12 +1246,37 @@ def answer(request, b):
         return JsonResponse({"errors": [{"code": "no_such_question", "msg": question_id}]}, status=404)
     # The asker comes from the note's own stable field. provenance.agent is the LAST writer,
     # which after a first answer is the answerer — deriving from it would mis-target every
-    # re-answered directive at the operator themselves.
+    # re-answered directive at the answerer themselves.
     asker = str(note_ent.get("asker")
                 or (note_ent.get("provenance") or {}).get("agent") or "").strip().lower()
     if not _valid_agent_name(asker):
         return JsonResponse({"errors": [{"code": "unknown_asker",
             "msg": "the question does not name who asked; issue a directive instead"}]}, status=409)
+
+    # THE ANSWER VEIL: the person who asked cannot be told a thing exists by the act of
+    # answering them.
+    try:
+        from . import veil as _veil
+        asker_tier = _veil.tier_of(asker)
+        hit = _veil.Veil(asker_tier).hit(text)
+    except Exception:                                        # noqa: BLE001
+        asker_tier, hit = "", None
+    if hit:
+        if not (b.get("disclose") and request.hub_auth.allows("veil:disclose")):
+            return JsonResponse({"errors": [{"code": "answer_would_disclose", "facet": hit,
+                "tier": asker_tier,
+                "msg": "this reply names the '%s' facet, which %s cannot see at tier %s. "
+                       "Reword it, or pass disclose=true (veil:disclose scope) to send it "
+                       "anyway and record the disclosure." % (hit, asker, asker_tier)}]},
+                status=422)
+        try:
+            hub_app.record_error(
+                "hub.veil", "a facet was disclosed to a %s in an answer" % asker_tier,
+                severity="warning", code="veil_disclosed",
+                context={"component": "veil", "facet": hit, "asker": asker,
+                         "question": question_id, "by": request.hub_auth.subject})
+        except Exception:                                    # noqa: BLE001
+            pass
 
     question_text = str(note_ent.get("title") or "")
     payload = {
@@ -1191,21 +1287,40 @@ def answer(request, b):
         "status": "active",
         "answers": question_id,
     }
-    existing_dir = next(
-        (e for e in state["entities"].values()
-         if isinstance(e, dict) and e.get("type") == "directive"
-         and e.get("answers") == question_id),
-        None)
+    # The ORIGINAL ask identifies the destination console — not the answering request.
+    asking_session = str(note_ent.get("from_session") or "")
+    if _SESSION_ID.fullmatch(asking_session):
+        payload["session"] = asking_session
     agent = b.get("agent", request.hub_auth.subject)
-    if existing_dir:
-        eid = existing_dir["id"]
-        resp, status = _append("directive", eid, payload,
-                               expected_version=existing_dir.get("version"),
-                               agent=agent, idem=b.get("idem_key"), etype="directive.issued")
-    else:
-        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
-        resp, status = _append("directive", eid, payload, expected_version=None,
-                               agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+    # One question has exactly ONE answer directive; the find-or-create is re-run on an OCC
+    # refusal, because both the id and the version it derives come from a read a concurrent
+    # answer can beat. Bounded: a race surviving three fresh reads is returned loudly.
+    resp, status, eid = {"errors": [{"code": "occ_retry_exhausted"}]}, 409, ""
+    for attempt in range(3):
+        if attempt:
+            state = hub_app.current_state()
+        existing_dir = next(
+            (e for e in state["entities"].values()
+             if isinstance(e, dict) and e.get("type") == "directive"
+             and e.get("answers") == question_id), None)
+        if existing_dir:
+            eid = existing_dir["id"]
+            if all(existing_dir.get(k) == payload.get(k)
+                   for k in ("title", "body_md", "targets", "session")):
+                resp, status = {"data": {"id": eid, "version": existing_dir.get("version"),
+                                         "unchanged": True}}, 200
+                break
+            payload["delivery_revision"] = int(existing_dir.get("delivery_revision") or 0) + 1
+            resp, status = _append("directive", eid, payload,
+                                   expected_version=existing_dir.get("version"),
+                                   agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+        else:
+            eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
+            payload["delivery_revision"] = 1
+            resp, status = _append("directive", eid, payload, expected_version=None,
+                                   agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+        if status not in (409, 428):
+            break
     if status not in (200, 201):
         return JsonResponse(resp, status=status)
 
@@ -1216,27 +1331,32 @@ def answer(request, b):
         tags = [t for t in (note_ent.get("tags") or []) if str(t).lower() != "open"]
         if "answered" not in [str(t).lower() for t in tags]:
             tags.append("answered")
-        closed = {k: v for k, v in note_ent.items() if k not in ("version", "provenance")}
-        closed["tags"] = tags
-        _retire_resp, retire_status = _append(
-            "note", question_id, closed, expected_version=note_ent.get("version"),
-            agent=agent, idem=None, etype="note.created")
-        still_open = retire_status not in (200, 201)
+        if tags != list(note_ent.get("tags") or []):
+            closed = {k: v for k, v in note_ent.items() if k not in ("version", "provenance")}
+            closed["tags"] = tags
+            _retire_resp, retire_status = _append(
+                "note", question_id, closed, expected_version=note_ent.get("version"),
+                agent=agent, idem=None, etype="note.created")
+            still_open = retire_status not in (200, 201)
     except Exception:                                    # noqa: BLE001 - never lose the reply
         still_open = True
     if still_open:
-        # Loud, in the response the operator reads: an answer that leaves its question open
+        # Loud, in the response the answerer reads: an answer that leaves its question open
         # is how a board's question count only ever grows.
         resp.setdefault("data", {})["question_still_open"] = True
+    hub_app.receipt("question", question_id, "resolved", agent=asker,
+                    detail="answered by %s" % agent)
     resp.setdefault("data", {})["directive"] = eid
     resp["data"]["asker"] = asker
+    if payload.get("session"):
+        resp["data"]["session"] = payload["session"]
+    if payload.get("delivery_revision"):
+        resp["data"]["delivery_revision"] = payload["delivery_revision"]
 
-    # CRYSTALLIZE is OPT-IN, and on the origin system it used to be automatic — thirteen
-    # "lessons" appeared in one afternoon, most of them requests that got fulfilled rather
-    # than rules anybody should carry. The knowledge surface rides every future duplicate-ask
-    # check, so minting indiscriminately taxes it to remember something true for one
-    # afternoon. The answerer decides, because only they know which of the two this was.
-    if not b.get("crystallize"):
+    # CRYSTALLIZE is OPT-IN: the knowledge surface rides every future duplicate-ask check, so
+    # minting indiscriminately taxes it to remember something true for one afternoon. The
+    # answerer decides, because only they know which of the two this was.
+    if not b.get("crystallize") or hit:
         resp["data"]["crystallized"] = False
         return JsonResponse(resp, status=status)
     try:
@@ -1287,7 +1407,11 @@ def directive(request, b):
 def ack(request, b):
     """One agent's record that one directive (or answer) was delivered to it. A scoped
     credential acks FOR ITSELF — the write seam already forced b['agent'] to the credential
-    subject. Stable id => replay-safe for offline retry queues."""
+    subject. Stable id => replay-safe for offline retry queues.
+
+    A REVISIONED answer must be acked at the revision the reader actually read: a missing
+    revision answers 428 with the current one, a stale revision 409 — a correction is never
+    marked read by a receipt for the text it replaced."""
     agent = b.get("agent") or ""
     if not _valid_agent_name(agent):
         return JsonResponse({"errors": [{"code": "need_agent"}]}, status=422)
@@ -1295,19 +1419,139 @@ def ack(request, b):
     if directive_id and ":" not in directive_id:
         directive_id = ids.make_id(hub_app.PROJECT_KEY, "directive", directive_id)
     state = hub_app.current_state()
-    if not directive_id or directive_id not in state["entities"]:
+    target = state["entities"].get(directive_id) if directive_id else None
+    if not target:
         return JsonResponse({"errors": [{"code": "unknown_directive", "id": directive_id}]}, status=404)
+    kind = "answer" if target.get("answers") else "directive"
+    revision = target.get("delivery_revision")
+    if revision is not None:
+        received = b.get("delivery_revision")
+        if received is None:
+            hub_app.receipt(kind, directive_id, "failed", agent=agent, outcome="need_revision")
+            return JsonResponse({"errors": [{"code": "need_delivery_revision",
+                "current_revision": revision,
+                "msg": "read the current answer with `inbox`, then ack its delivery_revision"}]},
+                status=428)
+        if type(received) is not int or received != revision:
+            hub_app.receipt(kind, directive_id, "failed", agent=agent, outcome="stale_revision",
+                            detail="acked revision %r, current %r" % (received, revision))
+            return JsonResponse({"errors": [{"code": "answer_changed",
+                "current_revision": revision,
+                "msg": "the answer was corrected after the revision you read — read the "
+                       "correction before acknowledging it"}]}, status=409)
     local = "%s--%s" % (directive_id.rsplit(":", 1)[-1], _slug(agent, "agent"))
     eid = ids.make_id(hub_app.PROJECT_KEY, "ack", local)
     existing = state["entities"].get(eid)
     payload = {"type": "ack", "directive": directive_id, "agent": agent,
                "note": str(b.get("note") or "")}
+    idem = b.get("idem_key") or f"ack:{eid}"
+    if revision is not None:
+        payload["delivery_revision"] = revision
+        idem += f":revision:{revision}"
     resp, status = _append("ack", eid, payload,
                            expected_version=existing.get("version") if existing else None,
-                           agent=agent, idem=b.get("idem_key") or f"ack:{eid}",
-                           etype="ack.recorded")
+                           agent=agent, idem=idem, etype="ack.recorded")
     if status in (200, 201):
+        hub_app.receipt(kind, directive_id, "delivered", agent=agent,
+                        detail=str(b.get("note") or "")[:200])
         _retire_if_fully_acked(directive_id, agent)
+    else:
+        hub_app.receipt(kind, directive_id, "failed", agent=agent, outcome="append_%s" % status)
+    return JsonResponse(resp, status=status)
+
+
+@writer(scope="message:write")
+def message(request, b):
+    """Agent-to-agent mail: `{to, note, title?, session?, machine?}` — no operator in the loop.
+
+    The note lands tagged `message`+`open` with `to`, the sender in `from_agent` and the
+    sender's console in `from_session` (from X-Hub-Session), so a reply can be addressed back to
+    exactly that console. `session` addresses one of the recipient's consoles; `machine` pins
+    delivery to one of their computers. It is delivered by the recipient's inbox/wait like any
+    other item and retired by /hub/api/message/ack. Idempotent on (sender, recipient, text)."""
+    agent = b.get("agent") or request.hub_auth.subject or ""
+    to = str(b.get("to") or "").strip().lower()
+    note_text = str(b.get("note") or b.get("body") or "").strip()
+    if not _valid_agent_name(str(agent)) or not _valid_agent_name(to):
+        return JsonResponse({"errors": [{"code": "need_sender_and_recipient",
+            "msg": "message needs a valid sender (agent) and recipient (to)"}]}, status=422)
+    if not note_text:
+        return JsonResponse({"errors": [{"code": "need_note"}]}, status=400)
+    target_session = str(b.get("session") or "").strip()
+    if target_session and not _SESSION_ID.fullmatch(target_session):
+        return JsonResponse({"errors": [{"code": "bad_session"}]}, status=422)
+    title = str(b.get("title") or note_text.splitlines()[0])[:300]
+    local = "m-%s-%s" % (_slug(agent, "agent"), hashlib.sha256(
+        ("%s|%s|%s" % (to, target_session, note_text)).encode("utf-8")).hexdigest()[:8])
+    eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
+    state = hub_app.current_state()
+    existing = state["entities"].get(eid)
+    if existing and "open" in [str(t).lower() for t in (existing.get("tags") or [])]:
+        return JsonResponse({"data": {"id": eid, "already": True}})
+    payload = {"type": "note", "category": "context", "title": title, "status": "standing",
+               "tags": ["message", "open"], "to": to, "from_agent": str(agent),
+               "body_md": note_text}
+    sender_session = _session_header(request)
+    if sender_session:
+        payload["from_session"] = sender_session
+    if target_session:
+        payload["session"] = target_session
+    machine = str(b.get("machine") or "").strip().lower()[:60]
+    if machine:
+        payload["machine"] = machine
+    resp, status = _append("note", eid, payload,
+                           expected_version=existing.get("version") if existing else None,
+                           agent=str(agent), idem=b.get("idem_key"), etype="note.created")
+    if status in (200, 201):
+        resp.setdefault("data", {})["to"] = to
+        if target_session:
+            resp["data"]["session"] = target_session
+    return JsonResponse(resp, status=status)
+
+
+@writer(scope="message:write")
+def message_ack(request, b):
+    """Retire an addressed message once it reached its recipient. Only the recipient may retire
+    it — a REFUSED delivery is recorded as a failed receipt, because without it an item that
+    never reached anyone looks exactly like one that did. A message pinned to one machine is
+    retired only from that machine."""
+    mid = str(b.get("id") or "").strip()
+    if not mid:
+        return JsonResponse({"errors": [{"code": "need_id"}]}, status=400)
+    if ":" not in mid:
+        mid = ids.make_id(hub_app.PROJECT_KEY, "note", mid)
+    state = hub_app.current_state()
+    ent = (state.get("entities") or {}).get(mid)
+    tags = [str(t).lower() for t in ((ent or {}).get("tags") or [])]
+    if not ent or ent.get("type") != "note" or "message" not in tags:
+        return JsonResponse({"errors": [{"code": "no_such_message", "msg": mid}]}, status=404)
+    agent = str(b.get("agent") or request.hub_auth.subject or "").lower()
+    to = str(ent.get("to") or "").lower()
+    if to and to != agent and request.hub_auth.mode == "scoped-agent":
+        hub_app.receipt("message", mid, "failed", agent=to, outcome="not_recipient",
+                        detail="%s tried to retire mail addressed to %s" % (agent, to))
+        return JsonResponse({"errors": [{"code": "not_recipient",
+            "msg": "that message is addressed to %s" % to}]}, status=403)
+    pinned = str(ent.get("machine") or "").strip().lower()
+    reader_machine = str(request.headers.get("X-Hub-Machine") or "").strip().lower()
+    if pinned and reader_machine and pinned != reader_machine:
+        hub_app.receipt("message", mid, "failed", agent=to, outcome="other_machine",
+                        detail="pinned to %s, retired from %s" % (pinned, reader_machine))
+        return JsonResponse({"errors": [{"code": "other_machine",
+            "msg": "that message is for %s, not %s" % (pinned, reader_machine)}]}, status=409)
+    if "open" not in tags:
+        return JsonResponse({"data": {"id": mid, "already": True}})
+    closed = {k: v for k, v in ent.items() if k not in ("version", "provenance")}
+    closed["tags"] = [t for t in (ent.get("tags") or []) if str(t).lower() != "open"] + ["delivered"]
+    via = str(b.get("via") or "")[:40]
+    if via:
+        closed["found_at"] = "delivered via %s" % via
+    resp, status = _append("note", mid, closed, expected_version=ent.get("version"),
+                           agent=agent or "agent", idem=b.get("idem_key") or f"msgack:{mid}",
+                           etype="note.created")
+    hub_app.receipt("message", mid, "delivered" if status in (200, 201) else "failed",
+                    agent=to or agent, outcome="ok" if status in (200, 201) else "append_%s" % status,
+                    detail=("delivered via %s" % via) if via else "")
     return JsonResponse(resp, status=status)
 
 
@@ -1326,14 +1570,16 @@ def _retire_if_fully_acked(directive_id, actor):
         targets = [str(t).strip().lower() for t in (ent.get("targets") or []) if str(t).strip()]
         if not targets or "all" in targets:
             return
+        from hub_core.inbox import ack_covers
         acked = set()
         for other in (state.get("entities") or {}).values():
-            if other.get("type") == "ack" and other.get("directive") == directive_id:
+            if other.get("type") == "ack" and ack_covers(ent, other):
                 acked.add(str(other.get("agent") or "").strip().lower())
         if not all(t in acked for t in targets):
             return
         payload = {k: ent[k] for k in ("type", "title", "body_md", "targets",
-                                       "remediation_cmd", "answers") if k in ent}
+                                       "remediation_cmd", "answers", "session",
+                                       "delivery_revision") if k in ent}
         payload["status"] = "fulfilled"
         _append("directive", directive_id, payload, expected_version=ent.get("version"),
                 agent=actor, idem=f"retire:{directive_id}:{ent.get('version')}",

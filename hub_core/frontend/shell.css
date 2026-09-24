@@ -2078,6 +2078,8 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .ask-answer { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; padding: 6px 9px; border-left: 2px solid var(--pass-solid, #2fae66); background: color-mix(in srgb, var(--pass, transparent) 26%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .ask-answer-by { font-size: 10.5px; color: var(--pass-solid, #2fae66); font-weight: 700; }
 .ask-answer-text { font-size: 12px; }
+.ask-stuck { font-size: 12px; padding: 6px 10px; border-left: 3px solid var(--fail-solid); background: color-mix(in srgb, var(--fail) 30%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; color: var(--fail-fg); }
+.agent-sess.is-working .sess-id { font-weight: 700; }
 .ask-lanes { display: flex; flex-wrap: wrap; gap: 6px; }
 .ask-lane { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
 .ask-strip { display: flex; align-items: center; gap: 3px; margin-top: 8px; }

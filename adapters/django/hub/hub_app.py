@@ -164,6 +164,20 @@ def _schedule_lease_truth(lease):
         logging.getLogger(__name__).exception("Hub lease truth timer could not be scheduled")
 
 
+def maintain_action():
+    """The navbar's "Update Core Systems" link — the adopter's MANUAL repair pass for a machine
+    whose own update loop has not converged (a runbook page, a deep link that opens an agent
+    session, a pipeline trigger). HUB_MAINTAIN_URL enables it; HUB_MAINTAIN_LABEL renames it.
+    A script-bearing scheme is refused: the value lands in an href on every board."""
+    url = str(_dj_setting("HUB_MAINTAIN_URL") or os.environ.get("HUB_MAINTAIN_URL") or "").strip()
+    scheme = url.split(":", 1)[0].lower() if ":" in url.split("/", 1)[0] else ""
+    if not url or scheme in ("javascript", "data", "vbscript"):
+        return None
+    label = str(_dj_setting("HUB_MAINTAIN_LABEL") or os.environ.get("HUB_MAINTAIN_LABEL")
+                or "Update Core Systems").strip()[:40]
+    return {"url": url[:500], "label": label}
+
+
 def worker_launch_enabled() -> bool:
     """Whether this deployment intentionally exposes its optional local-worker launch bridge."""
     value = _dj_setting("HUB_WORKER_LAUNCH_ENABLED", False)
@@ -414,6 +428,18 @@ def route_guard_adapter(state):
             sub = getattr(p, "url_patterns", None)
             if sub is not None:
                 walk(sub, pat)
+            elif "hub/api/" not in pat and pat.startswith("hub/") and getattr(
+                    getattr(p, "callback", None), "_hub_visibility", None) not in (
+                    "open", "veiled", "member"):
+                # Every read route DECLARES who may see it (open | veiled | member). An
+                # undeclared route serves no narrowed reader, and a new one must not slip in
+                # without somebody deciding — the veil is only as strong as its coverage.
+                viols.append(_sv("routes:undeclared-visibility",
+                                 "every /hub read route declares its visibility",
+                                 "%s -> %s declares none" % (pat, getattr(getattr(p, "callback", None),
+                                                                          "__name__", "?")),
+                                 "open | veiled | member",
+                                 remediation="add the route to urls.VISIBILITY"))
             elif "hub/api/" in pat:
                 cb = getattr(p, "callback", None)
                 guarded = getattr(cb, "_hub_token_gated", False) or getattr(cb, "_hub_origin_gated", False)
@@ -590,7 +616,7 @@ def _write_lease(task_id, lease):
 
 
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
-          actor_kind=None):
+          actor_kind=None, session="", machine=""):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
@@ -612,9 +638,13 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                               expires=cur["expires"])
             _schedule_lease_truth(cur)
             return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
+        # The CLAIMING CONSOLE rides the lease: with several consoles of one agent live, the
+        # session is the only fact that says which of them took responsibility — a claim must
+        # never be inferred from the directory a console happens to stand in.
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
                  "auth_subject": auth_subject, "credential_id": credential_id,
                  "actor_kind": actor_kind,
+                 "session": str(session or "")[:64], "machine": str(machine or "").lower()[:120],
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
@@ -751,12 +781,22 @@ def observe_presence(agent, headers, *, heartbeat=False):
     cockpits — throttled, because presence rides every write and the wake-up plane must not
     carry one signal per request. Fail-soft end to end: presence must never break a write."""
     try:
+        raw_files = headers.get("X-Hub-Files")
+        files = None if raw_files is None else [
+            f.strip() for f in str(raw_files).replace(";", ",").split(",") if f.strip()]
         _presence.observe(
             HUB_DIR, agent,
             machine=headers.get("X-Hub-Machine") or "",
             session=headers.get("X-Hub-Session") or "",
             cwd=headers.get("X-Hub-Cwd") or "",
             focus=headers.get("X-Hub-Focus") or "",
+            name=headers.get("X-Hub-Console") or "",
+            repo=headers.get("X-Hub-Repo") or "",
+            app=headers.get("X-Hub-App") or "",
+            state=headers.get("X-Hub-State") or "",
+            runtime=headers.get("X-Hub-Runtime") or "",
+            files=files,
+            retract_focus=headers.get("X-Hub-Focus-Retract") or "",
             heartbeat=heartbeat)
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
@@ -778,6 +818,54 @@ def live_sessions():
 
 def presence_stamp():
     return _presence.stamp(HUB_DIR)
+
+
+# ---- addressed delivery: the adopter's human-gate seam and the receipt record ----
+# An ask only a person can satisfy (an approval on a host, a signature) is delivered as a GATE:
+# it reaches the operator and is never widened to every console. HUB_HUMAN_GATE_PATTERN is a
+# regex over the ask's title + body; an ask can also carry the `human-only` tag itself.
+# HUB_GATE_RESOLVER is an optional dotted path to `resolver(text) -> str`: a non-empty answer
+# names the evidence that the approval has ALREADY landed, which turns the gate back into an
+# ordinary question anybody can close. It runs inside every inbox fold, so it must read a
+# cache only — never a subprocess, never a network call.
+from hub_core import inbox as _inbox
+from hub_core import receipts as _receipts
+
+
+def human_gate():
+    pattern = _dj_setting("HUB_HUMAN_GATE_PATTERN") or os.environ.get("HUB_HUMAN_GATE_PATTERN") or ""
+    return _inbox.gate_pattern_classifier(pattern)
+
+
+@functools.lru_cache(maxsize=4)
+def _resolver(path):
+    import importlib
+    module, _, name = path.rpartition(".")
+    return getattr(importlib.import_module(module), name)
+
+
+def gate_satisfied():
+    path = _dj_setting("HUB_GATE_RESOLVER") or os.environ.get("HUB_GATE_RESOLVER") or ""
+    if not path:
+        return None
+    try:
+        return _resolver(path)
+    except Exception:                                        # noqa: BLE001 - a bad path reads as unset
+        return None
+
+
+def question_items(state):
+    """The WHOLE open-question queue, longest wait first, gates classified."""
+    return _inbox.question_items(state, human_gate=human_gate(), gate_satisfied=gate_satisfied())
+
+
+def receipt(kind, ref, stage, **kwargs):
+    """One notification-lifecycle receipt. Fail-soft: a receipt that cannot be written must
+    never be the reason a delivery does not happen."""
+    try:
+        return _receipts.record(HUB_DIR, kind, ref, stage, **kwargs)
+    except Exception:                                        # noqa: BLE001
+        return {}
 
 
 # ---- the operational error stream: record-and-wake wrappers over hub_core.errorlog ----

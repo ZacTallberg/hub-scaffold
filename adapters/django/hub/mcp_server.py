@@ -121,19 +121,45 @@ TOOLS = [
                     "pass anyway=true for a genuinely different question.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "question": {"type": "string"},
-         "context": {"type": "string"}, "anyway": {"type": "boolean"}},
+         "context": {"type": "string"}, "anyway": {"type": "boolean"},
+         "to": {"type": "string", "description": "address one agent; default the operator"},
+         "human_only": {"type": "boolean",
+                        "description": "only a person can satisfy it: delivered as a gate"}},
          "required": ["agent", "question"]}},
-    {"name": "check_inbox",
-     "description": "What is addressed to this agent right now — directives aimed at it and the "
-                    "answer to its own question. Ack what you have acted on.",
+    {"name": "answer_question",
+     "description": "Answer an open question and retire it. The reply is addressed to the asker "
+                    "(and to the console that asked); a correction bumps its delivery revision.",
      "inputSchema": {"type": "object", "properties": {
-         "agent": {"type": "string"}}, "required": ["agent"]}},
+         "question": {"type": "string"}, "text": {"type": "string"},
+         "crystallize": {"type": "boolean"}}, "required": ["question", "text"]}},
+    {"name": "check_inbox",
+     "description": "What is addressed to this agent right now — messages to it, questions it "
+                    "should answer (stuck asks reach everyone), directives aimed at it and the "
+                    "answer to its own question. Name your session to get only this console's "
+                    "mail. Ack what you have acted on.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "session": {"type": "string"},
+         "machine": {"type": "string"}}, "required": ["agent"]}},
     {"name": "ack_directive",
      "description": "Record that a directive/answer was delivered to this agent; it leaves the "
-                    "inbox, and a directive acked by every named target retires itself.",
+                    "inbox, and a directive acked by every named target retires itself. Pass the "
+                    "delivery_revision you read when the item carries one.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
-         "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+         "note": {"type": "string"}, "delivery_revision": {"type": "integer"}},
+         "required": ["agent", "directive"]}},
+    {"name": "send_message",
+     "description": "Send mail to another agent; it is delivered into their inbox (to one of "
+                    "their consoles when `session` names it).",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "to": {"type": "string"}, "note": {"type": "string"},
+         "title": {"type": "string"}, "session": {"type": "string"},
+         "machine": {"type": "string"}}, "required": ["agent", "to", "note"]}},
+    {"name": "ack_message",
+     "description": "Retire a message that reached you (only its recipient may).",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "id": {"type": "string"}, "via": {"type": "string"}},
+         "required": ["agent", "id"]}},
     {"name": "post_update",
      "description": "Post one first-person line to the agents' updates feed — what you just fixed, "
                     "answered, acked or shipped, with the sha/URL that proves it.",
@@ -314,18 +340,39 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/complete", payload, auth_headers)
     elif name == "ask_operator":
         payload = {"agent": args["agent"], "question": args["question"]}
-        for key in ("context", "anyway"):
+        for key in ("context", "anyway", "to", "human_only"):
             if args.get(key):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/ask", payload, auth_headers)
+    elif name == "answer_question":
+        payload = {"question": args["question"], "text": args["text"]}
+        if args.get("crystallize"):
+            payload["crystallize"] = True
+        status, body = _seam("/hub/api/answer", payload, auth_headers)
     elif name == "check_inbox":
-        status, body = _seam("/hub/inbox.json", {"agent": args["agent"]}, auth_headers,
-                             method="get")
+        query = {"agent": args["agent"]}
+        for key in ("session", "machine"):
+            if args.get(key):
+                query[key] = args[key]
+        status, body = _seam("/hub/inbox.json", query, auth_headers, method="get")
     elif name == "ack_directive":
         payload = {"agent": args["agent"], "directive": args["directive"]}
         if args.get("note"):
             payload["note"] = args["note"]
+        if args.get("delivery_revision") is not None:
+            payload["delivery_revision"] = int(args["delivery_revision"])
         status, body = _seam("/hub/api/ack", payload, auth_headers)
+    elif name == "send_message":
+        payload = {"agent": args["agent"], "to": args["to"], "note": args["note"]}
+        for key in ("title", "session", "machine"):
+            if args.get(key):
+                payload[key] = args[key]
+        status, body = _seam("/hub/api/message", payload, auth_headers)
+    elif name == "ack_message":
+        payload = {"agent": args["agent"], "id": args["id"]}
+        if args.get("via"):
+            payload["via"] = args["via"]
+        status, body = _seam("/hub/api/message/ack", payload, auth_headers)
     elif name == "post_update":
         payload = {"agent": args["agent"], "summary": args["summary"]}
         for key in ("kind", "evidence", "item"):
