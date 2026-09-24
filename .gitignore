@@ -9,3 +9,9 @@ db.sqlite3
 build_sha.txt
 .hub_write_token.local
 .selftest-tmp.*
+
+# app-kit: an app's local environment, collected static files, and interrupted vendoring.
+.env
+staticfiles/
+.app-kit-staging/
+.app-kit-backup/
