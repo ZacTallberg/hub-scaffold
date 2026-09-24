@@ -21,9 +21,12 @@ from __future__ import annotations
 import hashlib
 import re
 
+from . import record_state
+
 #: A record in one of these states is history. It must never be served as current knowledge.
-#: ONE definition: search, the prompt index, the feed and the overlap tagger all read this.
-DEAD_STATUS = frozenset({"superseded", "dropped", "rejected", "retracted", "stale", "removed"})
+#: ONE definition, owned by hub_core.record_state (the retire verb writes these statuses):
+#: search, the prompt index, the feed and the overlap tagger all read it through here.
+DEAD_STATUS = frozenset(record_state.DEAD_STATUS)
 
 #: WHERE EACH TYPE KEEPS ITS MEANING — per type, read off the schemas. A shared field list is a
 #: proxy for what a record contains: a generic accessor once measured tasks at 88 characters
@@ -99,21 +102,12 @@ def knowledge_kind(ent):
 def superseded_ids(state) -> frozenset:
     """Every id named in the `supersedes` of a record that is itself live. The POINTER is the
     authority: a retirement write that failed, or a type with no status to write, cannot leave
-    the overruled record in front of an agent."""
-    out = set()
-    for ent in (state.get("entities") or {}).values():
-        if not isinstance(ent, dict) or ent.get("status") in DEAD_STATUS:
-            continue
-        target = ent.get("supersedes")
-        for t in (target if isinstance(target, list) else [target]):
-            t = str(t or "").strip()
-            if t and t != ent.get("id"):
-                out.add(t)
-    return frozenset(out)
+    the overruled record in front of an agent. Delegates to hub_core.record_state."""
+    return record_state.superseded_ids(state.get("entities") or {})
 
 
 def is_dead(ent, superseded=frozenset()) -> bool:
-    return ent.get("id") in superseded or ent.get("status") in DEAD_STATUS
+    return record_state.is_retired(ent, superseded)
 
 
 def _flatten(value) -> str:

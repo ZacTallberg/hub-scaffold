@@ -134,6 +134,39 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "directive": {"type": "string"},
          "note": {"type": "string"}}, "required": ["agent", "directive"]}},
+    {"name": "app_feed",
+     "description": "One app's slice of the board: open tasks and built-on-request notes that name "
+                    "the app, each row saying which field matched.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string"}, "name": {"type": "string"}}, "required": ["app"]}},
+    {"name": "list_components",
+     "description": "The UI components this hub hosts for its apps: measured versions, files, how "
+                    "to link them, and the apps observed loading them.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_component_props",
+     "description": "One app's component properties plus the schema that bounds them.",
+     "inputSchema": {"type": "object", "properties": {"app": {"type": "string"}},
+                     "required": ["app"]}},
+    {"name": "set_component_props",
+     "description": "REPLACE one app's component properties ({component: {key: value}}; keys left "
+                    "out return to defaults). Needs component:configure. Refused keys are listed.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string"}, "props": {"type": "object"}}, "required": ["app", "props"]}},
+    {"name": "person_profile",
+     "description": "Read or change one person's cross-app presentation preferences on behalf of "
+                    "the app that signed them in: theme, motion, ui/text size, font, agent "
+                    "placement, sidebar state, the two help switches, starred apps and their mark. "
+                    "With no `prefs` it reads, including the apps the person can reach. With `app` "
+                    "the change goes to that app's override (an empty prefs object removes it) and "
+                    "the answer resolves for that app. Needs profile:read / profile:write.",
+     "inputSchema": {"type": "object", "properties": {
+         "person": {"type": "string"}, "app": {"type": "string"},
+         "prefs": {"type": "object"}}, "required": ["person"]}},
+    {"name": "ask_agent",
+     "description": "Ask the brokered agent service a question (the hub holds its key). Answers "
+                    "carry citations; an unconfigured or failing lane says exactly why.",
+     "inputSchema": {"type": "object", "properties": {
+         "question": {"type": "string"}, "app": {"type": "string"}}, "required": ["question"]}},
     {"name": "search_board",
      "description": "Ranked search over the whole board — use it BEFORE asking; the fact may "
                     "already be recorded.",
@@ -193,6 +226,27 @@ TOOLS = [
          "agent": {"type": "string"}, "focus": {"type": "string"},
          "memory_cap": {"type": "integer", "minimum": 1, "maximum": 200},
          "memory_full": {"type": "integer", "minimum": 0, "maximum": 40}}}},
+    {"name": "retire_record",
+     "description": "Retire (or re-open) a knowledge record that stopped being true: a gap, note, "
+                    "directive, ADR or finding. A reason is required and is appended with a dated "
+                    "stamp; a closed/mitigated gap must name the task that closed it. Retired "
+                    "records leave search immediately.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "type": {"type": "string"},
+         "title": {"type": "string", "description": "exact title, with type, instead of id"},
+         "status": {"type": "string"}, "note": {"type": "string"},
+         "addressed_by": {"type": "array", "items": {"type": "string"}},
+         "superseded_by": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["agent"]}},
+    {"name": "console_history",
+     "description": "Read how a console is being driven, to coach prompting: with no session, the "
+                    "stored consoles; with agent + session, that console's prompts, replies and "
+                    "one-line tool calls (never tool output). Needs history:read; answers 404 "
+                    "while the hub has histories disabled.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "machine": {"type": "string"},
+         "session": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 3000}}}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -407,6 +461,43 @@ def _call_tool(name, args, auth_headers):
     elif name == "board_guidance":
         query = {k: args[k] for k in ("agent", "focus", "memory_cap", "memory_full") if args.get(k) is not None}
         status, body = _seam("/hub/guidance.json", query, auth_headers, method="get")
+    elif name == "app_feed":
+        query = {"app": args["app"]}
+        if args.get("name"):
+            query["name"] = args["name"]
+        status, body = _seam("/hub/app-feed.json", query, auth_headers, method="get")
+    elif name == "list_components":
+        status, body = _seam("/hub/components/", {}, auth_headers, method="get")
+    elif name == "get_component_props":
+        status, body = _seam("/hub/components/props/%s.json" % str(args["app"]).strip().lower(),
+                             {}, auth_headers, method="get")
+    elif name == "set_component_props":
+        status, body = _seam("/hub/api/component-props",
+                             {"app": args["app"], "props": args["props"]}, auth_headers)
+    elif name == "person_profile":
+        from urllib.parse import urlencode
+        query = {"person": args.get("person") or ""}
+        if args.get("app"):
+            query["app"] = args["app"]
+        path = "/hub/api/profile?" + urlencode(query)
+        if isinstance(args.get("prefs"), dict):
+            prefs = {"apps": {args["app"]: args["prefs"]}} if args.get("app") else args["prefs"]
+            status, body = _seam(path, {"prefs": prefs}, auth_headers)
+        else:
+            status, body = _seam(path, {}, auth_headers, method="get")
+    elif name == "ask_agent":
+        payload = {"question": args["question"]}
+        if args.get("app"):
+            payload["app"] = args["app"]
+        status, body = _seam("/hub/api/agent/ask", payload, auth_headers)
+    elif name == "retire_record":
+        payload = {key: args[key] for key in ("id", "type", "title", "status", "note",
+                                              "addressed_by", "superseded_by", "agent")
+                   if args.get(key)}
+        status, body = _seam("/hub/api/retire", payload, auth_headers)
+    elif name == "console_history":
+        query = {key: args[key] for key in ("agent", "machine", "session", "limit") if args.get(key)}
+        status, body = _seam("/hub/history.json", query, auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

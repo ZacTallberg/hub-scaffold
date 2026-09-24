@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import atomic
 from .canonical import canonical, sha256_hex
 
 
@@ -40,7 +41,7 @@ def durable_replace(path: Path, text: str) -> None:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    atomic.replace(tmp, path)
     _fsync_dir(path.parent)
 
 
@@ -737,10 +738,9 @@ class EventStore:
             }
             ev["hash"] = sha256_hex(prev_hash + canonical({k: ev[k] for k in _HASH_FIELDS}))
             # durable append to the canonical log FIRST (fsync), then index within the txn
-            with open(self.jsonl, "a", encoding="utf-8") as f:
-                f.write(canonical(ev) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            # The open alone waits out a transient Windows sharing window (a scanner or an
+            # indexer holding the file); the write itself still runs exactly once.
+            atomic.append_line(self.jsonl, canonical(ev) + "\n")
             try:
                 self._index_event(ev)
                 self._stamp_jsonl_size()

@@ -48,13 +48,22 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
   Search first (`GET /hub/search.json?q=…`) — an ask the board already has is refused with the
   matching ids, and the guard fails OPEN so a search outage never silences a real question.
 - **Optional presence headers on any write** — `X-Hub-Machine`, `X-Hub-Session`, `X-Hub-Cwd`,
-  `X-Hub-Focus` — feed the board's live-console view; `POST /hub/api/presence` is the seat
-  heartbeat between tasks. An authenticated write refreshes your observed seat automatically.
+  `X-Hub-Repo`, `X-Hub-Files`, `X-Hub-Focus` — feed the board's live-console view;
+  `POST /hub/api/presence` is the seat heartbeat between tasks. An authenticated write refreshes
+  your observed seat automatically. `X-Hub-Cwd` and `X-Hub-Repo` are ONE fact: a report that
+  names a cwd sets the repo to whatever accompanies it, and a missing repo header beside a cwd
+  means "this directory is in no repository" (a report with no cwd changes neither).
+  `X-Hub-Files` (comma-separated recent files) replaces the stored list only when sent, is
+  stamped on arrival, and reads as empty once older than 15 minutes.
 
 ## READ endpoints (GET, public)
 
 | Endpoint | Returns |
 |---|---|
+| `GET /hub/components/` | The UI components this hub HOSTS for the apps around it: name, version (a hash of the served bytes, never a declared number), files, how to link and mount it, whether it takes per-app properties, and `used_by` — the apps OBSERVED loading it (from the component's own properties fetch). |
+| `GET /hub/components/<name>/<file>` | One file of one component (`.css .js .json .svg .png .map` only; anything not on disk under that component is 404 — there is no caller-controlled path). `ETag` + `X-Component-Version`, cached 5 minutes, so a change reaches every linking app within minutes and with no app deploy. |
+| `GET /hub/components/props/<slug>.json[?component=<name>]` | One app's component properties with the schema that bounds them (each component declares its own in its `manifest.json`). Revalidated every load. |
+| `GET /hub/app-feed.json?app=<slug>[&name=<display name>]` | One app's slice of the board: `checklist` (open tasks naming the app), `announcements` (notes tagged `built-on-request` naming it), `whats-new` (empty by design — a deploy record is not a change note; the app supplies its own). Every row names the field that matched; `metadata.counts` (shown) sits beside `metadata.matched` (before the 25-row cap). |
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`. The running identity comes from the artifact's pre-build `HUB_BUILD_STAMP`; optional `?served=<sha>` adds an external comparison and a mismatch is explicit. |
 | `GET /hub/hub.json` | Full snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. |
 | `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
@@ -66,6 +75,8 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
 | `POST /hub/api/lesson` | Record a LESSON (`rule`, `why`, `tier`, `verify`, `verified_as_of`, `tags`, `supersedes`). Admitted and TAGGED, never refused for resemblance: `related` lists records it may duplicate or correct (weighted-lexical now; the semantic half is deferred and declared in `related_partial`, filled by `client adjudicate`). An identical live rule returns `duplicate_of` and writes nothing. `supersedes` retires the target (its `superseded_by` is stamped) and every knowledge surface drops it. Scope `note:write`. |
 | `POST /hub/api/finding` `method` `review` | Record a FINDING (a fact discovered), METHOD (`category` ∈ extraction, analysis, transformation, verification, governance, presentation) or REVIEW (a question only a person may answer). `title`, `note`, `evidence`, `tags`, `relates_to`, `verify`, `verified_as_of`; re-filing the same title needs `expected_version`. Scope `note:write`. |
+| `POST /hub/api/history` | **Opt-in.** A workstation's batch of new console turns: `{agent, sessions:[{session, runtime, cwd, title, turns:[{ts, role, text}]}]}` (≤ 512 KB). Needs `history:write`; a scoped credential uploads as its own subject. NOT `@writer`: secret-shaped spans are replaced by `[REDACTED]` rather than refusing the batch. Stored in the `HUB_DIR/histories/` sidecar, never the ledger; answers `{sessions, turns, redacted_on_receipt}`. 404 while disabled. |
+| `POST /hub/api/retire` | Retire or re-open one knowledge record — `gap`, `note`, `directive`, `adr`, or an adopter-added `finding` — by `id` or `type` + exact `title`. Each type moves only to a status its schema enumerates (defaults: note/directive/adr → `superseded`, finding → `stale`; a gap must name its status). Any move other than a re-open requires `note`, which is appended to the record's text with a dated `[status YYYY-MM-DD by agent]` stamp, never written over it. `closed`/`mitigated` gaps require `addressed_by` (422 `need_addressed_by` names it). Needs `record:retire` plus the target type's `<type>:write` scope. Retired records — dead by status (`superseded, dropped, rejected, retracted, stale`) or named in a live record's `supersedes` — leave `search.json` at once (`hub_core/record_state.py` is the one definition). |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
 | `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
 | `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. |
@@ -80,11 +91,20 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/guidance.json?focus=…&agent=…&memory_cap=…&memory_full=…` | what a session should have in front of it on THIS prompt: the knowledge index (lessons, findings, methods, reviews, crystallized notes, and answered asks titled by their question) ranked by the console's focus — by the focus's WORDS when no embedder can read its meaning (`memory_rank.by = "wording"`, the reason stated), or in standing order (foundational first, then newest) when neither applies — plus a small `live` block (the agent's inbox, unclaimed errors). `memory_cap` ≤ 200 titles; the first `memory_full` (≤ 40) carry their RULE and WHY. Rows carry `verified_as_of` and `verify` when the record does. The focus is embedded on the request path with a bounded wait; `memory_rank.focus_cache` says whether it was paid or warm. |
 | `GET /hub/knowledge/since?cursor=…&limit=…` | the append-only feed a machine mirrors knowledge from: `{cursor, more, items[], head}` with `put` / `revoke` / `reset` ops and an opaque cursor (ledger `provenance.seq` + catalog revision). Empty cursor bootstraps; page while `more`. A caught-up caller gets an empty page with an `ETag`, and `304` when it sends it back. |
 | `GET /hub/capabilities.json?kind=…&q=…` | what an agent can already do here: ledger `cap` entities merged with the catalog published from another repository at one pinned commit (one capability under two spellings counted once). `metadata.publication` = `{state: current\|cached\|none, commit, error}`; an incomplete publication is refused and the last complete one keeps serving. ETag covers the content and the publication commit. |
+| `GET /hub/history.json` | **Opt-in, operator-only.** With `agent` + `session` (`machine` optional, `limit` ≤ 3000): one console's stored turns oldest to newest (`turns[]` of `{ts, role: user\|assistant\|tool\|event, text}`, `turn_count`, `served`, `earlier_not_served`), ETag + 304 on the sidecar's size/mtime; with no session: the stored consoles, newest first. Readable with `history:read` or the adopter's `HUB_HISTORY_VIEWER` predicate; 404 to everyone else and while `HUB_HISTORIES_ENABLED` is off. |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
 unchanged, so an idle poll or a re-grounding pull costs an empty body.
+
+`hub.json` and `next.json` are **built once per input state**. A stats-only fingerprint of what
+they are built from (ledger size, the lease directory, presence, the error sidecars, telemetry) is
+taken before anything is opened; while it holds and the build is younger than the view's reuse cap
+(`hub.json` 5 s, matching the snapshot's own time bucket; `next.json` 10 s, which bounds how late
+an expired lease reappears as a stale reclaim), the cached bytes or a 304 are served without
+building a snapshot. Such responses carry `X-Hub-Memo: hit`. A build is remembered only if its
+inputs did not move while it ran, and an unreadable stamp always builds.
 
 ### The `live` block — what the cockpit reads
 
@@ -97,7 +117,7 @@ source of truth, and every ratio carries its denominator.
 | `activity` | recent canonical events; a done task carries the `receipt` that granted it. |
 | `inflight` | open tasks under a LIVE lease — agent, age, `stalled`, and plan progress. Under the receipt gate the lease (not a status word) is the true in-flight signal. |
 | `fleet` | per-agent cards: current lease, plan step, the last checkpoint note, recent action trail, completions, machine, and every live console (`sessions`). An agent with no claim but a fresh console focus reads `active` — working, just not on a board task — never `idle`. |
-| `sessions_live` | every live console, flat: agent, machine, session id, cwd, focus, age. The surface that stops two sessions from unknowingly working the same thing. |
+| `sessions_live` | every live console, flat: agent, machine, session id, cwd, repo, recent files (empty once older than 15 minutes), focus, age. The surface that stops two sessions from unknowingly working the same thing. |
 | `asks` / `asks_open` | open questions (who, what, since when). They also ride the attention rail. |
 | `errors` / `error_log` | the operational stream (bar-annotated rows) and its shape — histogram, trend, top sources, unclaimed count, per-channel coverage. |
 | `readiness` | `ready` / `needs_spec` / `snoozed`, with the top few of each. Readiness comes from actionable acceptance and dependencies, never from the presence of a test command. |
@@ -105,6 +125,7 @@ source of truth, and every ratio carries its denominator.
 | `dag` | critical path length, widest frontier, layer widths, the critical `path` itself, and the min-makespan `eta_tasks` for the fleet actually present. `acyclic: false` means the numbers are a floor, not a schedule. |
 | `progress` | done/total/pct plus MONOTONIC signals — `completed_total`, `last_1h`, `last_24h`, and a per-bucket `spark`. A ratio alone does not climb when the fleet discovers work as fast as it finishes it. |
 | `delivery` | Per-task accepted-operation proof / `landed` / `deployed` / `live`. For ordinary done work, required `verified_by` plus `evidence_uri` is its proof; only a task that explicitly declares a critical `verification_command` additionally needs a matching exit-0 transient receipt. Production delivery is the exact immutable deploy closure (`sha == served_sha`, task in `tasks_closed`) matching this running artifact's normalized build SHA; Git ancestry is optional legacy/source enrichment. |
+| `host_disk` | the drive holding the hub's own ledger: host, drive, `total_gb`, `free_gb`, `free_pct`, thresholds and `state` (`ok`/`warn`/`critical`/`unmeasured`). Always reported; cached 120 s. Below `HUB_DISK_WARN_GB` (default 15) a `host-disk-low` item joins the attention rail, ranked most-urgent below `HUB_DISK_CRITICAL_GB` (default 8). |
 | `attention` | the ranked "needs the operator" rail. |
 | `worker_health` | receipt outcomes and completions per seat, with denominators. |
 | `failure_modes` | what KIND of refusal the fleet keeps hitting, plus the unclassified count. |
@@ -238,6 +259,21 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | `/hub/api/ack` (`ack:write`) | `agent`, `directive` (id or local), optional `note` | One agent's record that delivery landed. Stable id (replay-safe). The item leaves that agent's inbox; a directive whose every NAMED target has acked retires itself to `fulfilled`. |
 | `/hub/api/presence` (`presence:write`) | `agent` (+ the `X-Hub-*` headers) | The seat heartbeat; the response carries the shared freshness contract. Ordinary writes stamp activity on their own. |
 | `/hub/api/forget-presence` (`presence:manage`) | `machine` and/or `target` (the agent name) | Drop a phantom or retired seat row — a decommissioned laptop otherwise sits on the fleet strip looking like a teammate until the retirement horizon. Refuses to drop everything (`422 need_machine_or_target`); connected cockpits wake immediately. |
+
+### Services to the apps around the hub
+
+These are called by an APP's server, never a browser: the app authenticates with its own scoped
+credential and names the person its own sign-in resolved. The hub authenticates the app; the app
+vouches for the person. `patterns/app-services.md` is the adopter's guide (component hosting, the
+bridge an app writes, the agent's upstream contract).
+
+| Endpoint (scope) | Key fields | Behaviour |
+|---|---|---|
+| `POST /hub/api/component-props` (`component:configure`) | `app` (slug), `props: {component: {key: value}}` | REPLACES the app's properties — a key left out returns to its default. Values outside a field's closed set or length cap are refused and listed in `refused` (never clamped); only non-default values are stored, with a short who/what/when history. |
+| `GET /hub/api/profile?person=` (`profile:read`) · `POST` (`profile:write`) | `prefs: {kind, image, theme, motion, text, ui, agent, font, nav_open, tips, help, starred, apps}` | A person's cross-app presentation choices. Every key is a closed set; out-of-range values are dropped and listed in `ignored`. `apps: {slug: {...}}` holds per-app overrides through the same table (the page keys and `agent`; never the mark or the stars): `{}` removes an app, `null` resets one key, and saving one app never drops another. `starred` is a list that replaces. `?app=<slug>` adds `resolved` (that app's effective values). The GET also answers `apps` — what the person can reach: the adopter's `HUB_APPS` directory joined with its `HUB_REACH` grants — and `granted_without_url`. The mark is initials or a small PNG/JPEG/WebP data URL (SVG refused: it can carry script). Named two ways only: an app's server with its credential and `?person=`, or the person's own same-origin browser through the adopter's `HUB_PERSON` resolver (no token; POST needs the CSRF token; a `?person=` naming anyone else is 404). 404 to everyone else. Stored in `HUB_DIR/profiles.json`, not the ledger. |
+| `POST /hub/api/agent/ask` (`agent:ask`) | `question`, optional `thread`, `person`, `conversation_id`, `app` | The hub forwards to the configured agent service with the ONE agent key it holds. Answers `{ok, answer, citations, conversation_id, history}`; `reason:"unconfigured"` names the missing setting; a refused, unreachable or slow service and an EMPTY answer are `reason:"failed"` with the cause. A deleted conversation is answered as a new one; a key that may not act for people still answers, with `history:"unconfigured"`. |
+| `GET /hub/api/agent/history?person=&app=&scope=app\|all` (`agent:history`) | | The person's past conversations for this app, or all. |
+| `GET /hub/api/agent/conversation?person=&id=` (`agent:history`) | | One conversation's turns. |
 
 ### The operational error stream
 

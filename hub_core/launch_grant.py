@@ -23,6 +23,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from . import atomic
 from .process_lock import ProcessFileLock
 
 DEFAULT_TTL_S = 120
@@ -75,7 +76,7 @@ def _secret() -> bytes:
                 handle.write(value)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp, path)
+            atomic.replace(tmp, path)
             try:
                 os.chmod(path, 0o600)
             except OSError:

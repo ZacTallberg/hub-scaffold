@@ -28,9 +28,10 @@ def _asset(name):
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def render(snap, brand, csrf_token=""):
+def render(snap, brand, csrf_token="", viewer_caps=()):
     """Return the full single-file HTML for the hub. `snap` = the /hub.json snapshot dict; `brand`
-    = the navbar title (e.g. 'Project · Hub'). Escapes the JSON island (< -> \\u003c so a stray
+    = the navbar title (e.g. 'Project · Hub'); `viewer_caps` = the gated surfaces THIS request may
+    see (e.g. ("history",)), decided server-side and published as a meta tag. Escapes the JSON island (< -> \\u003c so a stray
     </script in any field can't close it) and inlined JS (</script -> <\\/script)."""
     snap_json = json.dumps(snap, separators=(",", ":")).replace("<", "\\u003c")
     ident = _identity.load()
@@ -43,6 +44,7 @@ def render(snap, brand, csrf_token=""):
     repl = {
         "brand": _html.escape(str(brand)),
         "csrf_token": _html.escape(str(csrf_token or ""), quote=True),
+        "viewer_caps": _html.escape(" ".join(sorted({str(c) for c in (viewer_caps or ()) if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", str(c))})), quote=True),
         "project_key": ident["key"],
         "visual_mark": visual["mark"],
         "accent_h": str(visual["accent_h"]),

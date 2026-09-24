@@ -549,6 +549,7 @@ def run_audit(st=None, served=None) -> dict:
 import os as _os
 import time as _time
 import uuid as _uuid
+from hub_core import atomic
 from hub_core.process_lock import ProcessFileLock
 
 CLAIMS = HUB_DIR / "claims"
@@ -568,10 +569,9 @@ def _read_lease(task_id):
 
 def _write_lease(task_id, lease):
     CLAIMS.mkdir(parents=True, exist_ok=True)
-    p = _claim_path(task_id)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(lease), encoding="utf-8")
-    _os.replace(tmp, p)
+    # Locked, retrying replace: every board render reads these files with no lock, so on
+    # Windows a render landing mid-rename used to turn a claim into a 500 (hub_core.atomic).
+    atomic.write_json(_claim_path(task_id), lease)
 
 
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
@@ -742,6 +742,10 @@ def observe_presence(agent, headers, *, heartbeat=False):
             session=headers.get("X-Hub-Session") or "",
             cwd=headers.get("X-Hub-Cwd") or "",
             focus=headers.get("X-Hub-Focus") or "",
+            # The repo travels WITH the cwd (an absent header beside a cwd means "no repo
+            # here"), and a file list is replaced only when the header is actually sent.
+            repo=headers.get("X-Hub-Repo") or "",
+            files=headers.get("X-Hub-Files"),
             heartbeat=heartbeat)
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()

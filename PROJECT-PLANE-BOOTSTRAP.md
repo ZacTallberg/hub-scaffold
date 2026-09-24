@@ -324,7 +324,7 @@ project key are renameable bindings; the rules are not.
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
-      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." } }, "required": ["step", "done"] },
+      "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" }, "note": { "type": "string", "description": "What the worker reported at this checkpoint, whole (surfaces that must fit a line show a preview ending in an ellipsis) — the context that turns 'working on X' into 'working on X, last did Y'." }, "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." } }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
     "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
@@ -337,7 +337,7 @@ project key are renameable bindings; the rules are not.
       "type": "object", "additionalProperties": false,
       "properties": {
         "signature": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "note": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": ".*\\S.*" },
+        "note": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
         "at": { "$ref": "hub:common#/$defs/isoDate" },
         "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
         "consequential": { "type": "boolean" },

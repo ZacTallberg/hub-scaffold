@@ -5,7 +5,8 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, knowledge_api, knowledge_write, mcp_server, run_api
+from . import (app_services, histories_api, hub_api, hub_write, hubsite, knowledge_api,
+               knowledge_write, mcp_server, run_api)
 
 app_name = "hub"
 urlpatterns = [
@@ -33,7 +34,19 @@ urlpatterns = [
     path("knowledge/since", knowledge_api.knowledge_since, name="knowledge-since"),
     path("capabilities.json", knowledge_api.capabilities_json, name="capabilities"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
+    # or the adopter's HUB_HISTORY_VIEWER predicate (404 to everyone else).
+    path("history.json", histories_api.history_json, name="history"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
+    # Services to the apps around the hub (adapters/django/hub/app_services.py): hosted UI
+    # components and their per-app properties, and one app's slice of the board. Above the
+    # catch-alls, which would read "components/props/<slug>.json" as an entity.
+    path("components/", app_services.component_index, name="components"),
+    path("components/props/<str:slug>.json", app_services.component_props,
+         name="component-props"),
+    path("components/<str:name>/<str:filename>", app_services.component_file,
+         name="component-file"),
+    path("app-feed.json", app_services.app_feed_json, name="app-feed"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
     path("<str:type>/<str:local>.json", hub_api.entity_json),
@@ -54,6 +67,9 @@ urlpatterns = [
     path("api/finding", knowledge_write.finding),
     path("api/method", knowledge_write.method),
     path("api/review", knowledge_write.review),
+    # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
+    # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
+    path("api/retire", hub_write.retire),
     path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
@@ -76,6 +92,14 @@ urlpatterns = [
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),
+    # Per-app component settings (operator), a person's cross-app preferences (an app's server
+    # on behalf of a person it signed in), and the brokered agent (the hub holds the one key).
+    path("api/component-props", app_services.set_component_props),
+    path("api/profile", app_services.profile),
+    path("api/agent/ask", app_services.agent_ask),
+    path("api/agent/history", app_services.agent_history),
+    path("api/agent/conversation", app_services.agent_conversation),
+    path("api/history", histories_api.upload, name="history-upload"),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP

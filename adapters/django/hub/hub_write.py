@@ -75,25 +75,32 @@ def _body(request):
         return None
 
 
-def writer(fn=None, *, scope=None):
+def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
+    """The one authenticated seam. `methods` admits GET for a token-gated READ that serves
+    another server (an app asking on behalf of a person it signed in) -- the same credential,
+    scope and refusal recording as a write, with an empty body. `scope` may be a mapping of
+    method -> scope when one route both reads and writes (read and write are different
+    authorities). `presence=False` keeps such service calls off the fleet roster: an app's
+    server is not somebody's seat."""
     if fn is None:
-        return lambda view: writer(view, scope=scope)
+        return lambda view: writer(view, scope=scope, methods=methods, presence=presence)
 
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
-        if request.method != "POST":
-            return HttpResponseNotAllowed(["POST"])
+        if request.method not in methods:
+            return HttpResponseNotAllowed(list(methods))
         auth, problem = _authenticate(request)
         if not auth:
             _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
-        if not auth.allows(scope):
+        required = scope.get(request.method) if isinstance(scope, dict) else scope
+        if not required or not auth.allows(required):
             _record_refusal(request, "insufficient_scope",
-                            "a write was refused: subject %r lacks scope %r" % (auth.subject, scope))
-            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+                            "a write was refused: subject %r lacks scope %r" % (auth.subject, required))
+            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": required,
                                               "subject": auth.subject}]}, status=403)
-        b = _body(request)
+        b = {} if request.method == "GET" else _body(request)
         if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
         # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
@@ -124,12 +131,24 @@ def writer(fn=None, *, scope=None):
         # board knows who is on it without anyone filing a report — and an unauthenticated
         # caller can never forge a seat. The label the write carries (or, for a scoped
         # credential, its immutable subject) names the seat. Fail-soft by construction.
-        seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
-        hub_app.observe_presence(seat, request.headers)
+        if presence:
+            seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
+            hub_app.observe_presence(seat, request.headers)
         request.hub_auth = auth
         marker = _AUTH.set(auth)
         try:
             response = fn(request, b, *a, **k)
+        except ids.InvalidId as exc:
+            # UNMINTABLE ID, answered once for every writer. Each writer composes its entity id
+            # from caller-supplied input (a raw `local`, or a slug of a name), and make_id
+            # refuses what the id grammar does not accept. Unhandled, that refusal is a 500
+            # with an empty body whose only trace is the server log. Scoped to InvalidId on
+            # purpose: a blanket `except ValueError` would dress a genuine server bug up as a
+            # caller error, which is the same failure inverted.
+            response = JsonResponse({"errors": [{"code": "invalid_local", "id": exc.id,
+                "msg": "cannot mint %r: a local id must start with a letter or digit and use "
+                       "only [a-z0-9._-]. Send a valid 'local', or a name/title that slugs to "
+                       "one." % (exc.id,)}]}, status=400)
         finally:
             _AUTH.reset(marker)
         response["X-Hub-Auth-Subject"] = auth.subject
@@ -312,8 +331,19 @@ def complete(request, b):
             if problem:
                 bad[str(e)[:200]] = problem
         if bad:
+            # The refusal carries its own fix. The check is all-or-nothing, so a good URL
+            # sent BESIDE an unreachable item still refuses the whole completion -- and the
+            # usual reaction, dropping the real reference into prose, loses it from the record.
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from WORK_ROOT)",
+                "msg": "every evidence_uri must dereference (URL <400 / commit in this repo / "
+                       "existing path from WORK_ROOT); ONE bad item refuses the whole "
+                       "completion and the task stays in progress",
+                "fix": "resend with only references this hub can resolve: a URL it can fetch "
+                       "unauthenticated, a commit pushed to the repo it serves, or a path under "
+                       "its WORK_ROOT. A reference it cannot reach (a commit in another repo, a "
+                       "page behind sign-in) belongs behind a URL it can fetch -- or the board "
+                       "runs tracked mode (HUB_DONE_STRICTNESS=tracked), which records it as "
+                       "given. Keep the reference in evidence_uri; do not move it into prose.",
                 "bad": bad}]}, status=422)
     ent = hub_app.current_state().get("entities", {}).get(eid)
     if not ent:
@@ -414,10 +444,15 @@ def adr(request, b):
 @writer(scope="capability:write")
 def capability(request, b):
     agent = b.get("agent", "agent")
-    name = b.get("name")
-    if not name:
-        return JsonResponse({"errors": [{"code": "need_name"}]}, status=400)
+    name = str(b.get("name") or "")
+    # Guard on the SLUG, not the raw string: a whitespace-only name is truthy and used to walk
+    # past `if not name` into an id the grammar refuses (a 500). "This name yields a usable
+    # local" is the precondition actually meant. The slug rule itself is unchanged, so a
+    # retried registration keeps resolving to the same id.
     local = b.get("local") or "".join(c if c.isalnum() or c in "._-" else "-" for c in name.lower())
+    if not name.strip() or not str(local).strip("-._"):
+        return JsonResponse({"errors": [{"code": "need_name",
+            "msg": "name is required to register a capability"}]}, status=400)
     eid = ids.make_id(hub_app.PROJECT_KEY, "cap", local)
     payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key", "local")}
     payload["type"] = "cap"
@@ -516,6 +551,66 @@ def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None)
 gap = _simple_writer("gap", "gap.created", name_field="title", numeric=True)
 feat = _simple_writer("feat", "feat.upserted", name_field="name")
 note = _simple_writer("note", "note.created", name_field="title")
+
+
+@writer(scope="record:retire")
+def retire(request, b):
+    """Retire (or re-open) one knowledge record: a gap, note, directive, ADR, or finding.
+
+    A record that can be FILED but never retired only grows, and a knowledge surface full of
+    claims that stopped being true is worse than an empty one. The lifecycle rules live in
+    ``hub_core.record_state``: each type moves only to a status its own schema enumerates, a
+    retirement needs a ``note`` (appended with a dated stamp, never written over the evidence),
+    and a closed/mitigated gap must name the work that closed it. The caller needs the target
+    ``record:retire`` scope AND the target type's ordinary ``<type>:write`` scope — retiring is
+    writing that record, and a credential scoped to one type cannot retire another.
+
+    Target by ``id``, or by ``type`` + exact ``title`` (the name the filer actually remembers).
+    """
+    from hub_core import record_state
+
+    agent = b.get("agent", "agent")
+    state = hub_app.current_state()
+    entities = state.get("entities", {})
+    eid = str(b.get("id") or "").strip()
+    ent = entities.get(eid) if eid else None
+    if ent is None and not eid and b.get("title") and b.get("type"):
+        want_type, want_title = str(b["type"]).strip(), str(b["title"]).strip().lower()
+        matches = [e for e in entities.values() if isinstance(e, dict)
+                   and e.get("type") == want_type
+                   and str(e.get("title") or e.get("name") or "").strip().lower() == want_title]
+        if len(matches) > 1:
+            return JsonResponse({"errors": [{"code": "ambiguous_title",
+                "msg": "several records share that title; pass the id",
+                "ids": sorted(m["id"] for m in matches)}]}, status=409)
+        ent = matches[0] if matches else None
+    if ent is None:
+        return JsonResponse({"errors": [{"code": "not_found",
+            "msg": "no such record: pass an existing id, or type + exact title"}]}, status=404)
+    otype = ent.get("type")
+    scope = f"{otype}:write"
+    if not request.hub_auth.allows(scope):
+        return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+                                          "subject": request.hub_auth.subject}]}, status=403)
+    addressed_by = b.get("addressed_by")
+    if isinstance(addressed_by, str):
+        addressed_by = [addressed_by]
+    try:
+        payload = record_state.plan_retirement(
+            ent, status=b.get("status"), note=b.get("note") or "", agent=agent,
+            addressed_by=addressed_by, superseded_by=b.get("superseded_by") or "")
+    except record_state.RetireRefused as refused:
+        return JsonResponse({"errors": [{"code": refused.code, "msg": str(refused)}]}, status=422)
+    if payload.get("status") == ent.get("status") and set(payload) == {"status"}:
+        return JsonResponse({"data": {"id": ent["id"], "version": ent.get("version"),
+                                      "status": ent.get("status"), "unchanged": True}})
+    resp, status = _append(otype, ent["id"], payload,
+                           expected_version=b.get("expected_version", ent.get("version")),
+                           agent=agent, idem=b.get("idem_key"), etype=f"{otype}.retired")
+    if status == 200:
+        resp["data"]["status"] = payload["status"]
+        resp["data"]["previous_status"] = ent.get("status")
+    return JsonResponse(resp, status=status)
 
 
 @writer(scope="deploy:write")
@@ -1133,7 +1228,9 @@ def ask(request, b):
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     existing = state["entities"].get(eid)
-    payload = {"type": "note", "category": "context", "title": text[:300],
+    # The question is stored WHOLE. It used to be cut at 300 characters with no marker, so
+    # the operator answered the first half of a question and the asker never learned why.
+    payload = {"type": "note", "category": "context", "title": text,
                "asker": agent, "status": "standing", "tags": ["question", "open"],
                "body_md": str(b.get("context") or "")}
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
@@ -1180,7 +1277,7 @@ def answer(request, b):
     question_text = str(note_ent.get("title") or "")
     payload = {
         "type": "directive",
-        "title": ("Answer: %s" % question_text)[:300],
+        "title": "Answer: %s" % question_text,
         "body_md": text + "\n\n---\nIn answer to your question: " + question_text,
         "targets": [asker],
         "status": "active",
@@ -1240,7 +1337,7 @@ def answer(request, b):
         existing_lesson = (state.get("entities") or {}).get(lesson_id)
         lesson_payload = {
             "type": "note", "category": "method",
-            "title": (question_text or ("answer for " + asker))[:300],
+            "title": question_text or ("answer for " + asker),
             "body_md": text + "\n\n(Crystallized from a question asked by " + asker + ".)",
             "tags": ["pattern", "memory", "answered-question"],
             "status": "standing",
