@@ -289,7 +289,7 @@ def _errors_block(limit=errorlog.READ_LIMIT, app=""):
         claims = {}
     in_flight = 0
     buckets = [0] * 24
-    severities = {"critical": 0, "error": 0, "warning": 0}
+    severities = {"critical": 0, "error": 0, "warning": 0, "info": 0}
     sources, external, on_bar_n, unclaimed = {}, 0, 0, []
     claimed_n, deferred_n, deferred_open, reasons = 0, 0, 0, {}
     for row in rows:

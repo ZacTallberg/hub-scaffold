@@ -30,6 +30,32 @@ implementation details. Those are product work, not validation targets.
    notice; the inventory itself does not become a standing alarm.
 5. Stop when the report and tasks exist. Delete any temporary query/helper before commit.
 
+## Honest counts — "nothing happened" must never read as "nothing is wrong"
+
+An inventory, audit or checker that evaluated nothing prints the same all-clear as one that
+evaluated everything and found nothing. Only the first is a lie, and it is the easier one to ship.
+
+- **Zero evaluated is a failure, with a reason.** If no subject was evaluated, exit non-zero and
+  say why (no source reachable, nothing matched the scope). `0 of 0` is never green.
+- **Every all-clear carries its denominator**: `12 of 14 evaluated, 0 findings` — the two it did
+  not evaluate are named on their own rows.
+- **Subjects are discovered, not listed.** Derive them from the real thing (repositories that
+  actually carry a deploy job, Hubs that actually answer), de-duplicated by identity (the origin
+  remote, not the folder name), so two checkouts of one project are one row and a new project
+  is not invisible until someone edits a list.
+- **Unreadable input is a failure, not a skip.** A subject whose configuration could not be read
+  is `UNREACHABLE`, never quietly `OBSERVED` or `NOT_APPLICABLE`.
+- **Exclusions are derived and fail toward in-scope.** `NOT_APPLICABLE` must come from a fact in the
+  subject itself (a file that declares it, a property that is absent) and the reason is shown on
+  the row. When the fact cannot be established, the subject is in scope.
+- **A detector must be seen to fire.** Before trusting a one-shot detector's silence, run it once
+  against a case it MUST flag and one it must pass; record both outcomes in the report and delete
+  the disposable cases. A detector with no must-fire case is unfalsifiable.
+
+The Hub's own `hubaudit` keeps these rules: its result carries `evaluated` (entities, and adapters
+ran of requested), the printed line states it, and an audit that evaluated nothing is an
+`INCONCLUSIVE` blocking finding (`audit:nothing-evaluated`) rather than a PASS.
+
 ## Suggested observations
 
 Choose only observations relevant to the task; this is a menu, not a mandatory battery.

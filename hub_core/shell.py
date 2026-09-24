@@ -28,7 +28,7 @@ def _asset(name):
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def render(snap, brand, csrf_token="", viewer_caps=()):
+def render(snap, brand, csrf_token="", viewer_caps=(), csrf_cookie=""):
     """Return the full single-file HTML for the hub. `snap` = the /hub.json snapshot dict; `brand`
     = the navbar title (e.g. 'Project · Hub'); `viewer_caps` = the gated surfaces THIS request may
     see (e.g. ("history",)), decided server-side and published as a meta tag. Escapes the JSON island (< -> \\u003c so a stray
@@ -45,6 +45,8 @@ def render(snap, brand, csrf_token="", viewer_caps=()):
         "brand": _html.escape(str(brand)),
         "csrf_token": _html.escape(str(csrf_token or ""), quote=True),
         "viewer_caps": _html.escape(" ".join(sorted({str(c) for c in (viewer_caps or ()) if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", str(c))})), quote=True),
+        # The cookie NAME the board reads its token from at send time (settings-rendered).
+        "csrf_cookie": _html.escape(str(csrf_cookie or ""), quote=True),
         "project_key": ident["key"],
         "visual_mark": visual["mark"],
         "accent_h": str(visual["accent_h"]),

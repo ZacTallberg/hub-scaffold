@@ -2579,7 +2579,12 @@ def app_error(request, b):
     service, by someone who already suspects the answer — so it never gets asked. Services
     forward only what belongs on a queue a human drains: server exceptions and background
     job deaths, never uncaught browser noise from somebody's stale tab. Attributed to the
-    APP (source `app.<slug>.<kind>`), never to a person's machine."""
+    APP (source `app.<slug>.<kind>`), never to a person's machine.
+
+    Kinds a sender names: server, background, django, data, other, agent (a fault inside an
+    agentic chat loop) and the browser's js/promise/http/stream. `severity: info` with code
+    `app_forwarder_armed` is the forwarder's startup row: recorded, shown under coverage, and
+    never queued. The body carries no `agent` field; the scoped token names the sender."""
     slug = re.sub(r"[^a-z0-9-]", "", str(b.get("app") or "").strip().lower())[:60]
     if not slug:
         return JsonResponse({"errors": [{"code": "need_app", "msg": "app slug is required"}]}, status=400)
@@ -2592,7 +2597,7 @@ def app_error(request, b):
         str(b.get("message") or "Application error")[:_errorlog.MESSAGE_LIMIT],
         severity=str(b.get("severity") or "error").lower(),
         code=str(b.get("code") or "app_error")[:120],
-        details=str(b.get("details") or "")[:_errorlog.DETAILS_LIMIT * 2],
+        details=str(b.get("details") or ""),     # errorlog keeps head AND tail
         context={
             "app": slug,
             "component": str(b.get("component") or "app")[:120],
@@ -2659,7 +2664,7 @@ def agent_error(request, b):
         str(b.get("message") or "Worker reported an operational error")[:_errorlog.MESSAGE_LIMIT],
         severity=str(b.get("severity") or "error").lower(),
         code=str(b.get("code") or "agent_error")[:120],
-        details=str(b.get("details") or "")[:_errorlog.DETAILS_LIMIT * 2],
+        details=str(b.get("details") or ""),     # errorlog keeps head AND tail
         context={
             "component": str(b.get("component") or "worker")[:120],
             "operation": str(b.get("operation") or "")[:120],

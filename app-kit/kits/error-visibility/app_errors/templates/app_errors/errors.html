@@ -1,0 +1,37 @@
+{% extends base_template %}
+{% comment %}The read surface. The page you open when something is wrong is the worst place
+for a vague number: the heading is a FINDING, counts carry denominators, every row carries
+the evidence that produced it, and "nothing is failing" is a positive statement.{% endcomment %}
+{% block title %}Errors{% endblock %}
+{% block content %}
+<div class="kicker">Diagnostics</div>
+<h1>
+  {% if totals.open %}{{ totals.open }} of {{ totals.all }} recorded failure{{ totals.all|pluralize }} {{ totals.open|pluralize:"is,are" }} open{% else %}Nothing is failing right now{% endif %}
+  {% if totals.server %}<span class="crit">· {{ totals.server }} on the server</span>{% endif %}
+</h1>
+<p class="sub">
+  Every failure this app can see, from either side of the wire: uncaught JavaScript, rejected
+  promises, failed requests, dead live streams, server exceptions, background jobs, data faults
+  and agentic-chat faults. Identical failures collapse onto one row with a count, so this is a
+  list of problems, not a log.
+  {% if totals.occurrences %}<span class="muted">{{ totals.all }} distinct · {{ totals.occurrences }} occurrence{{ totals.occurrences|pluralize }}{% if since %} since {{ since|date:"M j" }}{% endif %}.</span>{% endif %}
+</p>
+<div class="health">
+  {% if forwarding.armed %}
+    <span class="chip {% if forwarding.last_ok is False %}crit{% else %}ok{% endif %}">
+      hub forwarding armed · {{ forwarding.sent }} delivered · {{ forwarding.failed }} failed{% if forwarding.last_detail %} · last {{ forwarding.last_detail }}{% endif %}
+    </span>
+  {% else %}
+    <span class="chip crit">hub forwarding NOT armed — {% if not forwarding.url %}HUB_API_BASE {% endif %}{% if not forwarding.token %}HUB_AGENT_TOKEN {% endif %}{% if not forwarding.slug %}APP_SLUG {% endif %}missing; failures stay on this page only</span>
+  {% endif %}
+  {% if recorder.faults %}<span class="chip crit">recorder failed {{ recorder.faults }} time{{ recorder.faults|pluralize }} in this process: {{ recorder.last_detail|truncatechars:120 }}</span>{% endif %}
+</div>
+<div class="bar">
+  <a class="btn" href="?show=open">Open ({{ totals.open|default:0 }} of {{ totals.all|default:0 }})</a>
+  <a class="btn" href="?show=all">All ({{ totals.all|default:0 }})</a>
+  <a class="btn" href="?show=resolved">Resolved</a>
+  {% for k in kinds %}<a class="chip" href="?kind={{ k.kind }}">{{ k.kind }} · {{ k.n }}</a>{% endfor %}
+  <span class="muted" style="margin-left:auto;font-size:11px">Without a browser: <code>manage.py errors --since 2h --trace</code> · <code>errors/json/</code></span>
+</div>
+<div id="errors-table">{% include "app_errors/_errors_table.html" %}</div>
+{% endblock %}

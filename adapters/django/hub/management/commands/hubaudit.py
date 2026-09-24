@@ -22,9 +22,17 @@ class Command(BaseCommand):
             import json
             self.stdout.write(json.dumps(r, indent=2))
         else:
-            self.stdout.write("AUDIT: %s  exit=%s  critical=%s high=%s warn=%s" % (
-                "PASS" if r["ok"] and not r["violations"] else ("WARN" if r["ok"] else "FAIL"),
-                r["exit_code"], r["counts"]["critical"], r["counts"]["high"], r["counts"]["warn"]))
+            # The verdict AND its denominator: an all-clear that does not say how much it looked
+            # at cannot be told apart from one that looked at nothing.
+            ev = r.get("evaluated") or {}
+            label = r.get("verdict") or ("PASS" if r["ok"] else "FAIL")
+            if label == "PASS" and r["violations"]:
+                label = "WARN"
+            self.stdout.write("AUDIT: %s  exit=%s  critical=%s high=%s warn=%s  evaluated: %s "
+                              "entities, %s of %s adapters" % (
+                label, r["exit_code"], r["counts"]["critical"], r["counts"]["high"],
+                r["counts"]["warn"], ev.get("entities", "?"), ev.get("adapters_ran", "?"),
+                ev.get("adapters_requested", "?")))
             for v in r["violations"]:
                 self.stdout.write("  [%s] %-22s %s" % (v["severity"].upper(), v["id"], v["observed"]))
         sys.exit(0 if r["exit_code"] in (0, 3) else r["exit_code"])

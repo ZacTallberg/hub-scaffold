@@ -2093,6 +2093,20 @@
       });
       body.appendChild(covWrap);
     }
+    // FORWARDERS: a satellite's silence is only good news once its forwarder has ARMED. Each
+    // serving process sends one info row at boot naming what armed; it is never queued.
+    if ((cov.forwarders || []).length) {
+      var fwdWrap = el("div", { class: "err-coverage" });
+      fwdWrap.appendChild(el("span", { class: "err-cov-lbl", text: "forwarders" }));
+      cov.forwarders.forEach(function (f) {
+        fwdWrap.appendChild(el("span", {
+          class: "err-cov-chip" + (f.state === "armed" ? " is-live" : " is-silent"),
+          title: f.message || f.app,
+          text: f.app + (f.state === "armed" ? " · armed " : " · PRODUCER FAILED ") + relativeTime(new Date(Date.now() - (f.age_s || 0) * 1000).toISOString())
+        }));
+      });
+      body.appendChild(fwdWrap);
+    }
     return el("section", { class: "card errors-card", id: "errorsCard", "aria-labelledby": "errorsTitle" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title", id: "errorsTitle" }, [icon("warning"),
@@ -3935,6 +3949,100 @@
     global.addEventListener("beforeunload", disconnectLive);
   }
 
+  /* ============================ CSRF AT SEND TIME ============================ */
+  // The board is a long-lived tab that is rarely reloaded. Django rotates the CSRF secret at
+  // sign-in, so a token baked into the page at render time goes stale and every write from an
+  // open board then answers 403. The page renders the cookie NAME from settings (never guessed
+  // from a project name, never a wildcard); the VALUE is read here, at send time. The rendered
+  // token is only the fallback for a cookie the page cannot read (HttpOnly, session-stored).
+  function csrfToken() {
+    try {
+      var name = (doc.querySelector('meta[name="csrf-cookie"]') || {}).content || "";
+      if (name) {
+        var parts = String(doc.cookie || "").split(";");
+        for (var i = 0; i < parts.length; i++) {
+          var pair = parts[i].trim();
+          if (pair.indexOf(name + "=") === 0) return decodeURIComponent(pair.slice(name.length + 1));
+        }
+      }
+    } catch (_e) { /* fall back to the rendered token */ }
+    return (doc.querySelector('meta[name="csrf-token"]') || {}).content || "";
+  }
+
+  /* ============================ BOARD FAILURE REPORTER ============================ */
+  // The board's own uncaught exceptions and unhandled rejections reach the operational stream
+  // through the CSRF-gated client-error channel. Only ACTIONABLE rows are sent: a page being
+  // torn down, a browser with no network interface, an abort the page itself caused, and an
+  // element that reports its own failures (data-reports-own-errors) stay silent; a src="" clear
+  // is not a failed load; a rejection with no Error is DESCRIBED, never sent as "[object Object]".
+  // An uncaught exception in the board is this system's own defect, so it lands at error
+  // severity and ON the read-time bar; only a transport blip that recovered is deferred there.
+  // A per-page and per-signature cap keeps a hot loop from flooding the endpoint.
+  var boardErrors = (function () {
+    var sent = 0, seen = Object.create(null), unloading = false;
+    var MAX_PER_PAGE = 20, MAX_PER_SIGNATURE = 3;
+    global.addEventListener("pagehide", function () { unloading = true; }, true);
+    global.addEventListener("beforeunload", function () { unloading = true; }, true);
+
+    function post(code, message, operation) {
+      try {
+        if (unloading || global.navigator && global.navigator.onLine === false) return;
+        if (sent >= MAX_PER_PAGE) return;
+        var sig = code + "|" + String(message).slice(0, 200);
+        seen[sig] = (seen[sig] || 0) + 1;
+        if (seen[sig] > MAX_PER_SIGNATURE) return;
+        sent++;
+        fetch("api/client-error", {
+          method: "POST", credentials: "same-origin", cache: "no-store", keepalive: true,
+          headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken() },
+          body: JSON.stringify({ source: "board", code: code, operation: operation || code,
+                                 message: String(message).slice(0, 800) })
+        }).catch(function () { /* the reporter must never become a second failure */ });
+      } catch (_e) { /* never throw from the reporter */ }
+    }
+
+    function describe(reason) {
+      if (reason == null) return "rejected with no reason";
+      if (typeof reason === "string") return reason;
+      if (reason instanceof Error || typeof reason.message === "string") {
+        var name = reason.name && reason.name !== "Error" ? reason.name + ": " : "";
+        return name + (reason.message || "error with no message");
+      }
+      if (typeof global.Response !== "undefined" && reason instanceof global.Response) {
+        return ("HTTP " + reason.status + " " + (reason.statusText || "") + " " + (reason.url || "")).trim();
+      }
+      try {
+        var json = JSON.stringify(reason);
+        if (json && json !== "{}") return ((reason.constructor && reason.constructor.name) || "object") + " " + json.slice(0, 300);
+      } catch (_e) { /* circular: fall through to the shape */ }
+      return ((reason.constructor && reason.constructor.name) || typeof reason) +
+             " with keys [" + Object.keys(reason).slice(0, 12).join(", ") + "]";
+    }
+
+    global.addEventListener("error", function (e) {
+      var node = e.target;
+      if (node && node !== global && node.tagName) {
+        if (node.hasAttribute && node.hasAttribute("data-reports-own-errors")) return;
+        if (node.getAttribute && node.getAttribute("src") === "") return;   // a clear, not a load
+        var url = String(node.currentSrc || node.src || node.href || "").split("?")[0];
+        post("resource", "resource failed to load: " + node.tagName +
+             (node.id ? "#" + node.id : "") + (url ? " " + url : ""), "resource");
+        return;
+      }
+      post("js", (e.error && e.error.message) || e.message || "script error",
+           [e.filename, e.lineno, e.colno].filter(Boolean).join(":") || "js");
+    }, true);
+
+    global.addEventListener("unhandledrejection", function (e) {
+      var reason = e.reason;
+      if (reason && (reason.name === "AbortError" || reason.__hubReported)) return;
+      post("promise", describe(reason), "promise");
+    });
+
+    return { post: post, describe: describe };
+  })();
+  global.reportBoardProblem = function (message, code) { boardErrors.post(code || "handled", message, code || "handled"); };
+
   /* ============================ LOCAL WORKER LAUNCH ============================ */
   // External protocols must be followed during the original user gesture. A fetch inside the
   // click handler loses that activation in some browsers, so controls are armed AHEAD of time
@@ -3957,7 +4065,7 @@
     if (anchor._launchGrantRequest) return anchor._launchGrantRequest;
     var count = parseInt(anchor.getAttribute("data-count") || "1", 10) || 1;
     var task = anchor.getAttribute("data-task") || "";
-    var csrf = (doc.querySelector('meta[name="csrf-token"]') || {}).content || "";
+    var csrf = csrfToken();
     var endpoint = launchCfg().grant_endpoint || "/hub/api/launch-grant";
     anchor.setAttribute("aria-busy", "true");
     var request = fetch(endpoint, {
