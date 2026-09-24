@@ -1352,6 +1352,12 @@
   /* An error row's DETAILS (the stack trace, the context fields, the origin) are served
      with every row and were rendered nowhere — a queue that names a failure but withholds
      the way in sends the reader to a server shell. Not an entity, so it gets its own modal. */
+  // A repeating error's weight: what the throttle collapsed before this row was written, or
+  // what it has folded since (newest row of a signature only), whichever is larger.
+  function errWeight(r) {
+    return Math.max(1 + (Number(r.occurrences_since_last) || 0), Number(r.occurrences_folded) || 0);
+  }
+
   function openErrorDetail(r, liveRefresh) {
     var role = r.severity === "critical" ? "fail" : "warn";
     var body = el("div");
@@ -1362,8 +1368,8 @@
       r.origin ? rowMono("Origin", r.origin + (r.origin_app ? " · " + r.origin_app : "")
                                    + (r.origin_machine ? " · " + r.origin_machine : "")) : null,
       rowMono("At", r.ts),
-      r.occurrences_since_last ? rowMono("Collapsed repeats",
-        "\u00d7" + (1 + r.occurrences_since_last) + " (throttled; count preserved)") : null,
+      errWeight(r) > 1 ? rowMono("Collapsed repeats",
+        "\u00d7" + errWeight(r) + " (throttled; count preserved)") : null,
       r.acked ? row("Claimed", (r.acked.by || "someone") + (r.acked.note ? " — " + r.acked.note : ""))
               : row("Queue state", el("span", { class: "badge b-fail", text: "unclaimed" }))
     ];
@@ -1501,7 +1507,7 @@
           ].filter(Boolean)),
           el("span", { class: "err-msg", text: r.message || "" }),
           el("span", { class: "err-meta mono", text: (r.source || "") + " · " + (r.fingerprint || "")
-            + (r.occurrences_since_last ? " · \u00d7" + (1 + r.occurrences_since_last) : "") })
+            + (errWeight(r) > 1 ? " · \u00d7" + errWeight(r) : "") })
         ]);
         item.addEventListener("click", function () { openErrorDetail(r); });
         body.appendChild(item);
