@@ -231,20 +231,115 @@ def current_state(st=None):
         owned.close()
 
 
+_GIT_HEAD = {"key": None, "sha": None, "at": 0.0}
+_GIT_HEAD_TTL_S = 60.0       # only when there is no checkout whose refs can be watched
+
+
+def _git_head_key():
+    """What HEAD resolves through, as a cheap stat-only fingerprint — or None without a checkout.
+
+    Walks up from WORK_ROOT to the ``.git`` git itself would find (a linked worktree's ``.git``
+    is a file naming its private dir; ``commondir`` names the shared one), then stamps HEAD's
+    text plus the mtime of every place the named ref can live (loose ref in either dir,
+    packed-refs). A commit, checkout, reset or pull rewrites one of those, so the memo can never
+    serve a HEAD that has moved."""
+    import os as _os
+    try:
+        here = Path(WORK_ROOT).resolve()
+    except OSError:
+        return None
+    for d in (here, *here.parents):
+        dot = d / ".git"
+        if dot.is_dir():
+            gitdir = dot
+            break
+        if dot.is_file():
+            try:
+                text = dot.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            if not text.startswith("gitdir:"):
+                return None
+            gitdir = Path(text[7:].strip())
+            if not gitdir.is_absolute():
+                gitdir = (d / gitdir).resolve()
+            break
+    else:
+        return None
+    try:
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    common = gitdir
+    try:
+        rel = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        common = (gitdir / rel).resolve() if not _os.path.isabs(rel) else Path(rel)
+    except OSError:
+        pass
+    stamps = []
+    if head.startswith("ref:"):
+        ref = head[4:].strip()
+        for base in (gitdir, common):
+            for path in (base / ref, base / "packed-refs"):
+                try:
+                    stamps.append(path.stat().st_mtime_ns)
+                except OSError:
+                    stamps.append(0)
+    return (str(gitdir), head, tuple(stamps))
+
+
 def _git_head():
     """Return the running code identity in every deployment shape.
 
     A source checkout can ask Git directly. A production image normally contains no ``.git``;
     there the pre-build stamp is the artifact's own identity and is the value that must ride on
     Hub mutations and discovery metadata.
+
+    MEMOIZED on what HEAD resolves through (``_git_head_key``). Every snapshot keys on the head
+    and every ledger write stamps it, and a ``git rev-parse`` subprocess per call was measured as
+    the dominant cost of a snapshot build (two spawns, ~0.5 s of a ~0.55 s build on Windows).
+    The refs are stat()ed instead, so a commit or checkout is still seen on the next read. With
+    no watchable checkout the answer is remembered for a minute.
     """
+    key = _git_head_key()
+    now = time.time()
+    memo = _GIT_HEAD
+    if memo["sha"] is not None:
+        if key is not None and memo["key"] == key:
+            return memo["sha"]
+        if key is None and memo["key"] is None and now - float(memo["at"]) < _GIT_HEAD_TTL_S:
+            return memo["sha"]
     try:
         r = subprocess.run(["git", "-C", str(WORK_ROOT), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=4)
         head = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         head = ""
-    return head or _running_sha()
+    sha = head or _running_sha()
+    if sha:
+        memo.update(key=key, sha=sha, at=now)
+    return sha
+
+
+def entity_from_store(st, eid: str) -> dict:
+    """ONE entity, folded from its own aggregate's events only.
+
+    A write needs the entity it is about to update (to merge, validate and check its version)
+    and nothing else; folding the whole ledger for it made every append cost a full replay, and
+    every append moves the head, so a burst of writes paid one full fold each. The fold of an
+    aggregate's own events is exactly that entity's row in the full fold (payloads merge per
+    aggregate, never across aggregates)."""
+    events = st.events(aggregate=eid)
+    return dict((_project.fold(events) or {}).get(eid, {})) if events else {}
+
+
+def entity(eid: str) -> dict:
+    """``entity_from_store`` over a store this helper opens and always closes."""
+    owned = store()
+    try:
+        return entity_from_store(owned, eid)
+    finally:
+        owned.close()
 
 
 def _build_stamp_path() -> Path:
@@ -879,6 +974,28 @@ def record_error(source, message, **kwargs):
     if not row.get("suppressed_since"):
         _publish_realtime("errors.recorded", fingerprint=row.get("fingerprint"))
     return row
+
+
+def record_ledger_busy(path, method, waited_s, details=""):
+    """One WARNING row for a busy-ledger refusal, the same from every path that answers it.
+
+    Both refusal paths call this: LedgerBusyMiddleware (a StoreBusy that escaped a view) and the
+    write seam (which catches StoreBusy itself to answer the structured 503). Contention is
+    back-pressure, so it is trended as a warning rather than triaged as a defect — but it must
+    be RECORDED, or write contention stays invisible on the board. Fail-soft: the 503 is served
+    whether or not the row lands."""
+    try:
+        return record_error(
+            "hub.ledger",
+            "ledger lock unavailable; answered 503 (retryable, nothing was written)",
+            severity="warning", code="ledger_busy", details=str(details or "")[:500],
+            # The wait rides in `reason`: the error log keeps only an allowlisted set of
+            # context keys, so a bespoke key would be dropped at the door.
+            context={"component": "store", "path": str(path or "")[:240],
+                     "method": str(method or ""),
+                     "reason": "waited %.1f s for the ledger lock" % float(waited_s or 0)})
+    except Exception:                                        # noqa: BLE001
+        return None
 
 
 def errors_changed():

@@ -98,16 +98,8 @@ class LedgerBusyMiddleware:
             waited = 0.0
         else:
             return None
-        try:
-            from . import hub_app
-            hub_app.record_error(
-                "hub.ledger",
-                "ledger lock unavailable; answered 503 (retryable, nothing was written)",
-                severity="warning", code="ledger_busy", details=str(exception)[:500],
-                context={"component": "store", "path": request.path[:240],
-                         "method": request.method, "waited_s": round(float(waited or 0), 1)})
-        except Exception:                                    # noqa: BLE001
-            pass                  # the refusal is served whether or not the record lands
+        from . import hub_app
+        hub_app.record_ledger_busy(request.path, request.method, waited, exception)
         response = JsonResponse(
             {"errors": [{"code": "busy", "retry_after": int(self.RETRY_AFTER),
                          "msg": "the hub ledger is busy; nothing was written — retry"}]},

@@ -271,8 +271,32 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
         pass  # presence must never break a request
 
 
+_ROWS_MEMO = {"key": None, "rows": None, "at": 0.0}
+ROWS_TTL_S = 2.0
+
+
 def rows(hub_dir) -> list:
-    """Every stored (agent, machine) row. A malformed file is skipped, never fatal."""
+    """Every stored (agent, machine) row. A malformed file is skipped, never fatal.
+
+    MEMOIZED for a couple of seconds on the directory's own fingerprint (``stamp``: file count
+    plus newest mtime). One board read walks presence several times (activity rows, agent
+    cards, lease liveness, the console binding), and each walk opened and parsed every file.
+    A write always moves the fingerprint, so the memo never serves a state that has moved;
+    callers get deep copies they may mutate; an empty or unreadable directory is never cached."""
+    import copy as _copy
+    key = (str(_dir(hub_dir)), stamp(hub_dir))
+    now = time.time()
+    memo = _ROWS_MEMO
+    if (key[1] != (0, 0) and memo["key"] == key and memo["rows"] is not None
+            and now - float(memo["at"]) < ROWS_TTL_S):
+        return _copy.deepcopy(memo["rows"])
+    out = _rows_uncached(hub_dir)
+    if key[1] != (0, 0):
+        memo.update(key=key, rows=_copy.deepcopy(out), at=now)
+    return out
+
+
+def _rows_uncached(hub_dir) -> list:
     out = []
     try:
         for p in _dir(hub_dir).glob("*.json"):

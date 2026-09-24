@@ -306,9 +306,12 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
     tasks = state.get("by_type", {}).get("task", [])
     items = []
 
-    def add(rank, kind, reason, tid=None, title=None, route=None):
-        items.append({"rank": rank, "kind": kind, "reason": reason, "id": tid, "route": route,
-                      "title": title or (tid.rsplit(":", 1)[-1] if tid else None)})
+    def add(rank, kind, reason, tid=None, title=None, route=None, waited_s=None):
+        row = {"rank": rank, "kind": kind, "reason": reason, "id": tid, "route": route,
+               "title": title or (tid.rsplit(":", 1)[-1] if tid else None)}
+        if isinstance(waited_s, (int, float)) and not isinstance(waited_s, bool) and waited_s >= 0:
+            row["waited_s"] = int(waited_s)
+        items.append(row)
 
     for t in tasks:
         if t.get("poison_blocked") and t.get("operator_attention", True):
@@ -324,7 +327,7 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
         if r.get("stalled"):
             add(1, "stalled-lease",
                 f"{r.get('agent')} has held the lease {_fmt_age(r.get('age_s'))} without finishing",
-                r.get("task"), r.get("title"))
+                r.get("task"), r.get("title"), waited_s=r.get("age_s"))
 
     # OPEN QUESTIONS are operator work: an ask nobody sees is a worker blocked on one fact,
     # and the cost of a question compounds for as long as it sits. Every row says how long it
@@ -336,7 +339,7 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
             "stuck-question" if q.get("stuck") else "open-question")
         add(1 if (q.get("stuck") or q.get("kind") == "gate") else 2, kind,
             f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}{age}", q.get("id"),
-            q.get("title"), route={"view": "overview", "focus": "asks"})
+            q.get("title"), route={"view": "overview", "focus": "asks"}, waited_s=q.get("waited_s"))
 
     # OVERDUE directives: `deadline` is documented as "surfaced, never enforced" — this is
     # the surfacing. An active directive past its deadline with targets still unacked is an
@@ -444,7 +447,11 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
         add(0, "board-drained",
             "no ready work and no worker in flight — spec a needs-spec item or file new work")
 
-    items.sort(key=lambda i: (i["rank"], str(i.get("id") or "")))
+    # Within a rank the LONGEST WAIT leads — the same key the inbox and the Questions card
+    # order by. A row with no measurable age sorts after every aged one (never as age 0), and
+    # the id only breaks exact ties, so an old ask can never sit behind a fresh one by id.
+    items.sort(key=lambda i: (i["rank"], "waited_s" not in i, -int(i.get("waited_s") or 0),
+                              str(i.get("id") or "")))
     return items[:32]
 
 
@@ -674,7 +681,11 @@ def _dag_block(state, workers):
 # stat fingerprint of claims/, or a fresh claim would stay invisible until the next append.
 # `served` is in the key because it feeds the build/coherence block; one probe must never be
 # handed another probe's cached verdict. Races just recompute, which is benign.
-_STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None}
+_STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None, "full_at": 0.0}
+# The incremental fold is chain-checked page by page, but it still inherits whatever the last
+# full replay produced. A periodic full replay bounds how long any drift (an upcaster changed
+# under a running process, a projection bug fixed by a hot reload) can survive in memory.
+FULL_REPLAY_S = 15 * 60
 _STATE_LOCK = threading.RLock()
 _SNAP_CACHE = {"key": None, "value": None}
 # Per-phase build timings of the snapshot: the last build and the worst seen per phase in this
@@ -741,10 +752,12 @@ def _projected(store, cursor):
             and pending[-1].get("seq") == seq and pending[-1].get("hash", "") == head_hash
         )
 
+        stale = time.time() - float(_STATE_CACHE.get("full_at") or 0) >= FULL_REPLAY_S
         if cached_seq is None or seq < cached_seq or (seq == cached_seq and head_hash != cached_hash) \
-                or (incremental and not contiguous):
+                or (incremental and not contiguous) or stale:
             events = _events_through(store, 0, seq)
             state = project.state(events)
+            _STATE_CACHE["full_at"] = time.time()
         elif incremental:
             events = list(_STATE_CACHE["events"] or ()) + pending
             entities = project.advance(
