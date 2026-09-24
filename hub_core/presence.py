@@ -24,6 +24,16 @@ Rules this module holds, each paid for in production on the origin system:
 * SELF-RETIRE, ARCHIVE OVER DELETE. A machine that stopped reporting keeps its row forever
   otherwise, and the fleet panel slowly becomes a museum. Rows unseen past the horizon move
   to _retired/ (evidence is never lost) and reappear the instant the machine checks in again.
+* WHERE A CONSOLE STANDS IS ONE FACT. The working directory and the repository it sits in
+  describe the same place, so a report that names a cwd names the repo WITH it -- empty
+  included. "Empty never clobbers" applied field by field kept a console's old repo for its
+  whole life once it moved to a directory with no repository (a client omits an empty
+  header), and the board went on attributing it to work that had ended days earlier. A
+  report that names no cwd still never clobbers either.
+* A FILE LIST IS A SNAPSHOT, NOT A STATE. Clients report the files a console touched
+  recently and omit the list when there are none, so a stored list would otherwise live for
+  ever and keep pairing consoles on edits from days ago. Every list carries the time it was
+  reported (files_at) and reads as empty once it is older than FILES_FRESH_S.
 * PRESENCE MUST NEVER BREAK A REQUEST. Every write path swallows I/O errors.
 * PRESENCE MUST NOT WAKE THE FLEET. Every authenticated request observes presence; a write
   (lock + replace + mtime bump) that only moves a timestamp on a row seen seconds ago buys
@@ -42,10 +52,14 @@ import re
 import time
 from pathlib import Path
 
+from . import atomic
+from .text import preview
 from .process_lock import ProcessFileLock
 
 SESSION_ACTIVE_S = 900          # a console that prompted within 15 minutes is a live console
 SESSION_KEEP_S = 1800           # a console quiet longer than this is closed, and is pruned
+FILES_FRESH_S = 900             # a reported file list older than this is history, not current work
+MAX_FILES = 24                  # a console's recent-files list is a hint, never an inventory
 _PRUNE_INTERVAL_S = 900         # walk the presence dir at most this often on the write path
 QUIET_REWRITE_S = 30            # a timestamp-only observation of a row this fresh is skipped
 FILES_FRESH_S = 600             # a console's file list older than ten minutes is history
@@ -144,7 +158,7 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
         if now - epoch(row.get("last_seen")) <= horizon:
             continue
         try:
-            os.replace(str(p), str(_retired_dir(hub_dir) / p.name))   # archive over delete
+            atomic.replace(p, _retired_dir(hub_dir) / p.name)   # archive over delete
             removed += 1
         except OSError:
             pass
@@ -206,7 +220,7 @@ def _clean_session_extra(extra) -> dict:
 def valid_focus(focus: str) -> str:
     """The focus as stored, or "" when it says nothing a reader can use (a bare entity id, a
     one-word stub). A console's focus is the board's answer to "what is this window on"."""
-    text = " ".join(str(focus or "").split())[:180]
+    text = preview(focus, 500)
     if len(text) < 6 or _STUB_FOCUS.match(text):
         return ""
     return text
@@ -222,9 +236,13 @@ def _session_merge(prior: dict, now: float, fields: dict, files, retract: str,
         value = str(fields.get(key) or "").strip()
         if key == "focus":
             value = valid_focus(value)
-        limit = 200 if key in ("cwd", "repo") else (180 if key == "focus" else 60)
+        limit = 400 if key == "cwd" else 200 if key == "repo" else (500 if key == "focus" else 60)
         if value:
             out[key] = value[:limit]
+    # WHERE A CONSOLE STANDS IS ONE FACT: a report naming a cwd names the repo with it, empty
+    # included ("this directory is in no repository"); only a report with no cwd leaves both.
+    if str(fields.get("cwd") or "").strip():
+        out["repo"] = str(fields.get("repo") or "").strip()[:200]
     if retract and out.get("focus") and valid_focus(retract) == out["focus"] \
             and not valid_focus(fields.get("focus") or ""):
         out["focus"] = ""
@@ -284,18 +302,35 @@ def parse_artifacts(header: str) -> dict:
     return out
 
 
-def parse_files(header: str) -> list:
-    """X-Hub-Files: comma-separated `<project>/<path>` a console edited recently. Bounded,
-    slash-normalized, deduplicated in order; a token without a project segment is dropped
-    (two consoles in different repos editing `src/views.py` are not editing one file)."""
+def parse_files(raw) -> list | None:
+    """A reported file list from a header value (comma/newline separated) or a list.
+
+    None means NOT REPORTED (keep what is stored); an empty list is a report of no files.
+    Each token is a `<project>/<path>`, slash-normalized and deduplicated in order; a token
+    without a project segment is dropped (two consoles in different repos editing `src/views.py`
+    are not editing one file), and so is one that climbs out with `..`. Bounded."""
+    if raw is None:
+        return None
+    items = raw if isinstance(raw, (list, tuple)) else str(raw).replace(chr(10), ",").split(",")
     out = []
-    for part in str(header or "").split(","):
-        rel = part.strip().replace(chr(92), "/").strip("/")[:200]
-        if "/" in rel and ".." not in rel.split("/") and rel not in out:
+    for item in items:
+        rel = str(item or "").strip().replace(chr(92), "/").strip("/")[:240]
+        if rel and "/" in rel and ".." not in rel.split("/") and rel not in out:
             out.append(rel)
         if len(out) >= FILES_MAX:
             break
     return out
+
+
+def fresh_files(session: dict, now: float | None = None) -> list:
+    """The session's file list if it is still current, else []. A list with no stamp was
+    written before stamps existed and cannot be dated, so it is treated as history too."""
+    now = time.time() if now is None else now
+    stamp = epoch((session or {}).get("files_at"))
+    if not stamp or now - stamp > FILES_FRESH_S:
+        return []
+    files = (session or {}).get("files")
+    return [str(f) for f in files] if isinstance(files, list) else []
 
 
 def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: str = "",
@@ -318,7 +353,7 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
     agent = (agent or "").strip().lower()
     if not agent:
         return
-    fields = {"cwd": cwd, "focus": redact_focus(focus), "name": name, "repo": repo, "app": app,
+    fields = {"cwd": cwd, "focus": preview(redact_focus(focus), 500), "name": name, "repo": repo, "app": app,
               "state": state, "runtime": runtime}
     if project or unattended:
         extra = dict(extra or {})
@@ -407,9 +442,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 payload["client_digest"] = client_digest
             if client or client_digest:
                 payload["client_at"] = now
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(tmp, p)
+            # Atomic and durable, waiting out a Windows sharing window (hub_core.atomic).
+            atomic.write_json(p, payload)
             # Self-cleaning under the same lock: the write that records a live seat retires
             # dead ones, so the panel is a picture of the CURRENT fleet.
             _prune_locked(hub_dir, now)
@@ -591,10 +625,10 @@ def session_row(agent: str, machine: str, s: dict, now: float) -> dict:
         "session": str(s.get("id") or "")[:8],
         "name": str(s.get("name") or "")[:40],
         "runtime": str(s.get("runtime") or "")[:16],
-        "cwd": str(s.get("cwd") or "")[:200],
+        "cwd": preview(s.get("cwd"), 200),
         "repo": str(s.get("repo") or "")[:200],
         "app": str(s.get("app") or "")[:60],
-        "focus": str(s.get("focus") or "")[:180],
+        "focus": preview(s.get("focus"), 180),
         "project": str(s.get("project") or "")[:80],
         "state": state[:16],
         "files": files,

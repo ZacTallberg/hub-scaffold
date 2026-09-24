@@ -6,6 +6,7 @@ deploy), 3=WARN-only (amber), 1=internal-error (fail-closed RED). NEVER trusts a
 Stack-specific behavioral checks (route-introspection for unguarded mutations, AST settings safety,
 the out-of-band live probe) plug in as `adapters`: callables(state) -> list[violation].
 """
+from . import atomic
 from .store import EventStore
 
 
@@ -1167,9 +1168,7 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)
+            atomic.write_text(path, text, fsync=False)
         except OSError:
             pass
 

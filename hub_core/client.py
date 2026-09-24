@@ -63,6 +63,14 @@ succeeds afterwards reports it (agent-error `hub_unreachable_span`) - graded err
 was stranded inside it or a console was working through it, warning otherwise - so a gap in what
 the hub saw is itself on record.
 
+Services to the apps around the hub::
+
+    python -m hub_core.client components                         # hosted UI components
+    python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
+    python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
+    python -m hub_core.client profile --person alice --set theme=dark
+    python -m hub_core.client agent-ask --question "..." --person alice --app budget-app
+
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
     python -m hub_core.client next                       # top ready + needs-spec + snoozed
@@ -326,6 +334,10 @@ class HubRefused(RuntimeError):
         self.body = body
         super().__init__(json.dumps({"status": status, "response": body}))
 
+    def codes(self) -> list[str]:
+        errors = self.body.get("errors") if isinstance(self.body, dict) else None
+        return [str(e.get("code")) for e in (errors or []) if isinstance(e, dict)]
+
 
 class HubUnreachable(RuntimeError):
     """No answer. `reached` says whether the request may have arrived (a read timeout or a 5xx
@@ -371,7 +383,10 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
             try:
                 with urllib.request.urlopen(request, timeout=per_try) as response:
                     _note_hub_client(response)
-                    payload = json.loads(response.read().decode("utf-8") or "{}")
+                    raw = response.read()
+                    status = getattr(response, "status", 200)
+                    payload = _decode_success(status, raw) if method != "GET" else \
+                        json.loads(raw.decode("utf-8") or "{}")
                 _mark_route(base, failed=False)
                 _window_closed(base)                # the hub answered: report a blind window
                 return payload
@@ -445,6 +460,28 @@ def _auth_headers() -> dict[str, str]:
     if write_token:
         return {"X-Write-Token": write_token}
     raise ValueError("set HUB_AGENT_TOKEN (preferred) or HUB_WRITE_TOKEN in the process environment")
+
+
+def _decode_success(status: int, raw: bytes) -> dict[str, Any]:
+    """A successful write's body, or an honest account of why there is none to quote.
+
+    An endpoint that answers 2xx with an empty (or non-JSON) body used to crash the decode or,
+    in sibling tools, print a line of Nones -- a success that reads as a non-event, which is
+    exactly what invites a re-run and a duplicate write. The hub is the authority; this line
+    says only what the transport knows.
+    """
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return {"accepted": True, "status": status,
+                "note": "the hub accepted the write and returned no body, so there is no id or "
+                        "version to quote -- read the board to see the result; do not re-run it"}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"accepted": True, "status": status,
+                "note": "the hub answered 2xx with a body that is not JSON (a proxy page?) -- "
+                        "the write may not have reached the hub; read the board before re-running",
+                "body_head": text[:200]}
 
 
 # -- The blind window: a span in which this client could not reach the hub --
@@ -726,6 +763,60 @@ def _retryable(body: Any) -> bool:
         return False
 
 
+def _evidence_problems(evidence: list[str]) -> list[str]:
+    """Evidence is a REFERENCE -- a URL, a commit sha, a path -- so it is one token. Prose
+    always contains whitespace and never dereferences; refusing it here puts the error in front
+    of the writer, in one edit, instead of after a round trip."""
+    return [item for item in evidence if not str(item).strip() or len(str(item).split()) > 1]
+
+
+def _evidence_help(error: "HubRefused") -> str:
+    """Turn an evidence_unresolvable refusal into the exact re-run, item by item."""
+    bad, fix = {}, ""
+    for entry in ((error.body or {}).get("errors") or []) if isinstance(error.body, dict) else []:
+        if isinstance(entry, dict):
+            bad.update(entry.get("bad") or {})
+            fix = fix or str(entry.get("fix") or "")
+    lines = ["  --> ONE unresolvable --evidence item refuses the WHOLE completion: nothing was",
+             "      recorded and the task is still in progress."]
+    for item, why in list(bad.items())[:6]:
+        lines.append("      %s  (%s)" % (item, why))
+    if fix:
+        lines.append("      " + fix)
+    return "\n".join(lines)
+
+
+def _note_refused_finish(base: str, arguments: argparse.Namespace, error: Exception) -> None:
+    """Write a REFUSED completion onto the task, so it is as visible as one that landed.
+
+    A refusal printed to stderr is loud to whoever is at the terminal and invisible to everyone
+    else: the board goes on showing an in-progress task with a claim on it and no hint that its
+    holder tried to close it and was told no -- precisely what an unattended worker leaves
+    behind. Best-effort by construction: the original refusal always propagates unchanged, and a
+    failure to annotate is announced rather than swallowed.
+    """
+    import datetime as _dt
+    reason = str(error).replace("\n", " ")
+    try:
+        entity = _fetch_task(base, arguments.task_id)
+        plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
+        plan.append({"step": "finish REFUSED -- task still in progress", "done": False,
+                     "note": "the hub refused the completion, so this task is NOT done: " + reason,
+                     "note_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+        body: dict[str, Any] = {"id": entity["id"], "plan": plan, "agent": _agent(arguments),
+                                "expected_version": entity.get("version")}
+        token = getattr(arguments, "lease_token", None) or os.environ.get("HUB_LEASE_TOKEN")
+        if token:
+            body["token"] = token
+        _post(base, "task", body, extra_headers=_presence_headers(arguments))
+        print("NOTE: the refusal is recorded on %s as an open plan step." % entity["id"],
+              file=sys.stderr)
+    except Exception as annotate_error:                          # noqa: BLE001
+        print("NOTE: could not record the refused finish on the board (%s: %s) -- the task "
+              "reads in progress with no reason attached; say why with `step --note`."
+              % (type(annotate_error).__name__, str(annotate_error)[:200]), file=sys.stderr)
+
+
 def _optional_auth_headers() -> dict[str, str]:
     try:
         return _auth_headers()
@@ -768,11 +859,33 @@ def _repo_remote(start: str) -> str:
 _REPLAY_ORIGIN: dict[str, str] | None = None
 
 
+def _repo_of(path: str) -> str:
+    """The repository a directory sits in, named by its top-level folder, or "" when it is
+    in none. Read from the filesystem (a .git entry up the tree), never guessed from the
+    path's spelling, so a console parked in a workspace root reports no repo at all."""
+    try:
+        here = os.path.abspath(path)
+        while True:
+            if os.path.exists(os.path.join(here, ".git")):
+                return os.path.basename(here.rstrip("\\/")) or ""
+            parent = os.path.dirname(here)
+            if parent == here:
+                return ""
+            here = parent
+    except (OSError, ValueError):
+        return ""
+
+
 def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, str]:
     """The observed-presence headers every write may carry. Environment first, flags win —
     the board's live-console view is only as true as what the seats send. The console's name,
     repository and runtime ride along so the roster can bind it to a project; the repository
-    is read from .git/config (never a subprocess) unless HUB_REPO says otherwise."""
+    is read from .git/config (never a subprocess) unless HUB_REPO says otherwise.
+
+    The cwd and the repo are sent as ONE fact: the hub applies the repo that accompanies a
+    cwd, and treats a missing repo beside a cwd as "this directory is in no repository".
+    HUB_FILES (comma-separated) is the console's recently touched files; the hub stamps it
+    on arrival and ages it out, so a stale list never outlives the work it described."""
     if _REPLAY_ORIGIN:
         # A REPLAYED write speaks as the console that QUEUED it, identity only: a lease is held
         # by a console, and the location headers would move that console's presence row to
@@ -2103,6 +2216,80 @@ def _run_check_env(base: str | None, arguments: argparse.Namespace) -> dict[str,
             "needs_a_person": len(needs), "reported": reported}
 
 
+# ── Services to the apps around the hub: hosted components, per-app component properties,
+# one app's slice of the board, a person's cross-app preferences, the brokered agent ──
+
+def _pairs(items: list[str] | None) -> dict[str, Any]:
+    """`key=value` flags into a dict; a value that parses as JSON (a number, a list) is used as
+    that JSON, otherwise as the literal string."""
+    out: dict[str, Any] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError("expected key=value, got %r" % item)
+        key, value = item.split("=", 1)
+        try:
+            out[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key.strip()] = value
+    return out
+
+
+def _run_hosted_components(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """The UI components this hub hosts for its apps (GET /hub/components/)."""
+    return _get(base, "components/")
+
+
+def _run_component_props(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Read one app's component properties, or REPLACE them with --set component.key=value
+    (a full set: properties not named return to their defaults, so current values are read
+    first and the named ones laid over them)."""
+    from urllib.parse import quote
+    current = _get(base, f"components/props/{quote(arguments.app)}.json")
+    if not arguments.set:
+        return current
+    props = {c: dict(v) for c, v in (current.get("props") or {}).items()}
+    for dotted, value in _pairs(arguments.set).items():
+        if "." not in dotted:
+            raise ValueError("name the property as component.key, got %r" % dotted)
+        component, key = dotted.split(".", 1)
+        props.setdefault(component, {})[key] = value
+    return _post(base, "component-props", {"app": arguments.app, "props": props,
+                                           "agent": _agent(arguments)})
+
+
+def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {"app": arguments.app}
+    if arguments.name:
+        query["name"] = arguments.name
+    return _get(base, "app-feed.json?" + urlencode(query))
+
+
+def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import quote
+    path = "profile?person=" + quote(arguments.person)
+    if arguments.set:
+        return _post(base, path, {"prefs": _pairs(arguments.set)})
+    return _get(base, "api/" + path)
+
+
+def _run_agent_ask(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {"question": arguments.question}
+    for name in ("person", "app", "conversation_id"):
+        value = getattr(arguments, name, None)
+        if value:
+            payload[name] = value
+    return _post(base, "agent/ask", payload)
+
+
+def _run_agent_history(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {"person": arguments.person, "scope": arguments.scope}
+    if arguments.app:
+        query["app"] = arguments.app
+    return _get(base, "api/agent/history?" + urlencode(query))
+
+
 # ── The worker LOOP: next -> start -> step -> finish, with compaction-proof regrounding ──
 # Extracted from two adopter fleets that each rebuilt this loop independently; the converged
 # core belongs to the template. The deployment-specific halves those tools also carried
@@ -2391,6 +2578,11 @@ def _run_finish(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
       on the worker, through hub_core.verifier's hardening (argv-form, scrubbed env, exfil
       refusal), and submits the typed receipt. A non-zero exit refuses the completion.
     """
+    malformed = _evidence_problems(arguments.evidence)
+    if malformed:
+        raise ValueError("evidence is a reference (a URL, a commit sha, a path), so it is one "
+                         "token with no spaces; put prose in --accept-note. Not a reference: "
+                         + "; ".join(repr(item) for item in malformed))
     entity = _fetch_task(base, arguments.task_id)
     current = _charter_sha()
     charter_note = ""
@@ -2445,7 +2637,14 @@ def _run_finish(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
         # Retract the focus `start` declared — only if it is still that one; a newer focus set
         # by another verb is never cleared by this.
         headers["X-Hub-Focus-Retract"] = str(entity["title"])[:180]
-    result = _post(base, "complete", payload, extra_headers=headers)
+    try:
+        result = _post(base, "complete", payload, extra_headers=headers)
+    except HubRefused as refusal:
+        # A refused finish is visible on the board and carries its fix.
+        _note_refused_finish(base, arguments, refusal)
+        if "evidence_unresolvable" in refusal.codes():
+            raise RuntimeError(str(refusal) + "\n" + _evidence_help(refusal)) from refusal
+        raise
     feed = _auto_update(base, arguments, "fixed",
                         f"Finished {entity.get('title') or arguments.task_id}: {arguments.accept_note}",
                         evidence=(arguments.evidence or [""])[0], item=arguments.task_id)
@@ -2568,7 +2767,20 @@ def _dispatch(bases: list[str], arguments: argparse.Namespace) -> dict[str, Any]
     if getattr(arguments, "runner", None):
         return arguments.runner(bases, arguments)
     operation, payload = arguments.payload(arguments)
-    return _post(bases, operation, payload, extra_headers=_presence_headers(arguments))
+    if operation == "complete":
+        malformed = _evidence_problems(payload.get("evidence_uri") or [])
+        if malformed:
+            raise ValueError("evidence is a reference (a URL, a commit sha, a path), so it is one "
+                             "token with no spaces; put prose in --accept-note. Not a reference: "
+                             + "; ".join(repr(item) for item in malformed))
+    try:
+        return _post(bases, operation, payload, extra_headers=_presence_headers(arguments))
+    except HubRefused as refusal:
+        if operation == "complete":
+            _note_refused_finish(bases, arguments, refusal)
+            if "evidence_unresolvable" in refusal.codes():
+                raise RuntimeError(str(refusal) + "\n" + _evidence_help(refusal)) from refusal
+        raise
 
 
 def _replay(bases: list[str], entry: dict[str, Any]) -> dict[str, Any]:
@@ -3215,6 +3427,43 @@ def _parser() -> argparse.ArgumentParser:
     whoami = commands.add_parser("whoami",
                                  help="what the hub resolves your credential and headers to")
     whoami.set_defaults(runner=_run_whoami)
+
+    hosted = commands.add_parser("hosted-components",
+                                 help="the UI components this hub hosts for its apps: versions, "
+                                      "files, adopters (`components` lists the standard components "
+                                      "and app skeletons a new app starts from)")
+    hosted.set_defaults(runner=_run_hosted_components)
+
+    cprops = commands.add_parser("component-props",
+                                 help="one app's component properties; --set comp.key=value replaces them")
+    cprops.add_argument("--app", required=True, help="the app slug")
+    cprops.add_argument("--set", action="append", metavar="COMPONENT.KEY=VALUE")
+    cprops.add_argument("--agent")
+    cprops.set_defaults(runner=_run_component_props)
+
+    feed = commands.add_parser("app-feed", help="one app's slice of the board (checklist, announcements)")
+    feed.add_argument("--app", required=True)
+    feed.add_argument("--name", help="the app's display name, matched as well as the slug")
+    feed.set_defaults(runner=_run_app_feed)
+
+    prof = commands.add_parser("profile",
+                               help="a person's cross-app preferences; --set key=value merges (profile:write)")
+    prof.add_argument("--person", required=True)
+    prof.add_argument("--set", action="append", metavar="KEY=VALUE")
+    prof.set_defaults(runner=_run_profile)
+
+    ask_agent = commands.add_parser("agent-ask", help="ask the brokered agent (agent:ask)")
+    ask_agent.add_argument("--question", required=True)
+    ask_agent.add_argument("--person")
+    ask_agent.add_argument("--app")
+    ask_agent.add_argument("--conversation-id", dest="conversation_id")
+    ask_agent.set_defaults(runner=_run_agent_ask)
+
+    agent_hist = commands.add_parser("agent-history", help="a person's past agent conversations (agent:history)")
+    agent_hist.add_argument("--person", required=True)
+    agent_hist.add_argument("--app")
+    agent_hist.add_argument("--scope", choices=["app", "all"], default="app")
+    agent_hist.set_defaults(runner=_run_agent_history)
 
     # The worker loop: next -> start -> step -> finish (+ reground after compaction).
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")

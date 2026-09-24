@@ -742,6 +742,7 @@ def run_audit(st=None, served=None) -> dict:
 import os as _os
 import time as _time
 import uuid as _uuid
+from hub_core import atomic
 from hub_core.process_lock import ProcessFileLock
 
 CLAIMS = HUB_DIR / "claims"
@@ -761,10 +762,9 @@ def _read_lease(task_id):
 
 def _write_lease(task_id, lease):
     CLAIMS.mkdir(parents=True, exist_ok=True)
-    p = _claim_path(task_id)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(lease), encoding="utf-8")
-    _os.replace(tmp, p)
+    # Locked, retrying replace: every board render reads these files with no lock, so on
+    # Windows a render landing mid-rename used to turn a claim into a 500 (hub_core.atomic).
+    atomic.write_json(_claim_path(task_id), lease)
 
 
 def commit_resolver():

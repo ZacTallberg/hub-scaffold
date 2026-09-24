@@ -18,6 +18,20 @@ def valid_id(s) -> bool:
     return bool(ID_RE.match(s or ""))
 
 
+class InvalidId(ValueError):
+    """make_id refused: the composed id does not match ID_RE.
+
+    A ValueError SUBCLASS so every existing `except ValueError` around minting still catches
+    it, and a distinct TYPE so the write seam can answer 400 naming the offending id instead
+    of an empty-bodied 500. `local` is caller-supplied on several writers (a raw `local`, or a
+    slug of a caller-supplied name), so an unmintable id is a caller error, not a server one.
+    """
+
+    def __init__(self, cid):
+        super().__init__(f"invalid id {cid!r}")
+        self.id = cid
+
+
 def _local(entity_id: str) -> str:
     parts = entity_id.split(":")
     return parts[2] if len(parts) >= 3 else ""
@@ -43,5 +57,5 @@ def next_id(entities, project: str, type_: str) -> str:
 def make_id(project: str, type_: str, local: str) -> str:
     cid = f"{project}:{type_}:{local}"
     if not valid_id(cid):
-        raise ValueError(f"invalid id {cid!r}")
+        raise InvalidId(cid)
     return cid

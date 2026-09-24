@@ -150,6 +150,16 @@ def cause_of(details) -> str:
     return ""
 
 
+def _note(value, limit=4000) -> str:
+    """A claim/resolve note, redacted like every other field but kept WHOLE up to a generous
+    bound -- and past it, clipped visibly. At 240 characters with no marker the root cause a
+    person wrote when they claimed a problem lost its second half without a trace."""
+    text = _clean(value, 10 ** 6)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + " … [clipped: %d of %d characters]" % (limit, len(text))
+
+
 def _context(value) -> dict:
     if not isinstance(value, dict):
         return {}
@@ -673,9 +683,7 @@ def _compact_locked(hub_dir) -> None:
         if not path.exists() or path.stat().st_size <= MAX_BYTES:
             return
         rows = path.read_text(encoding="utf-8", errors="replace").splitlines()[-KEEP_ROWS:]
-        temp = path.with_suffix(".compact.tmp")
-        temp.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
-        os.replace(temp, path)
+        atomic.write_text(path, "\n".join(rows) + ("\n" if rows else ""))
     except OSError:
         return
 
@@ -876,7 +884,7 @@ def ack(hub_dir, fingerprint: str, actor: str = "", note: str = "") -> dict:
         return {}
     # The note is the root cause a person will read next; it is redacted, never cut.
     entry = {"at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-             "by": _clean(actor, 60), "note": _clean(note, None)}
+             "by": _clean(actor, 60), "note": _note(note)}
     try:
         Path(hub_dir).mkdir(parents=True, exist_ok=True)
         with ProcessFileLock(Path(hub_dir), name=".errors.lock", timeout=5):
@@ -886,7 +894,7 @@ def ack(hub_dir, fingerprint: str, actor: str = "", note: str = "") -> dict:
                 for stale in sorted(current, key=lambda k: current[k].get("at", "")
                                     )[:len(current) - KEEP_ROWS]:
                     current.pop(stale, None)
-            _write_json(_acked_path(hub_dir), current)
+            atomic.write_json(_acked_path(hub_dir), current)
     except Exception:                                        # noqa: BLE001
         return {}
     return entry
@@ -902,7 +910,7 @@ def unack(hub_dir, fingerprint: str) -> bool:
             if fingerprint not in current:
                 return False
             current.pop(fingerprint)
-            _write_json(_acked_path(hub_dir), current)
+            atomic.write_json(_acked_path(hub_dir), current)
         return True
     except Exception:                                        # noqa: BLE001
         return False
@@ -941,9 +949,7 @@ def clear(hub_dir, before_epoch=None, only_acked=False) -> dict:
                     removed += 1
                 else:
                     kept.append(line)
-            temp = path.with_suffix(".clear.tmp")
-            temp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-            os.replace(temp, path)
+            atomic.write_text(path, "\n".join(kept) + ("\n" if kept else ""))
     except Exception as exc:                                 # noqa: BLE001
         return {"removed": 0, "kept": 0, "reason": type(exc).__name__}
     return {"removed": removed, "kept": len(kept)}

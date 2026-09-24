@@ -106,29 +106,37 @@ def _body(request):
         return None
 
 
-def writer(fn=None, *, scope=None):
+def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
+    """The one authenticated seam. `methods` admits GET for a token-gated READ that serves
+    another server (an app asking on behalf of a person it signed in) -- the same credential,
+    scope and refusal recording as a write, with an empty body. `scope` may be a mapping of
+    method -> scope when one route both reads and writes (read and write are different
+    authorities). `presence=False` keeps such service calls off the fleet roster: an app's
+    server is not somebody's seat."""
     if fn is None:
-        return lambda view: writer(view, scope=scope)
+        return lambda view: writer(view, scope=scope, methods=methods, presence=presence)
 
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
-        if request.method != "POST":
-            return HttpResponseNotAllowed(["POST"])
+        if request.method not in methods:
+            return HttpResponseNotAllowed(list(methods))
         auth, problem = _authenticate(request)
         if not auth:
             _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
-        # A tuple scope is ANY-OF: a narrower operation scope that an older, broader grant
-        # must keep satisfying (answering a question was once directive:write-only).
-        scopes = scope if isinstance(scope, (tuple, list)) else (scope,)
-        if not any(auth.allows(one) for one in scopes):
+        # `scope` may be a mapping of method -> scope (a route that both reads and writes);
+        # a tuple is ANY-OF: a narrower operation scope that an older, broader grant must keep
+        # satisfying (answering a question was once directive:write-only).
+        required = scope.get(request.method) if isinstance(scope, dict) else scope
+        scopes = required if isinstance(required, (tuple, list)) else (required,)
+        if not required or not any(auth.allows(one) for one in scopes):
             _record_refusal(request, "insufficient_scope",
-                            "a write was refused: subject %r lacks scope %r" % (auth.subject, scope))
+                            "a write was refused: subject %r lacks scope %r" % (auth.subject, required))
             return JsonResponse({"errors": [{"code": "insufficient_scope",
                                               "required": scopes[0] if len(scopes) == 1 else list(scopes),
                                               "subject": auth.subject}]}, status=403)
-        b = _body(request)
+        b = {} if request.method == "GET" else _body(request)
         if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
         # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
@@ -169,13 +177,25 @@ def writer(fn=None, *, scope=None):
         # board knows who is on it without anyone filing a report — and an unauthenticated
         # caller can never forge a seat. The label the write carries (or, for a scoped
         # credential, its immutable subject) names the seat. Fail-soft by construction.
-        seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
-        hub_app.observe_presence(seat, request.headers)
+        if presence:
+            seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
+            hub_app.observe_presence(seat, request.headers)
         request.hub_auth = auth
         marker = _AUTH.set(auth)
         req_marker = _REQUEST.set(request)
         try:
             response = fn(request, b, *a, **k)
+        except ids.InvalidId as exc:
+            # UNMINTABLE ID, answered once for every writer. Each writer composes its entity id
+            # from caller-supplied input (a raw `local`, or a slug of a name), and make_id
+            # refuses what the id grammar does not accept. Unhandled, that refusal is a 500
+            # with an empty body whose only trace is the server log. Scoped to InvalidId on
+            # purpose: a blanket `except ValueError` would dress a genuine server bug up as a
+            # caller error, which is the same failure inverted.
+            response = JsonResponse({"errors": [{"code": "invalid_local", "id": exc.id,
+                "msg": "cannot mint %r: a local id must start with a letter or digit and use "
+                       "only [a-z0-9._-]. Send a valid 'local', or a name/title that slugs to "
+                       "one." % (exc.id,)}]}, status=400)
         finally:
             _REQUEST.reset(req_marker)
             _AUTH.reset(marker)
@@ -655,10 +675,20 @@ def complete(request, b):
             if problem:
                 bad[str(e)[:200]] = problem
         if bad:
+            # The refusal carries its own fix. The check is all-or-nothing, so a good URL
+            # sent BESIDE an unreachable item still refuses the whole completion -- and the
+            # usual reaction, dropping the real reference into prose, loses it from the record.
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
                 "msg": "every evidence_uri must dereference (URL <400 / commit in this Hub's "
                        "repository or the task's project / existing path from WORK_ROOT)",
-                "project": project or None, "bad": bad}]}, status=422)
+                "project": project or None,
+                "fix": "resend with only references this hub can resolve: a URL it can fetch "
+                       "unauthenticated, a commit pushed to the repo it serves, or a path under "
+                       "its WORK_ROOT. A reference it cannot reach (a commit in another repo, a "
+                       "page behind sign-in) belongs behind a URL it can fetch -- or the board "
+                       "runs tracked mode (HUB_DONE_STRICTNESS=tracked), which records it as "
+                       "given. Keep the reference in evidence_uri; do not move it into prose.",
+                "bad": bad}]}, status=422)
     ent = hub_app.entity(eid)
     if not ent:
         return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
@@ -752,10 +782,15 @@ def adr(request, b):
 @writer(scope="capability:write")
 def capability(request, b):
     agent = b.get("agent", "agent")
-    name = b.get("name")
-    if not name:
-        return JsonResponse({"errors": [{"code": "need_name"}]}, status=400)
+    name = str(b.get("name") or "")
+    # Guard on the SLUG, not the raw string: a whitespace-only name is truthy and used to walk
+    # past `if not name` into an id the grammar refuses (a 500). "This name yields a usable
+    # local" is the precondition actually meant. The slug rule itself is unchanged, so a
+    # retried registration keeps resolving to the same id.
     local = b.get("local") or "".join(c if c.isalnum() or c in "._-" else "-" for c in name.lower())
+    if not name.strip() or not str(local).strip("-._"):
+        return JsonResponse({"errors": [{"code": "need_name",
+            "msg": "name is required to register a capability"}]}, status=400)
     eid = ids.make_id(hub_app.PROJECT_KEY, "cap", local)
     payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key", "local")}
     payload["type"] = "cap"
@@ -1841,7 +1876,9 @@ def ask(request, b):
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     tags = ["question", "open"] + (["human-only"] if b.get("human_only") else [])
-    payload = {"type": "note", "category": "context", "title": text[:300],
+    # The question is stored WHOLE. It used to be cut at 300 characters with no marker, so
+    # the operator answered the first half of a question and the asker never learned why.
+    payload = {"type": "note", "category": "context", "title": text,
                "asker": agent, "from_agent": agent, "status": "standing", "tags": tags,
                "body_md": str(b.get("context") or "")}
     if to:
@@ -1962,7 +1999,7 @@ def answer(request, b):
         text += "\n\n[answered by an unattended run -- verify against the source if it matters]"
     payload = {
         "type": "directive",
-        "title": ("Answer: %s" % question_text)[:300],
+        "title": "Answer: %s" % question_text,
         "body_md": text + "\n\n---\nIn answer to your question: " + question_text,
         "targets": [asker],
         "status": "active",
@@ -2060,7 +2097,7 @@ def answer(request, b):
         lesson_id = ids.make_id(hub_app.PROJECT_KEY, "note", note_local)
         lesson_payload = {
             "type": "note", "category": "method",
-            "title": (question_text or ("answer for " + asker))[:300],
+            "title": question_text or ("answer for " + asker),
             "body_md": text + "\n\n(Crystallized from a question asked by " + asker + ".)",
             "tags": ["pattern", "memory", "answered-question"],
             "status": "standing",

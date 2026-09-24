@@ -326,7 +326,7 @@ project key are renameable bindings; the rules are not.
       "type": "array",
       "items": { "type": "object", "additionalProperties": false, "properties": {
         "step": { "type": "string" }, "done": { "type": "boolean" },
-        "note": { "type": "string", "maxLength": 600, "description": "What the worker reported at this checkpoint — the context that turns 'working on X' into 'working on X, last did Y'." },
+        "note": { "type": "string", "description": "What the worker reported at this checkpoint, whole (surfaces that must fit a line show a preview ending in an ellipsis) — the context that turns 'working on X' into 'working on X, last did Y'." },
         "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." },
         "kind": { "enum": ["checkpoint", "pushed", "deployed", "handed_back", "lease_released", "reaped", "launcher_timeout", "claim_expired", "lifecycle"], "description": "What this checkpoint IS, so no reader parses prose: pushed (names the commit in `sha`, optionally its pipeline), deployed (a verified deploy made that commit live), and the lifecycle kinds a SCHEDULER writes about its own run (handed_back, lease_released, reaped, launcher_timeout, claim_expired, lifecycle) — shown, but never counted toward 'N of N done'." },
         "lifecycle": { "type": "boolean", "description": "True on a row a scheduler wrote about its own run, never about the work; counters leave it out of completeness." },
@@ -362,7 +362,7 @@ project key are renameable bindings; the rules are not.
       "type": "object", "additionalProperties": false,
       "properties": {
         "signature": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "note": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": ".*\\S.*" },
+        "note": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
         "at": { "$ref": "hub:common#/$defs/isoDate" },
         "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
         "consequential": { "type": "boolean" },
@@ -782,6 +782,8 @@ project key are renameable bindings; the rules are not.
       "minItems": 1,
       "description": "Agent names, or the single element 'all'. Auto-retire on full ack applies only to explicitly named targets — 'all' has no closed roster to check off."
     },
+    "machine": { "type": "string", "maxLength": 120, "description": "Pin delivery to ONE computer: only an inbox read that names this machine receives it. An unpinned client cannot claim to be the pinned place." },
+    "session": { "type": "string", "maxLength": 64, "description": "Pin delivery to ONE console (its session id). The write path resolves a console NAME to the live session it addresses and refuses a console that is not live, so a message never lands in a window nobody has open." },
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },

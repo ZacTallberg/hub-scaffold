@@ -25,6 +25,7 @@ from hub_core import (activity as activity_core, adherence, app_health,
                       updates, wip)
 from hub_core import overlap as overlap_core
 from hub_core.canonical import content_hash
+from hub_core.text import preview
 
 from . import delivery, hub_app, prewarm, realtime, roles
 
@@ -197,9 +198,9 @@ def _plan_progress(ent):
     # last did Y" — the fact a peer needs to decide whether to coordinate, wait, or move on.
     noted = [s for s in work if s.get("note")]
     return {"plan_done": done, "plan_total": total, "plan_lifecycle": lifecycle,
-            "step": (str(step)[:70] if step else None),
+            "step": (preview(step, 70) if step else None),
             "plan_pct": (round(done * 100 / total) if total else None),
-            "last_note": (str(noted[-1].get("note"))[:90] if noted else None)}
+            "last_note": (preview(noted[-1].get("note"), 90) if noted else None)}
 
 
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
@@ -356,7 +357,17 @@ def _errors_block(limit=errorlog.READ_LIMIT, app=""):
     return rows, metadata, unclaimed
 
 
-def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_unclaimed=None):
+def _host_disk():
+    """The hub's own drive, measured (cached) -- never allowed to break a snapshot."""
+    try:
+        from hub_core import hostdisk
+        return hostdisk.reading(hub_app.HUB_DIR)
+    except Exception as exc:                                 # noqa: BLE001
+        return {"state": "unmeasured", "error": str(exc)[:200]}
+
+
+def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_unclaimed=None,
+               disk=None):
     """The consolidated 'Needs the operator' rail: every signal a human (or a spec pass) must act
     on, unioned from sources otherwise scattered across tabs and the audit JSON — a poison-blocked
     task, a stuck worker, a dep that can never be satisfied, governance amber, blocked work,
@@ -387,6 +398,15 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
                 (t.get("last_failure") or {}).get("note") or "failure requires operator authority",
                 t["id"], t.get("title"))
 
+    # THE HUB'S OWN DISK. Below the warning threshold every append, snapshot and backup on
+    # this drive is one busy hour from failing -- and each failure would otherwise surface as
+    # a different, misleading symptom. Named here while there is still room to act.
+    if disk and disk.get("state") in ("warn", "critical"):
+        from hub_core import hostdisk
+        add(0 if disk["state"] == "critical" else 2, "host-disk-low", hostdisk.describe(disk),
+            None, "%.1f GB free on %s" % (disk.get("free_gb") or 0.0,
+                                           disk.get("drive") or "the hub's drive"))
+
     for r in (inflight or []):
         if r.get("stalled"):
             add(1, "stalled-lease",
@@ -404,14 +424,14 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
         if held:
             add(4, "question-in-flight",
                 f"in flight on {held.get('machine')} ({_fmt_age(held.get('age_s'))}): "
-                f"{str(q.get('title') or '')[:100]}", q.get("id"), q.get("title"),
+                f"{preview(q.get('title'), 100)}", q.get("id"), q.get("title"),
                 route={"view": "overview", "focus": "asks"}, waited_s=q.get("waited_s"))
             continue
         age = (" — waiting " + q["age"]) if q.get("age") else ""
         kind = "gate" if q.get("kind") == "gate" else (
             "stuck-question" if q.get("stuck") else "open-question")
         add(1 if (q.get("stuck") or q.get("kind") == "gate") else 2, kind,
-            f"{q.get('from')} asks: {str(q.get('title') or '')[:120]}{age}", q.get("id"),
+            f"{q.get('from')} asks: {preview(q.get('title'), 120)}{age}", q.get("id"),
             q.get("title"), route={"view": "overview", "focus": "asks"}, waited_s=q.get("waited_s"))
 
     # HELD WORK AGES IN PUBLIC (hub_core.held): every open hold is on the rail with who holds it
@@ -458,7 +478,7 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
             continue
         where = (p.get("context") or {}).get("app") or p.get("origin_app") or p.get("origin") or ""
         add(2, "error-unclaimed",
-            (f"[{where}] " if where else "") + str(p.get("message") or "")[:140],
+            (f"[{where}] " if where else "") + preview(p.get("message"), 140),
             None, str(p.get("source") or "error"),
             route={"view": "overview", "focus": "errors"})
 
@@ -691,7 +711,7 @@ def _fleet(events, state, inflight):
         last_ts.setdefault(ag, e.get("ts"))
         tr = trails.setdefault(ag, [])
         if len(tr) < 5:
-            tr.append({"action": action, "title": str(title)[:64], "ts": e.get("ts"),
+            tr.append({"action": action, "title": preview(title, 64), "ts": e.get("ts"),
                        "seq": e.get("seq")})
 
     # Live consoles per agent, from observed presence: an agent working WITHOUT a formal
@@ -1250,6 +1270,7 @@ def _live_blocks(events, state, audit, deliv, cursor):
     adher = adherence.score(events, state, leases=inflight)
     hub_dir = hub_app.HUB_DIR
     asks, error_rows, error_meta, error_unclaimed, sessions_live = _live_side_blocks(state)
+    disk = _host_disk()
     return {
         "transport": "event-stream",
         "realtime": hub_app.realtime_info(),
@@ -1286,8 +1307,11 @@ def _live_blocks(events, state, audit, deliv, cursor):
         "distribution": hub_app.distribution_report()[0],
         "built": _built_summary(events, state),
         "crossovers": _crossover_block(state),
+        # The hub's own drive: always reported with its numbers, a condition only below
+        # the thresholds (hub_core.hostdisk).
+        "host_disk": disk,
         "attention": _attention(state, audit, inflight, adher, deliv,
-                                asks=asks, error_unclaimed=error_unclaimed),
+                                asks=asks, error_unclaimed=error_unclaimed, disk=disk),
         "telemetry": telemetry.read_aggregate(hub_dir),
         "cost": cost.cost_block(hub_dir, state),
         "wip": hub_app.wip_status(len(inflight)),
@@ -1360,6 +1384,7 @@ def _snapshot(served=None):
         side_asks, side_error_rows, side_error_meta, side_unclaimed, side_sessions = \
             _live_side_blocks(state, lease_rows)
         _tick("side_blocks")
+        side_disk = _host_disk()
         live = {
             "transport": "event-stream",
             "realtime": hub_app.realtime_info(),
@@ -1398,8 +1423,10 @@ def _snapshot(served=None):
             "distribution": hub_app.distribution_report()[0],
             "built": _built_summary(events, state),
             "crossovers": _crossover_block(state),
+            "host_disk": side_disk,
             "attention": _attention(state, audit, inflight, adher, deliv,
-                                    asks=side_asks, error_unclaimed=side_unclaimed),
+                                    asks=side_asks, error_unclaimed=side_unclaimed,
+                                    disk=side_disk),
             # Task health (moving / ready-to-close / stalled / orphaned), the attended vs
             # unattended console split, crossovers between consoles, and the operational
             # "needs attention" list — hub_core.task_health / presence / overlap / attention.
@@ -2052,11 +2079,11 @@ def questions_json(request):
             "id": eid, "asker": asker, "at": asked_at,
             "to": str(ent.get("to") or "").lower(),
             "title": str(ent.get("title") or ""),
-            "context": str(ent.get("body_md") or "")[:1400],
+            "context": str(ent.get("body_md") or ""),
             "open": "open" in tags,
             "answered": bool(reply),
             "answer_id": (reply or {}).get("id", ""),
-            "answer": answer_body[:1800],
+            "answer": answer_body,
             "answer_by": str(answer_prov.get("agent") or "") if reply else "",
             "answer_at": answered_at,
             "acked": acked,
@@ -2705,9 +2732,9 @@ def search_json(request):
         elif q in hay_b:
             score += 3.0
         score += sum(1.5 for term in terms if term in hay_t)   # breadth of term coverage
-        hits.append({"id": ent.get("id"), "type": ent.get("type"), "title": title[:200],
+        hits.append({"id": ent.get("id"), "type": ent.get("type"), "title": title,
                      "status": ent.get("status") or ent.get("maturity") or "",
-                     "excerpt": body[:400], "score": round(score, 2)})
+                     "excerpt": preview(body, 400), "score": round(score, 2)})
     hits.sort(key=lambda h: h["score"], reverse=True)
     return JsonResponse({"data": hits[:limit],
                          "metadata": {"q": q, "terms": terms, "matched": len(hits)}})

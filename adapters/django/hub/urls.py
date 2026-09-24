@@ -6,7 +6,7 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import held, hub_api, hub_write, hubsite, veil, mcp_server, read_auth, run_api
+from . import app_services, held, hub_api, hub_write, hubsite, veil, mcp_server, read_auth, run_api
 
 R = read_auth.reader
 
@@ -58,6 +58,16 @@ urlpatterns = [
     path("built.json", R(hub_api.built_json), name="built"),
     path("ci-events.json", R(hub_api.ci_events_json), name="ci-events"),
     path("dag.graphml", R(hub_api.dag_graphml), name="dag-graphml"),
+    # Services to the apps around the hub (adapters/django/hub/app_services.py): hosted UI
+    # components and their per-app properties (OPEN presentation reads, declared public), and
+    # one app's slice of the board. Above the catch-alls, which would read
+    # "components/props/<slug>.json" as an entity.
+    path("components/", app_services.component_index, name="component-index"),
+    path("components/props/<str:slug>.json", app_services.component_props,
+         name="component-props"),
+    path("components/<str:name>/<str:filename>", app_services.component_file,
+         name="component-file"),
+    path("app-feed.json", R(app_services.app_feed_json), name="app-feed"),
     path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
     path("<str:type>.json", R(hub_api.type_json)),
     path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
@@ -128,6 +138,13 @@ urlpatterns = [
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
     path("api/heartbeat", hub_write.heartbeat),
+    # Per-app component settings (operator), a person's cross-app preferences (an app's server
+    # on behalf of a person it signed in), and the brokered agent (the hub holds the one key).
+    path("api/component-props", app_services.set_component_props),
+    path("api/profile", app_services.profile),
+    path("api/agent/ask", app_services.agent_ask),
+    path("api/agent/history", app_services.agent_history),
+    path("api/agent/conversation", app_services.agent_conversation),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP
@@ -150,6 +167,8 @@ VISIBILITY = {
     "item-claims.json": "veiled", "components.json": "veiled",
     "problems.json": "veiled", "app_health.json": "veiled", "doctor.json": "veiled",
     "overlap.json": "veiled", "enroll/status.json": "veiled",
+    "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
+    "components/<str:name>/<str:filename>": "open",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
