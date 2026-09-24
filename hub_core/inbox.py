@@ -111,6 +111,25 @@ def body_text(value, limit=INBOX_BODY_LIMIT) -> str:
                         % (limit, len(s)))
 
 
+def _hop(value) -> int:
+    try:
+        return max(0, min(9, int(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _age_s(stamp):
+    """Seconds since an ISO stamp, or None when it cannot be read (never a guess)."""
+    from datetime import datetime, timezone
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0, int(time.time() - when.timestamp()))
+
+
 def waited_since(stamp, now=None):
     """Seconds since an ISO-8601 board timestamp, or None when it cannot be read — never 0,
     so "we do not know how long" can never be mistaken for "it just arrived". A stamp in the
@@ -227,6 +246,10 @@ def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> 
             # A HUMAN GATE (`review`): delivered like any question, never taken by an
             # unattended session.
             "review": "review" in [str(t).lower() for t in (ent.get("tags") or [])],
+            # Escalation depth (0 = a person or an attended session) and how long it has
+            # waited: an unattended responder takes a hop-1 escalation only after a cooldown.
+            "hop": _hop(ent.get("hop")),
+            "age_s": _age_s(at),
             **({"unstuck": True} if unstuck else {}),
             **({"human_only": True} if human_only else {}),
             **({"granted": granted,

@@ -2037,6 +2037,8 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .ask-item:disabled { cursor: default; }
 .ask-head { display: flex; align-items: baseline; gap: 8px; }
 .ask-from { font-weight: 700; font-size: 12px; }
+.ask-hop { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap;
+  padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .ask-age { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .ask-title { font-size: 12.5px; font-weight: 600; }
 .ask-body { font-size: 11.5px; color: var(--muted); }

@@ -193,6 +193,15 @@ TOOLS = [
          "id": {"type": "string"}, "agent": {"type": "string"},
          "lease_token": {"type": "string"}},
          "required": ["id", "agent", "lease_token"]}},
+    {"name": "hand_back_task",
+     "description": "A run is ending with its task unfinished: return it to todo with ONE "
+                    "self-counting hand-back row (shown on the task, never counted as a done "
+                    "step) and release the fenced lease, so the board stops reading it as in flight.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "agent": {"type": "string"},
+         "lease_token": {"type": "string"},
+         "note": {"type": "string", "description": "why the run ended unfinished; what is left"}},
+         "required": ["id", "agent", "lease_token", "note"]}},
     {"name": "fail_task",
      "description": "Atomically record a real failure, return the lease, and create or reuse routed repair work.",
      "inputSchema": {"type": "object", "properties": {
@@ -242,7 +251,9 @@ TOOLS = [
          "human_only": {"type": "boolean",
                         "description": "only a person can satisfy it: delivered as a gate"},
          "idem_key": {"type": "string", "description": "repeat it on a retry: a call that "
-                      "already landed replays instead of being refused as its own duplicate"}},
+                      "already landed replays instead of being refused as its own duplicate"},
+         "hop": {"type": "integer", "minimum": 0, "maximum": 9,
+                 "description": "unattended runs only: the HUB_RESPONDER_HOP your launcher set"}},
          "required": ["agent", "question"]}},
     {"name": "answer_question",
      "description": "Answer an open question and retire it. The reply is addressed to the asker "
@@ -797,7 +808,7 @@ def _call_tool(name, args, auth_headers):
             payload["token"] = args["lease_token"]
         if args.get("note"):
             payload["note"] = args["note"]
-        status, body = _seam("/hub/api/" + ("hand-back" if name == "hand_task" else "unclaim"),
+        status, body = _seam("/hub/api/" + ("hand-to-queue" if name == "hand_task" else "unclaim"),
                              payload, auth_headers)
     elif name == "recall_task":
         local = str(args["id"]).rsplit(":", 1)[-1]
@@ -868,6 +879,11 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/release", {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
         }, auth_headers)
+    elif name == "hand_back_task":
+        status, body = _seam("/hub/api/hand-back", {
+            "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
+            "note": args["note"],
+        }, auth_headers)
     elif name == "fail_task":
         payload = {"id": args["id"], "agent": args["agent"],
                    "token": args["lease_token"], "signature": args["signature"],
@@ -910,7 +926,7 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/complete", payload, auth_headers)
     elif name == "ask_operator":
         payload = {"agent": args["agent"], "question": args["question"]}
-        for key in ("context", "anyway", "to", "human_only", "idem_key"):
+        for key in ("context", "anyway", "to", "human_only", "idem_key", "hop"):
             if args.get(key):
                 payload[key] = args[key]
         status, body = _seam("/hub/api/ask", payload, auth_headers)

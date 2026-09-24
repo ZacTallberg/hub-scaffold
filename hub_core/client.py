@@ -1172,7 +1172,49 @@ def _payload_ask(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         stamp = "via=responder"
         if stamp not in (payload.get("context") or ""):
             payload["context"] = ((payload.get("context") or "") + " " + stamp).strip()
+    # An unattended run's launcher sets HUB_RESPONDER_HOP; every question the run raises is
+    # stamped with it by the process, so the chain bound never depends on the model's memory.
+    hop = getattr(arguments, "hop", None) if getattr(arguments, "hop", None) is not None else os.environ.get("HUB_RESPONDER_HOP")
+    if hop not in (None, "", "0", 0):
+        payload["hop"] = int(hop)
     return "ask", payload
+
+
+def _payload_release(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
+    if not token:
+        raise ValueError("provide --lease-token or set HUB_LEASE_TOKEN")
+    return "release", {"id": arguments.task_id, "token": token, "agent": _agent(arguments)}
+
+
+def _payload_hand_back(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
+    if not token:
+        raise ValueError("provide --lease-token or set HUB_LEASE_TOKEN")
+    return "hand-back", {"id": arguments.task_id, "token": token, "agent": _agent(arguments),
+                         "note": arguments.note}
+
+
+def _journal_lease(task_id: str, result: Any) -> None:
+    """Record a granted lease where the launcher that started this process can find it.
+
+    An unattended launcher sets HUB_RUN_LEASES to a file of its own. A run that ends with a task
+    still held leaves nobody to release it — the fencing token lived only in the session — so
+    the lease would read as work in flight until its TTL. With the token journalled, the
+    launcher hands the task back at teardown WITH PROOF (the hub checks the token), never on a
+    guess about whose lease it is. Fail-soft: journalling never turns a claim into an error."""
+    path = os.environ.get("HUB_RUN_LEASES", "").strip()
+    if not path or not isinstance(result, dict):
+        return
+    token = result.get("token") or (result.get("data") or {}).get("token")
+    if not token:
+        return
+    try:
+        import time as _time
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"task": task_id, "token": token, "at": _time.time()}) + "\n")
+    except OSError:
+        pass
 
 
 def _payload_answer(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -1766,7 +1808,7 @@ def _run_hand(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     if getattr(arguments, "to", None) is not None:
         operation, payload = _payload_hand(arguments)
         return _post(base, operation, payload, extra_headers=_presence_headers(arguments))
-    return _run_let_go("hand-back")(base, arguments)
+    return _run_let_go("hand-to-queue")(base, arguments)
 
 
 def _run_let_go(operation: str):
@@ -2532,6 +2574,7 @@ def _run_start(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
         if title:
             headers["X-Hub-Focus"] = title[:180]
     claim = _post(base, "claim", payload, extra_headers=headers)
+    _journal_lease(arguments.task_id, claim)
     token = claim.get("token") or (claim.get("data") or {}).get("token") or ""
     entity = _fetch_task(base, arguments.task_id)
     sha = _charter_sha()
@@ -2943,7 +2986,10 @@ def _dispatch(bases: list[str], arguments: argparse.Namespace) -> dict[str, Any]
                              "token with no spaces; put prose in --accept-note. Not a reference: "
                              + "; ".join(repr(item) for item in malformed))
     try:
-        return _post(bases, operation, payload, extra_headers=_presence_headers(arguments))
+        result = _post(bases, operation, payload, extra_headers=_presence_headers(arguments))
+        if operation == "claim":
+            _journal_lease(payload["id"], result)
+        return result
     except HubRefused as refusal:
         if operation == "complete":
             _note_refused_finish(bases, arguments, refusal)
@@ -3215,7 +3261,17 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--human-only", action="store_true", dest="human_only",
                      help="only a person can satisfy this (an approval, a physical step): "
                           "delivered as a gate, never widened to every console")
+    ask.add_argument("--hop", type=int,
+                     help="escalation depth (default HUB_RESPONDER_HOP; unattended runs only)")
     ask.set_defaults(payload=_payload_ask)
+
+    hand_back = commands.add_parser(
+        "hand-back", help="a run ended with its task unfinished: back to todo with ONE self-counting row")
+    hand_back.add_argument("task_id")
+    hand_back.add_argument("--agent")
+    hand_back.add_argument("--lease-token", dest="lease_token")
+    hand_back.add_argument("--note", required=True, help="why the run ended with the task unfinished")
+    hand_back.set_defaults(payload=_payload_hand_back)
 
     answer = commands.add_parser("answer",
                                  help="reply to a question AND retire it (ask:answer scope)")
@@ -3476,7 +3532,7 @@ def _parser() -> argparse.ArgumentParser:
     receipts.set_defaults(runner=_run_receipts)
 
     for verb, operation, helptext in (
-            ("hand", "hand-back", "--to <agent>: give a task to a named agent (--to \"\" clears "
+            ("hand", "hand-to-queue", "--to <agent>: give a task to a named agent (--to \"\" clears "
                                   "it); without --to: hand it back to the queue for an "
                                   "unattended worker"),
             ("unclaim", "unclaim", "let go of a task (also an orphaned console's lease of yours)")):
