@@ -24,7 +24,11 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   at hop 2. Withheld rows are counted by reason, never dropped silently.
 - **A lease is held by a live console** (`hub_core.liveness`): another console of the same agent
   cannot renew a live one's lease; absence from a partial roster is never read as gone; in-flight
-  rows and the board name the holding console and whether it is gone.
+  rows and the board name the holding console and whether it is gone. **A GONE console releases
+  what it held** after `HUB_GONE_GRACE_S` from its last-seen stamp: the sweep hands its task back
+  and voids that lease, a claim or item claim takes it over (`took_over_from`), a renewal from
+  another console takes over the recorded holder, and every refusal inside the grace says when it
+  frees. UNPROVABLE never releases.
 - **The Hub hands back abandoned work** (`hub_core.lease_sweep`) with one self-counting
   `handed_back` row, and **lifecycle rows are never counted as work** (`hub_core.plan`).
 - **A lock timeout names its holder**: claims-lock waits that run out answer `503 lock_busy`
@@ -38,6 +42,8 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - **The promotion lane** (new `held` entity, `hold`/`promote`/`abandon`/`held` verbs, MCP tools, a
   Held tab, rail items that escalate with age): finished work held back from live ages in public
   and is freed only with evidence; a commit on no remote is allowed only with a recorded reason.
+  The Hub confirms a hold by FETCHABILITY (a remote-tracking ref or the forge resolver), never by
+  a commit merely existing in a local checkout (`hub_saw: "local_only"` is kept on the record).
 - **One responder per item** (`POST /hub/api/item-claim`, client `item-claim`, MCP
   `claim_item`): a per-machine TTL claim on a question or error fingerprint; a claimed item reads
   "in flight on <machine>" on the rail and the error card instead of "unclaimed".
