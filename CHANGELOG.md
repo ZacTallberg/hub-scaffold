@@ -20,7 +20,8 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   `/hub/components/` (link, never copy; version hashed from the served bytes; adopters observed),
   per-app component properties whose schema travels in each component's manifest
   (`POST /hub/api/component-props`, `component:configure`; out-of-set values refused and listed),
-  one app's slice of the board (`/hub/app-feed.json`), a person's cross-app preferences
+  one app's slice of the board (`/hub/app-feed.json`; every checklist and announcement row names
+  the field that matched it), a person's cross-app preferences
   (`/hub/api/profile`, closed sets, SVG marks refused), and the hub as the one credential broker to
   an agent service (`/hub/api/agent/{ask,history,conversation}`; unconfigured, failed and empty
   answers each named). The `agent` component ships: launcher, docked resizable panel that pushes
