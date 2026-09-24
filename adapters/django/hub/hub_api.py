@@ -15,9 +15,10 @@ from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpRespon
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
 
-from hub_core import (activity as activity_core, adherence, cost, dag, errorlog,
-                      failure_taxonomy, flow, inbox as inbox_core, project, projections,
-                      telemetry, upcast, updates, wip)
+from hub_core import (activity as activity_core, adherence, attention as attention_core,
+                      checkpoints, cost, dag, errorlog, failure_taxonomy, flow,
+                      inbox as inbox_core, overlap, presence as _presence, project, projections,
+                      task_health, task_rows, telemetry, upcast, updates, wip)
 from hub_core.canonical import content_hash
 
 from . import delivery, hub_app, realtime
@@ -149,6 +150,9 @@ def _inflight(state, stall_s=STALL_S):
         heartbeat_age = int(now - heartbeat) if heartbeat else None
         rows.append({
             "task": task, "agent": lease.get("agent"),
+            # The claiming console, when the client said which: what lets one of an agent's
+            # several live consoles — and only that one — show as holding this task.
+            "session": str(lease.get("session") or "")[:8],
             "title": ent.get("title") or task.rsplit(":", 1)[-1],
             "status": ent.get("status"), "age_s": age,
             "heartbeat_age_s": heartbeat_age,
@@ -166,9 +170,11 @@ def _plan_progress(ent):
     0->100 as the worker steps through it instead of flipping binary at done. plan_pct is None
     when the task carries no plan (nothing to show yet, which is not the same as no progress)."""
     plan = ent.get("plan") or []
-    total = len(plan)
-    done = sum(1 for s in plan if isinstance(s, dict) and s.get("done"))
-    step = next((s.get("step") for s in plan if isinstance(s, dict) and not s.get("done")), None)
+    # Counted over WORK checkpoints only (hub_core.checkpoints): a grown placeholder or a
+    # scheduler's own lifecycle row is shown in the plan but never moves "N of N done".
+    counts = checkpoints.progress(plan)
+    total, done = counts["total"], counts["done"]
+    step = next((s.get("step") for s in checkpoints.work_steps(plan) if not s.get("done")), None)
     # The last checkpoint note is the CONTEXT that turns "working on X" into "working on X,
     # last did Y" — the fact a peer needs to decide whether to coordinate, wait, or move on.
     noted = [s for s in plan if isinstance(s, dict) and s.get("note")]
@@ -864,6 +870,107 @@ def activity_json(request):
         meta["session"] = session[:8]
         meta["no_task_for"] = [r.get("project") for r in activity_core.no_task_for(rows, session)]
     return JsonResponse({"data": rows, "metadata": meta})
+def _consoles(state, sessions_live=None):
+    """Every live console with the task IT claimed (never inferred from a directory)."""
+    try:
+        rows = hub_app.live_sessions() if sessions_live is None else sessions_live
+        return _presence.attribute_leases(rows, hub_app.leases())
+    except Exception:                                        # noqa: BLE001 - never 500 the board
+        return []
+
+
+def _task_activity(events, consoles):
+    """{task_id: epoch} — the newest ledger event per task, raised by the live console that
+    holds it (a held task is MOVING while its console acts, even between typed steps)."""
+    out = {}
+    for e in events or []:
+        agg = str(e.get("aggregate") or "")
+        if ":task:" not in agg:
+            continue
+        stamp = _epoch(e.get("ts"))
+        if stamp:
+            out[agg] = max(out.get(agg, 0.0), stamp)
+    now = time.time()
+    for c in consoles or []:
+        tid = c.get("task_id")
+        if tid and c.get("state") == "working" and c.get("age_s") is not None:
+            out[tid] = max(out.get(tid, 0.0), now - float(c["age_s"]))
+    return out
+
+
+def _work_blocks(events, state, sessions_live, asks, error_unclaimed):
+    """Task health, the attended/unattended console split, crossovers, and the operational
+    attention list — one computation per payload, read by the board, the JSON API and the
+    inbox alike. Each block is fail-soft: a sidecar problem degrades one card, never the board."""
+    tasks = state.get("by_type", {}).get("task", [])
+    consoles = _consoles(state, sessions_live)
+    activity = _task_activity(events, consoles)
+    out = {}
+    try:
+        live_projects = {c.get("project") for c in consoles if c.get("project") and not c.get("finished")}
+        health = task_health.summarize(tasks, activity)
+        health["hygiene"] = task_health.hygiene_items(tasks, activity, live_projects)[:12]
+        health["unstarted"] = task_health.unstarted_requests(
+            tasks, state.get("by_type", {}).get("run", []), hub_app.leases())[:12]
+        out["task_health"] = health
+    except Exception:                                        # noqa: BLE001
+        out["task_health"] = None
+    split = _presence.split(consoles)
+    out["sessions"] = {k: v[:24] for k, v in split.items()}
+    out["sessions"]["counts"] = {k: len(v) for k, v in split.items()}
+    try:
+        out["crossovers"] = [overlap.public(sig) for sig in overlap.signals(consoles, tasks)][:24]
+    except Exception:                                        # noqa: BLE001
+        out["crossovers"] = []
+    out["needs_attention"] = _attention_payload(state, consoles, activity, asks, error_unclaimed)
+    return out
+
+
+def hub_client_version():
+    """The version of the worker client this hub serves: a digest of hub_core/client.py and
+    the modules its verbs import. Clients send theirs on every call (X-Hub-Client-Version)."""
+    cached = _CLIENT_VERSION.get("value")
+    if cached is not None:
+        return cached
+    import hashlib
+    from pathlib import Path
+    import hub_core as _hc
+    root = Path(_hc.__file__).parent
+    digest = hashlib.sha256()
+    for name in ("client.py", "checkpoints.py", "verifier.py"):
+        try:
+            digest.update((root / name).read_bytes().replace(b"\r\n", b"\n"))
+        except OSError:
+            pass
+    _CLIENT_VERSION["value"] = digest.hexdigest()[:12]
+    return _CLIENT_VERSION["value"]
+
+
+_CLIENT_VERSION = {}
+
+
+def _attention_payload(state, consoles, activity, asks, error_unclaimed):
+    """Gather the operational attention context and build the list (hub_core.attention)."""
+    from hub_core import agent_auth
+    ctx = {"now": time.time(), "operator": _operator_agent(), "sources": {},
+           "tasks": state.get("by_type", {}).get("task", []), "activity": activity,
+           "runs": state.get("by_type", {}).get("run", []), "sessions": consoles,
+           "questions": asks, "errors_unclaimed": error_unclaimed,
+           "hub_client": hub_client_version()}
+    for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
+                       ("credentials", lambda: agent_auth.CredentialRegistry(
+                           hub_app.HUB_DIR).list_public())):
+        try:
+            ctx[name] = read()
+        except Exception as exc:                             # noqa: BLE001
+            ctx["sources"][name] = "unreadable: %s" % type(exc).__name__
+    ctx["presence"] = {k: v for k, v in (ctx.get("presence") or {}).items()
+                       if not _presence.is_service_identity(k)}
+    try:
+        return attention_core.build(hub_app.HUB_DIR, ctx)
+    except Exception as exc:                                 # noqa: BLE001
+        return {"verdict": "attention could not be computed (%s)" % type(exc).__name__,
+                "items": [], "counts": {"total": 0}, "sources": {"attention": "failed"}}
 
 
 def _live_blocks(events, state, audit, deliv, cursor):
@@ -911,6 +1018,7 @@ def _live_blocks(events, state, audit, deliv, cursor):
         "telemetry": telemetry.read_aggregate(hub_dir),
         "cost": cost.cost_block(hub_dir, state),
         "wip": hub_app.wip_status(len(inflight)),
+        **_work_blocks(events, state, sessions_live, asks, error_unclaimed),
     }
 
 
@@ -1002,6 +1110,10 @@ def _snapshot(served=None):
             "updates": updates.read(hub_dir, 40),
             "attention": _attention(state, audit, inflight, adher, deliv,
                                     asks=side_asks, error_unclaimed=side_unclaimed),
+            # Task health (moving / ready-to-close / stalled / orphaned), the attended vs
+            # unattended console split, crossovers between consoles, and the operational
+            # "needs attention" list — hub_core.task_health / presence / overlap / attention.
+            **_work_blocks(events, state, side_sessions, side_asks, side_unclaimed),
             # Cost/latency aggregated FROM the OTLP GenAI lines workers emit — the standard's
             # aggregate, never a bespoke side-channel field.
             "telemetry": telemetry.read_aggregate(hub_dir),
@@ -1119,7 +1231,80 @@ def entity_json(request, type, local):
     if not veil.veil_for(request).visible(ent):
         raise Http404("no entity %s" % eid)      # omission: exactly the unknown-entity answer
     flags = state.get("flags", {}).get(eid, {})
+    if type == "task":
+        ent = _annotated_tasks(state, [ent])[0]
     return JsonResponse({"data": {**ent, **flags}})
+
+
+def _annotated_tasks(state, tasks):
+    """Task rows with holder / responder / pushed / handed_back / deployed / ci_problem."""
+    try:
+        live = {c.get("session") for c in hub_app.live_sessions() if not c.get("finished")}
+    except Exception:                                        # noqa: BLE001
+        live = set()
+    try:
+        errors, _meta = errorlog.read(hub_app.HUB_DIR)
+    except Exception:                                        # noqa: BLE001
+        errors = []
+    return task_rows.annotate(tasks, leases=hub_app.leases(),
+                              runs=state.get("by_type", {}).get("run", []),
+                              live_sessions=live, error_rows=errors)
+
+
+@require_GET
+def project_tasks_json(request, slug):
+    """GET /hub/project/<slug>/tasks.json — one project's open tasks plus those finished in the
+    last 14 days, each annotated, for a consuming app to poll. Answers 304 on a matching
+    If-None-Match: the validator moves only when something a reader shows moves."""
+    state, _ = _snapshot()
+    rows = _annotated_tasks(state, state.get("by_type", {}).get("task", []))
+    payload = task_rows.feed(rows, slug)
+    tag = '"%s"' % payload.pop("etag")
+    if request.headers.get("If-None-Match") == tag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = JsonResponse({"data": payload})
+    resp["ETag"] = tag
+    resp["Cache-Control"] = "no-cache"
+    return resp
+
+
+@require_GET
+def attention_json(request):
+    """GET /hub/attention.json — the operational needs-attention list with owner, fix, values
+    and age. Ages are not in the validator (a reader ticks them), so a quiet board answers 304."""
+    state, snap = _snapshot()
+    payload = (snap.get("live") or {}).get("needs_attention") or {}
+    tag = '"%s"' % attention_core.etag(payload)
+    if request.headers.get("If-None-Match") == tag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = JsonResponse({"data": payload})
+    resp["ETag"] = tag
+    resp["Cache-Control"] = "no-cache"
+    return resp
+
+
+@require_GET
+def consoles_json(request):
+    """GET /hub/consoles.json — every live console (attended, unattended, finished recap) with
+    what it is doing and the task it claimed, plus every crossover pair. ``?session=`` returns
+    only the signals addressed to that console, phrased from its side."""
+    state, _ = _snapshot()
+    consoles = _consoles(state)
+    tasks = state.get("by_type", {}).get("task", [])
+    sigs = overlap.signals(consoles, tasks)
+    split = _presence.split(consoles)
+    data = {"attended": split["attended"], "unattended": split["unattended"],
+            "finished": split["finished"],
+            "counts": {k: len(v) for k, v in split.items()},
+            "crossovers": [overlap.public(sig) for sig in sigs]}
+    session = (request.GET.get("session") or "").strip()[:8]
+    if session:
+        agent = next((c.get("agent") for c in consoles if c.get("session") == session), "")
+        data["addressed"] = [it for it in overlap.items_for_agent(sigs, agent)
+                             if it.get("session") == session]
+    return JsonResponse({"data": data})
 
 
 def graph_json(request):
@@ -1279,6 +1464,16 @@ def next_json(request):
     for lease in live_leases:
         busy_touches.update(schedule.normalized_touches(entities.get(lease.get("task"), {})))
     ready = schedule.order_ready(ready, flags, busy_touches=busy_touches)
+    if request.GET.get("unattended") in ("1", "true"):
+        # THE UNATTENDED LANE: what a supervisor may hand an unattended worker without asking —
+        # tasks explicitly marked unattended, P0-P2 only (P3 is a wish list), never a decision
+        # (a person's call). Work handed back by a run that ended unfinished is todo again and
+        # re-offered here like any other; one a live run is on is not.
+        running = task_health.live_run_subjects(state["by_type"].get("run", []))
+        ready = [t for t in ready
+                 if task_health.is_unattended(t) and not task_health.is_decision(t)
+                 and str(t.get("priority") or "") in ("P0", "P1", "P2")
+                 and t["id"] not in running]
 
     # BLOCKED-ON-DANGLING: an unmet dep referencing NO entity can never be satisfied by work
     # completing — it is a spec defect, not a wait. Without this rail such a task appears NOWHERE.
@@ -1298,7 +1493,7 @@ def next_json(request):
         n = max(1, min(int(request.GET.get("n", "1")), 50))
     except ValueError:
         n = 1
-    rows = [dict(t, available=True) for t in ready[:n]]
+    rows = [dict(t, available=True) for t in _annotated_tasks(state, ready[:n])]
     return JsonResponse({"data": rows, "needs_spec": needs_spec[:n], "snoozed": snoozed[:n],
                          "metadata": {"available": len(ready), "unblocked": len(ready),
                                       "ready": len(ready), "needs_spec": len(needs_spec),
@@ -1477,18 +1672,62 @@ def _veil_visible(request):
 def inbox_json(request):
     """What is addressed to ?agent= right now: messages to it, the questions it should see
     (addressed to it; for the operator, every unaddressed one; for everyone, any ask stuck past
-    the unstick window), directives aimed at it, and the answer to its own question. Name a
-    console (?session= or X-Hub-Session) to receive only that console's mail — plus mail for a
-    console of yours that has since ended."""
+    the unstick window), directives aimed at it, the answer to its own question, and the lanes
+    that deliver themselves (decisions, rotting tasks, attention, crossovers). Name a console
+    (?session= or X-Hub-Session) to receive only that console's mail — plus mail for a console
+    of yours that has since ended."""
     agent, machine, session = _inbox_reader(request)
     if not agent:
         return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
-    state, _ = _snapshot()
-    data = inbox_core.snapshot(state, agent, _operator_agent(), hub_dir=hub_app.HUB_DIR,
-                               **_inbox_kwargs(request, machine, session))
+    state, snap = _snapshot()
+    data = _addressed(state, snap, agent, **_inbox_kwargs(request, machine, session))
     return JsonResponse({"data": data,
                          "metadata": {"agent": agent, "operator": _operator_agent(),
                                       "session": session, "machine": machine}})
+
+
+def _deciders():
+    from . import hub_write
+    return hub_write._deciders()
+
+
+def _addressed(state, snap, agent, **kwargs):
+    """Everything addressed to ``agent`` right now: its messages, questions, directives and
+    answers (inbox_core.snapshot: session routing, human gates, the veil, offer receipts), plus
+    the lanes that deliver THEMSELVES —
+
+    * ``decision``   open decisions, to whoever decides (HUB_DECIDERS, default the operator)
+    * ``task-stall`` rotting tasks and unstarted unattended requests, to the operator
+    * ``attention``  operational conditions past their patience, to their owner / the operator
+    * ``overlap``    crossovers with another console, to each attended console's agent, once
+                     per side (``POST /hub/api/overlap-seen`` records delivery).
+
+    The self-delivering lanes pass through the same visibility filter as the addressed set, so
+    the contributor veil hides them exactly as it hides a message."""
+    operator = _operator_agent()
+    base = inbox_core.snapshot(state, agent, operator, hub_dir=hub_app.HUB_DIR, **kwargs)
+    items = list(base.get("items") or [])
+    extra = []
+    live = (snap or {}).get("live") or {}
+    if agent in _deciders():
+        extra += inbox_core.decision_items(state)
+    if agent == operator:
+        health = live.get("task_health") or {}
+        extra += list(health.get("hygiene") or []) + list(health.get("unstarted") or [])
+    extra += attention_core.items_for(agent, live.get("needs_attention"))
+    try:
+        sigs = overlap.signals(_consoles(state), state.get("by_type", {}).get("task", []))
+        extra += overlap.unseen(hub_app.HUB_DIR, overlap.items_for_agent(sigs, agent))
+    except Exception:                                        # noqa: BLE001
+        pass
+    visible = kwargs.get("visible")
+    if visible is not None:
+        try:
+            extra = [i for i in extra if visible(i)]
+        except Exception:                                    # noqa: BLE001 - fail closed
+            extra = []
+    items += extra
+    return {"items": items, "fingerprint": inbox_core.fingerprint(items), "count": len(items)}
 
 
 @require_GET
@@ -1509,24 +1748,17 @@ def inbox_wait(request):
         timeout = float(request.GET.get("wait") or inbox_core.MAX_WAIT_S)
     except (TypeError, ValueError):
         timeout = inbox_core.MAX_WAIT_S
-    visible = _veil_visible(request)
     tier = getattr(request, "hub_tier", "") or ""
 
     def snapshot_fn(who):
-        s = hub_app.store()
-        try:
-            state = project.state(s.events())
-        finally:
-            s.close()
-        kwargs = _inbox_kwargs(request, machine, session)
-        kwargs["visible"] = visible
-        return inbox_core.snapshot(state, who, _operator_agent(), hub_dir=hub_app.HUB_DIR,
-                                   **kwargs)
+        state, snap = _snapshot()
+        return _addressed(state, snap, who, **_inbox_kwargs(request, machine, session))
 
     def signal_fn():
         # The cheap fingerprint of everything the snapshot depends on — the wait loop must
         # not fold the whole ledger per poll tick. The presence stamp rides it BUCKETED
-        # (session routing reads presence, and presence moves on every request). "" on error
+        # (session routing, crossovers and attention read presence, and presence moves on
+        # every request), and leases ride it because a claim moves no ledger head. "" on error
         # never equals a real signal, so a failed read degrades to always-fold rather than
         # skipping a real change.
         try:
@@ -1538,10 +1770,14 @@ def inbox_wait(request):
         except Exception:                                    # noqa: BLE001
             return ""
         try:
-            stamp = hub_app.presence_stamp() if session else None
+            stamp = hub_app.presence_stamp()
         except Exception:                                    # noqa: BLE001
             stamp = None
-        return inbox_core.change_signal(seq, stamp)
+        try:
+            leases_fp = _leases_fp()
+        except Exception:                                    # noqa: BLE001
+            leases_fp = ""
+        return inbox_core.change_signal(seq, stamp, leases_fp)
 
     payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn,
                               signal_fn=signal_fn, key=(agent, machine, session, tier))

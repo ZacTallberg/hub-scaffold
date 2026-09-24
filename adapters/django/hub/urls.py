@@ -33,6 +33,11 @@ urlpatterns = [
     path("perf.json", hub_api.perf_json, name="perf"),
     path("veil-audit.json", hub_api.veil_audit_json, name="veil-audit"),
     path("tiers.json", hub_api.tiers_json, name="tiers"),
+    # Operator attention (owner, fix, values, age), the live consoles with their crossovers,
+    # and one project's annotated task feed (ETag/304) — same catch-all rule as above.
+    path("attention.json", hub_api.attention_json, name="attention"),
+    path("consoles.json", hub_api.consoles_json, name="consoles"),
+    path("project/<str:slug>/tasks.json", hub_api.project_tasks_json, name="project-tasks"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -54,6 +59,13 @@ urlpatterns = [
     path("api/take", hub_write.take),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
+    # Letting go of a task: back to the queue for an unattended worker (hand) or just released
+    # (unclaim) — including a lease an orphaned console of the same agent still holds.
+    path("api/hand", hub_write.hand),
+    path("api/unclaim", hub_write.unclaim),
+    # A person decides a decision task (file the build task / close / reply); agents are refused.
+    path("api/task/decide", hub_write.decide_task),
+    path("api/overlap-seen", hub_write.overlap_seen),
     # The ask/answer loop and the directive plane (delivery closed by acks).
     path("api/ask", hub_write.ask),
     path("api/answer", hub_write.answer),
@@ -92,6 +104,8 @@ VISIBILITY = {
     "delta.json": "veiled", "questions.json": "veiled", "inbox.json": "veiled",
     "inbox/wait": "veiled", "errors.json": "veiled", "search.json": "veiled",
     "agent-updates.json": "veiled", "activity.json": "veiled",
+    "attention.json": "veiled", "consoles.json": "veiled",
+    "project/<str:slug>/tasks.json": "veiled",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.

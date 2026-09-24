@@ -390,6 +390,45 @@ def directive_items(state, agent: str, now=None) -> list:
     return out
 
 
+def _parked_on_reply(task) -> bool:
+    """A decider REPLIED (a question back) and nothing has answered since: the decision leaves
+    the decider's inbox while the filer answers, and returns once a newer checkpoint follows."""
+    rows = [s for s in (task.get("plan") or []) if isinstance(s, dict) and s.get("done")
+            and not s.get("lifecycle")]
+    if not rows:
+        return False
+    last = max(rows, key=lambda s: str(s.get("note_at") or ""))
+    return str(last.get("step") or "") == "Reply"
+
+
+def decision_items(state) -> list:
+    """Open decisions (work_kind ``decision``, no recorded decision), addressed to whoever
+    decides, each with a deep link that opens it on the board. A decision never goes to an
+    unattended worker; it is a person's call, so it is delivered to one."""
+    out = []
+    for eid, ent in (state.get("entities") or {}).items():
+        if not isinstance(ent, dict) or ent.get("type") != "task":
+            continue
+        if str(ent.get("work_kind") or "").lower() != "decision":
+            continue
+        if ent.get("status") in ("done", "dropped") or isinstance(ent.get("decision"), dict):
+            continue
+        if _parked_on_reply(ent):
+            continue
+        prov = ent.get("provenance") or {}
+        out.append({
+            "kind": "decision", "id": "decision:%s:%s" % (eid, ent.get("version")),
+            "task": eid, "from": _text(prov.get("agent") or "a board member", 60),
+            "title": "Decision needed: %s" % _text(ent.get("title"), 280),
+            "body": body_text(ent.get("acceptance") or ent.get("title")),
+            "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
+            "link": "/hub/#task-%s" % str(eid).rsplit(":", 1)[-1],
+            "reply_cmd": ('python -m hub_core.client decide %s --then file|close|reply '
+                          '--decision "..."' % eid)})
+    out.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return out
+
+
 # ── the addressed set ───────────────────────────────────────────────────────────────────────
 
 def items_for(state, agent: str, operator: str, *, machine: str = "", session: str = "",
@@ -563,6 +602,8 @@ def render_line(item) -> str:
         return "Answer from %s: %s" % (item.get("from") or "the operator", item.get("title") or "")
     if kind == "message":
         return "Message from %s: %s" % (item.get("from") or "a board member", item.get("title") or "")
+    if item.get("kind") in ("decision", "task-stall", "attention", "overlap"):
+        return str(item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 

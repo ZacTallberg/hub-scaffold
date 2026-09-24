@@ -85,6 +85,11 @@ HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answe
 # HUB_MAINTAIN_URL = "https://docs.example.com/runbooks/client-repair"  # navbar "Update Core
 #                                      # Systems": the manual repair pass for a machine whose own
 #                                      # update loop has not converged (hidden when unset)
+# HUB_DECIDERS = "alice,bob"          # who may decide decision tasks (credential subjects);
+#                                       # default: the operator. Agents and shared-root never may.
+# HUB_VCS_ANCESTRY = "git"            # how a verified deploy asks "is this task's commit in the
+#                                       # build?" — "git" at HUB_WORK_ROOT, or "none" when the
+#                                       # image carries no repository (then only an exact sha closes)
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling

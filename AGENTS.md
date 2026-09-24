@@ -45,9 +45,11 @@ from a working multi-project system. Nothing here names any specific person, hos
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
   the barren ladder it climbs when a cycle produces nothing), the **agent client daemon**
   (`agent-client-daemon.md`: delivery into consoles, three-channel per-prompt context, a second
-  runtime as an adapter, a self-updater that cannot break itself, headless on Windows), and the
+  runtime as an adapter, a self-updater that cannot break itself, headless on Windows), the
   **route reconciler** (`route-reconciler.md`: per-entry refusal behind a mass-refusal guard, and
-  a report on every pass). None runs unless you install it.
+  a report on every pass), and **coordination** (`coordination.md`: how the hub pairs consoles on
+  the same file, task or subsystem and what each side does with the signal). None runs unless you
+  install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook

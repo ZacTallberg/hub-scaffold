@@ -140,6 +140,13 @@ def writer(fn=None, *, scope=None):
         finally:
             _REQUEST.reset(req_marker)
             _AUTH.reset(marker)
+        # Which worker client this hub serves: a client that differs knows it is stale (and,
+        # opted in, converges itself); the seat's own version rode in on X-Hub-Client-Version.
+        try:
+            from . import hub_api
+            response["X-Hub-Client-Current"] = hub_api.hub_client_version()
+        except Exception:                                    # noqa: BLE001
+            pass
         response["X-Hub-Auth-Subject"] = auth.subject
         response["X-Hub-Auth-Mode"] = auth.mode
         response["X-Hub-Credential-Id"] = auth.credential_id
@@ -158,18 +165,51 @@ def _event_identity(fallback_agent):
             "actor_kind": auth.actor_kind}
 
 
+def _own_repo_name() -> str:
+    """The repository this hub resolves commits against, for an error that has to name it."""
+    try:
+        r = subprocess.run(["git", "-C", str(hub_app.WORK_ROOT), "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=5)
+        url = (r.stdout or "").strip().rstrip("/")
+        if url.endswith(".git"):
+            url = url[:-4]
+        leaf = url.replace(":", "/").rsplit("/", 1)[-1]
+        if leaf:
+            return leaf
+    except Exception:                                        # noqa: BLE001
+        pass
+    return getattr(hub_app.WORK_ROOT, "name", "") or "this repository"
+
+
+_EVIDENCE_SHA = re.compile(r"[0-9a-f]{7,40}")
+
+
 def _evidence_problem(ev):
     """Return None if the evidence string dereferences to something real, else the reason it
     doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
     file path resolved from WORK_ROOT. This proves existence, not confinement: strict URL evidence
     is fetched from the Hub service account's network. 'done' evidence that cannot resolve is
-    decoration."""
-    import re
+    decoration.
+
+    A LIST IS ORDINARY EVIDENCE: a task spanning six commits is normal, and refusing the list
+    teaches people to put the proof in the accept note and leave the evidence field empty — an
+    evidence field that stops carrying evidence is a gate everyone routes around. A comma- or
+    space-separated list splits ONLY when every part is sha- or URL-shaped (a path or prose with
+    spaces stays one item), and each part must dereference; a bad part is NAMED rather than the
+    whole string refused."""
     import urllib.request
 
     ev = (ev or "").strip()
     if not ev:
         return "empty"
+    parts = [x.strip() for x in re.split(r"[,\s]+", ev) if x.strip()]
+    if len(parts) > 1 and all(_EVIDENCE_SHA.fullmatch(x) or x.startswith(("http://", "https://"))
+                              for x in parts):
+        for part in parts:
+            why = _evidence_problem(part)
+            if why:
+                return "%s: %s" % (part[:60], why)
+        return None
     if ev.startswith(("http://", "https://")):
         for method in ("HEAD", "GET"):
             try:
@@ -185,7 +225,15 @@ def _evidence_problem(ev):
         try:
             r = subprocess.run(["git", "-C", str(hub_app.WORK_ROOT), "cat-file", "-e", ev + "^{commit}"],
                                capture_output=True, timeout=10)
-            return None if r.returncode == 0 else "not a commit in this repo"
+            if r.returncode == 0:
+                return None
+            # NAME THE REPOSITORY. "not a commit in this repo" reads as "your sha is wrong" to a
+            # worker whose commit lives in another project, where a bare sha can NEVER resolve
+            # against this hub's checkout. Say which repo was searched and what to send instead.
+            return ("not a commit in %s (the only repository this hub resolves bare shas "
+                    "against). For work in another repository, send the commit's URL on its "
+                    "forge, e.g. https://git.example.com/<repo>/commit/%s"
+                    % (_own_repo_name(), ev[:12]))
         except Exception as e:
             return str(e)[:120]
     try:
@@ -196,8 +244,13 @@ def _evidence_problem(ev):
     return "not a resolvable URL, commit sha, or existing path from WORK_ROOT"
 
 
-def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype):
-    """Validate the MERGED entity, then append. Returns (response_dict, http_status)."""
+def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype,
+                       idem_scope=None):
+    """Validate the MERGED entity, then append. Returns (response_dict, http_status).
+
+    With ``idem_scope`` (creates only) a key already recorded under that id prefix replays the
+    ORIGINAL record: the response names the aggregate the first attempt created, with
+    ``replayed: true`` — a retried create is not a new record."""
     # The entity this write is about, from its own aggregate's events -- never a fold of the
     # whole ledger (hub_app.entity_from_store).
     existing = hub_app.entity_from_store(s, eid)
@@ -215,7 +268,8 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     try:
         before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(), idem_key=idem, **_event_identity(agent))
+                      git_sha=hub_app._git_head(), idem_key=idem,
+                      idem_scope=idem_scope if idem else None, **_event_identity(agent))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
     except StoreBusy as busy:
@@ -228,17 +282,43 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
         return ({"errors": [{"code": "busy", "msg": str(busy), "retry_after": 2}]}, 503)
     if ev.get("seq", 0) > before:
         hub_app.publish_event(ev)
-    return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)
+    stored = str(ev.get("aggregate") or eid)
+    data = {"id": stored, "version": ev["result_version"], "event": ev["event_id"]}
+    if stored != eid:
+        data["replayed"] = True     # a retried create: this is the record its first attempt made
+    return ({"data": data}, 200)
 
 
-def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
+def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_scope=None):
     """Append using a request-owned store and always release its database handle."""
     s = hub_app.store()
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
-                                  agent=agent, idem=idem, etype=etype)
+                                  agent=agent, idem=idem, etype=etype, idem_scope=idem_scope)
     finally:
         s.close()
+
+
+def _append_create(type_, payload, *, agent, idem, etype):
+    """Allocate a fresh numeric id and append, RE-ALLOCATING on a create race.
+
+    The id is derived from one read; a concurrent writer can mint the same id between that read
+    and the append, and the create then answers 428 — a refusal that is not the caller's to
+    resolve, because the SERVER allocated the id. Re-derive from a fresh read, bounded.
+
+    A RETRIED CREATE IS NOT A NEW RECORD: the id is allocated per attempt, so the per-aggregate
+    idempotency never saw a retry's first attempt, and a client whose response timed out minted
+    a twin on every re-send. With an idem key the lookup spans every record of the type."""
+    resp, status = {"errors": [{"code": "allocate_failed"}]}, 500
+    scope = "%s:%s:" % (hub_app.PROJECT_KEY, type_)
+    for _attempt in range(3):
+        state = hub_app.current_state()
+        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, type_)
+        resp, status = _append(type_, eid, payload, expected_version=None, agent=agent,
+                               idem=idem, etype=etype, idem_scope=scope)
+        if status != 428:
+            break
+    return resp, status
 
 
 @writer(scope="task:write")
@@ -256,6 +336,9 @@ def task(request, b):
         return JsonResponse({"errors": [{"code": "use_claim",
             "msg": "status 'in_progress' is granted only by a successful fenced claim"}]},
             status=409)
+    refusal = _decision_guard(b, is_create)
+    if refusal is not None:
+        return refusal
     twins = []
     if is_create:
         state = hub_app.current_state()
@@ -265,7 +348,7 @@ def task(request, b):
         # what hub_core.collision compares. This WARNS and never refuses: a false positive that
         # blocks a legitimate mint is worse than a duplicate the operator can see and fold.
         twins = collision.mint_collisions(b, state)
-        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "task")
+        eid = None
         b.setdefault("status", "todo")
     else:
         eid = b["id"]
@@ -281,13 +364,69 @@ def task(request, b):
     payload = {k: v for k, v in b.items()
                if k not in ("agent", "expected_version", "idem_key", "token")}
     payload["type"] = "task"
-    resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"), agent=agent,
-                           idem=b.get("idem_key"), etype="task.created" if is_create else "task.updated")
+    if is_create:
+        resp, status = _append_create("task", payload, agent=agent, idem=b.get("idem_key"),
+                                      etype="task.created")
+    else:
+        resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"),
+                               agent=agent, idem=b.get("idem_key"), etype="task.updated")
+    if (resp.get("data") or {}).get("replayed"):
+        twins = []                  # the retry IS the first record; it is not its own twin
     if twins and status < 400:
         resp["warnings"] = [{"code": "possible_twin",
                              "msg": "this task shares surfaces with existing work; fold if duplicate",
                              "candidates": twins}]
     return JsonResponse(resp, status=status)
+
+
+def _is_true(value) -> bool:
+    return value in (True, 1, "1", "true")
+
+
+def _decision_guard(b, is_create):
+    """A decision (work_kind ``decision``) is a person's call and is NEVER unattended.
+
+    Turning a task INTO a decision clears the flag (fail safe). Asking for ``unattended`` on a
+    decision — on create or on a later write, including a later write that only sets the flag on
+    a task that already is a decision — is refused with its fix, because the caller expected a
+    worker that must not come. Observed once: decision tasks marked unattended were offered in
+    priority order and an unattended worker claimed one that rewrote production figures awaiting
+    their owner's check."""
+    kind = str(b.get("work_kind") or "").strip().lower()
+    if kind == "decision":
+        if _is_true(b.get("unattended")):
+            return JsonResponse({"errors": [{"code": "decision_not_unattended",
+                "msg": "a decision is a person's call and is never offered to an unattended "
+                       "worker; drop unattended, or change work_kind if this is build work"}]},
+                status=409)
+        b["unattended"] = False     # becoming (or staying) a decision always clears the flag
+        return None
+    if _is_true(b.get("unattended")) and not is_create and not kind:
+        current = (hub_app.current_state().get("entities") or {}).get(b.get("id")) or {}
+        if str(current.get("work_kind") or "").lower() == "decision":
+            return JsonResponse({"errors": [{"code": "decision_not_unattended",
+                "msg": "%s is a decision (a person's call); it is never offered to an "
+                       "unattended worker" % b.get("id")}]}, status=409)
+    return None
+
+
+def _commit_done(eid, token, agent, payload, *, verified_version, auth, idem=None):
+    """THE one terminal write every ``done`` takes, whoever grants it.
+
+    ``complete()``, a person's decision and a deploy's automatic close all end here, so ``done``
+    always rests on a held lease (re-checked under the lease lock, bound to the subject that
+    acquired it), a version bound to exactly the task that was judged, and recorded evidence —
+    there is no second way to mint terminal task state. Returns ``(response, status)``; the
+    lease is released only when the transition landed."""
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        if not hub_app.lease_authorized(eid, token, auth.subject, auth.credential_id):
+            return ({"errors": [{"code": "lease",
+                                 "msg": "lease expired or was reclaimed during verification"}]}, 409)
+        resp, status = _append("task", eid, payload, expected_version=verified_version,
+                               agent=agent, idem=idem, etype="task.transitioned")
+        if status == 200:
+            hub_app.release_lease(eid, token)
+    return resp, status
 
 
 @writer(scope="task:complete")
@@ -391,14 +530,8 @@ def complete(request, b):
     # Fence the final append against an expiry/reclaim race. Verification can take minutes, so the
     # global lease lock is deliberately acquired only for this short commit section. The original
     # entity version binds the result to exactly the task definition that was verified.
-    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
-        if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
-                                        request.hub_auth.credential_id):
-            return JsonResponse({"errors": [{"code": "lease", "msg": "lease expired or was reclaimed during verification"}]}, status=409)
-        resp, status = _append("task", eid, payload, expected_version=verified_version, agent=agent,
-                               idem=b.get("idem_key"), etype="task.transitioned")
-        if status == 200:
-            hub_app.release_lease(eid, token)
+    resp, status = _commit_done(eid, token, agent, payload, verified_version=verified_version,
+                                auth=request.hub_auth, idem=b.get("idem_key"))
     return JsonResponse(resp, status=status)
 
 
@@ -633,7 +766,108 @@ def deploy(request, b):
     resp, status = _append("deploy", eid, payload, expected_version=0,
                            agent=b.get("agent", "agent"), idem=b.get("idem_key"),
                            etype="deploy.created")
+    if status == 200:
+        # THE DEPLOY CLOSES THE LOOP (hub_core.task_completion). Fail-soft: the release record
+        # is already durable, and a task that could not be annotated must never 500 it.
+        try:
+            outcome = close_deployed_tasks(eid, sha)
+            if any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
+                resp = dict(resp, tasks=outcome)
+        except Exception as exc:                             # noqa: BLE001
+            hub_app.record_error("hub.deploy-close", "deploy-driven task closure failed: %s"
+                                 % type(exc).__name__, severity="error",
+                                 context={"component": "hub-write", "deploy": eid})
     return JsonResponse(resp, status=status)
+
+
+DEPLOY_ACTOR = "hub"
+_CLOSE_LEASE_TTL_S = 120
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _record_auto_close(eid, state, why, sha, deploy_id):
+    """Write what the automatic close did onto the task, so a task waiting on a close that
+    cannot fire SAYS so instead of looking untouched."""
+    ent = (hub_app.current_state().get("entities") or {}).get(eid)
+    if not ent or ent.get("status") == "done":
+        return
+    _append("task", eid, {"type": "task", "auto_close": {
+        "state": state, "why": str(why or "")[:200], "sha": str(sha or "")[:40],
+        "deploy": deploy_id, "at": _utc_now()}},
+        expected_version=ent.get("version"), agent=DEPLOY_ACTOR,
+        idem="deploy-close-%s:%s:%s" % (state, eid, str(sha or "")[:12]), etype="task.updated")
+
+
+def close_deployed_tasks(deploy_id, deployed_sha):
+    """Step every open task whose recorded commit this verified release contains, and finish
+    the UNATTENDED ones through the one done path (a lease the hub holds, the deploy record as
+    evidence). A person's task is only stepped. Returns what happened for the record's answer."""
+    from hub_core import task_completion
+    tasks = hub_app.current_state().get("by_type", {}).get("task", [])
+    matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor)
+    closed, stepped, refused = [], [], {}
+    for task, commit in matches:
+        tid = task["id"]
+        at = _utc_now()
+        plan = [dict(x) for x in (task.get("plan") or []) if isinstance(x, dict)]
+        plan.append(task_completion.deployed_step(commit, deployed_sha, deploy_id, at))
+        resp, status = _append("task", tid, {"type": "task", "plan": plan},
+                               expected_version=task.get("version"), agent=DEPLOY_ACTOR,
+                               idem="deploy-step:%s:%s" % (tid, commit[:12]), etype="task.updated")
+        if status != 200:
+            refused[tid] = "the deployed checkpoint could not be written (%s)" % status
+            continue
+        if not task_completion.is_unattended(task):
+            stepped.append(tid)
+            continue
+        why = _hub_finish(tid, commit, deployed_sha, deploy_id)
+        if why:
+            refused[tid] = why
+            _record_auto_close(tid, "refused", why, commit, deploy_id)
+        else:
+            closed.append(tid)
+    out = {"closed": closed, "stepped": stepped, "refused": refused}
+    if unchecked:
+        out["unchecked"] = ("the repository could not answer whether %s %s contained in %s; only a "
+                            "task naming the served sha exactly could close"
+                            % (", ".join(u[:12] for u in unchecked[:5]),
+                               "is" if len(unchecked) == 1 else "are", deployed_sha[:12]))
+    return out
+
+
+def _hub_finish(tid, commit, deployed_sha, deploy_id):
+    """Finish one unattended task as the hub: claim a short lease (refused when anyone else
+    holds it — the hub never finishes work another agent holds), then the shared done path.
+    Returns '' on success, else the reason."""
+    from hub_core import agent_auth
+    auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id="hub-deploy-close",
+                                  scopes=("task:complete",), actor_kind="hub",
+                                  mode="hub-internal")
+    res = hub_app.claim(tid, DEPLOY_ACTOR, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
+                        credential_id=auth.credential_id, actor_kind=auth.actor_kind)
+    if not res.get("ok"):
+        return "held by %s" % res.get("held_by")
+    ent = (hub_app.current_state().get("entities") or {}).get(tid)
+    if not ent or ent.get("status") == "done":
+        if res.get("created"):
+            hub_app.release_lease(tid, res["token"])
+        return "gone or already done"
+    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
+            % (commit[:12], deployed_sha[:12], deploy_id))
+    payload = {"type": "task", "status": "done", "verified_by": [note],
+               "evidence_uri": [deploy_id, commit], "auto_close": {
+                   "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
+    resp, status = _commit_done(tid, res["token"], DEPLOY_ACTOR, payload,
+                                verified_version=ent.get("version"), auth=auth,
+                                idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+    if status != 200:
+        if res.get("created"):
+            hub_app.release_lease(tid, res["token"])
+        return "done refused: %s %s" % (status, json.dumps(resp)[:120])
+    return ""
 
 
 @writer(scope="decision:write")
@@ -704,7 +938,7 @@ def claim(request, b):
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
                             actor_kind=request.hub_auth.actor_kind,
-                            session=_session_header(request),
+                            session=_claim_session(request, b),
                             machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
@@ -714,13 +948,42 @@ def claim(request, b):
                 expected_version=ent.get("version"), agent=agent,
                 idem=b.get("idem_key"), etype="task.transitioned",
             )
+            if keep_lease_on_raced_transition(res, transition_status):
+                # A RENEWAL whose transition lost an OCC race is not a failed claim: this worker
+                # already held the lease, and the version moved because something else — very
+                # often its own retried request, after a timeout — already did the work.
+                # Releasing here tore down a valid fencing token and made the next complete()
+                # answer "claim the task first" to a worker that had claimed. Hand back the
+                # token it still holds and the version as it now stands.
+                fresh = hub_app.current_state().get("entities", {}).get(eid) or {}
+                res["version"] = fresh.get("version", ent.get("version"))
+                res["transition_raced"] = True
+                return JsonResponse(res, status=200)
             if transition_status != 200:
-                hub_app.release_lease(eid, res["token"])
+                if res.get("created"):
+                    hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=transition_status)
             res["version"] = transition["data"]["version"]
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+def keep_lease_on_raced_transition(res, transition_status) -> bool:
+    """Should a failed todo->in_progress transition LEAVE the lease alone?
+
+    Yes exactly when this call did not create the lease and the transition lost an OCC race.
+    A lease this call CREATED is still cleaned up on failure: nothing else holds it. The rule
+    fails toward keeping: a stranded lease expires on its own, a destroyed one strands the
+    worker that holds its token."""
+    return transition_status == 409 and not (res or {}).get("created")
+
+
+def _claim_session(request, b) -> str:
+    """The console making this claim: an explicit `session` in the body, else the observed
+    presence header every client already sends. Empty when neither is present."""
+    value = b.get("session") if isinstance(b.get("session"), str) else ""
+    return (value or request.headers.get("X-Hub-Session") or "").strip()[:64]
 
 
 @writer(scope="task:release")
@@ -970,7 +1233,7 @@ def take(request, b):
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
                             actor_kind=request.hub_auth.actor_kind,
-                            session=_session_header(request),
+                            session=_claim_session(request, b),
                             machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
@@ -979,7 +1242,8 @@ def take(request, b):
                                        expected_version=task.get("version"), agent=agent,
                                        idem=b.get("idem_key"), etype="task.transitioned")
             if code != 200:
-                hub_app.release_lease(eid, res["token"])
+                if res.get("created"):
+                    hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=code)
             res["version"] = transition["data"]["version"]
         res["task"] = task
@@ -1607,7 +1871,12 @@ def presence_ping(request, b):
     agent = b.get("agent") or request.hub_auth.subject or ""
     if not _valid_agent_name(str(agent)):
         return JsonResponse({"errors": [{"code": "need_agent"}]}, status=422)
-    hub_app.observe_presence(agent, request.headers, heartbeat=True)
+    # The session DIGEST rides the heartbeat body: what a supervisor distilled from the
+    # session's own activity (phase, doing, narration, last result, targets) and, for an
+    # unattended run, its lifecycle (kind, run, subject, started/ended, outcome). Bounded and
+    # typed by hub_core.presence; unknown keys are dropped.
+    digest = b.get("session_state") if isinstance(b.get("session_state"), dict) else {}
+    hub_app.observe_presence(agent, request.headers, heartbeat=True, extra=digest)
     return JsonResponse({"data": {"ok": True, "server_time": time.time(),
                                   **_presence.contract()}})
 
@@ -1770,3 +2039,269 @@ def clear_errors(request, b):
     result = _errorlog.clear(hub_app.HUB_DIR, before_epoch, only_acked)
     hub_app.errors_changed()
     return JsonResponse({"data": result})
+
+
+# ---- decisions: a person's call, never an agent's -------------------------------------------
+
+def _deciders():
+    """Who may decide: HUB_DECIDERS (comma list, settings or env), default the operator."""
+    raw = hub_app._dj_setting("HUB_DECIDERS") or os.environ.get("HUB_DECIDERS") or ""
+    names = {x.strip().lower() for x in str(raw).split(",") if x.strip()}
+    operator = str(hub_app._dj_setting("HUB_OPERATOR_AGENT") or os.environ.get("HUB_OPERATOR_AGENT")
+                   or "operator").strip().lower()
+    return names or {operator}
+
+
+def board_link(eid):
+    """A deep link that opens one task's detail on the board (the board's own #task-<local>)."""
+    return "/hub/#task-%s" % str(eid).rsplit(":", 1)[-1]
+
+
+@writer(scope="task:decide")
+def decide_task(request, b):
+    """Decide a decision task: ``{id, decision, then: file|close|reply}``.
+
+    A decision is a person's call, so an agent can never make one: the caller must hold a
+    scoped credential whose immutable subject is a named decider (HUB_DECIDERS, default the
+    operator). The shared-root token is refused — it is how automation writes, and a decision it
+    made would be indistinguishable from one a person made.
+
+    * ``file``  — mint the build task the decision leads to (its acceptance leads with the
+                  decision; unattended so the queue takes it) and close the decision naming it.
+    * ``close`` — record the decision with nothing to build.
+    * ``reply`` — a question or answer back, NOT a decision: it lands on the task's trail, the
+                  decision stays open (``decision`` stays absent), and the filer is messaged.
+
+    Closing goes through the one done path (a lease the decider holds for the moment of the
+    write, evidence = the board link). A second press returns the first result, never a second
+    build task: one lock, and the entity is re-read inside it."""
+    auth = request.hub_auth
+    if auth.mode != "scoped-agent" or auth.subject.lower() not in _deciders():
+        return JsonResponse({"errors": [{"code": "decision_needs_a_person",
+            "msg": "a decision is a person's call and an agent cannot make it: decide with a "
+                   "credential issued to a named decider (HUB_DECIDERS)"}]}, status=403)
+    person = auth.subject
+    eid = str(b.get("id") or "").strip()
+    text = " ".join(str(b.get("decision") or "").split())
+    then = str(b.get("then") or "").strip().lower()
+    if not eid:
+        return JsonResponse({"errors": [{"code": "need_id"}]}, status=400)
+    if len(text) < 3:
+        return JsonResponse({"errors": [{"code": "need_decision",
+                                         "msg": "say what was decided, or what you are asking"}]},
+                            status=422)
+    if then not in ("file", "close", "reply"):
+        return JsonResponse({"errors": [{"code": "need_then",
+            "msg": "then is 'file' (file the work this leads to), 'close' (nothing to build) or "
+                   "'reply' (a question or answer back; the decision stays open)"}]}, status=422)
+    with ProcessFileLock(hub_app.CLAIMS, name=".decide.lock", timeout=30):
+        ent = hub_app.current_state().get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if str(ent.get("work_kind") or "").lower() != "decision":
+            return JsonResponse({"errors": [{"code": "not_a_decision",
+                "msg": "%s is build work, not a decision" % eid}]}, status=409)
+        made = ent.get("decision") if isinstance(ent.get("decision"), dict) else None
+        if made:
+            return JsonResponse({"data": dict(made, id=eid, status=ent.get("status"),
+                                              already_decided=True)})
+        if ent.get("status") not in ("todo", "blocked", "in_progress"):
+            return JsonResponse({"errors": [{"code": "not_open", "status": ent.get("status")}]},
+                                status=409)
+        expected = b.get("expected_version")
+        if expected is not None and expected != ent.get("version"):
+            return JsonResponse({"errors": [{"code": "conflict",
+                                             "current_version": ent.get("version")}]}, status=409)
+        when = _utc_now()
+        plan = [dict(x) for x in (ent.get("plan") or []) if isinstance(x, dict)]
+        if then == "reply":
+            plan.append({"step": "Reply", "done": True, "kind": "checkpoint",
+                         "note": ("Reply from %s on %s: %s" % (person, when, text))[:600],
+                         "note_at": when})
+            resp, status = _append("task", eid, {"type": "task", "plan": plan},
+                                   expected_version=ent.get("version"), agent=person, idem=None,
+                                   etype="task.updated")
+            if status != 200:
+                return JsonResponse(resp, status=status)
+            # The FILER is who created the decision (stamped once by the fold), never the last
+            # writer: an unrelated priority edit must not redirect the reply to its editor.
+            filer = str((ent.get("provenance") or {}).get("created_by") or "").strip().lower()
+            paged = ""
+            # The shared-root compatibility subject is not a seat anybody reads; a reply to a
+            # decision it filed has nobody to page, and says so (paged: "").
+            if filer and filer not in (person.lower(), "shared-root"):
+                state = hub_app.current_state()
+                did = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
+                note = {"type": "directive", "status": "active", "targets": [filer],
+                        "title": ("Reply on %s: %s" % (eid, text))[:200],
+                        "body_md": ("%s replied on %s (%s) instead of deciding:\n\n%s\n\nAnswer on "
+                                    "the task (step it with your answer); once a checkpoint newer "
+                                    "than the reply is on its trail the decision reaches them "
+                                    "again: %s" % (person, eid, ent.get("title") or "", text,
+                                                   board_link(eid)))}
+                _r, nstatus = _append("directive", did, note, expected_version=None, agent=person,
+                                      idem="decision-reply:%s:%s" % (eid, when), etype="directive.issued")
+                paged = filer if nstatus == 200 else ""
+            return JsonResponse({"data": {"id": eid, "status": ent.get("status"), "replied": True,
+                                          "reply": {"text": text, "by": person, "at": when},
+                                          "paged": paged, "decision": None}})
+        stamp = "Decided by %s on %s: %s" % (person, when, text)
+        followup = ""
+        if then == "file":
+            priority = str(ent.get("priority") or "").upper()
+            subject = str(ent.get("title") or eid)
+            payload = {"type": "task", "status": "todo", "work_kind": "product",
+                       "unattended": True,
+                       "priority": priority if priority in ("P0", "P1", "P2") else "P2",
+                       "title": ("Build the decision: %s" % subject)[:200],
+                       "acceptance": ("DECIDED by %s on %s: %s\n\nThis task builds that decision. "
+                                      "It came from %s (%s). The question and its context: %s"
+                                      % (person, when[:10], text, eid, subject,
+                                         ent.get("acceptance") or ""))}
+            if ent.get("project"):
+                payload["project"] = ent["project"]
+            resp, status = _append_create("task", payload, agent=person,
+                                          idem="decision-file:%s" % eid, etype="task.created")
+            if status != 200:
+                return JsonResponse(resp, status=status)
+            followup = (resp.get("data") or {}).get("id") or ""
+            stamp += " Build task: %s." % (followup or "filed")
+        plan.append({"step": "Decided", "done": True, "kind": "checkpoint",
+                     "note": stamp[:600], "note_at": when})
+        record = {"text": text[:2000], "decided_by": person, "decided_at": when, "then": then}
+        if followup:
+            record["followup"] = followup
+        res = hub_app.claim(eid, person, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
+                            credential_id=auth.credential_id, actor_kind=auth.actor_kind)
+        if not res.get("ok"):
+            return JsonResponse({"errors": [{"code": "held", "held_by": res.get("held_by"),
+                "msg": "someone holds this decision's lease; release it before deciding"}]},
+                status=409)
+        update = {"type": "task", "status": "done", "plan": plan, "unattended": False,
+                  "decision": record, "verified_by": [stamp[:600]],
+                  "evidence_uri": [board_link(followup or eid)]}
+        resp, status = _commit_done(eid, res["token"], person, update,
+                                    verified_version=ent.get("version"), auth=auth)
+        if status != 200:
+            if res.get("created"):
+                hub_app.release_lease(eid, res["token"])
+            return JsonResponse(resp, status=status)
+    return JsonResponse({"data": dict(record, id=eid, status="done", followup=followup,
+                                      followup_url=board_link(followup) if followup else "")})
+
+
+# ---- hand / unclaim: letting go of a task, including one an orphaned console holds -------------
+
+def _releasable_lease(request, b, eid):
+    """The lease on ``eid`` this caller may release: the one whose fencing token it presents, or
+    — the orphaned-lease remedy — one held by the SAME agent from a console that is no longer
+    live. A lease a live console of the same agent holds, or another agent's, is never touched.
+    Returns ``(lease_or_None, refusal_or_None)``."""
+    lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
+    if not lease:
+        return None, None
+    token = b.get("token") if isinstance(b.get("token"), str) else ""
+    if token:
+        if lease.get("token") != token or not hub_app.lease_authorized(
+                eid, token, request.hub_auth.subject, request.hub_auth.credential_id):
+            return None, JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+        return lease, None
+    agent = str(b.get("agent") or "")
+    if lease.get("agent") != agent:
+        return None, JsonResponse({"errors": [{"code": "held", "held_by": lease.get("agent"),
+            "msg": "another agent holds this task"}]}, status=409)
+    if lease.get("auth_subject") and lease.get("auth_subject") != request.hub_auth.subject:
+        return None, JsonResponse({"errors": [{"code": "lease_subject_mismatch"}]}, status=409)
+    sid = str(lease.get("session") or "")[:8]
+    live = {str(r.get("session") or "")[:8] for r in hub_app.live_sessions()
+            if not r.get("finished")}
+    if not sid or sid in live:
+        return None, JsonResponse({"errors": [{"code": "lease_live",
+            "msg": "the lease is held by a live console (%s); release it from there, or pass its "
+                   "token" % (sid or "unknown session")}]}, status=409)
+    return lease, None
+
+
+def _lifecycle_row(plan, kind, note, at):
+    """Append (or count up) a scheduler row. A recurring hand-back is ONE row counting itself,
+    never N rows that read as N checkpoints of work."""
+    plan = [dict(x) for x in (plan or []) if isinstance(x, dict)]
+    last = plan[-1] if plan else None
+    if last and last.get("kind") == kind and last.get("lifecycle"):
+        last["times"] = int(last.get("times") or 1) + 1
+        last["note"] = note[:600]
+        last["note_at"] = at
+        return plan
+    plan.append({"step": {"handed_back": "Handed back to the queue",
+                          "lease_released": "Lease released"}.get(kind, kind),
+                 "done": True, "kind": kind, "lifecycle": True, "note": note[:600],
+                 "note_at": at})
+    return plan
+
+
+def _let_go(request, b, *, kind):
+    eid = str(b.get("id") or "").strip()
+    agent = str(b.get("agent") or "").strip()
+    if not eid or not agent:
+        return JsonResponse({"errors": [{"code": "need_id_agent"}]}, status=400)
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        ent = hub_app.current_state().get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if kind == "handed_back" and str(ent.get("work_kind") or "").lower() == "decision":
+            return JsonResponse({"errors": [{"code": "decision_not_unattended",
+                "msg": "a decision is a person's call and is never handed to an unattended worker"}]},
+                status=409)
+        if ent.get("status") in ("done", "dropped"):
+            return JsonResponse({"errors": [{"code": "closed", "status": ent.get("status")}]},
+                                status=409)
+        lease, refusal = _releasable_lease(request, b, eid)
+        if refusal is not None:
+            return refusal
+        if lease is None and kind == "lease_released" and ent.get("status") != "in_progress":
+            # Nothing is held and nothing is in flight: there is nothing to let go of, so write
+            # nothing — a scheduler row here would record an event that did not happen.
+            return JsonResponse({"data": {"id": eid, "task": eid, "version": ent.get("version"),
+                                          "released": False, "noop": True,
+                                          "status": ent.get("status"),
+                                          "unattended": ent.get("unattended")}})
+        at = _utc_now()
+        note = str(b.get("note") or "").strip() or (
+            "handed back by %s" % agent if kind == "handed_back" else "released by %s" % agent)
+        update = {"type": "task", "plan": _lifecycle_row(ent.get("plan"), kind, note, at)}
+        if ent.get("status") == "in_progress":
+            update["status"] = "todo"
+        if kind == "handed_back":
+            update["unattended"] = True
+        resp, status = _append("task", eid, update, expected_version=ent.get("version"),
+                               agent=agent, idem=b.get("idem_key"), etype="task.updated")
+        if status != 200:
+            return JsonResponse(resp, status=status)
+        released = hub_app.release_lease(eid, lease["token"]) if lease else False
+    return JsonResponse({"data": dict(resp["data"], task=eid, released=bool(released),
+                                      status=update.get("status", ent.get("status")),
+                                      unattended=update.get("unattended", ent.get("unattended")))})
+
+
+@writer(scope="task:release")
+def hand(request, b):
+    """Put a task back on the queue FOR AN UNATTENDED WORKER: status todo, ``unattended: true``,
+    the lease released (the caller's own, or one an orphaned console of the same agent holds),
+    and one counted ``handed_back`` scheduler row on the plan — never a work checkpoint."""
+    return _let_go(request, b, kind="handed_back")
+
+
+@writer(scope="task:release")
+def unclaim(request, b):
+    """Let go of a task without handing it anywhere: the lease released (own, or an orphaned
+    console's of the same agent), an in-progress task back to todo, ``unattended`` unchanged."""
+    return _let_go(request, b, kind="lease_released")
+
+
+@writer(scope="presence:write")
+def overlap_seen(request, b):
+    """Record that these crossover signals reached their console (sidecar only, never the
+    ledger), so each is announced once per side until it changes."""
+    from hub_core import overlap
+    ids_ = b.get("ids") if isinstance(b.get("ids"), list) else []
+    return JsonResponse({"data": {"marked": overlap.mark_seen(hub_app.HUB_DIR, ids_)}})
