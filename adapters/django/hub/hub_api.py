@@ -1406,6 +1406,31 @@ def consoles_json(request):
     return JsonResponse({"data": data})
 
 
+def components_json(request):
+    """Standard components and app skeletons, resolved on THIS read (hub_core.catalog).
+
+    ``?kind=component|skeleton`` narrows it (``template`` is accepted as an older spelling of
+    skeleton). A skeleton's ``applied`` rows carry each component's CURRENT get/entry/delivery,
+    ``missing`` names anything it applies that is not a registered component, and
+    ``order_problems`` names a dependency that is not a component or a cycle — reported, never
+    guessed around."""
+    from hub_core import catalog
+    kind = catalog.canonical_kind(request.GET.get("kind"))
+    if kind not in ("", "component", "skeleton"):
+        return JsonResponse({"errors": [{"code": "unknown_kind", "kind": kind,
+                                         "allowed": ["component", "skeleton"]}]}, status=400)
+    state, _ = _snapshot()
+    data = catalog.catalog(state, kind)
+    meta = {"kind": kind or "all"}
+    if "components" in data:
+        meta["components"] = len(data["components"])
+    if "skeletons" in data:
+        meta["skeletons"] = len(data["skeletons"])
+        meta["skeletons_with_gaps"] = sum(1 for s in data["skeletons"]
+                                          if s["missing"] or s["order_problems"])
+    return JsonResponse({"data": data, "metadata": meta})
+
+
 def graph_json(request):
     state, _ = _snapshot()
     return JsonResponse({"data": state["graph"], "dangling": state["dangling"],
@@ -2188,7 +2213,7 @@ def search_json(request):
             continue
         title = str(ent.get("title") or ent.get("name") or "")
         body = str(ent.get("body_md") or ent.get("summary") or ent.get("decision_md") or
-                   ent.get("acceptance") or "")
+                   ent.get("acceptance") or ent.get("what") or "")
         tags = " ".join(str(t) for t in (ent.get("tags") or []))
         hay_t, hay_b = (title + " " + tags).lower(), body.lower()
         score = 0.0

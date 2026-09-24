@@ -29,7 +29,8 @@ from a working multi-project system. Nothing here names any specific person, hos
 ## The mental model (four layers)
 - **hub** (`hub_core/` + `adapters/`) — nouns you operate: events → projected tasks/ADRs/features/etc.,
   token-gated writes, server-granted "done", and an optional single-use-grant worker bridge. Mounts
-  at `/hub` in a Django site; reads are unauthenticated, and the workstation bridge is disabled by
+  at `/hub` in a Django site; reads require an authenticated principal unless the operator declares
+  the board public (`HUB_READ_AUTH`), and the workstation bridge is disabled by
   default. The board is a live cockpit: observed presence (who is on it, from which machine and
   console, doing what), the ask/answer loop (a blocked worker's question is DELIVERED to the
   operator's inbox long-poll, the answer comes back addressed, the ack closes it), and a bounded
@@ -48,8 +49,13 @@ from a working multi-project system. Nothing here names any specific person, hos
   runtime as an adapter, a self-updater that cannot break itself, headless on Windows), the
   **route reconciler** (`route-reconciler.md`: per-entry refusal behind a mass-refusal guard, and
   a report on every pass), and **coordination** (`coordination.md`: how the hub pairs consoles on
-  the same file, task or subsystem and what each side does with the signal). None runs unless you
-  install it.
+  the same file, task or subsystem and what each side does with the signal). Operating write-ups
+  for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys that CI never cancels,
+  push-only change triggers, job ceilings, publications from the protected ref), `app-slots.md`
+  (allocate / stage / cut over / retire / re-adopt an app's port, service and route),
+  `directory-sign-in.md` (401 vs 503, one bind per rejected credential), and
+  `shared-app-banner.md` (one linked header master for many apps). None runs unless you install
+  it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook
@@ -101,8 +107,8 @@ disposable `verification-closer` only for a rare critical boundary.
   action/task/count-bound grant; authoritative consume remains write-token-gated.
 
 ## Security boundary you must not infer away
-- **Unauthenticated does not mean sanitized.** `/hub` reads expose the complete projected board.
-  Keep sensitive data out or add a real authentication boundary.
+- **Authenticated does not mean sanitized.** Every authenticated reader (and, on a board declared
+  `HUB_READ_AUTH = "public"`, everyone) sees the complete projected board. Keep sensitive data out.
 - **The write token grants terminal board authority, not code execution.** A writer sets
   `verification_command`, which the
   worker runs OUT-OF-BAND, submitting a typed exit-0 receipt the hub validates — the hub never

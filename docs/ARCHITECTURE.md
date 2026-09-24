@@ -15,7 +15,7 @@ operator / trusted agent
         |
         | X-Write-Token (general writes)
         v
-Django adapter at /hub -------------- unauthenticated GETs ----------> browser / readers
+Django adapter at /hub -------------- authenticated GETs ------------> browser / readers
         |                                                               (whole snapshot)
         | validate, OCC, lease checks, completion gate
         v
@@ -129,7 +129,8 @@ freeze its fleet strip and error card between appends.
 | Legacy done-task receipt debt is explicit | The adoption manifest captures a one-time ledger sequence + hash cutoff; audit separately accounts only pre-cutoff tasks invalid solely for absent/empty `verified_by` or `evidence_uri` | Historical entities are never rewritten and evidence is never invented. A mismatched anchor, any other defect, or any post-cutoff completion remains blocking. |
 | Strict completion proves more | Evidence dereference plus a typed exit-0 receipt the WORKER produced | The hub never runs the command itself; the token grants terminal board authority, not a shell. See [SECURITY.md](../SECURITY.md). |
 | Unsafe Django defaults are visible | AST audit for DEBUG, literal SECRET_KEY fallback, and `ALLOWED_HOSTS="*"` | This is a focused audit, not a complete Django deployment check. |
-| Mutating Hub routes have an explicit guard | URL resolver audit recognizes `@writer` or the narrow origin-gated mint | Reads are deliberately unauthenticated and expose whatever entities contain. |
+| Mutating Hub routes have an explicit guard | URL resolver audit recognizes `@writer` or the narrow origin-gated mint | — |
+| Reads are authenticated unless declared public | `read_auth.reader` on every read route (the route audit names one without it); `HUB_READ_AUTH = "public"` outside DEBUG is a high finding | Any authenticated reader sees the whole board; the gate proves identity, not per-entity authorization. |
 | Running build matches deploy record | Git or normalized `HUB_BUILD_SHA` / `SOURCE_VERSION` / build stamp plus the newest valid immutable deploy closure matching that artifact; a matching `PROJECT/state.json` remains a shortcut; optional external `served` comparison | Post-canary closure outranks stale pre-build mutable state. The Hub does not deploy or continuously probe production by itself. Adopt the deploy/canary patterns. |
 | Done work is deployed/live | Immutable deploy entity with exact `sha == served_sha`, explicit `tasks_closed[]`, and the running artifact SHA | Git ancestry is optional source/legacy enrichment; the canary and deploy writer must be wired by the adopter. |
 | Portable identity is coherent | Audit emits a high finding when Django `HUB_PROJECT_KEY` differs from `PROJECT/project.json`; `public_origin()` and `host_name()` give URL and allowlist consumers one normalized view | Correct the mismatch before further mutations so discovery and entity ids share one namespace. Bare legacy hosts remain readable, but new identity files should store a full HTTP(S) origin. |

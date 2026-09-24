@@ -187,3 +187,8 @@ def agent_card_view(request):
             type(exc).__name__)
     card.setdefault("signatures", [])
     return JsonResponse(card)
+
+
+# Discovery is public by design: the card names what this Hub can do and how to authenticate to
+# it, never a token or board content. The read-gate route audit honours this marker.
+agent_card_view._hub_public_discovery = True

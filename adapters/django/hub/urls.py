@@ -1,51 +1,55 @@
-"""The agent-operable Hub at /hub — unauthenticated reads and explicitly gated mutations.
+"""The agent-operable Hub at /hub — authenticated reads and explicitly gated mutations.
 
-Rendered entirely by hub_core (shell.render); no Django templates. The host must add read
-authentication when entity data is not public. NEVER mount at the front door.
+Rendered entirely by hub_core (shell.render); no Django templates. Every read route is wrapped
+by ``read_auth.reader``: reads require an authenticated principal unless the operator declares
+the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import held, hub_api, hub_write, hubsite, veil, mcp_server, run_api
+from . import held, hub_api, hub_write, hubsite, veil, mcp_server, read_auth, run_api
+
+R = read_auth.reader
 
 app_name = "hub"
 urlpatterns = [
-    path("", hubsite.hub, name="hub"),
-    path("hub.json", hub_api.hub_json),
-    path("audit.json", hub_api.audit_json),
-    path("graph.json", hub_api.graph_json),
-    path("next.json", hub_api.next_json),
+    path("", R(hubsite.hub), name="hub"),
+    path("hub.json", R(hub_api.hub_json)),
+    path("audit.json", R(hub_api.audit_json)),
+    path("graph.json", R(hub_api.graph_json)),
+    path("next.json", R(hub_api.next_json)),
     # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
     # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
-    path("live/events", hub_api.live_events, name="live-events"),
-    path("cursor.json", hub_api.cursor_json, name="cursor"),
-    path("delta.json", hub_api.delta_json, name="delta"),
+    path("live/events", R(hub_api.live_events), name="live-events"),
+    path("cursor.json", R(hub_api.cursor_json), name="cursor"),
+    path("delta.json", R(hub_api.delta_json), name="delta"),
     # The ask/answer surfaces, the operational stream, board search, and request identity.
     # Same rule: above the catch-all, or each would 404 as an unknown entity collection.
-    path("questions.json", hub_api.questions_json, name="questions"),
-    path("inbox.json", hub_api.inbox_json, name="inbox"),
-    path("inbox/wait", hub_api.inbox_wait, name="inbox-wait"),
-    path("errors.json", hub_api.errors_json, name="errors"),
-    path("search.json", hub_api.search_json, name="search"),
-    path("whoami.json", hub_api.whoami_json, name="whoami"),
-    path("agent-updates.json", hub_api.agent_updates_json, name="agent-updates"),
-    path("receipts.json", hub_api.receipts_json, name="receipts"),
-    path("activity.json", hub_api.activity_json, name="activity"),
-    path("perf.json", hub_api.perf_json, name="perf"),
-    path("veil-audit.json", hub_api.veil_audit_json, name="veil-audit"),
-    path("tiers.json", hub_api.tiers_json, name="tiers"),
+    path("questions.json", R(hub_api.questions_json), name="questions"),
+    path("inbox.json", R(hub_api.inbox_json), name="inbox"),
+    path("inbox/wait", R(hub_api.inbox_wait), name="inbox-wait"),
+    path("errors.json", R(hub_api.errors_json), name="errors"),
+    path("search.json", R(hub_api.search_json), name="search"),
+    path("whoami.json", R(hub_api.whoami_json), name="whoami"),
+    path("agent-updates.json", R(hub_api.agent_updates_json), name="agent-updates"),
+    path("receipts.json", R(hub_api.receipts_json), name="receipts"),
+    path("activity.json", R(hub_api.activity_json), name="activity"),
+    path("perf.json", R(hub_api.perf_json), name="perf"),
+    path("veil-audit.json", R(hub_api.veil_audit_json), name="veil-audit"),
+    path("tiers.json", R(hub_api.tiers_json), name="tiers"),
     # Operator attention (owner, fix, values, age), the live consoles with their crossovers,
     # and one project's annotated task feed (ETag/304) — same catch-all rule as above.
-    path("attention.json", hub_api.attention_json, name="attention"),
-    path("consoles.json", hub_api.consoles_json, name="consoles"),
-    path("project/<str:slug>/tasks.json", hub_api.project_tasks_json, name="project-tasks"),
+    path("attention.json", R(hub_api.attention_json), name="attention"),
+    path("consoles.json", R(hub_api.consoles_json), name="consoles"),
+    path("project/<str:slug>/tasks.json", R(hub_api.project_tasks_json), name="project-tasks"),
     # The promotion lane's queue (open holds, oldest first) and the per-machine item claims.
     # Both sit ABOVE the generic <type>.json catch-all.
-    path("held.json", held.held_json, name="held"),
-    path("item-claims.json", hub_api.item_claims_json, name="item-claims"),
-    path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
-    path("schema/<str:type>.schema.json", hub_api.schema_json),
-    path("<str:type>.json", hub_api.type_json),
-    path("<str:type>/<str:local>.json", hub_api.entity_json),
+    path("held.json", R(held.held_json), name="held"),
+    path("item-claims.json", R(hub_api.item_claims_json), name="item-claims"),
+    path("components.json", R(hub_api.components_json), name="components"),
+    path("dag.graphml", R(hub_api.dag_graphml), name="dag-graphml"),
+    path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
+    path("<str:type>.json", R(hub_api.type_json)),
+    path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
     path("api/task", hub_write.task),
     path("api/complete", hub_write.complete),
     path("api/adr", hub_write.adr),
@@ -95,6 +99,7 @@ urlpatterns = [
     path("api/agent-update", hub_write.agent_update),
     path("api/app-error", hub_write.app_error),
     path("api/agent-error", hub_write.agent_error),
+    path("api/ci-failure", hub_write.ci_failure),
     path("api/ack-error", hub_write.ack_error),
     path("api/clear-errors", hub_write.clear_errors),
     path("api/client-error", hub_api.client_error, name="client-error"),
@@ -120,7 +125,7 @@ VISIBILITY = {
     "agent-updates.json": "veiled", "activity.json": "veiled",
     "attention.json": "veiled", "consoles.json": "veiled",
     "project/<str:slug>/tasks.json": "veiled", "held.json": "veiled",
-    "item-claims.json": "veiled",
+    "item-claims.json": "veiled", "components.json": "veiled",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.

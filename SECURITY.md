@@ -64,13 +64,18 @@ revoked or rotated out otherwise retries forever while the board shows nothing b
 going quietly stale — indistinguishable from someone stepping away. `GET /hub/whoami.json`
 answers what a request's credential actually resolves to, without echoing it.
 
-## Unauthenticated reads
+## Reads: authenticated by default, never sanitized
 
-“Public read” means unauthenticated, not automatically sanitized. Every entity field can appear in
-the snapshot or a type/entity endpoint. Never store credentials, private URLs, internal topology,
-personal data, confidential prompts, or sensitive evidence in Hub entities if the read surface is
-reachable by people who must not see them. If the board is private, enforce authentication and
-access control in Django or at the reverse proxy and test that boundary.
+Every Hub read route is wrapped by `read_auth.reader`. With `HUB_READ_AUTH` unset (or anything but
+the exact word `public` — a typo never opens the board), a read needs a Django-authenticated user,
+a live scoped `X-Agent-Token`, or the shared-root `X-Write-Token`; an anonymous read answers 401
+and lands in the operational stream as `read_auth_refused`. The route audit names any read route
+that lacks the gate, and `HUB_READ_AUTH = "public"` outside `DEBUG` is a high audit finding.
+
+Authenticated is not authorized per entity: every reader sees the whole board. “Public read”
+likewise means anonymous, not sanitized. Every entity field can appear in the snapshot or a
+type/entity endpoint. Never store credentials, private URLs, internal topology, personal data,
+confidential prompts, or sensitive evidence in Hub entities if a reader must not see them.
 
 The delivery/presence/error surfaces widen what "the complete projected board" includes:
 questions and answers (`questions.json`, `inbox.json`), observed presence — agent names,
@@ -149,7 +154,9 @@ process merely because a `hub-worker://` URL was opened.
 - Serve `/hub` only over HTTPS outside localhost.
 - Set restrictive `ALLOWED_HOSTS`; configure proxy scheme headers correctly.
 - Keep `DEBUG` off and require `SECRET_KEY` in production.
-- Decide explicitly whether Hub reads are public; otherwise add and test authentication.
+- Keep the default authenticated reads, wire the sign-in people use, and send one anonymous request
+  to `/hub/` after each deploy: it must be refused. Declare `HUB_READ_AUTH = "public"` only for a
+  board whose whole content is publishable.
 - Run the Hub under a least-privilege account with a dedicated durable `HUB_DIR`.
 - Restrict outbound network access if strict URL evidence is enabled.
 - The hub executes no caller-supplied commands — keep it that way. A fork that re-adds

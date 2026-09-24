@@ -12,8 +12,14 @@ The hub is two pieces:
   commands. Must be importable as `hub`.
 
 Everything below assumes your repo root is the Django `BASE_DIR` (the directory holding
-`manage.py`). The Hub's GET surfaces are unauthenticated and return the complete board unless you
-add an authentication boundary. Read [SECURITY.md](../../SECURITY.md) before exposing `/hub` or
+`manage.py`). The Hub's GET surfaces require an authenticated principal by default (a Django user
+from your site's sign-in, a live scoped agent credential, or the shared-root token); set
+`HUB_READ_AUTH = "public"` only for a board whose entire content is publishable. For browsers,
+install your sign-in and point `HUB_LOGIN_URL` (or `LOGIN_URL` with `django.contrib.auth`
+installed) at it so a refused board read redirects there. Board links are addresses
+(`/hub/?tab=<view>#<type>-<local>`); the `?tab=` survives the redirect in `next`, but a URL
+fragment never reaches the server, so to keep a record link through sign-in have your sign-in
+form append `location.hash` to its `next` value before submitting. Read [SECURITY.md](../../SECURITY.md) before exposing `/hub` or
 issuing a token.
 
 ## 1. Put the code on the import path
@@ -226,7 +232,9 @@ stateless view does not implement that stream. The Hub's `/hub/live/events` SSE 
 shipped immediate-push rail for the cockpit and worker coordination; MCP point reads never become
 a background refresh cycle. Every run append wakes SSE as part of the normal committed-event path.
 
-Read surface (unauthenticated; safe to expose only when all board data is publishable):
+Read surface (authenticated by default via `read_auth.reader`; every route below answers 401 to an
+anonymous request unless `HUB_READ_AUTH = "public"`, and the route audit names any read route that
+lacks the gate):
 
 - `GET /hub/` — the human view (single-file tabbed app; `?format=json` returns the snapshot)
 - `GET /hub/?served=<sha>` / `hub.json` — snapshot incl. build coherence

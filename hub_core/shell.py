@@ -1,5 +1,5 @@
 """Shared hub SHELL renderer — fills hub_core/frontend/hub_shell.html with the inlined kit
-(tokens.css + shell.css + print.css + hub.js + palette.js) and the snapshot as the #hub-data JSON
+(tokens.css + shell.css + print.css + surfaces.js + hub.js + palette.js) and the snapshot as the #hub-data JSON
 island. Built ONCE here so every stack's human view (Django or single-file WSGI) renders the SAME
 client-rendered tabbed app — no per-stack template duplication. hub.js builds the tabs/tables/modals
 client-side from the island (UI == API by construction; each active view owns a bounded native
@@ -59,6 +59,7 @@ def render(snap, brand, csrf_token=""):
         "print_css": _asset("print.css"),
         "snapshot_json": snap_json,
         "theme_js": _asset("theme.js").replace("</script", "<\\/script"),
+        "surfaces_js": _asset("surfaces.js").replace("</script", "<\\/script"),
         "hub_js": _asset("hub.js").replace("</script", "<\\/script"),
         "palette_js": _asset("palette.js").replace("</script", "<\\/script"),
     }
