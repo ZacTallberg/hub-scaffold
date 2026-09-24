@@ -78,6 +78,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import client as hub
+from . import textguard
 
 UNATTENDED_CAPABILITY = "unattended"
 LOOP_STAMP = "via=responder"
@@ -283,9 +284,13 @@ def _post_update(base: str, run_id: str, item_id: str, outcome: str, summary: st
     A session that died mid-work, gave up, or cleared an item without a closing verb posts
     nothing — its work would be invisible. A duplicate line is far cheaper than a silent
     abandonment. Tagged ``automated`` so it is telemetry, never an item addressed to a person."""
+    # The summary relays the session's own output, which routinely carries terminal colour
+    # codes; the write seam refuses control characters, so neutralize them HERE or the one
+    # note that makes an abandonment visible is itself refused.
     payload = {"agent": _agent(), "local": "responder-" + run_id.lower(),
-               "title": ("Responder %s: %s" % (outcome, item_id))[:200],
-               "category": "context", "status": "standing", "body_md": summary[:4000],
+               "title": textguard.neutralize("Responder %s: %s" % (outcome, item_id))[:200],
+               "category": "context", "status": "standing",
+               "body_md": textguard.neutralize(summary)[:4000],
                "tags": ["responder", "unattended", "automated", outcome]}
     if ":" in item_id and not item_id.startswith("error:"):
         payload["relates_to"] = [item_id]
@@ -293,6 +298,20 @@ def _post_update(base: str, run_id: str, item_id: str, outcome: str, summary: st
         hub._post(base, "note", payload)
     except (RuntimeError, ValueError) as error:
         _log("update note for %s not recorded: %s" % (run_id, str(error)[:200]))
+
+
+def _adhoc_run_id(item_id: str) -> str:
+    """An id for an exit that never queued a run, so its note is still one addressable line."""
+    return "exit-%s-%s" % (time.strftime("%Y%m%dT%H%M%S"), hashlib.sha1(
+        ("%s|%s" % (item_id, time.time())).encode("utf-8")).hexdigest()[:6])
+
+
+def _early_exit(base: str, run_id: str, item_id: str, outcome: str, why: str) -> None:
+    """A run that ends before its session starts is still a terminal outcome: say so."""
+    _post_update(base, run_id, item_id, outcome,
+                 "Unattended run `%s` for %s ended **%s** before a session started: %s\n"
+                 % (run_id, item_id, outcome, why))
+    _presence(base, run_id, "responder %s: %s" % (outcome, item_id))
 
 
 # ---------------------------------------------------------------- what is work
@@ -323,6 +342,14 @@ def _looped(text: str) -> bool:
     return LOOP_STAMP in str(text or "")
 
 
+def _review_gate(entry: dict) -> bool:
+    """A review is a HUMAN gate: only a person may answer it, so no unattended session is ever
+    launched for one, however it reached the inbox."""
+    return (bool(entry.get("review"))
+            or "review" in [str(t).lower() for t in (entry.get("tags") or [])]
+            or str(entry.get("title") or "").lstrip().lower().startswith("review gate:"))
+
+
 def _unattended(task: dict) -> bool:
     caps = ((task.get("routing") or {}).get("required_capabilities") or [])
     return UNATTENDED_CAPABILITY in [str(c).lower() for c in caps]
@@ -335,6 +362,10 @@ def find_work(base: str) -> dict:
     inbox = (hub._get(base, "inbox.json?agent=" + quote(_agent())).get("data") or {})
     asks = [i for i in (inbox.get("items") or []) if isinstance(i, dict)
             and i.get("kind") == "question"]
+    gates = [i for i in asks if _review_gate(i)]
+    if gates:
+        surfaced["review_gates_left_for_a_person"] = len(gates)
+    asks = [i for i in asks if not _review_gate(i)]
     workable = [i for i in asks if not _looped("%s %s" % (i.get("title"), i.get("body")))]
     if len(asks) != len(workable):
         surfaced["asks_from_unattended_sessions"] = len(asks) - len(workable)
@@ -407,7 +438,7 @@ def resolve_item(base: str, item_id: str) -> dict | None:
     for entry in inbox.get("items") or []:
         if isinstance(entry, dict) and str(entry.get("id")) == item_id \
                 and entry.get("kind") == "question":
-            if _looped("%s %s" % (entry.get("title"), entry.get("body"))):
+            if _review_gate(entry) or _looped("%s %s" % (entry.get("title"), entry.get("body"))):
                 return None
             return {"kind": "question", "id": item_id, "title": str(entry.get("title") or ""),
                     "from": entry.get("from") or "", "body": str(entry.get("body") or "")[:3800]}
@@ -525,6 +556,8 @@ CLOSE THE LOOP, by kind:
               the deploy verifies: `finish <id> --accept-note "<what changed, for the requester>"
               --evidence <sha|url>`.
 - question -> `answer <id> --text "<the answer>"` (delivered to the asker in about a second).
+              NEVER answer a review gate (tagged `review`, titled "Review gate:"): only a
+              person may. If one reached you, touch nothing and exit.
 - error    -> `ack-error <fingerprint> --note "claimed: <what you are checking>"` FIRST, so every
               other console sees it is in flight; fix the cause and ship; then
               `ack-error <fingerprint> --note "resolved: <root cause> evidence <sha|url>"`.
@@ -655,25 +688,55 @@ def run_session(argv: list, cwd: str, env: dict, bound_s: int, lane: str, run_id
     return rc, (out or "")[-4000:], reaped
 
 
-def uncommitted(workspace: str) -> str:
-    """'repo: N files (a, b, c)' for uncommitted work under the workspace, or ''. Read-only —
-    the launcher NEVER commits: only the session knew which files were its own."""
+def dirty_snapshot(workspace: str) -> dict:
+    """{repo: {path: fingerprint}} of every uncommitted file under the workspace, where the
+    fingerprint is the porcelain status plus a digest of the file's bytes. Taken BEFORE a
+    session and again after it, so the launcher names only what THIS session changed — a file
+    an earlier run left dirty is not blamed on every later one. Read-only."""
     root = Path(workspace)
     if not root.is_dir():
-        return ""
+        return {}
     candidates = [root] if (root / ".git").exists() else [p for p in sorted(root.iterdir())
                                                           if (p / ".git").exists()]
-    parts = []
+    snap: dict = {}
     for repo in candidates[:40]:
         try:
-            out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+            out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain",
+                                  "--untracked-files=all"],
                                  capture_output=True, text=True, timeout=15,
                                  creationflags=_NO_WINDOW).stdout or ""
         except (OSError, subprocess.SubprocessError):
             continue
-        files = [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+        files: dict = {}
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            path = line[3:].strip().strip('"')
+            try:
+                target = repo / path
+                stat = target.stat()
+                digest = (hashlib.sha256(target.read_bytes()).hexdigest()[:16]
+                          if stat.st_size <= 8 * 1024 * 1024
+                          else "%d@%d" % (stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                digest = "-"                                   # deleted, or a directory
+            files[path] = line[:2] + ":" + digest
+        snap[repo.name] = files
+    return snap
+
+
+def uncommitted(workspace: str, before: dict | None = None) -> str:
+    """'repo: N files (a, b, c)' for uncommitted work THIS session left under the workspace, or
+    ''. ``before`` is the :func:`dirty_snapshot` taken at launch; a file that was already dirty
+    counts only if the session changed it further. Read-only — the launcher NEVER commits: only
+    the session knew which files were its own."""
+    before = before or {}
+    parts = []
+    for repo, now in dirty_snapshot(workspace).items():
+        earlier = before.get(repo) or {}
+        files = [path for path, mark in now.items() if earlier.get(path) != mark]
         if files:
-            parts.append("%s: %d file%s (%s%s)" % (repo.name, len(files), "" if len(files) == 1
+            parts.append("%s: %d file%s (%s%s)" % (repo, len(files), "" if len(files) == 1
                                                     else "s", ", ".join(files[:6]),
                                                     ", ..." if len(files) > 6 else ""))
         if len(parts) >= 5:
@@ -697,15 +760,24 @@ def respond(item_id: str) -> int:
     if int(record.get("attempts") or 0) >= MAX_ATTEMPTS:
         _log("respond %s: attempted %d times already; left for a person"
              % (item_id, int(record["attempts"])))
+        _early_exit(base, _adhoc_run_id(item_id), item_id, "exhausted",
+                    "attempted %d times already; left for a person, no session was spent."
+                    % int(record["attempts"]))
         return 0
     try:
         item = resolve_item(base, item_id)
     except RuntimeError as error:
         _log("respond %s: cannot confirm it is still ours (%s); leaving it pending"
              % (item_id, str(error)[:160]))
+        _early_exit(base, _adhoc_run_id(item_id), item_id, "unverified",
+                    "the board could not be read (%s), so nothing was launched: 'cannot tell' "
+                    "is never a reason to act." % str(error)[:160])
         return 0
     if item is None:
         _log("respond %s: no longer offered here; standing down" % item_id)
+        _early_exit(base, _adhoc_run_id(item_id), item_id, "stood-down",
+                    "not offered to an unattended session (taken, cleared, never ours, or a "
+                    "review gate left for a person); no session was spent.")
         return 0
 
     kind, lane, bound = item["kind"], _lane(item["kind"]), _bound(item["kind"])
@@ -723,12 +795,17 @@ def respond(item_id: str) -> int:
                 if resolve_item(base, item_id) is None:
                     _log("respond %s: taken or cleared while queued; standing down" % item_id)
                     _run_finished(run_id, "stood-down")
-                    _presence(base, run_id, "responder stood down: %s" % item_id)
+                    _early_exit(base, run_id, item_id, "stood-down",
+                                "taken or cleared elsewhere while this run waited for the "
+                                "%s lane; no session was spent." % lane)
                     return 0
             except RuntimeError:
                 pass
         if time.time() >= wait_until:
             _run_finished(run_id, "lane-full")
+            _early_exit(base, run_id, item_id, "lane-full",
+                        "the %s lane stayed busy for %dm; no session was spent. The next poll "
+                        "may offer it again." % (lane, 2 * bound // 60))
             return 0
         time.sleep(5)
     try:
@@ -736,11 +813,17 @@ def respond(item_id: str) -> int:
         # session is spent, so a stale item is a cheap exit.
         try:
             item = resolve_item(base, item_id)
-        except RuntimeError:
+        except RuntimeError as error:
             _run_finished(run_id, "unverified")
+            _early_exit(base, run_id, item_id, "unverified",
+                        "the board could not be read with the lane held (%s), so nothing was "
+                        "launched: 'cannot tell' is never a reason to act." % str(error)[:160])
             return 0
         if item is None or _disabled():
             _run_finished(run_id, "stood-down" if item is None else "disabled")
+            if item is None:
+                _early_exit(base, run_id, item_id, "stood-down",
+                            "taken or cleared elsewhere before launch; no session was spent.")
             return 0
         prompt = _charter(item, bound)
         try:
@@ -760,6 +843,7 @@ def respond(item_id: str) -> int:
         _log("respond %s: launching (%s lane, bounded %ds, attempt %d/%d)"
              % (item_id, lane, bound, attempts, MAX_ATTEMPTS))
         session = {"id": run_id, "kind": kind, "item": item_id, "title": item.get("title") or ""}
+        dirty_before = dirty_snapshot(_workspace())     # so only THIS session's leftovers are named
         started = time.time()
         try:
             rc, tail, reaped = run_session(argv, _workspace(), _session_env(session), bound,
@@ -773,7 +857,7 @@ def respond(item_id: str) -> int:
         _release(lane)
 
     outcome = verify_outcome(base, item, killed=rc is None)
-    dirty = uncommitted(_workspace())
+    dirty = uncommitted(_workspace(), dirty_before)
     responses = _read_json(responses_path, {})
     entry = responses.get(item_id) or {"attempts": 1}
     entry.update({"state": "done" if outcome == "cleared" else outcome, "at": time.time(),

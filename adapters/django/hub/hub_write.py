@@ -1143,8 +1143,11 @@ def ask(request, b):
                          hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     existing = state["entities"].get(eid)
+    # `review: true` marks a HUMAN GATE: delivered like any question, but tagged so no
+    # unattended session may take it (the responder skips `review`; its charter forbids it).
     payload = {"type": "note", "category": "context", "title": text[:300],
-               "asker": agent, "status": "standing", "tags": ["question", "open"],
+               "asker": agent, "status": "standing",
+               "tags": ["question", "open"] + (["review"] if b.get("review") is True else []),
                "body_md": str(b.get("context") or "")}
     related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
     if related:

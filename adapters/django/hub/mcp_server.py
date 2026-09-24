@@ -294,6 +294,7 @@ def _record(args, auth_headers):
                      auth_headers)
     if kind == "review":
         payload = {"agent": agent, "question": "Review gate: " + title, "anyway": True,
+                   "review": True,
                    "context": text + "\n\nThis is a human gate: nothing it covers ships "
                                      "until a person answers."}
         if related:

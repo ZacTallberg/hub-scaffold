@@ -82,6 +82,7 @@ def question_items(state) -> list:
             "title": _text(ent.get("title"), 300),
             "body": body_text(ent.get("body_md")),
             "at": _text(prov.get("created_at") or prov.get("updated_at") or "", 40),
+            "review": "review" in tags,       # a human gate: never for an unattended session
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out
