@@ -168,7 +168,54 @@ HUB_WORKER_LAUNCH_ENABLED = False
 HUB_WORKER_PROTOCOL = "hub-{{PROJECT_KEY}}"
 # HUB_WORKER_LAUNCH_ISSUER_URL = "{{LIVE_URL}}/hub/api/launch-grant/consume"
 # HUB_WORKER_GRANT_TTL_S = 120
+
+# Optional console chat histories (disabled unless explicitly enabled — see below):
+# HUB_HISTORIES_ENABLED = False
+# HUB_HISTORY_VIEWER = "myproject.auth.is_team_lead"   # (request) -> bool for the board's viewer
+# HUB_HISTORY_RETENTION_DAYS = 45
 ```
+
+### The shared app banner and the person's preferences
+
+Apps behind this hub can wear one shared header linked from `/hub/components/banner/` (the full
+contract and a runnable example are in `patterns/app-banner.md`). Its server half is
+`/hub/api/profile` (the same route an app's server uses, `patterns/app-services.md`); for the
+person's own browser to reach it directly, the hub needs to know WHO a request is:
+
+```python
+# (request) -> username, behind your own sign-in; unset = only app servers with a credential
+HUB_PERSON = "myproject.auth.username"
+# The app directory the banner's app drawer resolves slugs against:
+HUB_APPS = [{"slug": "budget-app", "name": "Budget", "url": "https://budget.example.com/"}]
+# (person) -> {slug: role}: ACTIVE grants only, matched under every spelling your access
+# system keeps for that person (short name, UPN, email); unset = nothing listed
+HUB_REACH = "myproject.access.grants_for"
+```
+
+`hub.viewers.debug_person` (with `HUB_DEBUG_PERSON`) is for a developer's own machine only:
+it answers under DEBUG from 127.0.0.1 and nobody otherwise. An app that keeps its hub
+credential on its server instead calls `/hub/api/profile?person=<username>` with a
+`profile:read`/`profile:write` credential and re-serves the answer from its own gated route
+(`data-profile-url`).
+
+### Console chat histories (opt-in)
+
+An operator coaching a team of agent-assisted people can read how each console is driven: the
+person's prompts, the assistant's replies, and one line per tool call — never tool output, model
+reasoning, or subagent side conversations. Turn it on ONLY after the people whose workstations
+upload have been told the operator can read their consoles.
+
+- Workstations upload with `python -m hub_core.client history-push --follow` (a credential with
+  `history:write`). Text is redacted on the workstation and again on receipt; a
+  `HISTORY_DISABLED` file in the uploader's state directory (`HUB_HISTORY_STATE_DIR`, default
+  `~/.hub-history`) opts that workstation out.
+- Storage is a bounded sidecar under `HUB_DIR/histories/` — never the ledger — capped per console
+  (1.5 MB), in total (300 MB, oldest first) and by `HUB_HISTORY_RETENTION_DAYS`. Exclude
+  `histories/` from routine backups unless you have decided to retain them.
+- Reading needs `history:read` (CLI `history`, MCP `console_history`) or, in a browser, the
+  predicate named by `HUB_HISTORY_VIEWER`. The scaffold ships no login, so without a predicate the
+  board shows no history control. `hub.viewers.debug_loopback` is for a developer's own machine
+  only (DEBUG and 127.0.0.1). Everyone else, and everyone while the feature is off, gets 404.
 
 `HUB_DIR` is optional only for local development. In production, point it explicitly at storage
 that survives process and artifact replacement and is writable by the service account. The Hub

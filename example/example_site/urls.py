@@ -10,11 +10,12 @@ from django.urls import include, path
 
 from hub.agent_card import agent_card_view
 
-from . import demo_app
+from . import demo, demo_app
 
 
 def index(request):
-    return JsonResponse({"app": "example", "hub": "/hub/", "demo_app": "/demo-app/"})
+    return JsonResponse({"app": "example", "hub": "/hub/", "demo_app": "/demo-app/",
+                         "banner_demo": "/demo/budget-app/"})
 
 
 urlpatterns = [
@@ -29,4 +30,8 @@ urlpatterns = [
     path("demo-app/agent/conversation", demo_app.agent_conversation),
     path("demo-app/profile.json", demo_app.profile),
     path("demo-app/feed.json", demo_app.feed),
+    # Two example adopting apps wearing the shared banner (DEBUG only; see demo.py).
+    path("demo/access.json", demo.access_json),
+    path("demo/signout/", demo.signout),
+    path("demo/<slug:slug>/", demo.page),
 ]

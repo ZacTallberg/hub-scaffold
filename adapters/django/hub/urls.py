@@ -6,7 +6,7 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import app_services, held, hub_api, hub_write, hubsite, veil, mcp_server, read_auth, run_api
+from . import app_services, held, histories_api, hub_api, hub_write, hubsite, veil, mcp_server, read_auth, run_api
 
 R = read_auth.reader
 
@@ -57,6 +57,9 @@ urlpatterns = [
     path("distribution.json", R(hub_api.distribution_json), name="distribution"),
     path("built.json", R(hub_api.built_json), name="built"),
     path("ci-events.json", R(hub_api.ci_events_json), name="ci-events"),
+    # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
+    # or the adopter's HUB_HISTORY_VIEWER predicate (404 to everyone else).
+    path("history.json", R(histories_api.history_json), name="history"),
     path("dag.graphml", R(hub_api.dag_graphml), name="dag-graphml"),
     # Services to the apps around the hub (adapters/django/hub/app_services.py): hosted UI
     # components and their per-app properties (OPEN presentation reads, declared public), and
@@ -83,6 +86,9 @@ urlpatterns = [
     path("api/gap", hub_write.gap),
     path("api/feat", hub_write.feat),
     path("api/note", hub_write.note),
+    # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
+    # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
+    path("api/retire", hub_write.retire),
     path("api/deploy", hub_write.deploy),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
@@ -145,6 +151,7 @@ urlpatterns = [
     path("api/agent/ask", app_services.agent_ask),
     path("api/agent/history", app_services.agent_history),
     path("api/agent/conversation", app_services.agent_conversation),
+    path("api/history", histories_api.upload, name="history-upload"),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP
@@ -169,6 +176,7 @@ VISIBILITY = {
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
+    "history.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

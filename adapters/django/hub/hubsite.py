@@ -8,7 +8,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 
 from hub_core import shell
 
-from . import hub_app
+from . import histories_api, hub_app
 from .hub_api import _snapshot, _wire_snapshot, hub_json
 
 
@@ -23,4 +23,8 @@ def hub(request):
         snap = view.scrub(snap)        # the inlined island is a payload like any other
     # The page embeds exactly what hub.json serves: large collections as heads, with their exact
     # counts, hydrated by the board from /hub/<type>.json after first paint.
-    return HttpResponse(shell.render(_wire_snapshot(snap), f"{hub_app.BRAND} · Hub", csrf_token=get_token(request)))
+    # Gated surfaces this viewer may open, decided HERE per request — the page never carries a
+    # credential, only the fact that the server will answer this person.
+    caps = ("history",) if histories_api.can_view(request) else ()
+    return HttpResponse(shell.render(_wire_snapshot(snap), f"{hub_app.BRAND} · Hub",
+                                     csrf_token=get_token(request), viewer_caps=caps))

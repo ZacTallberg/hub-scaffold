@@ -148,10 +148,31 @@ The services the hub offers the apps around it (`patterns/app-services.md`) spli
   trust it to name the person. They must be reached only from an app's server, behind that app's
   own sign-in. A credential holding `profile:write` can change any person's preferences, and
   `agent:ask` spends the agent service's quota — issue them per app, scoped, and expiring.
+- `/hub/api/profile` has one more door, for the person's own same-origin browser, and it is shut
+  until the adopter names `HUB_PERSON` (a `(request) -> username` behind its own sign-in). Through
+  it the person is whoever the resolver says: a `?person=` naming anyone else answers 404, a POST
+  must pass Django's CSRF check, and an unresolved request gets the 404 of an unknown route.
+  `hub.viewers.debug_person` exists for a developer's loopback under DEBUG only.
+- The profile GET lists the apps a person can reach from `HUB_APPS` joined with the adopter's
+  `HUB_REACH` seam. The seam must return ACTIVE grants only and match every spelling of the
+  person's name its access system keeps; unset or failing, it lists nothing.
 - The agent service key (`HUB_AGENT_KEY`) is held by the hub alone and never returned. TLS to the
   agent service is verified unless `HUB_AGENT_TLS_VERIFY` is explicitly false.
 - `HUB_DIR/profiles.json`, `component-props.json` and `component-adopters.json` are mutable
   sidecars, not ledger history; back them up with `HUB_DIR`.
+
+## Console chat histories (opt-in)
+
+`HUB_HISTORIES_ENABLED` turns on a surface that holds what people typed to their assistants. It is
+off by default and must stay off until the people whose workstations upload have been told the
+operator can read it. Its boundaries: uploads need `history:write` and are redacted twice
+(workstation and receipt) with the write seam's credential shapes, replacing rather than refusing;
+only prompts, assistant text and one-line tool calls are sent — never tool output or reasoning;
+storage is a bounded sidecar under `HUB_DIR/histories/`, never the ledger, so it can be deleted;
+reads need `history:read` or the adopter's `HUB_HISTORY_VIEWER` predicate and answer the plain 404
+to everyone else. Redaction is pattern-based and cannot recognise every secret or every piece of
+personal data — treat the sidecar as sensitive, exclude it from routine backups, and keep its
+retention short.
 
 ## Worker-launch boundary
 
