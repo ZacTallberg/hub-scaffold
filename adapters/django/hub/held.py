@@ -45,7 +45,10 @@ def hold(request, b):
     if error:
         return _refuse(*error)
     resolver = hub_app.commit_resolver()
-    confirmed, searched = resolver.has(fields["sha"], _project_key(resolver, fields["repo"]))
+    # FETCHABILITY, not existence: a commit present in some local worktree but on no remote is
+    # exactly what this record exists to catch, so the resolver is asked whether a server has it.
+    confirmed, searched = resolver.fetchable(fields["sha"], _project_key(resolver,
+                                                                         fields["repo"]))
     attested = b.get("attested") is True
     unpushed_reason = str(b.get("unpushed_reason") or "").strip()
     reachable, error = _held.reachability(attested, confirmed, unpushed_reason)
@@ -65,6 +68,11 @@ def hold(request, b):
     branch = str(b.get("branch") or "").strip()
     if branch:
         payload["branch"] = branch[:120]
+    if confirmed is False:
+        # What the Hub itself saw stays on the record even when the client's attestation
+        # carried it through: "on a local disk, on no remote-tracking branch, as far as the Hub
+        # could see" is the fact a reviewer of this hold needs first.
+        payload["hub_saw"] = "local_only"
     if fields["from_gap"]:
         payload["from_gap"] = fields["from_gap"]
     if reachable == "unpushed":

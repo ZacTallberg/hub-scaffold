@@ -74,6 +74,26 @@ def local_has(path, sha: str):
     return r.returncode == 0
 
 
+def local_fetchable(path, sha: str):
+    """Can somebody other than this disk FETCH `sha`? Asked of one checkout's remote-tracking refs.
+
+    True   the commit is contained in at least one ``refs/remotes/*`` ref: it is on a server
+    False  the checkout HAS the commit and no remote-tracking ref contains it: it lives on this
+           disk only -- exactly the case a held-commit record exists to catch
+    None   the checkout lacks the commit (its remote refs may simply be stale), or git could not
+           be asked; neither is evidence either way
+
+    Existence is not reachability: ``cat-file -e`` answers yes for a commit made in a worktree
+    and never pushed, so it must never stand in for this question."""
+    sha = str(sha or "").strip().lower()
+    if local_has(path, sha) is not True:
+        return None
+    r = _git(path, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/remotes")
+    if r is None or r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
+
+
 def local_full(path, sha: str) -> str:
     """The full 40-hex name of `sha` in that checkout, or "" when it cannot be resolved."""
     if not is_sha(sha) or not _readable_repo(path):
@@ -161,6 +181,47 @@ class Resolver:
         if None in answers:
             return None, searched
         return False, searched
+
+    def fetchable(self, sha: str, project: str = "") -> tuple:
+        """``(verdict, searched)`` -- could anybody but its author FETCH `sha`? The promotion
+        lane's question, which ``has`` cannot answer: a commit present only in a local worktree
+        exists, and is precisely what must not read as safe.
+
+        Asked of the project's checkout (its remote-tracking refs), the Hub's own repository,
+        and the configured remote resolver (a forge answers "the server has it", which is
+        fetchability by definition). True if any place shows it on a server; False when a place
+        holds it locally on no remote and nothing shows it pushed; None otherwise."""
+        sha = str(sha or "").strip().lower()
+        searched, answers = [], []
+        project = str(project or "").strip().lower()
+        places = []
+        if project and self.repos.get(project):
+            places.append(("%s checkout" % project, self.repos[project]))
+        if self.work_root:
+            places.append(("this hub's repository", self.work_root))
+        for label, path in places:
+            found = local_fetchable(path, sha)
+            searched.append(label + {True: " (on a remote-tracking branch)",
+                                     False: " (present locally, on NO remote-tracking branch)",
+                                     None: " (does not have it, or not readable)"}[found])
+            answers.append(found)
+        if project and self.remote is not None and True not in answers:
+            try:
+                found = self.remote(project, sha)
+            except Exception:                                # noqa: BLE001 - unreachable is not "no"
+                found = None
+            found = found if found in (True, False) else None
+            searched.append("%s remote%s" % (project, {True: " (the server has it)",
+                                                       False: " (the server does not have it)",
+                                                       None: " (could not be asked)"}[found]))
+            answers.append(found)
+        if project and not self.repos.get(project) and self.remote is None:
+            searched.append("%s (no checkout or resolver configured)" % project)
+        if True in answers:
+            return True, searched
+        if False in answers:
+            return False, searched
+        return None, searched
 
     def contains(self, candidate: str, target: str, project: str = ""):
         """Is `candidate` contained in `target`, asked of the project's checkout and then the
