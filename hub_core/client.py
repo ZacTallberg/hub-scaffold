@@ -398,6 +398,10 @@ def _run_whoami(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "whoami.json")
 
 
+def _run_perf(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _get(base, "perf.json")
+
+
 # ── The worker LOOP: next -> start -> step -> finish, with compaction-proof regrounding ──
 # Extracted from two adopter fleets that each rebuilt this loop independently; the converged
 # core belongs to the template. The deployment-specific halves those tools also carried
@@ -707,6 +711,10 @@ def _parser() -> argparse.ArgumentParser:
     whoami = commands.add_parser("whoami",
                                  help="what the hub resolves your credential and headers to")
     whoami.set_defaults(runner=_run_whoami)
+
+    perf = commands.add_parser("perf", help="which process answered, its role, the backgrounder's "
+                                            "clock and the startup prewarm timings")
+    perf.set_defaults(runner=_run_perf)
 
     # The worker loop: next -> start -> step -> finish (+ reground after compaction).
     nxt = commands.add_parser("next", help="the top ready tasks (needs-spec and snoozed beside them)")

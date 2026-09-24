@@ -57,6 +57,7 @@ JSONL, or SQLite mutation is an offline recovery operation only: drain live writ
 | `claims/*.json` | Expiring task leases | Usually no; losing them makes the durable `in_progress` task reclaimable |
 | `presence/` (+ `presence/_retired/`) | Observed seats/consoles; rows unseen past the horizon are archived, never deleted | Usually no; it repopulates as agents check in |
 | `errors.jsonl`, `errors-acked.json` | Bounded, redacted operational error stream + acknowledged signatures | According to incident policy; the stream is capped at ~2 MB |
+| `background.json`, `delivery_projection.json` | The backgrounder's clock and its published delivery projection (`HUB_ROLE`) | No; rebuilt on the next tick |
 | `.attest-secret` | Launch-grant signing secret | Yes if launch continuity matters; keep secret |
 | `grants/*.used` | Consumed nonces | Retain at least through maximum grant lifetime |
 | `grants/decisions.jsonl` | Launch grant/consume/refusal audit trail | According to audit policy |
@@ -167,6 +168,36 @@ the workstation, the local token file, and whether the token was rotated. If cli
 verify the per-user protocol registration and browser permission for external protocols. If windows
 remain open, the operator wrapper is still running or is spawning a detached child; the adapter does
 not use `-NoExit` and closes its own host when the wrapper returns.
+
+## Process roles and restarts that nobody sees
+
+One checkout can run as two kinds of process (`HUB_ROLE`, read per call):
+
+| Role | Runs | Starts background threads? |
+|---|---|---|
+| unset / `all` | requests + background projections (single-process default) | yes |
+| `web` | requests only; reads the backgrounder's sidecars | no, unless the backgrounder's clock is older than `HUB_BACKGROUND_STALE_S` (180 s) or absent -- then ONE single-flight build, so a dead backgrounder degrades to the single-process shape instead of a frozen board |
+| `background` | `python manage.py hubbackground` -- folds the ledger every `HUB_BACKGROUND_INTERVAL_S` (20 s), materializes the delivery projection, wakes the live streams when it changes, re-arms lease timers, stamps its clock | n/a |
+
+`GET /hub/perf.json` names the process that answered (role, pid, uptime), the backgrounder's
+clock (`fresh` / `stale` / `absent`, with its last tick's report) and the startup prewarm's step
+timings. Read it first when a response is slow: it says which process to look at.
+
+**Startup prewarm.** Call `hub.prewarm.start()` from the SERVED entrypoint (`wsgi.py` /
+`asgi.py`, as the example does), never from settings or an app `ready()` hook. It opens the store,
+folds the ledger and builds the board snapshot once on a daemon thread, so the first requests
+after a restart -- the moment every client reconnects -- do not each pay those costs. Requests are
+never blocked by it. `HUB_PREWARM=0` disables it.
+
+**Rolling restart.** With two or more `web` processes behind the reverse proxy (one upstream with
+several members, or two ports) a deploy restarts ONE web process at a time: stop it, start it on
+the new build, and wait until its own `GET /hub/perf.json` answers with the new `pid` AND
+`GET /hub/hub.json` answers `200` with the new build stamp before touching the next. The proxy's
+retry-on-connect-failure carries requests to the member that is up. Check every process is healthy
+BEFORE restarting any, so a deploy never starts from a degraded pool. Restart the backgrounder
+last; the web processes serve the last published projection (or build their own past the stale
+threshold) while it is down. The mechanism (a service manager, a container orchestrator, a script)
+is the adopter's; the order and the per-process health gate are the contract.
 
 ## Upgrade procedure
 

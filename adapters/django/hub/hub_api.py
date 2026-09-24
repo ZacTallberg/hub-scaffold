@@ -21,7 +21,7 @@ from hub_core import (adherence, cost, dag, errorlog, failure_taxonomy, flow,
                       inbox as inbox_core, project, projections, telemetry, upcast, wip)
 from hub_core.canonical import content_hash
 
-from . import delivery, hub_app, realtime
+from . import delivery, hub_app, prewarm, realtime, roles
 
 _COLLECTION = {"task": "tasks", "run": "runs", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
                "deploy": "deploys", "note": "notes", "directive": "directives", "ack": "acks"}
@@ -750,23 +750,59 @@ def _cache_delivery(key, value):
             _DELIVERY_CACHE["values"].pop(next(iter(_DELIVERY_CACHE["values"])), None)
 
 
+def _delivery_path():
+    return hub_app.HUB_DIR / "delivery_projection.json"
+
+
+def _delivery_key(cursor, served):
+    # The artifact stamp is production's direct running identity. Include it in the key so a new
+    # image can never inherit a delivery projection materialized by an older one, even when both
+    # point at the same durable ledger cursor.
+    return (cursor.get("seq", 0), cursor.get("hash", ""), served, hub_app._running_sha())
+
+
+def read_delivery_sidecar(key):
+    """The projection the backgrounder published for EXACTLY this key, else None."""
+    try:
+        data = json.loads(_delivery_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("block") if data.get("key") == list(key) else None
+
+
+def write_delivery_sidecar(key, block):
+    from hub_core import atomic
+    target = _delivery_path()
+    tmp = target.with_name(target.name + ".%d.tmp" % os.getpid())
+    tmp.write_text(json.dumps({"key": list(key), "block": block, "written_at": time.time()},
+                              default=str), encoding="utf-8")
+    atomic.replace(tmp, target)
+
+
 def _delivery_fast(state, cursor, served):
-    # The artifact stamp is production's direct running identity. Include it in the cache key so
-    # a new image can never inherit a delivery projection materialized by an older one, even when
-    # both point at the same durable ledger cursor.
-    artifact_sha = hub_app._running_sha()
-    identity_key = (served, artifact_sha)
-    key = (cursor.get("seq", 0), cursor.get("hash", ""), *identity_key)
+    key = _delivery_key(cursor, served)
     with _DELIVERY_LOCK:
         exact = _DELIVERY_CACHE["values"].get(key)
         if exact is not None:
             return exact, True
-        should_build = key not in _DELIVERY_CACHE["building"]
-        if should_build:
-            _DELIVERY_CACHE["building"].add(key)
     # Exact sha/served_sha/tasks_closed proof is pure entity projection and belongs on the direct
     # path. Git ancestry is legacy/source-checkout enrichment only.
     provisional = delivery.direct_block(state, served=served)
+    if delivery.repository_available() and not roles.runs_background_here():
+        # HUB_ROLE=web: the backgrounder materializes; this process only reads what it published.
+        published = read_delivery_sidecar(key)
+        if published is not None:
+            _cache_delivery(key, published)
+            return published, True
+        if roles.backgrounder_fresh(hub_app.HUB_DIR):
+            # Honest unknown until the backgrounder's tick lands and wakes the stream.
+            return provisional, False
+        # The backgrounder is stale or absent: build ONE projection here (single-flight, below)
+        # rather than serving an unmeasured leg forever.
+    with _DELIVERY_LOCK:
+        should_build = key not in _DELIVERY_CACHE["building"]
+        if should_build:
+            _DELIVERY_CACHE["building"].add(key)
     if not delivery.repository_available():
         _cache_delivery(key, provisional)
         with _DELIVERY_LOCK:
@@ -1301,6 +1337,14 @@ def live_events(request):
     response["X-Accel-Buffering"] = "no"
     response["X-Hub-Realtime-Scope"] = hub_app.realtime_info()["scope"]
     return response
+
+
+@require_GET
+def perf_json(request):
+    """Which process answered, in which role, how fresh the backgrounder's clock is, and what the
+    startup prewarm cost -- so a slow response is traced to a process, not to "the hub"."""
+    return JsonResponse({"process": roles.process_info(hub_app.HUB_DIR),
+                         "prewarm": prewarm.status()})
 
 
 def next_json(request):
