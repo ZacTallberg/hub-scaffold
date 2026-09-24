@@ -58,7 +58,7 @@ html[data-theme="dark"] .ab-root, html[data-theme="dark"] .ab-surface {
 
 /* ---- GLYPH DEFENCE. Size, fill and stroke are presentation attributes on every <svg>, and
    re-asserted here on an enumerated class, so a host's `svg { fill: currentColor }` or
-   `svg { width: 100% }` cannot turn outlines into blobs or glyphs into page-wide shapes. */
+   `svg { width: 100% }` cannot turn outlines into solid fills or glyphs into page-wide shapes. */
 .ab-root svg.ab-i, .ab-surface svg.ab-i {
   width: 18px !important; height: 18px !important; min-width: 0 !important; max-width: none !important;
   display: inline-block !important; flex: none !important; vertical-align: middle !important;
