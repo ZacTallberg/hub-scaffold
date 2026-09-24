@@ -394,6 +394,11 @@ def _client_id() -> str:
         return CLIENT_VERSION
 
 
+def _is_hub_answer(body: Any) -> bool:
+    """The hub's own JSON envelope (an answer), as opposed to a gateway's error page."""
+    return isinstance(body, dict) and ("errors" in body or "data" in body or "ok" in body)
+
+
 def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
              headers: dict[str, str], timeout: int | None = None,
              _busy: int = 0) -> dict[str, Any]:
@@ -446,10 +451,22 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                                     _busy=busy)
                 if error.code == 503 and _retryable(parsed):
                     raise HubRefused(error.code, parsed) from error
+                if error.code >= 500 and _is_hub_answer(parsed):
+                    # The HUB answered 5xx in its own envelope: an answer, never retried --
+                    # retrying an answer only repeats it (or, for a write, re-applies it).
+                    _mark_route(base, failed=False)
+                    raise HubRefused(error.code, parsed) from error
+                if error.code == 503:
+                    # A 503 page that is not the hub's envelope is the PROXY with no upstream to
+                    # hand the request to: it never reached the hub, so even a write is safe to
+                    # send again on the next sweep.
+                    last = HubUnreachable("gateway HTTP 503, not the hub's answer", reached=False,
+                                          bases=bases)
+                    break
                 if error.code >= 500:
-                    # The hub (or the proxy speaking for it) answered 5xx. Another route ends at
-                    # the same process, so it would only repeat the answer; the backed-off second
-                    # sweep may retry a read.
+                    # A gateway 502/504 in front of the hub: the request may have reached it.
+                    # Another route ends at the same process, so it would only repeat the answer;
+                    # the backed-off second sweep may retry a read.
                     last = HubUnreachable(f"HTTP {error.code}", reached=True, bases=bases)
                     break
                 _mark_route(base, failed=False)   # it answered: this route is right
