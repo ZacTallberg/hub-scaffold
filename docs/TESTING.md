@@ -39,6 +39,45 @@ When one is justified:
 The receipt is durable; the test is not. Do not promote the probe into a repository test, verifier,
 fixture, package script, pre-commit hook, CI job, or scheduled workflow.
 
+## A green signal is not evidence
+
+An exit code, a green pipeline and a passing assertion share one weakness: their mechanism cannot
+tell "it worked" from "it never ran". `git push` can exit 0 having pushed nothing (a credential
+prompt blocked in the background and the shell's status was read as git's); a readiness check can
+assert exactly the defect it should catch; a check that a guard exists can pass with the guard
+deleted because a comment names it. So, whenever proof is gathered — the ordinary real operation
+or a rare critical probe:
+
+- **Real cases, on data nobody authored for the check.** A check written by the person who wrote
+  the code encodes the same belief and hands it back in green. Prefer inputs that already exist:
+  real questions and the answers that resolved them, recorded failures with their causes, a real
+  document through the real model. Three hand-written cases labelled by the author are an opinion
+  with numbers attached. If real data says the work does not help, that is the finding.
+- **Probe the deployed system and READ what came back.** Drive the surface a person or an agent
+  actually uses and put its output in the receipt — the served bytes, the deployed sha, the row
+  that was written, the rendered page. A transcript of the system answering is evidence; an
+  assertion that passed is not.
+- **Fix what breaks; do not pre-anticipate it.** A check written to confirm code you just wrote is
+  a guess about which failure might occur. Make failure audible instead: wire it to the operational
+  error stream (`patterns/error-visibility.md`) so a real break arrives with its input and
+  traceback, then repair that.
+
+For the rare critical probe (the boundaries above), four more rules:
+
+1. **Write MUST-NOT assertions.** "Readiness must NOT answer 200 with the database down" cannot be
+   satisfied by agreeing with the implementation, which is the only shape that catches a check
+   that pinned the bug.
+2. **The acceptance criterion comes from someone other than the implementer**, written as a
+   runnable command before the code, and the implementer does not edit it. Checks generated after
+   faulty code find markedly fewer of its faults than checks written independently.
+3. **Falsification is necessary, never sufficient.** Disabling the mechanism and watching the probe
+   fail proves the probe is COUPLED to the mechanism, not that it asserts the right thing: a probe
+   that pins the defect goes red when you disable the mechanism too, and reads as strong.
+4. **Verify the instrument before the result.** A harness that mutates code to falsify a probe must
+   print what it changed and how many anchors it matched; a zero-match mutation is a HARNESS
+   failure, never "the probe survived". Confirm the fixture is healthy, then break exactly one
+   thing. And never let an agent type the count — the runner prints it.
+
 ## Proof composes
 
 A completed dependency contributes its receipt to every parent task, milestone, and release that
