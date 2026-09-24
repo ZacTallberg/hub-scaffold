@@ -100,7 +100,7 @@
         var sub = rec.subtitle || rec.detail || rec.maturity || rec.build || rec.sha || "";
         // Commands may carry an explicit anchor/href + an action fn name; default to entity anchor.
         var anchor = rec.anchor || ("#" + g.type + "-" + local);
-        var hay = [g.label, local, title, sub, rec.legacy_ref || "", (rec.tags || []).join(" ")]
+        var hay = [g.label, local, title, sub, id, anchor, rec.legacy_ref || "", (rec.tags || []).join(" ")]
           .join(" ").toLowerCase();
         out.push({
           group: g.label, type: g.type, id: id, local: local, title: String(title),
@@ -216,15 +216,21 @@
     if (!q) {
       scored = idx.slice(0, 50).map(function (it) { return { it: it, hits: [], score: 0 }; });
     } else {
+      var exactQuery = q.toLowerCase().replace(/^#/, "");
       for (var i = 0; i < idx.length; i++) {
         var r = fuzzy(q, idx[i].hay);
         if (r) {
           // re-run on the visible title so <mark> lands on what the eye sees
           var th = fuzzy(q, idx[i].title.toLowerCase());
-          scored.push({ it: idx[i], hits: th ? th.hits : [], score: r.score + (th ? th.score : 0) });
+          var exactId = [idx[i].id, idx[i].local, String(idx[i].anchor || "").replace(/^#/, "")]
+            .some(function (v) { return String(v).toLowerCase() === exactQuery; });
+          scored.push({ it: idx[i], hits: th ? th.hits : [], score: r.score + (th ? th.score : 0),
+                        exact: exactId ? 2 : (idx[i].title.toLowerCase() === exactQuery ? 1 : 0) });
         }
       }
-      scored.sort(function (a, b) { return b.score - a.score; });
+      // A typed record ADDRESS (full id, local id, or #type-local anchor) outranks every fuzzy
+      // match: short numeric ids otherwise lose to incidental digits inside commit SHAs.
+      scored.sort(function (a, b) { return b.exact - a.exact || b.score - a.score; });
       scored = scored.slice(0, 50);
     }
     _results = scored;

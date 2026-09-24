@@ -16,7 +16,10 @@ Everything below assumes your repo root is the Django `BASE_DIR` (the directory 
 from your site's sign-in, a live scoped agent credential, or the shared-root token); set
 `HUB_READ_AUTH = "public"` only for a board whose entire content is publishable. For browsers,
 install your sign-in and point `HUB_LOGIN_URL` (or `LOGIN_URL` with `django.contrib.auth`
-installed) at it so a refused board read redirects there. Read [SECURITY.md](../../SECURITY.md) before exposing `/hub` or
+installed) at it so a refused board read redirects there. Board links are addresses
+(`/hub/?tab=<view>#<type>-<local>`); the `?tab=` survives the redirect in `next`, but a URL
+fragment never reaches the server, so to keep a record link through sign-in have your sign-in
+form append `location.hash` to its `next` value before submitting. Read [SECURITY.md](../../SECURITY.md) before exposing `/hub` or
 issuing a token.
 
 ## 1. Put the code on the import path
