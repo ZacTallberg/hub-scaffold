@@ -1,0 +1,140 @@
+{
+ "generated_by": "app-kit/tools/kits.py record",
+ "kits": {
+  "assistant": {
+   "files": {
+    "KIT.json": "bb2c1a2a51f23baa7d617093913b5f883a40472f",
+    "README.md": "ea9a1ca68f180c25f422d59e987374d6425712ba",
+    "REQUIRES.md": "58cb82dc5b6538a186459c4b55228dfbd14f5665",
+    "assistant/__init__.py": "a7a2c9c8c32391a25d08d70cf05a90f6da582e1e",
+    "assistant/adapter.py": "eedfdd7ef8bcc2f372280e683a91e51b438a9756",
+    "assistant/audit.py": "3958f88835d40cc6bf3414f8a0a25da8afe01d68",
+    "assistant/belt.py": "6911044a9effd0c7aa0b41507dca86d40fb50cb9",
+    "assistant/canon.py": "073fa4eafd5959685f5f9d5c8b0f61900abeed9c",
+    "assistant/families/__init__.py": "b40be429aaffd846a75154bbb972e0d1de7903b7",
+    "assistant/families/core.py": "539d94175fee205ba3f7efcd0d3230aea1e6f68c",
+    "assistant/gate.py": "34fc70613388219c1fc7892c9f914cef32b02b77",
+    "assistant/plan.py": "2bf4d51a0dc7172744397b52ef4f933e4548bf77",
+    "assistant/probe.py": "3f18da7886fc649ea90b226fc0e4883cd64cd660",
+    "assistant/routing.py": "d7233c94ef8c2e336839c931e551d92cc79ac83b"
+   },
+   "installs": [
+    "assistant"
+   ],
+   "kit_sha": "94c0eb0a8d8b6a87dfe6409a701fb90e0a5dcbe3",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "The Assistant Canon (64 families) as data, the coverage count, routing lanes, turn plan, correction belt, write gates and a real-model probe"
+  },
+  "gate": {
+   "files": {
+    "KIT.json": "d2b33b8d1d4af19aa7f2d42010b426ab1808199b",
+    "README.md": "f9a943fa2633c0ab76b86624d460e7dc287b3e76",
+    "REQUIRES.md": "80f29e128d9dcbf32e41446a4b9a9599468c0ca8",
+    "app_gate/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_gate/apps.py": "00ec624d1b555ebb544187dae0385129920be40c",
+    "app_gate/auth.py": "bbdcae9fdfd990b78cf323de02bb472b3d23bba1",
+    "app_gate/backends.py": "f47f709c793697abe4fe9c0789c8afc177c03391",
+    "app_gate/checks.py": "b111b44b1e8e5e6a600179fa1e6a5602875c953b",
+    "app_gate/context_processors.py": "61a0c71efb464f67d2f6d46cd707e34e7ea40fe7",
+    "app_gate/management/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_gate/management/commands/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_gate/management/commands/roster.py": "e42db7b5647774a2028523c55b14f26417a5e656",
+    "app_gate/middleware.py": "d759180c491732ca7200489e43c27f79f637700a",
+    "app_gate/migrations/0001_initial.py": "0bd253d04eb45d29c4b13fa3838fc6edc7048473",
+    "app_gate/migrations/0002_seed_owners.py": "00d1e0ffb974324d48a4b56c6493e41adecd441c",
+    "app_gate/migrations/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_gate/models.py": "0031fce8fcdad33fee4e2f3ce7568b3e7b1b557b",
+    "app_gate/static/app_gate/gate.css": "a3818152686b53748f336fef5d90bc9dd879ce18",
+    "app_gate/templates/app_gate/denied.html": "0e15d80f218ec73252cf77939efa8dfb5322cccd",
+    "app_gate/templates/app_gate/login.html": "080321224349963ec20918bf0e05059938a1a2ed",
+    "app_gate/urls.py": "1d95957c27ab30990f618057b39fabf637e0b600",
+    "app_gate/views.py": "03eeb225d08bafe13fcf2f197f6d2b063a2e6822"
+   },
+   "installs": [
+    "app_gate"
+   ],
+   "kit_sha": "0d9ef0884b3bf2780d1c8384c07cad9b8b877e99",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "Deny-by-default identity gate: owners, per-app roster, role ladder, append-only gate log"
+  },
+  "health": {
+   "files": {
+    "KIT.json": "9becf2a8266b699a0ee3ceb2e6383079f5912ea4",
+    "README.md": "0abbb618cc594b9ff9f4d5f80e62112364a1031b",
+    "REQUIRES.md": "b3efdcef3ede578069e31223006e51ccc95428c9",
+    "app_health/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_health/apps.py": "24bb98925391725ee4d256862319c5b3e99ab2fd",
+    "app_health/urls.py": "6584f59b9bb54b959c350b6b368a92809f35503b",
+    "app_health/views.py": "caa9d11e7ab0a093b03b00b898936286911caf21"
+   },
+   "installs": [
+    "app_health"
+   ],
+   "kit_sha": "511451efcb5ff17e09e1b274ffeb8dceb5c05926",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "Liveness and a readiness probe that fails on an unmigrated database"
+  },
+  "service-runner": {
+   "files": {
+    "KIT.json": "d135522947fbffad3165335a8f4feecbb424c3f5",
+    "README.md": "dc1b62bb587f490137b0bb3e1e95f9eab5d33919",
+    "REQUIRES.md": "a60ebc00d7117cde7473160174a080d5a87c19f7",
+    "service_runner.py": "63746f4bc711c2e0006ded3f38319caab67e3ef9"
+   },
+   "installs": [
+    "service_runner.py"
+   ],
+   "kit_sha": "47bf8b633d0062d3f64a3f12d4fa18a49b9a207f",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "Run, supervise and verify declared services from one strict manifest; a requested stop is not a crash"
+  },
+  "settings": {
+   "files": {
+    "KIT.json": "db946a851abcc0a642d645c1ebfa5c4281d582dc",
+    "README.md": "b9910e6b369376fdf784c2d057295ab305efb202",
+    "REQUIRES.md": "e742300c318e2828ea82d6bb320191c577414669",
+    "appkit_settings.py": "00356626b01017f3fb6d438e154e183269907dd3",
+    "envcheck.py": "5fd2c61333bd7c8e9f6fadf553867f0d4d6ed4d5"
+   },
+   "installs": [
+    "appkit_settings.py",
+    "envcheck.py"
+   ],
+   "kit_sha": "b1671da05d564415bf4dd836a73eccafd3a28810",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "Fail-closed Django settings and a production env validator that names every problem at once"
+  },
+  "shell": {
+   "files": {
+    "KIT.json": "53c689bde0509a2ca29a9e82eee7ca663c8e4288",
+    "README.md": "3608e8aef1696555af4e1f66201ddc8813de3ccb",
+    "REQUIRES.md": "b08ac53eb3f871c371f4c0acbee1f66a55cc31ad",
+    "app_shell/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_shell/apps.py": "36327e2a096bc7985444d10c9a689ea568821263",
+    "app_shell/checks.py": "6c17ba133c23b6df1b87253a98e43e19f954e03e",
+    "app_shell/context_processors.py": "171a15adff0054f0b3e221629b8b8f81cc66431b",
+    "app_shell/static/app_shell/prefetch.js": "3917d4ebd4a5c6beddb7edcaa537290c1e6b7a93",
+    "app_shell/static/app_shell/shell.css": "567b240f8c70736534e6bb921aa02f8c84d8f994",
+    "app_shell/static/app_shell/shell.js": "0184072f28fb616f6378921d9ab0701fab2ea2c6",
+    "app_shell/templates/app_shell/_confirm.html": "0a901717609d4f0ec8dba7baf9b174983372b7d3",
+    "app_shell/templates/app_shell/_drawer.html": "10a0e8fab70f967659cf9b575935f8503222b7b9",
+    "app_shell/templates/app_shell/_live.html": "f702a8e2092966ab39ec74f9f319a997389f2bb7",
+    "app_shell/templates/app_shell/_palette.html": "29a535f0748744c8c2035427e6936bc2f1d0f539",
+    "app_shell/templates/app_shell/_toasts.html": "b0dceeeb74c4ce1ef800d1fe9f4aa659a925bcbb",
+    "app_shell/templates/app_shell/base.html": "017b61512ce1c2fcaab8238d5976da96d9829dda"
+   },
+   "installs": [
+    "app_shell"
+   ],
+   "kit_sha": "eab25f6da8e130bfa43d0c49500261d0dc67a479",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "App shell whose capabilities (toasts, palette, live, drawer, confirm, transitions, prefetch) are declared, not always-on"
+  }
+ }
+}

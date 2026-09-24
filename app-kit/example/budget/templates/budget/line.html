@@ -1,0 +1,8 @@
+{% extends "budget/base.html" %}
+{% block title %}{{ line.code }} {{ line.title }}{% endblock %}
+{% block content %}
+<div class="page">
+  <h1 class="page-title">{{ line.code }} {{ line.title }}{% if line.variance and line.variance > 0 %} is {{ line.variance|floatformat:"2g" }} over plan{% endif %}</h1>
+  <div class="card">{% include "budget/_line.html" %}</div>
+</div>
+{% endblock %}

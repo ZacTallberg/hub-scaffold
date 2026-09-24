@@ -1,0 +1,11 @@
+{% comment %} Not window.confirm(): a native dialog shows the page ORIGIN in its chrome, can be suppressed
+   by the browser's "prevent additional dialogs" box (turning a guarded action unguarded), and
+   has no room for what matters — what the click is about to DO. {% endcomment %}
+<dialog class="app-dialog" data-confirm-dialog aria-labelledby="confirm-title">
+  <h2 id="confirm-title" class="dialog-title">Before you go ahead</h2>
+  <p class="dialog-text" data-confirm-text></p>
+  <div class="dialog-actions">
+    <button class="btn btn-quiet" type="button" data-confirm-cancel>Cancel</button>
+    <button class="btn btn-primary" type="button" data-confirm-ok>Yes, do it</button>
+  </div>
+</dialog>

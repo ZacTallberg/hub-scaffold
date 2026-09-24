@@ -1,0 +1,18 @@
+<dl class="facts">
+  <dt>Team</dt><dd>{{ line.team }}</dd>
+  <dt>Status</dt><dd><span class="pill pill-{{ line.status }}">{{ line.get_status_display }}</span></dd>
+  <dt>Planned</dt><dd>{{ line.planned|floatformat:"2g" }}</dd>
+  <dt>Actual</dt><dd>{% if line.actual is None %}not measured yet{% else %}{{ line.actual|floatformat:"2g" }}{% endif %}</dd>
+  <dt>Variance</dt><dd>{% if line.variance is None %}&mdash; (no actual to compare){% else %}{{ line.variance|floatformat:"2g" }}{% if line.variance > 0 %} over, because the actual exceeds the plan{% endif %}{% endif %}</dd>
+</dl>
+{% if line.status == "archived" %}
+<form method="post" action="{% url 'budget:reopen' line.code %}" class="review" data-confirm="Reopen {{ line.code }}? It returns to the open list with its budget status; the reopen is recorded in its history.">
+  {% csrf_token %}<span class="muted">Archived lines can be reopened.</span>
+  <button class="btn btn-primary" type="submit">Reopen</button>
+</form>
+{% endif %}
+<h3 class="section-title">History</h3>
+<ol class="history">
+  {% for e in events %}<li><time>{{ e.at|date:"Y-m-d H:i" }}</time> {{ e.actor }} &middot; {{ e.action }}</li>
+  {% empty %}<li class="muted">No changes recorded for this line yet.</li>{% endfor %}
+</ol>

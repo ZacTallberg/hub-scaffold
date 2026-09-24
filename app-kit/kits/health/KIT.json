@@ -1,0 +1,1 @@
+{"state": "active", "summary": "Liveness and a readiness probe that fails on an unmigrated database", "installs": ["app_health"]}

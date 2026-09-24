@@ -1,0 +1,8 @@
+{% extends "app_shell/base.html" %}
+{% load static %}
+{% block head %}<link rel="stylesheet" href="{% static 'budget/budget.css' %}">{% endblock %}
+{% block home_url %}{% url 'budget:home' %}{% endblock %}
+{% block nav %}
+  <a href="{% url 'budget:home' %}" data-prefetch {% if request.resolver_match.url_name == 'home' %}aria-current="page"{% endif %}>Lines</a>
+  <a href="{% url 'budget:method' %}" data-prefetch {% if request.resolver_match.url_name == 'method' %}aria-current="page"{% endif %}>How it is counted</a>
+{% endblock %}
