@@ -89,7 +89,8 @@
     feat: { shipped: "pass", partial: "warn", planned: "info", experimental: "info", removed: "stale" },
     gap: { open: "fail", investigating: "warn", mitigated: "info", closed: "pass", "wont-fix": "stale" },
     cap: { extracted: "pass", reusable: "pass", proven: "pass", prototype: "warn", concept: "info", service: "info" },
-    directive: { active: "info", fulfilled: "pass", superseded: "stale", expired: "warn" }
+    directive: { active: "info", fulfilled: "pass", superseded: "stale", expired: "warn" },
+    held: { held: "warn", promoted: "pass", abandoned: "stale" }
   };
   function roleOf(type, status) { return (SROLE[type] || {})[status] || "info"; }
   function badge(type, status) {
@@ -154,7 +155,7 @@
   var D = parseData();
   var BY_ID = {};
   var COLLECTIONS = ["tasks", "adrs", "feats", "gaps", "caps", "deploys", "notes",
-                     "directives", "acks"];
+                     "directives", "acks", "held"];
   function rebuildIndex() {
     BY_ID = {};
     COLLECTIONS.forEach(function (k) {
@@ -174,7 +175,10 @@
     { key: "caps", label: "Capabilities", icon: "stack", pick: function (d) { return d.caps || []; }, type: "cap", cols: COLS_CAP() },
     { key: "deploys", label: "Deploys", icon: "rocket", pick: function (d) { return d.deploys || []; }, type: "deploy", cols: COLS_DEPLOY() },
     { key: "notes", label: "Findings", icon: "stack", pick: function (d) { return d.notes || []; }, type: "note", cols: COLS_NOTE() },
-    { key: "directives", label: "Directives", icon: "bolt", pick: function (d) { return d.directives || []; }, type: "directive", cols: COLS_DIRECTIVE() }
+    { key: "directives", label: "Directives", icon: "bolt", pick: function (d) { return d.directives || []; }, type: "directive", cols: COLS_DIRECTIVE() },
+    // THE PROMOTION LANE: finished work held back from live, ageing in public until it is
+    // promoted with evidence. Open holds first, oldest first — the oldest is the one rotting.
+    { key: "held", label: "Held", icon: "stack", pick: function (d) { return heldRows(d); }, type: "held", cols: COLS_HELD() }
   ];
   TABS.forEach(function (t) { if (t.pick) t.rows = t.pick(D); });
   function tabByKey(key) { for (var i = 0; i < TABS.length; i++) if (TABS[i].key === key) return TABS[i]; return null; }
@@ -203,11 +207,21 @@
       complete: !command || passed
     };
   }
+  // A row a SCHEDULER wrote about its own run (a hand-back, a reaped worker) is not work.
+  // Counted raw, a task reads MORE complete every time a worker dies on it. Mirrors
+  // hub_core/plan.py LIFECYCLE_KINDS; such rows are still shown, never ticked as work.
+  var LIFECYCLE_KINDS = { handed_back: 1, lease_released: 1, reaped: 1, launcher_timeout: 1,
+                          claim_expired: 1, lifecycle: 1 };
+  function isLifecycleStep(step) {
+    return !!(step && (step.lifecycle === true || LIFECYCLE_KINDS[step.kind]));
+  }
   function taskProgress(task) {
-    var plan = (task && task.plan) || [];
+    var all = (task && task.plan) || [];
+    var plan = all.filter(function (s) { return s && !isLifecycleStep(s); });
     if (!plan.length) return null;
     var done = plan.filter(function (s) { return s && s.done; }).length;
     return { done: done, total: plan.length, pct: Math.round(done * 100 / plan.length),
+             lifecycle: all.length - plan.length,
              step: (plan.filter(function (s) { return s && !s.done; })[0] || {}).step || null };
   }
   function taskStatusBadge(task) {
@@ -240,11 +254,30 @@
       { label: "Status", k: "status", cls: "col-status", cell: function (r) { return el("td", { class: "col-status" }, [taskStatusBadge(r)]); } },
       { label: "Held by", k: "id", cls: "col-pickup", sortVal: function (r) { return leaseOf(r.id) ? 0 : 1; }, cell: function (r) {
           var lease = leaseOf(r.id);
+          // GIVEN, NOT YET STARTED: until somebody holds a lease, the agent a task was handed to
+          // is its owner. The lease always wins once it exists.
+          if (!lease && r.assigned_to && r.status !== "done" && r.status !== "dropped") {
+            return el("td", { class: "col-pickup" }, [el("span", { class: "lease-chip is-assigned",
+              title: "given to " + r.assigned_to + " · not started yet" }, [
+              doc.createTextNode("→ " + r.assigned_to)
+            ])]);
+          }
           if (!lease) return txt("—", "cell-sub col-pickup");
-          return el("td", { class: "col-pickup" }, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : ""),
-            title: lease.agent + " has held this " + fmtAge(lease.age_s) }, [
+          // A lease is held by a LIVE CONSOLE. "gone" means the holder's machine is reporting
+          // and that console is not among its live ones; "unprovable" means presence cannot
+          // say (the machine is quiet), which is never read as gone.
+          var gone = lease.holder_state === "gone";
+          var why = lease.agent + " has held this " + fmtAge(lease.age_s)
+            + (lease.holder_session ? " · console " + String(lease.holder_session).slice(0, 8) : "")
+            + (lease.holder_machine ? " on " + lease.holder_machine : "")
+            + (gone ? " · that console has been gone " + fmtAge(lease.holder_gone_s)
+                      + "; the lease frees itself when it expires"
+               : lease.holder_state === "unprovable" && lease.holder_session
+                 ? " · liveness unprovable (its machine is not reporting)" : "");
+          return el("td", { class: "col-pickup" }, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : "") + (gone ? " is-gone" : ""),
+            title: why }, [
             el("span", { class: "lease-dot", "aria-hidden": "true" }),
-            doc.createTextNode(lease.agent || "worker")
+            doc.createTextNode((lease.agent || "worker") + (gone ? " · gone" : ""))
           ])]);
         } },
       { label: "Phase", k: "phase", cls: "col-phase", cell: function (r) { return txt(r.phase, "cell-sub col-phase"); } },
@@ -255,7 +288,8 @@
           if (!p) return txt("unplanned", "cell-sub col-progress");
           return el("td", { class: "col-progress task-progress-cell" }, [
             el("span", { class: "mini-progress", "aria-hidden": "true" }, [el("span", { style: "width:" + p.pct + "%" })]),
-            el("span", { class: "mini-progress-label", text: p.done + "/" + p.total })]);
+            el("span", { class: "mini-progress-label", text: p.done + "/" + p.total,
+                         title: p.lifecycle ? p.lifecycle + " scheduler row(s) on this plan (hand-backs, reaped runs) are shown but not counted as work" : null })]);
         } }
     ];
   }
@@ -320,6 +354,40 @@
             text: (overdue ? "overdue · " : "") + relativeTime(r.deadline) })]);
         } },
       { label: "Kind", k: "answers", cell: function (r) { return txt(r.answers ? "answer" : "directive", "cell-sub"); } }
+    ];
+  }
+  // Open holds carry their age and urgency from the live block (the server computes both, so the
+  // board and /hub/held.json can never disagree); closed ones keep their record.
+  function heldRows(d) {
+    var byId = {};
+    ((d.live || {}).held || []).forEach(function (h) { byId[h.id] = h; });
+    return (d.held || []).map(function (e) {
+      var q = byId[e.id];
+      return q ? Object.assign({}, e, { age_s: q.age_s, urgency: q.urgency, detail: q.detail }) : e;
+    }).sort(function (a, b) {
+      var oa = a.status === "held" ? 0 : 1, ob = b.status === "held" ? 0 : 1;
+      return (oa - ob) || ((b.age_s || 0) - (a.age_s || 0));
+    });
+  }
+  function COLS_HELD() {
+    var urg = { critical: 0, warn: 1, info: 2 };
+    return [
+      { label: "Status", k: "status", cell: function (r) { return el("td", null, [badge("held", r.status)]); } },
+      { label: "Urgency", k: "urgency", sortVal: function (r) { return urg[r.urgency] == null ? 9 : urg[r.urgency]; },
+        cell: function (r) {
+          if (r.status !== "held" || !r.urgency) return txt("—", "cell-sub");
+          var role = r.urgency === "critical" ? "fail" : r.urgency === "warn" ? "warn" : "info";
+          return el("td", null, [el("span", { class: "badge b-" + role, text: r.urgency })]);
+        } },
+      { label: "Held", k: "age_s", cls: "num", sortVal: function (r) { return r.age_s || 0; },
+        cell: function (r) { return txt(r.status === "held" ? fmtAge(r.age_s || 0) : "—", "num"); } },
+      { label: "Commit", k: "sha", cls: "col-id", cell: function (r) { return txt((r.repo || "") + " @ " + String(r.sha || "").slice(0, 12), "col-id"); } },
+      { label: "Held because", k: "title", cls: "col-title", cell: function (r) {
+          return el("td", { class: "col-title" }, [
+            doc.createTextNode(r.title || ""),
+            r.reachable === "unpushed" ? el("span", { class: "held-disk", text: "on one disk only" }) : null
+          ].filter(Boolean));
+        } }
     ];
   }
   function deployCoherence(r) {
@@ -461,7 +529,8 @@
       kids.push(el("div", { class: "tcard-prog" }, [
         el("div", { class: "tcard-track" }, [el("div", { class: "tcard-fill", style: "width:" + prog.pct + "%" })]),
         el("div", { class: "tcard-steps" }, [
-          el("span", { text: "step " + prog.done + "/" + prog.total }),
+          el("span", { text: "step " + prog.done + "/" + prog.total
+                             + (prog.lifecycle ? " (+" + prog.lifecycle + " lifecycle, not work)" : "") }),
           prog.step ? el("span", { class: "tcard-step", text: prog.step }) : null
         ].filter(Boolean))
       ]));
@@ -584,7 +653,9 @@
     "open-question": "Open question", "error-unclaimed": "Unclaimed error",
     "delivery-unmeasured-landing": "Landing unknown",
     "delivery-unmeasured-release": "Release unknown",
-    "delivery-unmeasured-live": "Live state unknown"
+    "delivery-unmeasured-live": "Live state unknown",
+    "question-in-flight": "Question in flight",
+    "held-info": "Held back", "held-warn": "Held back (ageing)", "held-critical": "Held back too long"
   };
   var ATTN_TONE = {
     "board-drained": "fail", "stalled-lease": "warn", "dangling-dep": "warn",
@@ -592,7 +663,8 @@
     "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
     "open-question": "warn", "error-unclaimed": "fail",
     "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
-    "delivery-unmeasured-live": "warn"
+    "delivery-unmeasured-live": "warn",
+    "question-in-flight": "info", "held-info": "info", "held-warn": "warn", "held-critical": "fail"
   };
   function attentionItem(it) {
     var tone = ATTN_TONE[it.kind] || "info";
@@ -1194,6 +1266,41 @@
      answered ones show the reply as a turn plus whether delivery LANDED (the asker's ack) —
      "answered" and "delivered" are different facts. Lanes and a 14-day strip answer "are we
      keeping up" without counting rows. */
+  // THE LINEAGE LADDER (?lineage=1): asked for, never automatic — it can put several questions
+  // to git. Each hop states known / no / superseded / unknown, and an unknown says why.
+  function lineageSection(task) {
+    var out = el("div", { class: "lineage-body" });
+    var btn = el("button", { class: "btn-ghost", type: "button", text: "Trace to what is serving" });
+    var sectionNode = el("div", { class: "detail-grid one" }, [section("Lineage", "branch", [
+      el("p", { class: "cell-sub", text: "The commits this task recorded, the verified deploy that carries one, the first release to carry it, and whether what is serving now still contains it." }),
+      btn, out])]);
+    btn.addEventListener("click", function () {
+      btn.disabled = true; out.textContent = "";
+      out.appendChild(el("p", { class: "cell-sub", text: "tracing…" }));
+      timedFetch("task/" + encodeURIComponent(localId(task.id)) + ".json?lineage=1", {
+        credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
+      }).then(function (r) { return r.json(); }).then(function (body) {
+        var lin = (body.data || {}).lineage || {};
+        out.textContent = "";
+        if (lin.error) out.appendChild(el("div", { class: "callout warn", text: "Could not trace: " + lin.error }));
+        (lin.hops || []).forEach(function (h) {
+          var role = h.state === "known" ? "pass" : h.state === "no" || h.state === "superseded" ? "fail" : "stale";
+          out.appendChild(el("div", { class: "lineage-hop" }, [
+            el("span", { class: "badge b-" + role, text: h.hop.replace("_", " ") + " · " + h.state }),
+            el("span", { class: "lineage-detail", text: h.detail })
+          ]));
+        });
+        out.appendChild(el("p", { class: "cell-sub", text: lin.complete ? "Live: the build serving now contains this task's commit."
+          : "Not proven live — read the first hop that is not ‘known’." }));
+        btn.disabled = false;
+      }, function (err) {
+        out.textContent = "";
+        out.appendChild(el("div", { class: "callout warn", text: "The trace request failed: " + (err && err.message || err) }));
+        btn.disabled = false;
+      });
+    });
+    return sectionNode;
+  }
   var ANSWER_ECHO = "\n\n---\nIn answer to your question:";
   function askThreads() {
     var acksByDirective = {};
@@ -1206,6 +1313,9 @@
       if (d.answers) answerByQuestion[d.answers] = d;
     });
     var threads = [];
+    // A question a machine has CLAIMED is in flight, not waiting on nobody (item claims).
+    var claimedAsk = {};
+    ((D.live || {}).asks || []).forEach(function (q) { if (q.claimed_by) claimedAsk[q.id] = q.claimed_by; });
     (D.notes || []).forEach(function (n) {
       var tags = (n.tags || []).map(function (t) { return String(t).toLowerCase(); });
       if (tags.indexOf("question") < 0) return;
@@ -1223,6 +1333,9 @@
         answered: !!reply,
         answer: answerText,
         answerBy: reply ? String((reply.provenance || {}).agent || "") : "",
+        answerUnattended: !!(reply && reply.unattended),
+        hop: parseInt(n.hop, 10) || 0,
+        claimedBy: claimedAsk[n.id] || null,
         acked: !!(reply && (acksByDirective[reply.id] || []).indexOf(asker) >= 0),
         askedAt: askedAt, askedMs: isNaN(askedMs) ? null : askedMs,
         answeredMs: isNaN(answeredMs) ? null : answeredMs,
@@ -1244,23 +1357,28 @@
     return threads;
   }
   function askThread(t) {
-    var stateLbl = t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
+    var stateLbl = t.open && t.claimedBy ? "in flight on " + t.claimedBy.machine
+                 : t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
                  : !t.acked ? "answered — awaiting the asker's ack"
                  : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
     var kids = [
       el("span", { class: "ask-head" }, [
         el("span", { class: "ask-from", text: t.asker || "someone" }),
+        t.hop ? el("span", { class: "ask-hop", title: "raised by an unattended run " + t.hop +
+                             " hop" + (t.hop === 1 ? "" : "s") + " deep; hop 2 is a person's",
+                             text: "escalation · hop " + t.hop }) : null,
         el("span", { class: "ask-state" + (t.open ? " is-open" : t.acked ? " is-closed" : " is-answered"),
                      text: stateLbl }),
         el("time", { class: "rel-time ask-age", datetime: t.askedAt || "", "data-ts": t.askedAt || "",
                      text: relativeTime(t.askedAt) })
-      ]),
+      ].filter(Boolean)),
       el("span", { class: "ask-title", text: t.title })
     ];
     if (t.context) kids.push(el("span", { class: "ask-body", text: String(t.context).slice(0, 220) }));
     if (t.answered && t.answer) {
       kids.push(el("span", { class: "ask-answer" }, [
-        el("span", { class: "ask-answer-by", text: (t.answerBy || "the operator") + " replied" }),
+        el("span", { class: "ask-answer-by", text: (t.answerBy || "the operator") + " replied"
+          + (t.answerUnattended ? " (an unattended run — verify if it matters)" : "") }),
         el("span", { class: "ask-answer-text", text: String(t.answer).slice(0, 300) })
       ]));
     }
@@ -1497,7 +1615,8 @@
             el("span", { class: "badge b-" + (r.severity === "critical" ? "fail" : "warn"), text: r.severity || "error" }),
             where ? el("span", { class: "err-where", text: where }) : null,
             el("time", { class: "rel-time err-age", datetime: r.ts || "", "data-ts": r.ts || "", text: relativeTime(r.ts) }),
-            el("span", { class: "err-claim", text: r.acked ? ("claimed by " + ((r.acked || {}).by || "someone")) : "unclaimed" })
+            el("span", { class: "err-claim", text: r.acked ? ("claimed by " + ((r.acked || {}).by || "someone"))
+              : r.claimed_by ? ("in flight on " + r.claimed_by.machine) : "unclaimed" })
           ].filter(Boolean)),
           el("span", { class: "err-msg", text: r.message || "" }),
           el("span", { class: "err-meta mono", text: (r.source || "") + " · " + (r.fingerprint || "")
@@ -1694,7 +1813,7 @@
   var _openModalLive = null;
   function openEntity(type, r, liveRefresh) {
     var role = type === "deploy" ? (r.audit_ok ? "pass" : "fail") : roleOf(type, r.status || r.maturity);
-    var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket", directive: "bolt" }[type] || "info";
+    var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket", directive: "bolt", held: "stack" }[type] || "info";
     var title = r.title || r.name || (r.number != null ? ("ADR " + r.number) : localId(r.id));
     var body = el("div");
 
@@ -1707,7 +1826,11 @@
       r.phase ? row("Phase", r.phase) : null,
       r.priority ? row("Priority", r.priority) : null,
       r.number != null ? rowMono("Number", r.number) : null,
-      r.version != null ? rowMono("Version", r.version) : null
+      r.version != null ? rowMono("Version", r.version) : null,
+      type === "task" && r.assigned_to ? row("Given to", r.assigned_to + (leaseOf(r.id) ? "" : " · not started yet")) : null,
+      type === "task" && r.machine ? row("Only on", r.machine + " — its input is there; no other machine is offered it") : null,
+      type === "task" && r.project ? rowMono("Project", r.project) : null,
+      r.hop ? row("Escalation", "raised by an unattended run, hop " + r.hop + (r.hop >= 2 ? " — a person's now" : " — an unattended run may take it once more")) : null
     ];
     var detailRows = [
       r.summary ? row("Summary", r.summary) : null,
@@ -1717,7 +1840,15 @@
       r.needs ? row("Needs", r.needs) : null,
       r.build ? rowMono("Build", r.build) : null,
       r.sha ? rowMono("SHA", r.sha) : null,
-      r.at ? rowMono("At", r.at) : null
+      r.at ? rowMono("At", r.at) : null,
+      type === "held" && r.repo ? rowMono("Repository", r.repo + (r.branch ? " (" + r.branch + ")" : "")) : null,
+      type === "held" && r.reason ? row("Held because", r.reason) : null,
+      type === "held" && r.rebuild ? row("Before it can go live", r.rebuild) : null,
+      type === "held" && r.reachable ? row("Fetchable", r.reachable === "unpushed"
+        ? "ON ONE DISK ONLY — " + (r.unpushed_reason || "no reason recorded") + (r.local_path ? " (" + r.local_path + ")" : "")
+        : "yes — proven by " + r.reachable) : null,
+      type === "held" && r.promoted_evidence ? rowMono("Promoted with", r.promoted_evidence) : null,
+      type === "held" && r.abandoned_reason ? row("Abandoned because", r.abandoned_reason) : null
     ];
     if (type === "directive") {
       // Delivery is the directive's whole point: name the roster and who has checked in.
@@ -1767,6 +1898,7 @@
         ])));
       }
       if (liveRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Live", "pulse", liveRows)]));
+      body.appendChild(lineageSection(r));
     }
 
     var links = [];
@@ -2266,7 +2398,8 @@
   }
 
   var TYPE_COLLECTION = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps",
-                          deploy: "deploys", note: "notes", directive: "directives", ack: "acks" };
+                          deploy: "deploys", note: "notes", directive: "directives", ack: "acks",
+                          held: "held" };
   function applyDelta(payload) {
     // DELTA CONSUME: patch only the changed entities into in-memory state and re-render. The wire
     // carries the changed rows, never the whole board. The cockpit blocks ride along in
@@ -2708,7 +2841,7 @@
 
     var initial = "overview";
     try { var p = new URL(location.href).searchParams.get("tab"); if (p && _panes[p]) initial = p; } catch (e) {}
-    var keyMap = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes", directive: "directives" };
+    var keyMap = { task: "tasks", adr: "adrs", feat: "feats", gap: "gaps", cap: "caps", deploy: "deploys", note: "notes", directive: "directives", held: "held" };
     if (location.hash) {
       var m = location.hash.slice(1).match(/^([a-z]+)-(.+)$/);
       if (m && keyMap[m[1]]) initial = keyMap[m[1]];
