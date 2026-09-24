@@ -73,15 +73,19 @@ def epoch(value) -> float:
 
 
 def contract() -> dict:
-    """The shared freshness contract. A heartbeat every HUB_PRESENCE_INTERVAL_S seconds
+    """The shared freshness contract. A heartbeat every HUB_PRESENCE_INTERVAL_S seconds (60 by
+    default)
     permits two delayed frames before degrading and six missed frames before the computer is
     declared offline. Activity is a separate signal: a request proves the agent acted, never
     that the seat remains online after it returned."""
     try:
-        interval = int(os.environ.get("HUB_PRESENCE_INTERVAL_S", "15"))
+        interval = int(os.environ.get("HUB_PRESENCE_INTERVAL_S", "60"))
     except (TypeError, ValueError):
-        interval = 15
-    interval = max(5, min(interval, 60))
+        interval = 60
+    # 60 s by default, not 15: every seat's heartbeat is a request the hub must serve, and on a
+    # hub already short of threads a fleet of 15 s beacons is a measurable share of its load for
+    # no gain in truth (online/offline are derived from the interval, so they stay honest).
+    interval = max(5, min(interval, 300))
     return {
         "heartbeat_interval_s": interval,
         "online_after_s": max(30, interval * 3),
@@ -136,8 +140,50 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
     return removed
 
 
+# What only a seat running the client kit reports. Presence is written for ANY authenticated
+# caller that sets X-Hub-Machine (a probe, a script borrowing a token), so a row that names a
+# machine but carries none of these is a CALLER, not a computer: listing it as a device puts a
+# phantom "never checked in" machine on somebody's card and a false "behind" on the distribution
+# view. One rule, read by every device view.
+KIT_TELEMETRY = ("client", "artifacts")
+FILES_MAX = 12
+
+
+def is_kit_machine(row) -> bool:
+    """True when a presence row is a computer running the client kit, not a bare caller."""
+    return bool(isinstance(row, dict) and str(row.get("machine") or "").strip()
+                and any(row.get(k) for k in KIT_TELEMETRY))
+
+
+def parse_artifacts(header: str) -> dict:
+    """`name=sha,name=sha` (X-Hub-Artifacts) -> {name: sha}; malformed pairs are dropped."""
+    import re
+    out = {}
+    for part in str(header or "").split(",")[:32]:
+        name, sep, sha = part.partition("=")
+        name, sha = name.strip().lower()[:40], sha.strip()[:80]
+        if sep and name and re.fullmatch(r"[a-z0-9._-]+", name) and sha:
+            out[name] = sha
+    return out
+
+
+def parse_files(header: str) -> list:
+    """X-Hub-Files: comma-separated `<project>/<path>` a console edited recently. Bounded,
+    slash-normalized, deduplicated in order; a token without a project segment is dropped
+    (two consoles in different repos editing `src/views.py` are not editing one file)."""
+    out = []
+    for part in str(header or "").split(","):
+        rel = part.strip().replace(chr(92), "/").strip("/")[:200]
+        if "/" in rel and ".." not in rel.split("/") and rel not in out:
+            out.append(rel)
+        if len(out) >= FILES_MAX:
+            break
+    return out
+
+
 def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: str = "",
-            focus: str = "", heartbeat: bool = False) -> None:
+            focus: str = "", heartbeat: bool = False, client: str = "", artifacts=None,
+            files=None) -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine).
     A heartbeat stamps heartbeat_at; anything else stamps activity_at. Never raises."""
@@ -170,6 +216,15 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 payload["heartbeat_at"] = now
             else:
                 payload["activity_at"] = now
+            # Kit telemetry is a fact about the MACHINE row, and only a machine row can carry it
+            # (an agent-only row is a legacy aggregate, never a device).
+            if machine and client:
+                payload["client"] = str(client)[:80]
+            if machine and artifacts:
+                prior_art = payload.get("artifacts")
+                payload["artifacts"] = {**(prior_art if isinstance(prior_art, dict) else {}),
+                                        **dict(artifacts)}
+                payload["telemetry_at"] = now
             sid = (session or "").strip()[:64]
             if sid:
                 sessions = payload.get("sessions")
@@ -183,6 +238,14 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                     "focus": (focus or "").strip()[:180] or prior.get("focus", ""),
                     "at": now,
                 }
+                # Files are a CURRENT claim ("this console edited these recently"): a report
+                # replaces the last one, and a report without the header keeps it.
+                if files is not None:
+                    sessions[sid]["files"] = list(files)[:FILES_MAX]
+                    sessions[sid]["files_at"] = now
+                elif prior.get("files"):
+                    sessions[sid]["files"] = prior["files"]
+                    sessions[sid]["files_at"] = prior.get("files_at", now)
                 # A console quiet past the keep window is closed. Without pruning this list
                 # only grows and ends up reporting every window ever opened.
                 cutoff = now - SESSION_KEEP_S
@@ -244,9 +307,11 @@ def read(hub_dir) -> dict:
                      if k not in ("agent", "sessions") and not k.startswith("_")}
             entry.setdefault("machine", name)
             sess = r.get("sessions")
+            entry["kit"] = is_kit_machine(r)
             entry["sessions"] = sorted(
                 ({"id": k, "cwd": (v or {}).get("cwd", ""),
-                  "focus": (v or {}).get("focus", ""), "at": epoch((v or {}).get("at"))}
+                  "focus": (v or {}).get("focus", ""), "at": epoch((v or {}).get("at")),
+                  "files": list((v or {}).get("files") or [])[:FILES_MAX]}
                  for k, v in (sess or {}).items() if isinstance(v, dict)),
                 key=lambda s: s.get("at") or 0, reverse=True) if isinstance(sess, dict) else []
             machines.append(entry)
@@ -309,8 +374,34 @@ def live_sessions(hub_dir, now: float | None = None) -> list:
                             "session": str(s.get("id") or "")[:8],
                             "cwd": str(s.get("cwd") or "")[:64],
                             "focus": str(s.get("focus") or "")[:100],
+                            "files": list(s.get("files") or [])[:FILES_MAX],
                             "age_s": round(now - at)})
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
+    return out
+
+
+FILE_OVERLAP_WINDOW_S = 600
+
+
+def file_overlaps(sessions: list) -> list:
+    """FILE crossovers: two live consoles that both edited the same `<project>/<path>` inside
+    the window — the strongest duplicate-work signal there is, and the one nobody sees from
+    inside either console. Pairs are of DIFFERENT consoles (a console never overlaps itself);
+    each pair is listed once, most shared files first. Pure over live_sessions() rows."""
+    live = [s for s in sessions or []
+            if s.get("files") and (s.get("age_s") is None or s["age_s"] <= FILE_OVERLAP_WINDOW_S)]
+    out = []
+    for i, one in enumerate(live):
+        for other in live[i + 1:]:
+            key_one = (one.get("agent"), one.get("machine"), one.get("session"))
+            if key_one == (other.get("agent"), other.get("machine"), other.get("session")):
+                continue
+            shared = sorted(set(one["files"]) & set(other["files"]))
+            if shared:
+                out.append({"a": {k: one.get(k) for k in ("agent", "machine", "session")},
+                            "b": {k: other.get(k) for k in ("agent", "machine", "session")},
+                            "files": shared})
+    out.sort(key=lambda o: -len(o["files"]))
     return out
 
 

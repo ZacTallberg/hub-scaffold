@@ -122,13 +122,15 @@ def directive_items(state, agent: str) -> list:
     return out
 
 
-def items_for(state, agent: str, operator: str) -> list:
+def items_for(state, agent: str, operator: str, operator_extra=None) -> list:
     """Everything currently addressed to `agent`. The operator additionally receives every
-    open question — questions are addressed to whoever can answer them."""
+    open question — questions are addressed to whoever can answer them — and any computed
+    items the adapter raises for a person (a seat gone silent, persistent drift): conditions
+    that cannot fix themselves and so must become somebody's item."""
     agent = (agent or "").strip().lower()
     items = directive_items(state, agent)
     if agent and agent == (operator or "").strip().lower():
-        items = question_items(state) + items
+        items = question_items(state) + list(operator_extra or []) + items
     return items
 
 
@@ -138,8 +140,8 @@ def fingerprint(items) -> str:
     return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def snapshot(state, agent: str, operator: str) -> dict:
-    items = items_for(state, agent, operator)
+def snapshot(state, agent: str, operator: str, operator_extra=None) -> dict:
+    items = items_for(state, agent, operator, operator_extra)
     return {"items": items, "fingerprint": fingerprint(items), "count": len(items)}
 
 
@@ -192,6 +194,10 @@ def render_line(item) -> str:
         return "%s asks: %s" % (item.get("from") or "someone", item.get("title") or "")
     if item.get("kind") == "answer":
         return "Answer from %s: %s" % (item.get("from") or "the operator", item.get("title") or "")
+    if item.get("kind") == "offline":
+        return "OFFLINE %s" % (item.get("title") or "")
+    if item.get("kind") == "drift":
+        return "DRIFT %s" % (item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 

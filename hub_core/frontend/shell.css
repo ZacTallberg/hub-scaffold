@@ -2054,7 +2054,17 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .err-spark { flex: none; }
 
 /* ============ Fleet cards: machines, live consoles, checkpoint notes ============ */
-.agent-mach { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; white-space: nowrap; }
+.agent-mach { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+.agent-machs { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.mach-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.agent-mach.conn-online .mach-dot { background: var(--pass-solid); }
+.agent-mach.conn-activity-only .mach-dot, .agent-mach.conn-degraded .mach-dot { background: var(--warn-solid); }
+.agent-mach.conn-offline .mach-dot { background: var(--fail-solid); }
+.agent-mach.conn-offline, .agent-mach.conn-unverified { border-style: dashed; }
+.mach-state { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+.agent-overlap { display: flex; gap: 6px; align-items: baseline; font-size: 11.5px; padding: 4px 8px; border-radius: 6px; background: var(--warn); color: var(--text); }
+.agent-overlap .b-glyph { color: var(--warn-solid); flex: none; }
+.sess-files { flex: none; font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
 .agent-note { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-card.s-abandoned { border-left-color: var(--warn-solid, #d99a2b); }
 .agent-card.s-active { border-left-color: var(--accent, #4f7cff); }
@@ -2111,3 +2121,20 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .err-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
 .err-details { font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); }
 .deadline-overdue { color: var(--fail-solid, #e5484d); font-weight: 700; font-size: 11.5px; }
+
+/* ============ Seats: distribution grades and derived per-person output ============ */
+.dist-list, .built-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.dist-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; min-width: 0; }
+.dist-row.st-current .mach-dot { background: var(--pass-solid); }
+.dist-row.st-drifted .mach-dot { background: var(--warn-solid); }
+.dist-row.st-offline .mach-dot { background: var(--muted); }
+.dist-mach { font-family: var(--mono, monospace); flex: none; }
+.dist-agent { color: var(--muted); flex: none; }
+.dist-what { margin-left: auto; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dist-row.st-drifted .dist-what { color: var(--text); }
+.built-row { padding: 6px 0; border-top: 1px dashed var(--border); }
+.built-row:first-child { border-top: 0; }
+.built-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.built-person { font-weight: 600; }
+.built-recent { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.callout.pass { background: var(--pass); color: var(--pass-fg); }
