@@ -43,7 +43,12 @@ from a working multi-project system. Nothing here names any specific person, hos
   that keeps failures in its own log can only be debugged from a shell on its host), and
   **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
-  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
+  the barren ladder it climbs when a cycle produces nothing), **unattended responders**
+  (`unattended-responders.md`: `hub_core.responder` spends one bounded, non-interactive session
+  per item that actually happened — a question, a fresh error, a task marked `--unattended` —
+  never a rotting task or a timer), and **multi-agent coordination**
+  (`multi-agent-coordination.md`: crossover between consoles, the five record kinds, and
+  audience-fenced doctrine). None runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook
@@ -122,8 +127,9 @@ disposable `verification-closer` only for a rare critical boundary.
   a script encodes one environment's assumptions and then rots silently against the platform it
   drives. The contract it must satisfy is fixed; the mechanism is yours.
 - **Optional entity types (Findings, Lessons, Decisions-log)** — generic and reusable, but kept OUT of
-  the minimal base. Add them via `campaigns/augment-hub.md` if you want them; they're an intended
-  extension, not a gap.
+  the minimal base. Findings and methods already ride `note` categories through the client's
+  `finding`/`method` verbs (and a review rides the ask loop); a dedicated entity type is an
+  intended extension via `campaigns/augment-hub.md`, not a gap.
 - **No LICENSE** — none, by choice (public repo → viewable but all-rights-reserved; add a permissive
   license only if a teammate needs to legally reuse it).
 
