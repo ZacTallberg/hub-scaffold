@@ -202,8 +202,13 @@ class HubForwarder(logging.Handler):
 ```
 
 Issue that service its own scoped credential — never the root token
-(`POST /hub/api/agent-credential {"action":"issue","subject":"svc-billing","scopes":["error:report"]}`
-from a `credential:manage` holder). A CLI process forwards without any wiring:
+(`POST /hub/api/agent-credential {"action":"issue","subject":"svc-billing","scopes":["error:report"],"ttl_s":31536000}`
+from a `credential:manage` holder). `ttl_s` is required (60..31536000 seconds) and the credential
+expires: rotate it before the `expires_at` the issue answer names — issue the replacement, swap
+the service's token, revoke the old one. A lapsed token is refused with HTTP 403; the app kit's
+`forwarding_status()` (and its forwarding chip) shows it as a climbing `failed` count with
+`last_detail: "HTTP 403"`, and the Hub records the refusal as a `hub.auth` row, so an expired
+forwarder is visible instead of silently unarmed. A CLI process forwards without any wiring:
 
 ```bash
 python -m hub_core.client app-error --app billing --kind background \
