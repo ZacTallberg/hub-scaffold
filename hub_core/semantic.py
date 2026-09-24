@@ -513,17 +513,31 @@ def semantic_ranking(query: str, conn, *, candidate_ids=None) -> tuple:
 
 
 def fuse_convex(lexical_scores: dict, semantic_scores: dict, *, alpha: float = CONVEX_ALPHA) -> dict:
-    """`alpha * lexical + (1 - alpha) * dense`, each normalized WITHIN THE QUERY.
+    """`alpha * lexical + (1 - alpha) * dense`, each normalized WITHIN THE QUERY — for a record
+    BOTH channels could read.
 
     A BM25 score and a cosine are different units; the only thing that makes them addable is
     rescaling both against the range this query produced (lexical by its max, dense min-max).
-    A record missing from one channel scores 0 there and keeps its other half — never dropped.
+    A record with a vector that shares no word with the query scores 0 lexically and keeps its
+    dense share.
 
-    Measured on the source instance (266 real answered asks, held-out halves): BM25F alone
-    69.5% top-1 / 94.5% top-5; dense alone 71.9 / 89.8; max-reciprocal-rank fusion 61.7 / 96.1
-    — worse at top-1 than either of its own inputs, because a max of ranks is blind to the two
-    channels AGREEING, which is the signal that separates a top-1 from a top-5; this convex
-    form 75.6 / 97.4, and 77.2 / 97.7 with the CSLS term.
+    A record WITHOUT a vector (written since the last `semantic_index` run) is scored by the
+    channel that could read it, at full weight: its score is its normalized lexical score. A
+    missing vector is an UNKNOWN, not a zero — scoring it as a zero capped every such record at
+    `alpha` (0.3), below any embedded record with a middling cosine, so the lesson written a
+    minute ago ranked 33rd for its own exact words while records that contained neither word
+    ranked above it. Renormalizing alpha to 1 for that record keeps the scale identical (both
+    forms live in 0..1), so an unvectored exact match ties the best record both channels agree
+    on, and an unvectored weak match stays below it.
+
+    `semantic_scores` holds a score for EVERY stored vector among the candidates (no top-N cut
+    upstream), so absence from it means no vector — never "ranked too low to return".
+
+    Measured on the source instance (266 real answered asks, held-out halves, fully indexed):
+    BM25F alone 69.5% top-1 / 94.5% top-5; dense alone 71.9 / 89.8; max-reciprocal-rank fusion
+    61.7 / 96.1 — worse at top-1 than either of its own inputs, because a max of ranks is blind
+    to the two channels AGREEING, which is the signal that separates a top-1 from a top-5; this
+    convex form 75.6 / 97.4, and 77.2 / 97.7 with the CSLS term.
     """
     if not semantic_scores:
         return dict(lexical_scores)
@@ -536,8 +550,10 @@ def fuse_convex(lexical_scores: dict, semantic_scores: dict, *, alpha: float = C
     for eid in set(lexical_scores) | set(semantic_scores):
         lex = lexical_scores.get(eid, 0.0) / top
         dense = semantic_scores.get(eid)
-        dense = (dense - lo) / span if dense is not None else 0.0
-        out[eid] = alpha * lex + (1.0 - alpha) * dense
+        if dense is None:
+            out[eid] = lex                      # no vector: the lexical channel at full weight
+        else:
+            out[eid] = alpha * lex + (1.0 - alpha) * (dense - lo) / span
     return out
 
 

@@ -60,7 +60,11 @@ model what it actually returns (dimension, norm, a related vs. unrelated cosine)
 it; `--coverage` prints what is embedded.
 
 Scores are fused convexly (`alpha=0.3` lexical) with a CSLS hub penalty computed by the index
-job. Those constants were measured on one board; **measure yours** with
+job. A record written since the last index run has no vector yet; it is scored by its wording
+ALONE, at full weight, never as "dense = 0" — a missing vector is unknown, not dissimilar, and
+treating it as zero capped every new record at 0.3 so the lesson written a minute ago ranked
+below records that shared none of its words. Between index runs a new record is therefore
+findable by its words at its true rank, and by meaning once the job has embedded it. Those constants were measured on one board; **measure yours** with
 `python manage.py retrieval_eval`, which scores every configuration over the board's own
 answered asks (a question somebody asked, linked by the board to the reply that resolved it —
 data nobody wrote for an evaluation), fits alpha on one half and reports on the other across
