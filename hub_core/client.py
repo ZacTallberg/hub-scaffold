@@ -31,6 +31,15 @@ in silence::
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
 
+What you learned goes on the board as the right KIND of record, and standing doctrine is read
+as your credential may see it::
+
+    python -m hub_core.client finding "export drops rows with an empty region" --evidence "..."
+    python -m hub_core.client method "verify at the deployed artifact" --how "..."
+    python -m hub_core.client gap "no restore drill" --severity P2 --evidence "..."
+    python -m hub_core.client review "may the export email real recipients?" --context "..."
+    python -m hub_core.client doctrine --doc doctrine --text
+
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
 
     python -m hub_core.client next                       # top ready + needs-spec + snoozed
@@ -175,6 +184,13 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         payload["plan"] = [
             {"step": step, "done": False} for step in arguments.plan_item
         ]
+    required = list(dict.fromkeys(arguments.requires + (["unattended"] if arguments.unattended
+                                                         else [])))
+    if required:
+        # A required capability is a hard placement filter at pull time; `unattended` is the
+        # one the event-driven responder (hub_core.responder) takes, so an attended worker
+        # that never declared it is never handed the task by `next`.
+        payload["routing"] = {"required_capabilities": required}
     return "task", payload
 
 
@@ -226,6 +242,14 @@ def _payload_ask(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         payload["relates_to"] = arguments.relates_to
     if arguments.anyway:
         payload["anyway"] = True
+    # THE LOOP BREAK IS MECHANICAL. An unattended responder (hub_core.responder) never works
+    # an ask stamped `via=responder`; the stamp is added HERE whenever the launching process
+    # marked the session unattended, so a chain of automated escalations stops at one hop
+    # without depending on a model remembering to type the marker.
+    if os.environ.get("HUB_UNATTENDED") == "1":
+        stamp = "via=responder"
+        if stamp not in (payload.get("context") or ""):
+            payload["context"] = ((payload.get("context") or "") + " " + stamp).strip()
     return "ask", payload
 
 
@@ -290,6 +314,64 @@ def _payload_ack_error(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     if arguments.note:
         payload["note"] = arguments.note
     return "ack-error", payload
+
+
+# ── Record verbs: which KIND of record a thing is decides where it lands ──
+# finding = a fact you DISCOVERED about how something actually behaves (needs evidence);
+# method  = a procedure this project both follows and exhibits (reusable practice);
+# gap     = a named deficiency somebody could own and close, with a severity;
+# review  = a human gate -- a question only a person may answer, raised BEFORE the thing ships.
+# A lesson (a rule earned from a mistake) is a `note` in the `gotcha` category. Filing
+# everything as one kind is how a board's other tabs go stale while one list grows.
+
+def _payload_finding(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"title": arguments.title, "category": "discovery",
+                               "status": "standing", "body_md": arguments.evidence,
+                               "tags": ["finding", *arguments.tag], "agent": _agent(arguments)}
+    if arguments.relates_to:
+        payload["relates_to"] = arguments.relates_to
+    return "note", payload
+
+
+def _payload_method(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"title": arguments.title, "category": "method",
+                               "status": "standing", "body_md": arguments.how,
+                               "tags": ["method", *arguments.tag], "agent": _agent(arguments)}
+    if arguments.relates_to:
+        payload["relates_to"] = arguments.relates_to
+    return "note", payload
+
+
+def _payload_gap(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"title": arguments.title, "status": "open",
+                               "severity": arguments.severity, "evidence": arguments.evidence,
+                               "agent": _agent(arguments)}
+    if arguments.source:
+        payload["source"] = arguments.source
+    return "gap", payload
+
+
+def _payload_review(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """A review gate rides the ask loop on purpose: it must be DELIVERED to the person who
+    decides, not merely recorded where they might one day look."""
+    payload: dict[str, Any] = {"agent": _agent(arguments),
+                               "question": "Review gate: " + arguments.question,
+                               "context": (arguments.context or "") +
+                                          ("\n\nThis is a human gate: nothing it covers ships "
+                                           "until a person answers."),
+                               "anyway": True}
+    if arguments.relates_to:
+        payload["relates_to"] = arguments.relates_to
+    return "ask", payload
+
+
+def _run_doctrine(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """A standing document as THIS credential may read it (facet fences applied server-side)."""
+    from urllib.parse import quote
+    payload = _get(base, f"doctrine.json?doc={quote(arguments.doc)}")
+    if arguments.text:
+        return {"text": (payload.get("data") or {}).get("text", "")}
+    return payload
 
 
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -535,6 +617,11 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--phase")
     create.add_argument("--touch", action="append", default=[])
     create.add_argument("--plan-item", action="append", default=[])
+    create.add_argument("--requires", action="append", default=[],
+                        help="a capability the claiming worker must declare (repeatable)")
+    create.add_argument("--unattended", action="store_true",
+                        help="hand the task to the unattended responder lane "
+                             "(routing.required_capabilities += unattended)")
     create.add_argument("--agent")
     create.set_defaults(payload=_payload_create)
 
@@ -628,6 +715,46 @@ def _parser() -> argparse.ArgumentParser:
     ack_error.add_argument("--note")
     ack_error.add_argument("--reopen", action="store_true")
     ack_error.set_defaults(payload=_payload_ack_error)
+
+    finding = commands.add_parser("finding",
+                                  help="record a DISCOVERED fact about how something behaves")
+    finding.add_argument("title")
+    finding.add_argument("--evidence", required=True, help="what you observed, and where")
+    finding.add_argument("--tag", action="append", default=[])
+    finding.add_argument("--relates-to", action="append", default=[], dest="relates_to")
+    finding.add_argument("--agent")
+    finding.set_defaults(payload=_payload_finding)
+
+    method = commands.add_parser("method",
+                                 help="record a reusable procedure this project follows")
+    method.add_argument("title")
+    method.add_argument("--how", required=True, help="how it is done, and its limits")
+    method.add_argument("--tag", action="append", default=[])
+    method.add_argument("--relates-to", action="append", default=[], dest="relates_to")
+    method.add_argument("--agent")
+    method.set_defaults(payload=_payload_method)
+
+    gap = commands.add_parser("gap", help="record an ownable deficiency with a severity")
+    gap.add_argument("title")
+    gap.add_argument("--severity", choices=("P0", "P1", "P2", "P3"), required=True)
+    gap.add_argument("--evidence", required=True)
+    gap.add_argument("--source")
+    gap.add_argument("--agent")
+    gap.set_defaults(payload=_payload_gap)
+
+    review = commands.add_parser("review",
+                                 help="raise a human gate: a question only a person may answer")
+    review.add_argument("question")
+    review.add_argument("--context")
+    review.add_argument("--relates-to", action="append", default=[], dest="relates_to")
+    review.add_argument("--agent")
+    review.set_defaults(payload=_payload_review)
+
+    doctrine = commands.add_parser("doctrine",
+                                   help="read a standing document as your credential may see it")
+    doctrine.add_argument("--doc", default="doctrine")
+    doctrine.add_argument("--text", action="store_true", help="print only the rendered text")
+    doctrine.set_defaults(runner=_run_doctrine)
 
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)
