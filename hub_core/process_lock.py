@@ -47,6 +47,18 @@ def _pid_alive(pid: int | None) -> bool:
         return True
 
 
+class LockBusy(TimeoutError):
+    """A lock wait that ran out, carrying its own diagnosis.
+
+    ``str(exc)`` is the full operator message (it names the lock file). ``public`` is the same
+    diagnosis without the server path -- the form an HTTP caller may be shown, so a refused
+    claim tells the worker WHO held the lock and for how long instead of answering a bare 500."""
+
+    def __init__(self, message, public=""):
+        super().__init__(message)
+        self.public = public or "a runtime lock was busy"
+
+
 class ProcessFileLock:
     """Re-entrant-in-process, exclusive-across-processes lock.
 
@@ -92,7 +104,7 @@ class ProcessFileLock:
         # Only age can break an empty/unrecognized lock.
         return time.time() - stat.st_mtime > self.LEGACY_STALE_S
 
-    def _busy_message(self, budget, where):
+    def _busy_message(self, budget, where) -> "LockBusy":
         """Name the holder in the timeout, so a refusal carries its own diagnosis.
 
         "runtime lock busy" says nothing about WHO held the lock or for how long, and those are
@@ -110,8 +122,10 @@ class ProcessFileLock:
             holder = f"pid {pid} ({'alive' if _pid_alive(pid) else 'dead'})"
         else:
             holder = "no pid recorded"
-        return (f"runtime lock busy: {self.path} -- waited {budget:g}s on the {where} lock; "
-                f"held by {holder}, lock file age {age}s, waiting pid {os.getpid()}")
+        detail = (f"waited {budget:g}s on the {where} lock; held by {holder}, lock file age "
+                  f"{age}s, waiting pid {os.getpid()}")
+        return LockBusy(f"runtime lock busy: {self.path} -- {detail}",
+                        public=f"runtime lock busy: {self.path.name} -- {detail}")
 
     def __enter__(self):
         # ONE budget covers other threads in this process as well as other processes: an
@@ -119,7 +133,7 @@ class ProcessFileLock:
         budget = max(0.0, self.timeout)
         deadline = time.monotonic() + budget
         if not self._thread_lock.acquire(timeout=budget):
-            raise TimeoutError(self._busy_message(budget, where="thread"))
+            raise self._busy_message(budget, where="thread")
         if _DEPTH.get(self._key, 0) == 0:
             while True:
                 try:
@@ -146,9 +160,9 @@ class ProcessFileLock:
                 except PermissionError:
                     pass  # Windows delete-pending window: ordinary contention.
                 if time.monotonic() >= deadline:
-                    message = self._busy_message(budget, where="file")
+                    busy = self._busy_message(budget, where="file")
                     self._thread_lock.release()
-                    raise TimeoutError(message)
+                    raise busy
                 time.sleep(0.005)
         _DEPTH[self._key] = _DEPTH.get(self._key, 0) + 1
         return self

@@ -122,11 +122,44 @@ def directive_items(state, agent: str) -> list:
     return out
 
 
-def items_for(state, agent: str, operator: str) -> list:
-    """Everything currently addressed to `agent`. The operator additionally receives every
-    open question — questions are addressed to whoever can answer them."""
+def assignment_items(state, agent: str) -> list:
+    """Tasks GIVEN to this agent by name (POST /hub/api/hand) that it has not started yet.
+
+    A board field nobody is pushed is an assignment its recipient finds by luck, so the same
+    addressed set -- and its long-poll -- carries it. It leaves the inbox the moment the task
+    moves on (claimed, finished, or handed to someone else); no ack is needed, the claim IS
+    the acknowledgement."""
     agent = (agent or "").strip().lower()
-    items = directive_items(state, agent)
+    if not agent:
+        return []
+    out = []
+    for eid, ent in (state.get("entities") or {}).items():
+        if not isinstance(ent, dict) or ent.get("type") != "task":
+            continue
+        if str(ent.get("assigned_to") or "").strip().lower() != agent:
+            continue
+        if ent.get("status") not in ("todo", "blocked"):
+            continue
+        prov = ent.get("provenance") or {}
+        out.append({
+            "kind": "assignment",
+            "id": eid,
+            "from": _text(prov.get("agent") or "the operator", 60),
+            "title": _text(ent.get("title"), 300),
+            "body": body_text(ent.get("acceptance")),
+            "at": _text(prov.get("updated_at") or prov.get("created_at") or "", 40),
+            "priority": _text(ent.get("priority"), 4),
+        })
+    out.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return out
+
+
+def items_for(state, agent: str, operator: str) -> list:
+    """Everything currently addressed to `agent`: directives aimed at it, the answer to its own
+    question, and tasks given to it by name. The operator additionally receives every open
+    question — questions are addressed to whoever can answer them."""
+    agent = (agent or "").strip().lower()
+    items = directive_items(state, agent) + assignment_items(state, agent)
     if agent and agent == (operator or "").strip().lower():
         items = question_items(state) + items
     return items
@@ -192,6 +225,9 @@ def render_line(item) -> str:
         return "%s asks: %s" % (item.get("from") or "someone", item.get("title") or "")
     if item.get("kind") == "answer":
         return "Answer from %s: %s" % (item.get("from") or "the operator", item.get("title") or "")
+    if item.get("kind") == "assignment":
+        return "%s gave you %s: %s" % (item.get("from") or "the operator", item.get("id") or "",
+                                       item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 
