@@ -59,7 +59,12 @@ from a working multi-project system. Nothing here names any specific person, hos
   (`app-services.md`: hosted UI components apps link instead of copy, per-app component
   properties, each app's slice of the board, per-person preferences, and the hub as the one
   credential broker to an agent service — its routes ship mounted but do nothing until an app
-  links a component or `HUB_AGENT_URL` is set).
+  links a component or `HUB_AGENT_URL` is set), **unattended responders**
+  (`unattended-responders.md`: `hub_core.responder` spends one bounded, non-interactive session
+  per item that actually happened — a question, a fresh error, a task marked `--unattended` —
+  never a rotting task or a timer), and **multi-agent coordination**
+  (`multi-agent-coordination.md`: crossover between consoles, the five record kinds, and
+  audience-fenced doctrine).
   Operating write-ups for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys
   that CI never cancels, push-only change triggers, job ceilings, publications from the protected
   ref), `app-slots.md` (allocate / stage / cut over / retire / re-adopt an app's port, service and
@@ -147,6 +152,8 @@ disposable `verification-closer` only for a rare critical boundary.
   Lessons, findings, methods and reviews ride the base `note` type, distinguished by a kind tag,
   through their own verbs (`/hub/api/lesson|finding|method|review`, `patterns/knowledge-retrieval.md`).
   Promote one to its own type via `campaigns/augment-hub.md` only if you need a distinct schema.
+  The client's `review-gate` verb and the MCP `record` tool (kind `review`) raise a review as a
+  DELIVERED human gate (an ask tagged `review`, never taken by an unattended responder).
 - **No LICENSE** — none, by choice (public repo → viewable but all-rights-reserved; add a permissive
   license only if a teammate needs to legally reuse it).
 
