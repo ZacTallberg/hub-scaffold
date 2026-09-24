@@ -1,0 +1,45 @@
+{
+  "name": "banner",
+  "title": "App banner",
+  "what": "One shared header every adopting app links: page navigation (strip or sidebar), the person's preferences everywhere or per app, their apps with stars, one drawer from the avatar, info bubbles, a derived tour and read-me, and People and Permissions over the data-access-url contract.",
+  "link": [
+    "<link rel=\"stylesheet\" href=\"{hub}/components/banner/banner.css\">",
+    "<script src=\"{hub}/components/banner/banner.js\" defer></script>"
+  ],
+  "mount": {
+    "element": "#app-banner",
+    "attributes": {
+      "data-app": "the app's slug (required)",
+      "data-app-name": "the app's name as people say it",
+      "data-app-sub": "one line under the name",
+      "data-version": "the app's version; printed with exactly one leading v",
+      "data-home": "where the name links (default ./)",
+      "data-mark": "an image URL for the app's mark (default: its initials)",
+      "data-hub": "the hub's mount path (default /hub)",
+      "data-profile-url": "the person's preferences route (default {hub}/api/profile; empty = this browser only)",
+      "data-actor": "the signed-in person's display name",
+      "data-actor-sub": "their username",
+      "data-avatar": "an app-supplied picture that wins over the person's mark",
+      "data-role": "their role here; 'admin' in it shows the Admins-only section, 'super admin' the View-as card",
+      "data-signout": "the sign-out URL (always POSTed)",
+      "data-nav-style": "strip (default) or sidebar",
+      "data-access-url": "the People and Permissions contract endpoint",
+      "data-tour-url": "an authored tour: {steps:[{selector,title,text}]}",
+      "data-readme-url": "an authored read-me: {lead, sections:[{head, lines}], note}",
+      "data-theme-external": "present when the app owns <html data-theme> itself"
+    },
+    "islands": {
+      "nav": "[{label, href, icon, hint, sep, current, count, countId, children:[...]}]",
+      "profile": "[{label, href | id, icon, sub, info}] -- the app's own rows for the person",
+      "admin": "[{label, href | id, icon, sub, info}] -- admin-only rows",
+      "help": "[{label, href | id, icon, sub, info}] -- extra How-this-works rows"
+    },
+    "slot": "[data-ab-slot] -- the app's own controls, left of the band's"
+  },
+  "publishes": {
+    "css": ["--ab-h", "--ab-band-h", "--ab-zoom", "--ab-sidebar-w"],
+    "html_attributes": ["data-theme", "data-ab-font", "data-ab-motion", "data-ab-tips", "data-ab-help"],
+    "events": ["app-banner:ready", "app-banner:prefs", "app-banner:action"],
+    "page_attributes_read": ["data-ab-info", "data-ab-info-title", "data-ab-tip", "data-ab-help"]
+  }
+}
