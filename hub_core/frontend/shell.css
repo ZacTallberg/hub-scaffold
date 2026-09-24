@@ -2142,8 +2142,13 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
      natural height — the height:0 trick only makes sense beside something. */
   .live-cluster { grid-template-rows: none; }
   .live-cluster > .fleet-card, .live-cluster > .signals-duo, .live-cluster > .attention-card {
-    grid-column: 1; grid-row: auto;
+    grid-column: 1;
   }
+  /* Explicit rows: the rail precedes the signals in the DOM, so auto placement would put it
+     between the people and their asks/errors. */
+  .live-cluster > .fleet-card { grid-row: 1; }
+  .live-cluster > .signals-duo { grid-row: 2; }
+  .live-cluster > .attention-card { grid-row: 3; }
   .live-cluster > .attention-card { height: auto; min-height: 0; }
   .live-cluster > .attention-card .attn-list { max-height: 340px; }
 }
