@@ -97,18 +97,76 @@ def _post(base: str, operation: str, payload: dict[str, Any],
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
+    return _open(request, base, 30, replay_safe=False)
+
+
+#: Transport retries: three attempts with these pauses between them. A hub mid-redeploy or a
+#: bursty network path answers again within seconds; an HTTP ANSWER from the hub is never
+#: retried, because retrying an answer only repeats it (or, for a write, re-applies it).
+RETRY_PAUSES_S = (5, 10)
+#: A 502/503/504 whose body is not the hub's JSON envelope is the PROXY in front of the hub
+#: speaking: the hub is unreachable, and the page is not its answer.
+GATEWAY_STATUSES = frozenset({502, 503, 504})
+
+
+def _is_hub_answer(body: Any) -> bool:
+    return isinstance(body, dict) and ("errors" in body or "data" in body or "ok" in body)
+
+
+def _undelivered(reason: Any) -> bool:
+    """True when the request provably never reached a server: refused, or no such host."""
+    import socket
+    return isinstance(reason, (ConnectionRefusedError, socket.gaierror))
+
+
+def _open(request: urllib.request.Request, base: str, timeout: float, *,
+          replay_safe: bool) -> dict[str, Any]:
+    """urlopen with a bounded retry on TRANSPORT failures only.
+
+    Reads (``replay_safe``) retry every transport failure and every gateway page. A write
+    retries only what provably never arrived (connection refused, name resolution) or a
+    gateway 503 (the proxy had no upstream to hand it to): a timed-out or reset write may
+    have landed, and a retry that then reports failure for a write that landed is worse than
+    the failure it avoided. Every retry prints HUB_CLIENT_RETRY on stderr."""
+    import time as _time
+    import socket
+    attempts = len(RETRY_PAUSES_S) + 1
+    for attempt in range(1, attempts + 1):
+        retry, detail = False, ""
         try:
-            body: Any = json.loads(detail)
-        except json.JSONDecodeError:
-            body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode("utf-8", errors="replace")
+            try:
+                body: Any = json.loads(raw)
+            except json.JSONDecodeError:
+                body = raw
+            if error.code not in GATEWAY_STATUSES or _is_hub_answer(body):
+                raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
+            detail = f"gateway HTTP {error.code}, not the hub's answer"
+            retry = replay_safe or error.code == 503
+            if not retry or attempt == attempts:
+                hint = "" if retry else " (the write may have landed; read it back before retrying)"
+                raise RuntimeError(f"Hub is unreachable at {base}: {detail}{hint}") from error
+        except urllib.error.URLError as error:
+            detail = str(error.reason)
+            retry = replay_safe or _undelivered(error.reason)
+            if not retry or attempt == attempts:
+                hint = "" if replay_safe or _undelivered(error.reason) else (
+                    " (the write may have landed; read it back before retrying)")
+                raise RuntimeError(f"Hub is unreachable at {base}: {detail}{hint}") from error
+        except (TimeoutError, socket.timeout, ConnectionError, OSError) as error:
+            detail = f"{type(error).__name__}: {error}"
+            retry = replay_safe
+            if not retry or attempt == attempts:
+                hint = "" if replay_safe else " (the write may have landed; read it back before retrying)"
+                raise RuntimeError(f"Hub is unreachable at {base}: {detail}{hint}") from error
+        pause = RETRY_PAUSES_S[attempt - 1]
+        print(f"HUB_CLIENT_RETRY attempt={attempt}/{attempts} url={request.full_url} "
+              f"detail={detail!r} pause_s={pause}", file=sys.stderr, flush=True)
+        _time.sleep(pause)
+    raise RuntimeError(f"Hub is unreachable at {base}")   # unreachable: the loop returns or raises
 
 
 def _optional_auth_headers() -> dict[str, str]:
@@ -142,18 +200,7 @@ def _get(base: str, path: str, timeout: int = 30) -> dict[str, Any]:
                  "User-Agent": os.environ.get("HUB_CLIENT_USER_AGENT", DEFAULT_USER_AGENT),
                  **_optional_auth_headers()},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        try:
-            body: Any = json.loads(detail)
-        except json.JSONDecodeError:
-            body = detail
-        raise RuntimeError(json.dumps({"status": error.code, "response": body})) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Hub is unreachable at {base}: {error.reason}") from error
+    return _open(request, base, timeout, replay_safe=True)
 
 
 def _agent(arguments: argparse.Namespace) -> str:
