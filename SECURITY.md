@@ -140,6 +140,14 @@ The services the hub offers the apps around it (`patterns/app-services.md`) spli
   trust it to name the person. They must be reached only from an app's server, behind that app's
   own sign-in. A credential holding `profile:write` can change any person's preferences, and
   `agent:ask` spends the agent service's quota — issue them per app, scoped, and expiring.
+- `/hub/api/profile` has one more door, for the person's own same-origin browser, and it is shut
+  until the adopter names `HUB_PERSON` (a `(request) -> username` behind its own sign-in). Through
+  it the person is whoever the resolver says: a `?person=` naming anyone else answers 404, a POST
+  must pass Django's CSRF check, and an unresolved request gets the 404 of an unknown route.
+  `hub.viewers.debug_person` exists for a developer's loopback under DEBUG only.
+- The profile GET lists the apps a person can reach from `HUB_APPS` joined with the adopter's
+  `HUB_REACH` seam. The seam must return ACTIVE grants only and match every spelling of the
+  person's name its access system keeps; unset or failing, it lists nothing.
 - The agent service key (`HUB_AGENT_KEY`) is held by the hub alone and never returned. TLS to the
   agent service is verified unless `HUB_AGENT_TLS_VERIFY` is explicitly false.
 - `HUB_DIR/profiles.json`, `component-props.json` and `component-adopters.json` are mutable

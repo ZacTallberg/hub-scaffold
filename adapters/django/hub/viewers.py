@@ -34,3 +34,29 @@ def allowed(request, setting_name: str) -> bool:
         return bool(check(request))
     except Exception:                                        # noqa: BLE001 -- fail closed
         return False
+
+
+def person(request) -> str:
+    """WHO is this browser request, as the adopter's sign-in knows them -- or "".
+
+    ``HUB_PERSON = "myproject.auth.username"`` names a callable ``(request) -> str | None``
+    (typically ``request.user.get_username()`` behind the adopter's own login). Unset, failing
+    to import, raising, or answering nothing: "" -- a request the hub cannot name is nobody,
+    and a person-scoped route answers it as it answers anyone unknown."""
+    path = getattr(settings, "HUB_PERSON", None)
+    if not path:
+        return ""
+    try:
+        resolve = import_string(path) if isinstance(path, str) else path
+        who = resolve(request)
+    except Exception:                                        # noqa: BLE001 -- fail closed
+        return ""
+    return str(who or "").strip().lower()
+
+
+def debug_person(request) -> str:
+    """For a developer's own machine only: ``HUB_DEBUG_PERSON`` (default "dev") while
+    ``debug_loopback`` holds, nobody otherwise. Never name it on a deployed hub."""
+    if not debug_loopback(request):
+        return ""
+    return str(getattr(settings, "HUB_DEBUG_PERSON", "dev") or "")

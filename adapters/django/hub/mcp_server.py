@@ -152,6 +152,16 @@ TOOLS = [
                     "out return to defaults). Needs component:configure. Refused keys are listed.",
      "inputSchema": {"type": "object", "properties": {
          "app": {"type": "string"}, "props": {"type": "object"}}, "required": ["app", "props"]}},
+    {"name": "person_profile",
+     "description": "Read or change one person's cross-app presentation preferences on behalf of "
+                    "the app that signed them in: theme, motion, ui/text size, font, agent "
+                    "placement, sidebar state, the two help switches, starred apps and their mark. "
+                    "With no `prefs` it reads, including the apps the person can reach. With `app` "
+                    "the change goes to that app's override (an empty prefs object removes it) and "
+                    "the answer resolves for that app. Needs profile:read / profile:write.",
+     "inputSchema": {"type": "object", "properties": {
+         "person": {"type": "string"}, "app": {"type": "string"},
+         "prefs": {"type": "object"}}, "required": ["person"]}},
     {"name": "ask_agent",
      "description": "Ask the brokered agent service a question (the hub holds its key). Answers "
                     "carry citations; an unconfigured or failing lane says exactly why.",
@@ -379,6 +389,17 @@ def _call_tool(name, args, auth_headers):
     elif name == "set_component_props":
         status, body = _seam("/hub/api/component-props",
                              {"app": args["app"], "props": args["props"]}, auth_headers)
+    elif name == "person_profile":
+        from urllib.parse import urlencode
+        query = {"person": args.get("person") or ""}
+        if args.get("app"):
+            query["app"] = args["app"]
+        path = "/hub/api/profile?" + urlencode(query)
+        if isinstance(args.get("prefs"), dict):
+            prefs = {"apps": {args["app"]: args["prefs"]}} if args.get("app") else args["prefs"]
+            status, body = _seam(path, {"prefs": prefs}, auth_headers)
+        else:
+            status, body = _seam(path, {}, auth_headers, method="get")
     elif name == "ask_agent":
         payload = {"question": args["question"]}
         if args.get("app"):

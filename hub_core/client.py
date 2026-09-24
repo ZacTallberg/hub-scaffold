@@ -50,6 +50,8 @@ Services to the apps around the hub::
     python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
     python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
     python -m hub_core.client profile --person alice --set theme=dark
+    python -m hub_core.client profile --person alice --app budget-app --set ui=110   # one app only
+    python -m hub_core.client profile --person alice --star budget-app
     python -m hub_core.client agent-ask --question "..." --person alice --app budget-app
 
 The worker LOOP rides the same seam — the converged core of two adopter fleets::
@@ -579,10 +581,31 @@ def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
-    from urllib.parse import quote
-    path = "profile?person=" + quote(arguments.person)
-    if arguments.set:
-        return _post(base, path, {"prefs": _pairs(arguments.set)})
+    """Read or change one person's preferences, as the app that signed them in.
+
+    `--set key=value` merges everywhere; with `--app <slug>` it sets that app's override
+    instead, and `--clear-app` puts that app back on the everywhere-values. `--star` /
+    `--unstar` edit the starred apps (a list that replaces, so the current one is read first).
+    With no change it reads, including the apps the person can reach and, with --app, what that
+    app resolves to. Needs profile:read / profile:write."""
+    from urllib.parse import urlencode
+    query = {"person": arguments.person}
+    if arguments.app:
+        query["app"] = arguments.app
+    path = "profile?" + urlencode(query)
+    change: dict[str, Any] = _pairs(arguments.set)
+    if arguments.app and (change or arguments.clear_app):
+        change = {"apps": {arguments.app: {} if arguments.clear_app else change}}
+    elif arguments.clear_app:
+        raise ValueError("--clear-app needs --app <slug>")
+    if arguments.star or arguments.unstar:
+        current = _get(base, "api/profile?" + urlencode({"person": arguments.person}))
+        starred = list(((current.get("data") or {}).get("prefs") or {}).get("starred") or [])
+        starred = [s for s in starred if s not in (arguments.unstar or [])]
+        starred += [s for s in (arguments.star or []) if s not in starred]
+        change["starred"] = starred
+    if change:
+        return _post(base, path, {"prefs": change})
     return _get(base, "api/" + path)
 
 
@@ -973,6 +996,11 @@ def _parser() -> argparse.ArgumentParser:
                                help="a person's cross-app preferences; --set key=value merges (profile:write)")
     prof.add_argument("--person", required=True)
     prof.add_argument("--set", action="append", metavar="KEY=VALUE")
+    prof.add_argument("--app", help="scope --set to this app's override, and resolve for it")
+    prof.add_argument("--clear-app", action="store_true",
+                      help="with --app: put that app back on the everywhere-values")
+    prof.add_argument("--star", action="append", metavar="SLUG")
+    prof.add_argument("--unstar", action="append", metavar="SLUG")
     prof.set_defaults(runner=_run_profile)
 
     ask_agent = commands.add_parser("agent-ask", help="ask the brokered agent (agent:ask)")
