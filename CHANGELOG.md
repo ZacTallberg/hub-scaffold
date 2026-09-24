@@ -14,6 +14,37 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Integration: fifteen lanes on one engine, one verb per intent
+
+- **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and
+  unattended kind, kit telemetry (`client` version+sha per machine, `client_digest` for the
+  stale-seat detector, `artifacts`), project-qualified recent files (a bare name is qualified with
+  the console's project), a redacted focus kept whole up to a preview, and the repo moving with
+  the cwd — merged never-clobber in one `_session_merge`, projected in one `session_row`.
+- **One crossover engine** (`hub_core.overlap`): file > problem > task > project > topic, with
+  the peer's checkpoint and a suggested split; `items_for_agent` for an agent's consoles and
+  `items` for one console, both reading the same comparison.
+- **One inbox fold.** Messages, questions (stuck, gated, review, hop), directives (pinned ones
+  only where they are pinned; an answer's console routed with fall-through), assignments,
+  decisions, task rot, attention, owned problems, operator-only seat items and crossovers — one
+  fingerprint, one veil filter, one change signal (ledger head, presence, leases, error stamp).
+- **One transport.** Several routes, breadth-first failover, the offline queue and blind window,
+  busy-503 retries in place, idempotent retries of retry-safe writes, safe headers, a hub 5xx
+  envelope never retried, a gateway 503 page resent.
+- **One verb per intent where two lanes named the same thing:** `/api/hand` gives with `to` and
+  hands back to the unattended queue without it (`/api/assign`, `/api/hand-to-queue`), while
+  `/api/hand-back` is the run-ended transition an unattended launcher writes; `/api/ci-event`
+  takes the webhook secret or an agent credential; `consoles` carries the split and
+  `--mine`; `recall` answers a task id with its trail and anything else from knowledge;
+  `prompt-context` gives the three-channel payload or, with `--hook`, the knowledge block;
+  `errors` reads the folded queue, `--include` the raw stream; `perf` shows route latency and
+  the answering process; hosted UI components are `hosted-components` (`components` stays the
+  standard-component catalog); a delivered human gate is `review-gate`.
+- **Every read route carries the read gate and declares its visibility**; the hosted
+  components are declared public discovery. `hub.json` and `next.json` are memoized per input
+  state, and `next.json`'s memo key includes who is asking.
+- app-kit records the error-visibility and csrf kits with their seams declared.
+
 ### Delivery: addressed mail that lands, asks that never get stuck, a visibility veil
 
 - **Busy ledger answers 503, never 500.** `StoreBusy` + jittered `BEGIN IMMEDIATE` retries inside
