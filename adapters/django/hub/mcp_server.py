@@ -200,7 +200,9 @@ TOOLS = [
      "description": "Record a GAP — a named deficiency someone could own and close, with a severity.",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "title": {"type": "string"},
-         "severity": {"enum": ["P0", "P1", "P2", "P3"]}, "evidence": {"type": "string"},
+         "severity": {"enum": ["P0", "P1", "P2", "P3"]},
+         "note": {"type": "string", "description": "what is missing and how it shows"},
+         "evidence": {"type": "string"},
          "source": {"type": "string"}},
          "required": ["agent", "title", "severity"]}},
     {"name": "recall_record",
@@ -439,7 +441,11 @@ def _call_tool(name, args, auth_headers):
             payload = {k: v for k, v in args.items() if k != "kind" and v not in (None, "")}
             status, body = _seam("/hub/api/" + kind, payload, auth_headers)
     elif name == "record_gap":
-        payload = {k: v for k, v in args.items() if v not in (None, "")}
+        from hub_core.client_knowledge import gap_text
+        payload = {k: v for k, v in args.items() if v not in (None, "") and k != "note"}
+        text = gap_text(args.get("note"), args.get("evidence"))
+        if text:
+            payload["evidence"] = text
         payload.setdefault("status", "open")
         status, body = _seam("/hub/api/gap", payload, auth_headers)
     elif name == "recall_record":

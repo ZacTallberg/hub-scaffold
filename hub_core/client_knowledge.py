@@ -11,7 +11,7 @@ board loses the difference, so each has its own verb::
     python -m hub_core.client finding "The import stalls when the queue exceeds 10k" --note "..."
     python -m hub_core.client method "Verify a fix at the deployed artifact" --category verification
     python -m hub_core.client review "May the export include personal data?" --note "..."
-    python -m hub_core.client gap "Half the services report no errors" --severity P1
+    python -m hub_core.client gap "Half the services report no errors" --severity P1 --note "..."
     python -m hub_core.client recall example:note:l-3f8a1c2b4d5e      # or a phrase
     python -m hub_core.client capabilities --q "retry"
     python -m hub_core.client prompt-context --hook < hook.json         # from a prompt hook
@@ -76,10 +76,22 @@ def _record_payload(kind: str):
 def _payload_gap(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     payload: dict[str, Any] = {"agent": _agent(arguments), "title": arguments.title,
                                "severity": arguments.severity, "status": "open"}
-    for key in ("evidence", "source"):
-        if getattr(arguments, key, None):
-            payload[key] = getattr(arguments, key)
+    text = gap_text(getattr(arguments, "note", None), getattr(arguments, "evidence", None))
+    if text:
+        payload["evidence"] = text
+    if getattr(arguments, "source", None):
+        payload["source"] = arguments.source
     return "gap", payload
+
+
+def gap_text(note, evidence) -> str:
+    """A gap keeps its text in `evidence` (the schema has no note field). `--note` is accepted so
+    the gap verb reads like finding/method/review; with both, the note leads and the evidence
+    follows under its own label, so neither is dropped."""
+    note, evidence = str(note or "").strip(), str(evidence or "").strip()
+    if note and evidence:
+        return note + "\n\nEvidence: " + evidence
+    return note or evidence
 
 
 # ── recall ──
@@ -368,7 +380,8 @@ def register(commands) -> None:
     gap = commands.add_parser("gap", help="record a GAP — an ownable deficiency with a severity")
     gap.add_argument("title")
     gap.add_argument("--severity", required=True, choices=("P0", "P1", "P2", "P3"))
-    gap.add_argument("--evidence")
+    gap.add_argument("--note", help="what is missing and how it shows (stored as the gap's evidence text)")
+    gap.add_argument("--evidence", help="where it was observed (file:line, a URL, a command's output)")
     gap.add_argument("--source")
     gap.add_argument("--agent")
     gap.set_defaults(payload=_payload_gap)

@@ -2167,3 +2167,4 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .chat-tools summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-tools ul { margin: 4px 0 0; padding-left: 18px; }
 .chat-tools li { overflow-wrap: anywhere; }
+.tab-newest { gap: 6px; }
