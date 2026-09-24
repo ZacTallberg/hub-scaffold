@@ -43,6 +43,15 @@ command for each, keep it beside the runbook, and every step below becomes liter
    release is happening. Only when this release crosses an explicitly identified critical
    integration seam, exercise that one seam with a transient probe, retain its receipt, and delete
    the probe artifact before continuing.
+   **Protect the ledger first** when the release swaps the checkout or runs migrations: take a
+   verified backup (`python manage.py hubbackup --reason pre-deploy`, see `docs/OPERATIONS.md`)
+   and read its `HUBBACKUP_TAKEN` line. The protection must work on the host as it IS: prove the
+   vault writable rather than assuming it, fall back to a git-ignored path inside the checkout
+   (one a reset does not delete) when it is not, prune BEFORE copying (and keep fewer in the
+   fallback, which shares the disk), verify the copy is not shorter than the source (record the
+   live head and size BEFORE copying; refuse a copy that does not reach both), and remove a
+   half-written copy. A protection step that fails on a permission error while the pipeline stays
+   green is the same as having none — make that failure red.
 3. **Stamp the build identity, then read it back** (only if your platform needs `SET_BUILD_ID`).
    Expected: the read-back names YOUR sha. A build that fails closed on a missing stamp is correct
    behaviour — it is refusing to produce an artifact that cannot say what it is.
@@ -203,6 +212,29 @@ impossible to erode:
 - **Count lines lazily.** Streaming a large ledger through a shell pipeline as one object per line
   to print a count costs more than the copy; use a lazy line enumerator, and count blank lines the
   same way on both sides of any before/after comparison.
+
+## Keep the push path fast
+
+If shipping is frequent, every second on the push path is multiplied by every push, and a check
+that runs on the same host it verifies degrades the thing it measures. What belongs on the push
+path is what makes the deploy record TRUE: the service is running this revision, health answers at
+the deployed sha, the unauthenticated surface refuses what it must, and one authenticated read
+proves token, view and JSON end to end. Everything slower — browser passes, whole-board
+downloads, deep sweeps — runs on a named schedule (pin it to ONE schedule by its own variable; a
+bare "any schedule" rule fires on every unrelated nightly job) or on demand.
+
+- Fetch full history only in the job that hands a commit to the deployment checkout (a shallow
+  workspace cannot be fetched into one); every other job can clone shallow.
+- The deploy job waits for nothing it does not need. A check that genuinely guards the host — an
+  undeclared destructive migration — runs as the deploy job's FIRST step, where it fails the
+  deploy itself, instead of as a separate stage everything queues behind.
+- Configuration the deploy re-applies (secrets merged into an environment file) can be skipped
+  when a cheap fingerprint read says nothing changed AND every declared key is still present;
+  stamp only what this run actually wrote, so losing the stamp costs one full sync, never a wrong
+  one.
+- A pipeline definition that fails to parse produces a pipeline with zero jobs, which some
+  dashboards show as neither red nor green. Quote any script line containing `: ` (YAML reads it
+  as a mapping) and read the job list of the first pipeline after editing the file.
 
 ## Rollback
 

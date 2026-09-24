@@ -67,11 +67,11 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | Endpoint | Returns |
 |---|---|
 | `GET /hub/` | Human dashboard. `?format=json` returns the same snapshot as `hub.json`. The running identity comes from the artifact's pre-build `HUB_BUILD_STAMP`; optional `?served=<sha>` adds an external comparison and a mismatch is explicit. |
-| `GET /hub/hub.json` | Full snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. |
-| `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). The CALLER decides what is offered (`?agent=`, `?machine=`, `?unattended=1`, or the `X-Hub-*` headers): work given to somebody else, work only another machine can do, and an unattended run's escalation that is a person's are left out and COUNTED in `metadata.withheld` by reason — never silently dropped (see *Who a ready task is offered to*). |
+| `GET /hub/hub.json` | Snapshot: `tasks, runs, adrs, feats, gaps, caps, deploys, notes, graph, dangling, build, audit`, derived counts/coverage, worker-launch capability metadata, and the `live` cockpit block (below). Production delivery is derived directly from the artifact stamp plus exact deploy closures. `collection_counts` is exact for every collection; `partial` names each collection served as a HEAD (see below). |
+| `GET /hub/next.json?n=N` | DISCOVER — up to N ranked unblocked tasks without a live lease (urgency = priority + blocker count). `todo` tasks have `stale_reclaim:false`; abandoned `in_progress` tasks whose lease is absent/expired have `stale_reclaim:true`. `n` clamps 1–50; `metadata.available` counts all available rows before truncation (`metadata.unblocked` is retained as a compatibility alias). |
 | `GET /hub/audit.json` | the computed audit: `{ok, exit_code, counts, violations[]}`. exit_code 0=pass, 3=warn, 2=violation. |
 | `GET /hub/graph.json` | dependency edges + dangling references. |
-| `GET /hub/<type>.json` | a whole collection — type ∈ `task, run, adr, feat, gap, cap, deploy, note, directive, ack, held`. |
+| `GET /hub/<type>.json` | a WHOLE collection as `{data, count, cursor, metadata}`, rows in exactly the snapshot's shape — type is the singular (`task, run, adr, feat, gap, cap, deploy, note, directive, ack`) or the snapshot key (`tasks`, `notes`, …). Conditional on a per-collection tag (304 when unchanged). |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). A task read with `?lineage=1` also carries its **lineage ladder** (see below). |
 | `GET /hub/held.json[?repo=]` | the promotion queue: every OPEN hold, oldest first, with `age_s`, `urgency` (info/warn/critical, four times faster for a commit on one disk only), its holder and a one-line `detail`; metadata counts promoted and abandoned. |
 | `GET /hub/item-claims.json` | every per-machine item claim still in force: `{item: {machine, session, agent, age_s, releases_in_s, holder_state, gone_s, frees_in_s}}`; a claim whose console is GONE past the grace is omitted. |
@@ -79,7 +79,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
 | `GET /.well-known/agent-card.json` | Signed **agent discovery** mounted at the ROOT. It uses current AgentCard discovery vocabulary but truthfully advertises no A2A interface because this adapter implements no A2A task transport. `x-hub.callableProtocols` points to the real MCP endpoint; one skill per task `work_kind` is read live from the schema. Authentication metadata names `X-Write-Token`; its value never appears. |
-| `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. |
+| `GET /hub/live/events` | **Persistent push stream.** Emits `ready`, cumulative canonical `patch` payloads, and transport-only `heartbeat` keepalives. A patch has the same `{changed, removed, cursor, audit, live, metadata}` shape as `delta.json`, contains every change through its exact numeric cursor, and is applied directly—there is no steady-state follow-up fetch or polling interval. Resume with `Last-Event-ID` or `?since=<seq>`; cursor catch-up and a full live re-ground happen once on reconnect. On the thread-holding (WSGI) path at most `HUB_LIVE_STREAMS_MAX` streams (default 3; 0 = unlimited) are open per process; a stream past the cap receives one `busy` frame `{reason, limit, retry_ms}` (jittered 8–20 s) and closes — the board treats that as capacity, not a transport failure, shows "Waiting for a live slot" and reconnects after `retry_ms`. ASGI streams hold no worker thread and are not capped. |
 | `GET /hub/cursor.json` | `{seq, hash, ts}` — the liveness cursor alone, no board contents. What a canary or supervisor polls to prove the board is advancing. |
 | `GET /hub/delta.json?since=<seq>` | Reconnect/recovery form of the cumulative patch: `{changed[], removed[], cursor, audit, live}`. The normal connected path receives this payload inside SSE and does not call this endpoint. `since >= head` still returns refreshed live blocks for lease-only truth; a `cursor.seq` below your `since` means the head regressed—fall back to a full snapshot. |
 | `GET /hub/activity.json[?agent=&session=]` | every live console in one uniform shape — agent, machine, `session`, `name`, `runtime`, `cwd`, `repo`, `app`, `project`, `state` (working/idle), `focus`, recent `files`, `age_s` — bound to the task THAT console holds (`has_task`, `task_id`, `task_title`; a claim is never inferred from a directory). Metadata counts consoles with/without a task and the projects worked with no task; with `session`, `no_task_for` is that console's nudge. |
@@ -93,6 +93,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/components.json[?kind=component\|skeleton]` | Standard components and app skeletons, resolved from the capability graph on THIS read (`hub_core/catalog.py`). A component is a `cap` of `kind: component` (`what`, `when`, `get`, `entry`, `delivery` copy/hosted/package, `hosted_at`, `exemplar`, `default`, `depends_on`); a skeleton is a `cap` of `kind: skeleton` that names components (`applies`, in order) or takes all of them (`applies_all`, ordered by `depends_on`). Each skeleton carries `applied[]` with every component's CURRENT get/entry/delivery, `missing[]` for anything it names that is not a registered component, and `order_problems[]` for an unknown dependency or a cycle — reported, never guessed around. `template` is accepted as an older spelling of `skeleton`; any other kind is `400 unknown_kind`. |
 | `GET /hub/<type>/<local>.json` | One whole record plus its derived flags. The board's detail dialog reads this on open, so fields the snapshot row does not carry are still shown; deep links (`?tab=<view>#<type>-<local>`) to a record outside the snapshot resolve through it. |
 | `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
+| `GET /hub/perf.json` | the ANSWERING process: `process{role, pid, uptime_s, background_clock{status, age_s, tick report}}` and `prewarm{state, steps}`. See `docs/OPERATIONS.md` → Process roles. |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/agent-updates.json?limit=N` | the agents' own first-person feed of what they did — `{at, epoch, agent, machine, kind, summary, evidence, item, by}`, newest first, bounded to the last 200 lines; metadata carries `last_24h`. The same rows ride `live.updates`. |
 | `GET /hub/distribution.json` | every seat graded against what this hub publishes (the client it serves, `CHARTER-CORE.md` when present, and each `HUB_DISTRIBUTED_ARTIFACTS` file): per seat `current` / `drifted` (with the stale artifacts) / `offline` (silent past 2h — named, never graded as drift) / `phantom` / `legacy`; seats gone 72h+ collapse to a count. The `verdict` leads and states what it did NOT grade. Hashes compare LF-normalized bytes (CRLF and raw forms accepted) and split `version+sha` before grading. A seat silent 6h+ becomes an OPERATOR inbox item of kind `offline`; drift on an ONLINE seat becomes kind `drift` only once the artifact has been published 6h+. |
@@ -105,8 +106,24 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/attention.json` | **Needs attention**: every fixable operational condition — seats gone silent, clients older than the one this hub serves, consoles working with no task, orphaned leases, stalled or unclosed tasks, unstarted unattended requests, expiring/expired credentials, unanswered questions, unclaimed errors — each with `severity`, `who` acts, the exact `fix`, the `evidence` values that produced it, and a real `age_s` (first-seen is persisted). Cleared conditions move to `recently_cleared` with how long they stood. A source that could not be read is named in `sources` and silences only its own detectors. `ETag`/304 (ages are excluded from the tag). |
 | `GET /hub/consoles.json[?session=<id>]` | Every live console split `attended` / `unattended` (live runs) / `finished` (runs that ended in the last 30 min, kept as a recap with their outcome), each with an honest state (`working` under two minutes of quiet, else `idle` with "idle 12 min, last did …"), the digest a supervisor reported, and the task IT claimed. `crossovers[]` lists every pair of consoles on the same file, task, subsystem or subject; `?session=` adds `addressed[]` — the signals for that console with the peer's focus, task, latest checkpoint (a peer report), how to reach them and a suggested split. |
 
-`GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
-unchanged, so an idle poll or a re-grounding pull costs an empty body.
+`GET /hub/hub.json` (and `GET /hub/?format=json`) answer **304** when the caller already holds the
+current tag, so an idle poll or a re-grounding pull costs an empty body. The tag is WEAK (`W/"…"`):
+it hashes the whole board with the clock-derived fields (`generated_at`, every `age_s`/`idle_s`)
+removed plus a five-minute bucket, because those fields change on every rebuild and made two reads
+of an unchanged board carry different tags. The caller's last tag is accepted from any of three
+carriers — `If-None-Match`, `X-Hub-ETag`, or `?etag=` — because a proxy in front of an adopting
+host may drop or rewrite `If-None-Match`; the board's own client sends all three. Responses carry
+the tag in both `ETag` and `X-Hub-ETag`.
+
+**Snapshot heads.** A collection larger than `HUB_SNAPSHOT_HEAD_ROWS` (default 60; 0 disables)
+is served on the wire as a head: every row that is still LIVE (open tasks, active directives, open
+questions, open/investigating gaps) plus the newest of the rest by `provenance.updated_at`.
+`partial[<key>] = true` names it and `collection_counts[<key>]` stays exact. The board fetches the
+whole list from `GET /hub/<type>.json` after first paint (tasks first, then the open tab, then the
+rest one at a time) and merges every later snapshot into it by id, so a head never shrinks a tab.
+The head exists only on the wire: every server-side derivation — the attention rail, counts,
+search, the MCP tools — reads the whole cached snapshot, so no derived number is computed over a
+head. A client of `hub.json` that needs a whole collection reads `partial` and fetches it.
 
 ### The `live` block — what the cockpit reads
 
@@ -396,6 +413,11 @@ CI results arrive through the CI system's own webhook (register it per project:
 the deploy-step failures worth reporting are in `patterns/deploy-hardening.md`.
 Rows are redacted at write and throttled per fingerprint (the count is preserved) — an
 unthrottled flood does not just add noise, it EVICTS every other error from a bounded store.
+The fingerprint is computed over the message with per-occurrence detail removed (uuids, hex
+ids, numbers, query strings, quoted values), so `job <uuid> failed` from a hundred runs is ONE
+signature: one throttle bucket, one ack. The newest row of a signature carries
+`occurrences_folded` — the repeats this process has collapsed since that row was written — and
+the weight a reader should show is `max(1 + occurrences_since_last, occurrences_folded)`.
 Every write on every endpoint above is additionally screened for secret shapes and refused
 `422 secret_shaped_payload`: the ledger is append-only, so a secret written into it can never
 be removed, only rotated. Recognizable redaction placeholders pass.
@@ -435,6 +457,20 @@ client); write responses carry `X-Hub-Client-Current`, and the attention list na
 running a different client. `HUB_CLIENT_SELF_UPDATE=1` lets a stale client fast-forward its own
 git checkout — opt-in, `pull --ff-only` only, rate-limited to one attempt per 15 minutes with the
 stamp written before the attempt, detached and fail-soft.
+
+### Retries and idempotency
+
+Every entity write accepts `idem_key`. The server binds it to the payload it arrived with (a
+content hash is folded into the stored key), so an exact retry — a POST whose response was lost —
+replays the first event and answers `200` with `data.replayed: true`, while a genuinely different
+write that happens to reuse a key still lands. Creates of server-numbered entities (`task`,
+`directive`, `gap`, an answer's first directive) scope the key to the type's id prefix, so a
+retried create returns the ORIGINAL id instead of minting a twin under a newly allocated one. The
+numeric id itself is chosen by the store UNDER its write lock (the first number the index does not
+hold), so simultaneous creates land as distinct records -- never a refusal, never one silently
+overwriting another. `python -m hub_core.client` mints a key for `create`, `ask`, `answer`,
+`directive` and `ack` when none is given and retries a transport failure (timeout, reset,
+502/503/504) with the same key and payload, so a write that landed is reported once, as landed.
 
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
 (dereferenceable-evidence mode).

@@ -241,6 +241,39 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   TLS trust by runtime, readiness gates adopted on evidence, failure outcomes reported) and
   `machine-push-identity.md`.
 
+### Store and performance: a ledger that cannot fork itself, writes that report once, reads that scale
+
+- **The ledger stops manufacturing forks.** `append` indexes its row BEFORE the durable line is
+  written, so a failed insert leaves the log untouched instead of a line no row backs (the
+  duplicate-seq fork). Opens prove currency by four facts (size, tail hash, index tip, row
+  count) without restamping the ledger's mtime; the allocator reads only the tail; a rebuild
+  prints `LEDGER_INDEX_REBUILT` with its reason and root. `hub_core/atomic.py` waits out the
+  transient Windows sharing window on open/rename, never retrying a partial write.
+- **A retry that landed reports success, once.** `idem_key` is bound to the payload it came
+  with; creates scope it to the type's id prefix and answer `data.replayed`; the store allocates
+  server-numbered ids under its write lock (`append(allocate=...)`), so parallel creates land as
+  distinct records. `python -m hub_core.client` retries transport failures with the same key.
+  A keyless re-ask of an ANSWERED question is refused as a duplicate; only a still-open question
+  is its own retry.
+- **Errors fold by cause.** Fingerprints ignore uuids, ids, numbers and quoted values; the
+  newest row of a signature carries the repeats folded since it was written.
+- **Reads scale.** `hub.json` carries a weak ETag that ignores clock fields, accepted from
+  `If-None-Match`, `X-Hub-ETag` or `?etag=`; large collections ride as heads (`partial`,
+  exact `collection_counts`) that the board hydrates from `GET /hub/<type>.json`
+  (`client list`, MCP `list_collection`); WSGI board streams are capped
+  (`HUB_LIVE_STREAMS_MAX`) with a `busy` frame the board waits out.
+- **Process roles.** `HUB_ROLE=web|background` and `manage.py hubbackground` take background
+  projections off the request process; `hub.prewarm.start()` warms the served process;
+  `GET /hub/perf.json` / `client perf` names the answering process.
+- **Verified backups.** `manage.py hubbackup` bundles `HUB_DIR` by exclusion, verifies by
+  REBUILDING the board (`hub_core.reconstruct`) at a live cursor recorded before bundling (a
+  copy shorter than the source is refused, never compared only as far as it reaches), prunes
+  before copying, falls back to a
+  git-ignored vault, ships an off-host copy, and reports staleness; restore goes only into an
+  empty directory. The deploy runbook gains the pre-deploy backup and a fast-push-path section.
+- **Also:** the scrub gate refuses stray control bytes; `patterns/read-access-grants.md`
+  admits a private board's viewers from the ledger's own active grants.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw
