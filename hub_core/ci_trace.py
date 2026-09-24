@@ -47,9 +47,10 @@ NOT_DEPLOYED = re.compile(
 # A real failure inside the job's own work: a phase table row, or a SCREAMING_FAILED marker.
 PHASE_FAIL = re.compile(r"^\s*\[FAIL\]\s*(\S.*)$", re.M)
 HARD_FAIL = re.compile(r"\b([A-Z][A-Z_]{4,})_FAILED\b")
-# The first failure-shaped line of a log nothing above could classify.
+# The first failure-shaped line of a log nothing above could classify. A SCREAMING_MISMATCH
+# marker counts too: the word may follow an underscore, which a plain \b does not see.
 FIRST_SIGNAL = re.compile(
-    r"^.*?\b(?:FAIL(?:ED|URE)?|ERROR|Exception|Traceback|MISMATCH|AssertionError|"
+    r"^.*?(?:\b|(?<=_))(?:FAIL(?:ED|URE)?|ERROR|Exception|Traceback|MISMATCH|AssertionError|"
     r"refused|denied|timed out)\b.*$", re.M | re.I)
 # The runner's own epitaph says only that something failed, which the row already says.
 EPITAPH = re.compile(r"^\s*(?:ERROR:\s*)?Job failed|cleaning up project directory", re.I)
