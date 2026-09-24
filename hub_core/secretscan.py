@@ -43,7 +43,14 @@ _SECRET_SHAPES = (
     (r"AKIA[0-9A-Z]{16}", "a cloud access key id"),
 )
 
-_ASSIGNMENT = re.compile(_KEYWORD + r"[ \t]*[=:][ \t]*([^\s\"',;]{6,})", re.IGNORECASE)
+# A PLACEHOLDER MAY CONTAIN SPACES. The plain value alternative stops at the first space, so
+# `API_TOKEN=<supplied by the deploy>` was captured as `<supplied`, which the bracket placeholder
+# cannot match — and an operator's documentation write was refused as a credential. A bracketed
+# value is therefore taken WHOLE, and only when the bracket ENDS the token, so
+# `password=<x>realsecret` is still read as a credential.
+_BRACKETED = r"(?:<[^>\n]{0,160}>|\[[^\]\n]{0,160}\]|\{[^}\n]{0,160}\})(?=[\s\"',;]|$)"
+_ASSIGNMENT = re.compile(_KEYWORD + r"[ \t]*[=:][ \t]*(" + _BRACKETED + r"|[^\s\"',;]{6,})",
+                         re.IGNORECASE)
 
 
 def secret_problem(payload) -> str:

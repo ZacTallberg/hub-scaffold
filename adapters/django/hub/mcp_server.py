@@ -474,6 +474,60 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "app": {"type": "string"},
          "include": {"enum": ["deferred", "all"]}}}},
+    # Knowledge: record what was learned by its kind, find it again, and read the per-prompt index.
+    {"name": "share_lesson",
+     "description": "Record a LESSON — a rule earned from a mistake. Admitted and tagged with the "
+                    "records it may duplicate or correct (never refused for resemblance); an identical "
+                    "live rule returns duplicate_of and writes nothing.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "rule": {"type": "string"}, "why": {"type": "string"},
+         "tier": {"enum": ["normal", "foundational"]},
+         "verify": {"type": "string", "description": "for a state claim: the command/URL that answers it now"},
+         "verified_as_of": {"type": "string"}, "supersedes": {"type": "string"},
+         "tags": {"type": "array", "items": {"type": "string"}}},
+         "required": ["agent", "rule"]}},
+    {"name": "record_knowledge",
+     "description": "Record a FINDING (a fact discovered about how a system behaves), a METHOD (a "
+                    "procedure the team follows) or a REVIEW (a question only a person may answer).",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"enum": ["finding", "method", "review"]}, "agent": {"type": "string"},
+         "title": {"type": "string"}, "note": {"type": "string"}, "evidence": {"type": "string"},
+         "category": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}},
+         "relates_to": {"type": "array", "items": {"type": "string"}},
+         "expected_version": {"type": "integer"}},
+         "required": ["kind", "agent", "title"]}},
+    {"name": "record_gap",
+     "description": "Record a GAP — a named deficiency someone could own and close, with a severity.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "title": {"type": "string"},
+         "severity": {"enum": ["P0", "P1", "P2", "P3"]},
+         "note": {"type": "string", "description": "what is missing and how it shows"},
+         "evidence": {"type": "string"},
+         "source": {"type": "string"}},
+         "required": ["agent", "title", "severity"]}},
+    {"name": "recall_record",
+     "description": "One board record in full by id, including any overlap suspicions and their "
+                    "verdicts; a phrase falls through to ranked search.",
+     "inputSchema": {"type": "object", "properties": {
+         "ref": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+         "required": ["ref"]}},
+    {"name": "find_related",
+     "description": "Records close to an id (or free text) by weighted vocabulary AND by meaning; "
+                    "each basis says when it could not run.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "text": {"type": "string"}}}},
+    {"name": "list_capabilities",
+     "description": "What an agent can already do here: ledger capabilities merged with the "
+                    "published catalog, with the publication commit and state.",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"type": "string"}, "q": {"type": "string"}}}},
+    {"name": "board_guidance",
+     "description": "The knowledge index ranked for what this agent is doing (focus), with the "
+                    "live block (inbox, unclaimed errors). memory_rank says how it was ordered.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "focus": {"type": "string"},
+         "memory_cap": {"type": "integer", "minimum": 1, "maximum": 200},
+         "memory_full": {"type": "integer", "minimum": 0, "maximum": 40}}}},
     {"name": "retire_record",
      "description": "Retire (or re-open) a knowledge record that stopped being true: a gap, note, "
                     "directive, ADR or finding. A reason is required and is appended with a dated "
@@ -914,6 +968,43 @@ def _call_tool(name, args, auth_headers):
     elif name == "read_errors":
         query = {key: str(args[key]) for key in ("app", "include") if args.get(key)}
         status, body = _seam("/hub/errors.json", query, auth_headers, method="get")
+    elif name == "share_lesson":
+        status, body = _seam("/hub/api/lesson", {k: v for k, v in args.items() if v not in (None, "")},
+                             auth_headers)
+    elif name == "record_knowledge":
+        kind = args.get("kind")
+        if kind not in ("finding", "method", "review"):
+            status, body = 400, {"errors": [{"code": "bad_kind", "msg": "finding | method | review"}]}
+        else:
+            payload = {k: v for k, v in args.items() if k != "kind" and v not in (None, "")}
+            status, body = _seam("/hub/api/" + kind, payload, auth_headers)
+    elif name == "record_gap":
+        from hub_core.client_knowledge import gap_text
+        payload = {k: v for k, v in args.items() if v not in (None, "") and k != "note"}
+        text = gap_text(args.get("note"), args.get("evidence"))
+        if text:
+            payload["evidence"] = text
+        payload.setdefault("status", "open")
+        status, body = _seam("/hub/api/gap", payload, auth_headers)
+    elif name == "recall_record":
+        ref = str(args.get("ref") or "").strip()
+        parts = ref.split(":")
+        status, body = 404, {}
+        if 2 <= len(parts) <= 3 and " " not in ref:
+            type_, local = (parts[1], parts[2]) if len(parts) == 3 else (parts[0], parts[1])
+            status, body = _seam("/hub/%s/%s.json" % (type_, local), {}, auth_headers, method="get")
+        if status >= 400:
+            status, body = _seam("/hub/search.json", {"q": ref, "limit": int(args.get("limit", 8))},
+                                 auth_headers, method="get")
+    elif name == "find_related":
+        query = {k: args[k] for k in ("id", "text") if args.get(k)}
+        status, body = _seam("/hub/related.json", query, auth_headers, method="get")
+    elif name == "list_capabilities":
+        query = {k: args[k] for k in ("kind", "q") if args.get(k)}
+        status, body = _seam("/hub/capabilities.json", query, auth_headers, method="get")
+    elif name == "board_guidance":
+        query = {k: args[k] for k in ("agent", "focus", "memory_cap", "memory_full") if args.get(k) is not None}
+        status, body = _seam("/hub/guidance.json", query, auth_headers, method="get")
     elif name == "app_feed":
         query = {"app": args["app"]}
         if args.get("name"):

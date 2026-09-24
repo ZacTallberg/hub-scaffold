@@ -6,7 +6,8 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import app_services, held, histories_api, hub_api, hub_write, hubsite, veil, mcp_server, read_auth, run_api
+from . import (app_services, held, histories_api, hub_api, hub_write, hubsite, knowledge_api,
+               knowledge_write, veil, mcp_server, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -35,7 +36,13 @@ urlpatterns = [
     path("doctor.json", R(hub_api.doctor_json), name="doctor"),
     path("overlap.json", R(hub_api.overlap_json), name="overlap"),
     path("enroll/status.json", R(hub_api.enroll_status_json), name="enroll-status"),
-    path("search.json", R(hub_api.search_json), name="search"),
+    path("search.json", R(knowledge_api.search_json), name="search"),
+    # Knowledge: related records, the per-prompt memory index, the mirror feed, and the
+    # published capability catalog. Above the catch-all for the same reason as the rest.
+    path("related.json", R(knowledge_api.related_json), name="related"),
+    path("guidance.json", R(knowledge_api.guidance_json), name="guidance"),
+    path("knowledge/since", R(knowledge_api.knowledge_since), name="knowledge-since"),
+    path("capabilities.json", R(knowledge_api.capabilities_json), name="capabilities"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
     path("agent-updates.json", R(hub_api.agent_updates_json), name="agent-updates"),
     path("receipts.json", R(hub_api.receipts_json), name="receipts"),
@@ -86,6 +93,12 @@ urlpatterns = [
     path("api/gap", hub_write.gap),
     path("api/feat", hub_write.feat),
     path("api/note", hub_write.note),
+    # Knowledge records: a lesson is admitted and TAGGED with what it may overlap (never
+    # refused for resemblance); finding / method / review say which kind of record they are.
+    path("api/lesson", knowledge_write.lesson),
+    path("api/finding", knowledge_write.finding),
+    path("api/method", knowledge_write.method),
+    path("api/review", knowledge_write.review),
     # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
     # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
     path("api/retire", hub_write.retire),
@@ -177,6 +190,8 @@ VISIBILITY = {
     "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
     "history.json": "member",
+    "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
+    "capabilities.json": "veiled",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

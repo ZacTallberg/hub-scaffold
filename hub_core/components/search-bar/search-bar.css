@@ -1,0 +1,259 @@
+/* Search bar -- the stylesheet for search-bar.js. Linked from the hub, never copied.
+
+   NAMESPACE. Every token and class is --sb-* / .sb-*, so it drops into a page that already has a
+   design system without collision. Where the shared banner's tokens exist (--ab-*) the panel
+   inherits them, so a search box inside the banner matches the band it sits in; with no banner
+   it falls back to neutral values of its own.
+
+   THEMING. Declared on :root, redeclared under :root[data-theme="dark"] (the attribute the banner
+   and most apps set) and under prefers-color-scheme guarded by :root:not([data-theme="light"]),
+   so an app with its own switch drives it, an app with none follows the OS, and a deliberate
+   light choice is never overridden. */
+
+/* THE GLYPHS ARE STROKE-ONLY AND SAY SO THEMSELVES. They ship fill="none" and width/height as
+   presentation attributes, which ANY author rule beats -- and an ordinary CSS reset
+   (`svg { fill: currentColor }`, `img, svg { height: auto }`) does exactly that, turning outlines
+   into solid shapes. Enumerated classes, not a prefix match: a blanket [class^="sb-"] would reach
+   an app's own icons. A new glyph must be added here. */
+.sb-icon svg, .sb-clear svg, .sb-agent svg { fill: none; stroke-width: 1.9px; }
+.sb-icon svg { width: 18px; height: 18px; }
+.sb-clear svg { width: 13px; height: 13px; stroke-width: 2px; }
+.sb-agent svg { width: 15px; height: 15px; stroke-width: 1.5px; }
+
+:root {
+  --sb-accent: var(--ab-accent, #3b6fd8);
+  --sb-surface: var(--ab-bg, #ffffff);
+  --sb-surface-alt: #f0f3f7;
+  --sb-fg: var(--ab-ink, #1a2332);
+  --sb-muted: var(--ab-muted, #5a6678);
+  --sb-faint: #6b7682;
+  --sb-line: var(--ab-line, #dfe3e8);
+  --sb-warn-bg: #fff8e6;
+  --sb-warn-fg: #7a5b00;
+  --sb-warn-line: #e8d49a;
+  --sb-shadow: 0 12px 32px rgba(26, 35, 50, .18);
+  --sb-radius: 10px;
+  --sb-z: 2147481000;
+  /* The BAR inherits whatever it was dropped into (a band, a toolbar, a page): it paints no box,
+     only a hairline underline that lights on hover and goes solid on focus. */
+  --sb-bar-line: color-mix(in srgb, currentColor 30%, transparent);
+  --sb-bar-glow: color-mix(in srgb, currentColor 55%, transparent);
+  --sb-focus-line: currentColor;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sb-surface: var(--ab-bg, #161b22);
+    --sb-surface-alt: #1e242d;
+    --sb-fg: var(--ab-ink, #e6edf3);
+    --sb-muted: var(--ab-muted, #9aa7b4);
+    --sb-faint: #7d8896;
+    --sb-line: var(--ab-line, #2b323c);
+    --sb-warn-bg: #2a2413;
+    --sb-warn-fg: #e8cf8a;
+    --sb-warn-line: #4a3f1c;
+    --sb-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  }
+}
+:root[data-theme="dark"] {
+  --sb-surface: var(--ab-bg, #161b22);
+  --sb-surface-alt: #1e242d;
+  --sb-fg: var(--ab-ink, #e6edf3);
+  --sb-muted: var(--ab-muted, #9aa7b4);
+  --sb-faint: #7d8896;
+  --sb-line: var(--ab-line, #2b323c);
+  --sb-warn-bg: #2a2413;
+  --sb-warn-fg: #e8cf8a;
+  --sb-warn-line: #4a3f1c;
+  --sb-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+}
+
+/* ------------------------------------------------------------------- the bar */
+
+.sb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  flex: 1 1 30rem;
+  width: 30rem;
+  max-width: 100%;
+  min-width: 10rem;
+  margin: 0;
+  padding: .35rem .15rem .4rem .1rem;
+  font-size: .95rem;
+  color: inherit;
+  box-sizing: border-box;
+  box-shadow: inset 0 -1px 0 var(--sb-bar-line);
+  transition: box-shadow .22s ease-out;
+}
+.sb:hover { box-shadow: inset 0 -1px 0 var(--sb-bar-glow), 0 5px 10px -6px var(--sb-bar-glow); }
+.sb:focus-within { box-shadow: inset 0 -2px 0 var(--sb-focus-line); }
+
+/* THE FIELD IS THE COMPONENT'S, NOT THE PAGE'S. Design systems style every input, commonly as
+   `input:not([type="checkbox"]):not([type="radio"]):not([type="file"])` -- specificity (0,3,1),
+   which beats two classes and draws a boxed field inside the underline. The same shape here lifts
+   this to (0,5,0) and wins honestly, without !important (which would also beat an app that has a
+   real reason to restyle it) and without an id (the mount can be moved into the banner). */
+.sb .sb-input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.sb .sb-input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):hover,
+.sb .sb-input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
+.sb .sb-input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus-visible {
+  flex: 1 1 auto; min-width: 0; width: auto;
+  border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent;
+  margin: 0; height: auto; min-height: 0; padding: .3rem 0;
+  font: inherit; font-size: .95rem; color: inherit;
+  -webkit-appearance: none; appearance: none;
+}
+.sb-input::placeholder { color: inherit; opacity: .7; }
+.sb-input::-webkit-search-decoration,
+.sb-input::-webkit-search-cancel-button,
+.sb-input::-webkit-search-results-button { -webkit-appearance: none; appearance: none; }
+
+.sb-sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.sb-icon { display: inline-flex; flex: none; opacity: .7; transition: opacity .22s ease-out; }
+.sb:hover .sb-icon, .sb:focus-within .sb-icon { opacity: 1; }
+
+.sb-clear {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.3rem; height: 1.3rem; padding: 0;
+  border: 0; border-radius: 50%;
+  background: transparent; color: inherit;
+  opacity: .6; cursor: pointer;
+}
+.sb-clear:hover { opacity: 1; background: color-mix(in srgb, currentColor 18%, transparent); }
+.sb-clear:focus-visible { outline: 2px solid var(--sb-accent); outline-offset: 2px; }
+.sb-clear[hidden] { display: none; }
+
+.sb-agent {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem; opacity: .45; cursor: default;
+  transition: opacity .22s ease-out;
+}
+.sb:hover .sb-agent, .sb:focus-within .sb-agent { opacity: .7; }
+.sb-agent:hover { opacity: 1; }
+
+/* ----------------------------------------------------------------- the panel */
+
+/* The PANEL floats over the page rather than the band, so it uses the full surface palette. */
+.sb-panel {
+  position: absolute;
+  top: calc(100% + .45rem);
+  left: 0;
+  right: 0;
+  min-width: 18rem;
+  z-index: var(--sb-z);
+  background: var(--sb-surface);
+  color: var(--sb-fg);
+  border: 1px solid var(--sb-line);
+  border-radius: var(--sb-radius);
+  box-shadow: var(--sb-shadow);
+  overflow: hidden;
+  text-align: left;
+}
+.sb-panel[hidden] { display: none; }
+
+.sb-list { max-height: min(60vh, 26rem); overflow-y: auto; padding: .3rem 0; scroll-behavior: smooth; }
+
+.sb-group-head {
+  padding: .5rem .85rem .25rem;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--sb-faint);
+}
+.sb-group-head--top { color: var(--sb-accent); }
+
+.sb-opt {
+  display: flex;
+  align-items: baseline;
+  gap: .6rem;
+  padding: .4rem .85rem;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+}
+.sb-opt.is-active { background: var(--sb-surface-alt); box-shadow: inset 2px 0 0 var(--sb-accent); }
+
+.sb-opt-body { display: flex; flex-direction: column; gap: .1rem; min-width: 0; flex: 1 1 auto; }
+.sb-opt-title { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-opt-meta {
+  font-size: .76rem; color: var(--sb-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* The learned row: a rule and a tint, not a badge. The only claim made about it is the app's own
+   `why`, shown at the size of a footnote -- a reason to look, not an instruction to stop. */
+.sb-opt--top {
+  background: linear-gradient(to right, var(--sb-surface-alt), transparent);
+  border-left: 3px solid var(--sb-accent);
+  padding-left: calc(.85rem - 3px);
+  align-items: flex-start;
+}
+.sb-opt--top .sb-opt-title { font-weight: 600; white-space: normal; }
+.sb-opt-why { flex: 0 1 auto; max-width: 45%; font-size: .72rem; color: var(--sb-muted); text-align: right; }
+@media (max-width: 34rem) {
+  .sb-opt--top { flex-direction: column; }
+  .sb-opt-why { max-width: none; text-align: left; }
+}
+/* A recent or popular QUERY re-runs a search rather than opening a thing: drawn plainer. */
+.sb-opt--term .sb-opt-title { color: var(--sb-muted); }
+
+.sb-more {
+  display: block;
+  padding: .55rem .85rem;
+  border-top: 1px solid var(--sb-line);
+  font-size: .8rem;
+  color: var(--sb-accent);
+  text-decoration: none;
+}
+.sb-more:hover, .sb-more:focus-visible { background: var(--sb-surface-alt); }
+
+/* ------------------------------------------------------------------- states */
+
+.sb-state { padding: .9rem .85rem; }
+.sb-state-title { font-size: .88rem; font-weight: 600; }
+.sb-state-body { margin-top: .25rem; font-size: .78rem; color: var(--sb-muted); }
+/* A FAILURE LOOKS LIKE A FAILURE: an empty list and a lane that is down never render alike. */
+.sb-state--warn {
+  background: var(--sb-warn-bg);
+  color: var(--sb-warn-fg);
+  border-left: 3px solid var(--sb-warn-line);
+}
+.sb-state--warn .sb-state-body { color: inherit; opacity: .85; }
+
+.sb-reading {
+  padding: .55rem .85rem; font-size: .8rem; color: var(--sb-muted);
+  border-bottom: 1px solid var(--sb-line);
+}
+.sb-reading::before { content: "\2726\00a0"; color: var(--sb-accent); }
+.sb-note {
+  margin: .35rem .6rem .5rem; padding: .45rem .6rem; font-size: .78rem; line-height: 1.4;
+  color: var(--sb-warn-fg); background: var(--sb-warn-bg); border: 1px solid var(--sb-warn-line);
+  border-radius: 8px;
+}
+
+.sb-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: .4rem .85rem;
+  border-top: 1px solid var(--sb-line);
+  background: var(--sb-surface-alt);
+  font-size: .7rem;
+  color: var(--sb-faint);
+}
+@media (hover: none) { .sb-foot { display: none; } }
+
+@media (max-width: 62rem) {
+  .sb { flex: 1 1 auto; width: auto; max-width: none; }
+}
+
+/* Somebody who needs less movement told their operating system once. */
+@media (prefers-reduced-motion: reduce) {
+  .sb, .sb-icon, .sb-agent { transition: none; }
+  .sb-list { scroll-behavior: auto; }
+}

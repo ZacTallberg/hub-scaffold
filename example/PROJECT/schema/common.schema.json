@@ -27,7 +27,8 @@
         "agent": { "type": "string", "description": "Agent id that last mutated this entity." },
         "created_by": { "type": "string", "description": "Agent id that created this entity; stamped once by the fold from its first event and never rewritten. Anything that must reach the author (a reply to a decision, a stalled task's owner) reads this, never agent." },
         "model_version": { "type": "string" },
-        "session_id": { "type": "string" }
+        "session_id": { "type": "string" },
+        "seq": { "type": "integer", "minimum": 0, "description": "Ledger sequence of the event that last changed this entity, stamped by the fold — the cursor a mirror (/hub/knowledge/since) pages by." }
       },
       "required": ["created_at"]
     },

@@ -1,0 +1,37 @@
+{
+  "name": "header-takeover",
+  "title": "Header takeover",
+  "what": "A companion to the shared banner: hides (never removes) the header an app names in data-replaces and names the reachable controls that went dark, warns when the banner sits on top of a header nobody declared, hides app copies of controls the banner is really drawing (data-ab-superseded, or automatically in the slot, with data-ab-keep as the written escape hatch), and lets an operator take an app's own control off the band (hide_custom).",
+  "link": [
+    "<script src=\"{hub}/components/header-takeover/header-takeover.js\" defer></script>"
+  ],
+  "requires": ["banner"],
+  "mount": {
+    "element": "#app-banner (the banner's own mount); runs after app-banner:ready",
+    "attributes": {
+      "data-replaces": "selector list of the app header(s) the banner stands in for; \"\" = nothing to replace (silences the detector); absent = detect and warn only",
+      "data-props": "optional: the hub's component-properties route for this app (read with ?component=header-takeover)"
+    },
+    "page_attributes": {
+      "data-ab-superseded": "on an app element or wrapper: the banner already offers this; hidden once the banner has drawn",
+      "data-ab-keep": "\"<why>\" on an app control or wrapper in the slot: keep it beside the banner's own; the reason is printed"
+    }
+  },
+  "rules": [
+    "Hidden, never removed: apps bind their own controls by id at startup.",
+    "The detector only warns; its failure mode is doing nothing.",
+    "A duplicate is hidden only while the banner is drawing its counterpart, checked per control and asked twice.",
+    "An app's own search box is kept when the standard search bar is not mounted.",
+    "hide_custom is a person's decision, reversible on every pass, scoped to the banner's slot.",
+    "The drawer keeps one Guided tour, one About this app and one People and Permissions: an app's island copy is hidden while the banner draws its own, and a repeated app row keeps its first copy; each drop is reported."
+  ],
+  "props": [
+    {"key": "hide_custom", "label": "Take an app's own control off the band", "type": "list", "max": 80, "max_items": 12,
+     "default": [], "hint": "One per line: the words on the control, or its #id. Hidden for everyone on this app; delete the line to bring it back."}
+  ],
+  "publishes": {
+    "html_attributes": ["data-header-takeover", "data-ab-replaced", "data-ab-duplicate", "data-ab-offband", "data-ab-superseded-hidden"],
+    "events": ["app-banner:duplicate"],
+    "events_read": ["app-banner:ready", "hub:component-props"]
+  }
+}

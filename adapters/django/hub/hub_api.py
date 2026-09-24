@@ -2795,58 +2795,6 @@ def whoami_json(request):
     return JsonResponse({"data": data})
 
 
-_SEARCH_STOP = {"the", "a", "an", "is", "of", "to", "and", "or", "in", "on", "for", "it",
-                "with", "at", "this", "that", "was", "are"}
-
-
-@require_GET
-def search_json(request):
-    """Ranked multi-term search over the whole board — the PULL half of "push pointers,
-    pull content". A substring scan returns nothing for a natural query even when the
-    exact entity exists, and an agent that cannot find the fact at the moment of need
-    re-derives it (or hits the trap it warned about). Stdlib term frequency over
-    title/name/body fields, weighted headline-over-body, exact-phrase boosted."""
-    q = (request.GET.get("q") or "").strip().lower()[:200]
-    try:
-        limit = max(1, min(50, int(request.GET.get("limit") or 10)))
-    except (TypeError, ValueError):
-        limit = 10
-    if not q:
-        return JsonResponse({"data": [], "metadata": {"q": "", "msg": "pass ?q="}})
-    terms = [t for t in re.split(r"[^a-z0-9._-]+", q) if t and t not in _SEARCH_STOP][:24]
-    state, _ = _snapshot()
-    hits = []
-    # One definition of a dead record (hub_core.record_state): its own status says the claim is
-    # no longer true, or a live record's `supersedes` names it. Both keep it out of the answer.
-    superseded = _record_state.superseded_ids(state["entities"])
-    for ent in state["entities"].values():
-        if not isinstance(ent, dict):
-            continue
-        if _record_state.is_retired(ent, superseded):
-            continue
-        title = str(ent.get("title") or ent.get("name") or "")
-        body = str(ent.get("body_md") or ent.get("summary") or ent.get("decision_md") or
-                   ent.get("acceptance") or ent.get("what") or "")
-        tags = " ".join(str(t) for t in (ent.get("tags") or []))
-        hay_t, hay_b = (title + " " + tags).lower(), body.lower()
-        score = 0.0
-        for term in terms:
-            score += 3.0 * hay_t.count(term) + 1.0 * hay_b.count(term)
-        if not score:
-            continue
-        if q in hay_t:
-            score += 8.0            # exact phrase in the headline
-        elif q in hay_b:
-            score += 3.0
-        score += sum(1.5 for term in terms if term in hay_t)   # breadth of term coverage
-        hits.append({"id": ent.get("id"), "type": ent.get("type"), "title": title,
-                     "status": ent.get("status") or ent.get("maturity") or "",
-                     "excerpt": preview(body, 400), "score": round(score, 2)})
-    hits.sort(key=lambda h: h["score"], reverse=True)
-    return JsonResponse({"data": hits[:limit],
-                         "metadata": {"q": q, "terms": terms, "matched": len(hits)}})
-
-
 @require_POST
 @csrf_protect
 def client_error(request):

@@ -124,6 +124,10 @@ def _advance(entities, events):
             prov["created_by"] = first_by
         elif ev.get("agent_id"):
             prov.setdefault("created_by", ev["agent_id"])
+        # The ledger sequence of the event that last changed this entity: the cursor a local
+        # mirror pages by (/hub/knowledge/since) — "what changed after N" needs no replay.
+        if ev.get("seq") is not None:
+            prov["seq"] = ev["seq"]
         if ev.get("agent_id"):
             prov["agent"] = ev["agent_id"]
         if ev.get("git_sha"):
