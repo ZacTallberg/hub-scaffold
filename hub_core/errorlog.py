@@ -18,6 +18,12 @@ Rules this module holds, each paid for in production on the origin system:
   Host header) is recorded as a warning and flagged external, so a suppressed repeat
   reports the same severity its written sibling did and can never crowd the top of the
   stream.
+* A CHANGE OF SEVERITY IS A NEW FACT. The throttle folds a repeat into the prior write only
+  at the SAME severity: a service that demotes a class (error -> warning) gets a row at the
+  new severity instead of lending its occurrences to the old error row.
+* AN ACK IS BOUNDED BY ITS OWN TIME. It covers the occurrences at or before the moment it was
+  given; a recurrence after it is a new event nobody accepted and surfaces again. is_acked()
+  is the one predicate every reader shares, and it fails OPEN toward visible.
 * ACK COLLAPSES, NEVER DELETES; a clear is bounded by AGE or by ACK, never "everything" —
   a clear must never be the operation that destroys evidence of a failure nobody has
   looked at. only_acked is a RESTRICTION: an age bound beside it narrows the acked set.
@@ -226,17 +232,23 @@ def record(hub_dir, source, message, *, severity="error", code="runtime_error",
         row["external"] = True
     seen_map = _LAST_SEEN.setdefault(key, {})
     seen = seen_map.get(fingerprint)
-    if seen and (now - seen[0]) < THROTTLE_S:
-        seen_map[fingerprint] = (seen[0], seen[1] + 1)
+    # A change of SEVERITY is a new fact, never a recurrence to fold. The fingerprint does not
+    # carry severity, so without this a service that demotes a class (error -> warning) had
+    # its warnings folded into the old ERROR row's window and counted as that row's repeats —
+    # and a resolved error kept being re-stamped by occurrences its own service had already
+    # declared harmless.
+    same_sev = bool(seen) and seen[2] == row["severity"]
+    if seen and same_sev and (now - seen[0]) < THROTTLE_S:
+        seen_map[fingerprint] = (seen[0], seen[1] + 1, seen[2])
         row["suppressed_since"] = seen[1] + 1
         return row
-    if seen:
+    if seen and same_sev:
         row["occurrences_since_last"] = seen[1]
-    seen_map[fingerprint] = (now, 1)
+    seen_map[fingerprint] = (now, 1, row["severity"])
     if len(seen_map) > _LAST_SEEN_MAX:
         # A long-lived process sees an unbounded stream of distinct fingerprints; windows
         # older than the throttle have nothing left to suppress. The map stays BOUNDED.
-        for stale in [fp for fp, (first, _) in seen_map.items() if (now - first) >= THROTTLE_S]:
+        for stale in [fp for fp, v in seen_map.items() if (now - v[0]) >= THROTTLE_S]:
             seen_map.pop(stale, None)
 
     try:
@@ -286,9 +298,11 @@ def read(hub_dir, limit=READ_LIMIT) -> tuple[list, dict]:
         rows.reverse()
         acked = read_acked(hub_dir)
         for row in rows:
-            mark = acked.get(row.get("fingerprint"))
-            if mark:
-                row["acked"] = mark
+            # Only the occurrences the ack actually covered. A recurrence after it is a NEW
+            # event: a signature-only mute once hid eight of nine live rows of a different
+            # root cause behind a days-old ack whose note claimed "0 recurrences since".
+            if is_acked(row, acked):
+                row["acked"] = acked[row.get("fingerprint")]
         metadata = {
             "available": failure is None,
             "retention": KEEP_ROWS,
@@ -316,10 +330,52 @@ def read_acked(hub_dir) -> dict:
         return {}
 
 
+def _epoch(value) -> float:
+    """An ISO-8601 (...Z) or epoch-ish value as a float; -inf when unreadable."""
+    if value in (None, ""):
+        return float("-inf")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+ACK_SKEW_S = 2.0
+
+
+def is_acked(row: dict, acked: dict | None = None, hub_dir=None) -> bool:
+    """Is THIS occurrence acknowledged? An ack covers only rows AT OR BEFORE its own
+    timestamp; a recurrence after it re-surfaces, because nobody accepted it. The single
+    predicate behind the row's `acked` mark, the unclaimed count every reader shares, and the
+    only_acked clear — so the board, the API and an agent can never disagree about a row.
+
+    Fails OPEN toward VISIBLE: an ack with no readable time, or a row with none, mutes
+    nothing. A real error wrongly hidden is worse than a handled one shown twice."""
+    if acked is None:
+        acked = read_acked(hub_dir) if hub_dir is not None else {}
+    mark = acked.get(row.get("fingerprint"))
+    if not isinstance(mark, dict):
+        return False
+    ack_at = _epoch(mark.get("at"))
+    if ack_at == float("-inf"):
+        return False
+    row_at = _epoch(row.get("epoch") if row.get("epoch") not in (None, "") else row.get("ts"))
+    if row_at == float("-inf"):
+        return False
+    # The ack is written after the row it accepts; allow clock jitter and rounding so an
+    # accepted row never leaks back as "new".
+    return row_at <= ack_at + ACK_SKEW_S
+
+
 def ack(hub_dir, fingerprint: str, actor: str = "", note: str = "") -> dict:
-    """Acknowledge one error SIGNATURE. Acking is not deleting: the rows stay in the stream
-    and stay countable — they just stop competing for attention with failures nobody has
-    looked at yet. Returns {} on failure so a caller can report honestly."""
+    """Acknowledge one error SIGNATURE, up to NOW. Acking is not deleting: the rows stay in
+    the stream and stay countable — they just stop competing for attention with failures
+    nobody has looked at yet. A recurrence after this moment is not covered (is_acked).
+    Returns {} on failure so a caller can report honestly."""
     fingerprint = _clean(fingerprint, 32)
     if not fingerprint:
         return {}
@@ -384,7 +440,9 @@ def clear(hub_dir, before_epoch=None, only_acked=False) -> dict:
                     continue
                 old = before_epoch is None or float(row.get("epoch") or 0) < float(before_epoch)
                 if only_acked:
-                    drop = bool(acked.get(row.get("fingerprint"))) and old
+                    # is_acked, not membership: a recurrence after the ack is NOT acked, so
+                    # an only_acked clear must never delete the rows the ack keeps visible.
+                    drop = is_acked(row, acked) and old
                 else:
                     drop = old
                 if drop:
