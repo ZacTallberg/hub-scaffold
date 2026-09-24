@@ -65,6 +65,10 @@ HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see bel
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
 # HUB_SNAPSHOT_HEAD_ROWS = 60          # larger collections ride hub.json as a head; 0 = never
 # HUB_LIVE_STREAMS_MAX = 3             # concurrent WSGI board streams per process; 0 = no cap
+# Process roles are ENVIRONMENT, per process (docs/OPERATIONS.md -> Process roles):
+#   HUB_ROLE=web | background (unset = both), HUB_BACKGROUND_STALE_S=180,
+#   HUB_BACKGROUND_INTERVAL_S=20, HUB_PREWARM=0 to skip the served-process warm-up that
+#   `from hub import prewarm; prewarm.start()` in wsgi.py/asgi.py starts.
 # HUB_FAILURE_CIRCUIT_THRESHOLD = 3    # identical cause signatures before circuit-open
 # HUB_FAILURE_BACKOFF_BASE_S = 30      # exponential retry base
 # HUB_FAILURE_BACKOFF_MAX_S = 3600     # hard retry ceiling

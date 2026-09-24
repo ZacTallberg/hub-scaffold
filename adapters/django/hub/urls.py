@@ -27,6 +27,7 @@ urlpatterns = [
     path("errors.json", hub_api.errors_json, name="errors"),
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    path("perf.json", hub_api.perf_json, name="perf"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
