@@ -382,8 +382,7 @@ def _decision_guard(b, is_create):
                 "msg": "a decision is a person's call and is never offered to an unattended "
                        "worker; drop unattended, or change work_kind if this is build work"}]},
                 status=409)
-        if "unattended" in b or is_create:
-            b["unattended"] = False
+        b["unattended"] = False     # becoming (or staying) a decision always clears the flag
         return None
     if _is_true(b.get("unattended")) and not is_create and not kind:
         current = (hub_app.current_state().get("entities") or {}).get(b.get("id")) or {}
@@ -1832,7 +1831,9 @@ def decide_task(request, b):
                                    etype="task.updated")
             if status != 200:
                 return JsonResponse(resp, status=status)
-            filer = str((ent.get("provenance") or {}).get("agent") or "").strip().lower()
+            # The FILER is who created the decision (stamped once by the fold), never the last
+            # writer: an unrelated priority edit must not redirect the reply to its editor.
+            filer = str((ent.get("provenance") or {}).get("created_by") or "").strip().lower()
             paged = ""
             # The shared-root compatibility subject is not a seat anybody reads; a reply to a
             # decision it filed has nobody to page, and says so (paged: "").

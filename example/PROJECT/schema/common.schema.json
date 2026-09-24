@@ -25,6 +25,7 @@
         "commits": { "type": "array", "items": { "type": "string" }, "description": "Implementing commit SHA(s)." },
         "author": { "type": "string" },
         "agent": { "type": "string", "description": "Agent id that last mutated this entity." },
+        "created_by": { "type": "string", "description": "Agent id that created this entity; stamped once by the fold from its first event and never rewritten. Anything that must reach the author (a reply to a decision, a stalled task's owner) reads this, never agent." },
         "model_version": { "type": "string" },
         "session_id": { "type": "string" }
       },

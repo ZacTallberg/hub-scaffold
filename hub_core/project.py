@@ -92,6 +92,12 @@ def _advance(entities, events):
         # Copy the one touched aggregate. Incremental readers can therefore advance a cached
         # projection without mutating the version still visible to another request.
         ent = dict(entities.get(agg, {"id": agg, "type": _type_of(agg)}))
+        # Who CREATED the aggregate is stamped once, from its first event, and survives any later
+        # payload -- including one that carries its own provenance dict. ``agent`` is the LAST
+        # writer; anything that must reach the author (a reply to a decision, a stalled task's
+        # owner) reads ``created_by``, never ``agent``.
+        first_by = (entities.get(agg, {}).get("provenance") or {})
+        first_by = first_by.get("created_by") if isinstance(first_by, dict) else None
         for k, v in payload.items():
             ent[k] = v
         ent["version"] = ev.get("result_version", ent.get("version", 0))
@@ -110,6 +116,10 @@ def _advance(entities, events):
             prov = {}
         prov.setdefault("created_at", ev.get("ts"))
         prov["updated_at"] = ev.get("ts")
+        if first_by:
+            prov["created_by"] = first_by
+        elif ev.get("agent_id"):
+            prov.setdefault("created_by", ev["agent_id"])
         if ev.get("agent_id"):
             prov["agent"] = ev["agent_id"]
         if ev.get("git_sha"):
