@@ -7,6 +7,7 @@ reconnect cursor reconciliation closes the only interval in which a client could
 """
 import asyncio
 import json
+import logging
 import re
 import threading
 import time
@@ -1477,6 +1478,16 @@ def doctrine_json(request):
     except OSError as exc:
         return JsonResponse({"errors": [{"code": "unreadable", "msg": type(exc).__name__}]},
                             status=503)
+    # Doctrine read from disk never passes the write seam's guard, so it gets the same check
+    # here: a lost escape (\a in a Windows path) would otherwise ride every agent's prompt.
+    from hub_core import textguard as _textguard
+    problems = _textguard.control_char_problems({name: raw})
+    if problems:
+        logging.getLogger("hub.doctrine").error("doctrine %s refused: %s", name,
+                                                _textguard.message(problems))
+        return JsonResponse({"errors": [{"code": "control_chars", "doc": name,
+                                         "msg": _textguard.message(problems),
+                                         "problems": problems}]}, status=503)
     text = _facets.render(raw, visible)
     return JsonResponse({"data": {
         "doc": name, "served": sorted(files),

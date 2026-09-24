@@ -76,7 +76,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
-| `GET /hub/doctrine.json?doc=<name>` | a standing document rendered through its facet fences for THE PRESENTING CREDENTIAL: `{doc, served[], facets_visible[], subject, sha256, text}`. A credential with scope `facet:<name>` (or `facet:*`, or `*`) sees that facet's blocks, an anonymous read sees none; hidden blocks leave no trace and the response names only the facets this caller CAN see. `404 unknown_doc` lists the served names. Documents come from `HUB_DOCTRINE_FILES` (default `PROJECT/DOCTRINE.md`, `CHARTER-CORE.md`, `AGENTS.md`). Fence syntax: `patterns/multi-agent-coordination.md`. |
+| `GET /hub/doctrine.json?doc=<name>` | a standing document rendered through its facet fences for THE PRESENTING CREDENTIAL: `{doc, served[], facets_visible[], subject, sha256, text}`. A credential with scope `facet:<name>` (or `facet:*`, or `*`) sees that facet's blocks, an anonymous read sees none; hidden blocks leave no trace and the response names only the facets this caller CAN see. `404 unknown_doc` lists the served names; a source file carrying a C0 control character (a lost `\a` in a Windows path) is refused `503 control_chars` naming the offsets, never served. A near-miss fence marker (wrong shape, trailing text) hides the rest of the document from every reader below `*`. Documents come from `HUB_DOCTRINE_FILES` (default `PROJECT/DOCTRINE.md`, `CHARTER-CORE.md`, `AGENTS.md`). Fence syntax: `patterns/multi-agent-coordination.md`. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
 unchanged, so an idle poll or a re-grounding pull costs an empty body.
@@ -239,8 +239,9 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 The client's `finding`, `method`, `gap` and `review` verbs (and the MCP `record` tool) are
 routings onto the write paths above, not new endpoints: a finding is a `note` in category
 `discovery` tagged `finding`, a method a `note` in category `method`, a gap a `gap` with a
-severity and evidence, and a review an `ask` whose question starts `Review gate:` — so it is
-DELIVERED to the operator before the thing ships. When to use which:
+severity and evidence, and a review an `ask` whose question starts `Review gate:` sent with
+`review: true` — so it is DELIVERED to the operator before the thing ships, and tagged `review`
+(the inbox item carries `review: true`) so no unattended responder is ever launched for it. When to use which:
 `patterns/multi-agent-coordination.md`. `create --unattended` marks a task for the event-driven
 responder lane (`routing.required_capabilities` += `unattended`; `patterns/unattended-responders.md`).
 
@@ -263,7 +264,7 @@ Every write on every endpoint above is additionally screened for secret shapes a
 be removed, only rotated. Recognizable redaction placeholders pass.
 Every board write outside the error-report scope is also refused `422 control_chars` when a
 string carries a C0 control character other than newline, carriage return or tab — almost
-always a backslash escape eaten between the source and the call (`` in a Windows path lands a
+always a backslash escape eaten between the source and the call (`\a` in a Windows path lands a
 raw BEL). The refusal names the field, offsets and character; fix the source and resend.
 
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`

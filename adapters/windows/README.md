@@ -123,10 +123,10 @@ current user, no admin needed — the event-driven launcher described in
 protocol handler, no browser grant.
 
 ```powershell
-# write <HomeDir>esponder.env first: HUB_API_BASE, HUB_AGENT_ID, HUB_RESPONDER_RUNTIME,
+# write <HomeDir>\responder.env first: HUB_API_BASE, HUB_AGENT_ID, HUB_RESPONDER_RUNTIME,
 # HUB_RESPONDER_WORKSPACE, HUB_AGENT_TOKEN_FILE (a path; the token itself never goes in the file)
-.egister-responder.ps1 -HomeDir "$env:USERPROFILE\.hub-responder"   # arm; re-run = repair
-.egister-responder.ps1 -Remove                                        # leave
+.\register-responder.ps1 -HomeDir "$env:USERPROFILE\.hub-responder"   # arm; re-run = repair
+.\register-responder.ps1 -Remove                                        # leave
 ```
 
 The task runs under `pythonw.exe` so the scheduler never flashes a console window, refuses to
