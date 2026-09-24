@@ -534,7 +534,9 @@ def route_guard_adapter(state):
 
     General writes carry ``@writer`` with a named operation scope. The one deliberately narrow
     browser capability may instead carry ``@csrf_protect`` plus ``_hub_origin_gated``; it can only
-    mint a short-lived launch grant and never receives general write authority.
+    mint a short-lived launch grant and never receives general write authority. The CI ingest,
+    whose sender is a CI system rather than an agent, carries ``_hub_secret_gated``: it refuses
+    everything without a configured webhook secret and can only add or retire CI rows.
     """
     try:
         from django.urls import get_resolver
@@ -575,10 +577,11 @@ def route_guard_adapter(state):
                                      remediation="add the route to urls.VISIBILITY"))
             elif "hub/api/" in pat:
                 cb = getattr(p, "callback", None)
-                guarded = getattr(cb, "_hub_token_gated", False) or getattr(cb, "_hub_origin_gated", False)
+                guarded = (getattr(cb, "_hub_token_gated", False) or getattr(cb, "_hub_origin_gated", False)
+                           or getattr(cb, "_hub_secret_gated", False))
                 if not guarded:
                     viols.append(_sv("routes:unguarded", "every /hub/api/ route has an explicit gate",
-                                     "%s -> %s is not token- or origin-gated" %
+                                     "%s -> %s is not token-, origin- or secret-gated" %
                                      (pat, getattr(cb, "__name__", "?")),
                                      "@writer or narrow @csrf_protect capability",
                                      remediation="wrap general writes with @writer"))
@@ -1091,6 +1094,27 @@ _SESSION_HEADERS = {"X-Hub-Project": "project", "X-Hub-Files": "files",
                     "X-Hub-Runtime": "runtime"}
 
 
+def _presence_files(header, project="", repo=""):
+    """X-Hub-Files as `<project>/<path>` tokens (hub_core.presence.parse_files). A bare file
+    name is qualified with the console's own project (X-Hub-Project, else the repository's
+    last path segment) when one is known, so a console that reports plain names keeps its list
+    while two consoles in different repos are never paired on one bare name."""
+    project = str(project or "").strip().strip("/")
+    if not project and repo:
+        project = str(repo).strip().rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
+        if project.endswith(".git"):
+            project = project[:-4]
+    tokens = []
+    for part in str(header or "").replace(";", ",").split(","):
+        part = part.strip().replace(chr(92), "/").strip("/")
+        if not part:
+            continue
+        if "/" not in part and project:
+            part = project + "/" + part
+        tokens.append(part)
+    return _presence.parse_files(",".join(tokens))
+
+
 def observe_presence(agent, headers, *, heartbeat=False, extra=None):
     """Refresh the caller's presence row from optional X-Hub-* headers (and, from the presence
     ping, a body digest of what the session is doing), then wake connected cockpits — throttled,
@@ -1099,11 +1123,11 @@ def observe_presence(agent, headers, *, heartbeat=False, extra=None):
     seat on an older client than this hub serves is visible. Fail-soft end to end: presence must
     never break a write."""
     try:
-        raw_files = headers.get("X-Hub-Files")
-        files = None if raw_files is None else [
-            f.strip() for f in str(raw_files).replace(";", ",").split(",") if f.strip()]
+        files_header = headers.get("X-Hub-Files")
+        files = None if files_header is None else _presence_files(
+            files_header, headers.get("X-Hub-Project") or "", headers.get("X-Hub-Repo") or "")
         fields = {name: headers.get(header) for header, name in _SESSION_HEADERS.items()
-                  if headers.get(header)}
+                  if headers.get(header) and name != "files"}
         fields.update(extra or {})
         _presence.observe(
             HUB_DIR, agent,
@@ -1116,10 +1140,18 @@ def observe_presence(agent, headers, *, heartbeat=False, extra=None):
             app=headers.get("X-Hub-App") or "",
             state=headers.get("X-Hub-State") or "",
             runtime=headers.get("X-Hub-Runtime") or "",
+            # A console's recently edited files. Absent header = no claim (keep the last one);
+            # an empty header = "nothing edited recently" (clear it).
             files=files,
             retract_focus=headers.get("X-Hub-Focus-Retract") or "",
             heartbeat=heartbeat, extra=fields,
-            client=headers.get("X-Hub-Client-Version") or "")
+            # Kit telemetry: the client's own version+sha and the sha of every artifact the
+            # seat runs. It is what separates a computer from a bare caller (is_kit_machine)
+            # and what the distribution view grades. X-Hub-Client-Version is the digest the
+            # stale-seat detector compares against the client this hub serves.
+            client=headers.get("X-Hub-Client") or "",
+            client_digest=headers.get("X-Hub-Client-Version") or "",
+            artifacts=_presence.parse_artifacts(headers.get("X-Hub-Artifacts") or ""))
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
         if stamp != _PRESENCE_PUBLISH["stamp"] and now - _PRESENCE_PUBLISH["at"] >= 2.0:
@@ -1132,6 +1164,60 @@ def observe_presence(agent, headers, *, heartbeat=False, extra=None):
 
 def read_presence():
     return _presence.read(HUB_DIR)
+
+
+def read_presence_rows():
+    """The RAW per-(agent, machine) rows, offline machines included (the live view ages them
+    out, and an offline laptop is still its person's machine)."""
+    return _presence.rows(HUB_DIR)
+
+
+def is_kit_machine(row):
+    return _presence.is_kit_machine(row)
+
+
+# ---- distribution: is every seat running what this hub publishes? ----
+from hub_core import distribution as _distribution
+
+
+def distribution_files():
+    """What this hub publishes, as {artifact: file}. Always the client it serves (the seats'
+    `python -m hub_core.client`) and the charter core when the project ships one; plus any
+    adopter file named in HUB_DISTRIBUTED_ARTIFACTS ({name: path}, relative to WORK_ROOT) —
+    a seat reports the same name through HUB_ARTIFACTS."""
+    import hub_core.client as _client_module
+    files = {"client": Path(_client_module.__file__)}
+    charter = WORK_ROOT / "CHARTER-CORE.md"
+    if charter.exists():
+        files["charter"] = charter
+    extra = _dj_setting("HUB_DISTRIBUTED_ARTIFACTS") or {}
+    if isinstance(extra, dict):
+        for name, rel in extra.items():
+            path = Path(rel)
+            files[str(name).lower()] = path if path.is_absolute() else WORK_ROOT / path
+    return files
+
+
+def distribution_report(now=None):
+    """(report, published) — the grade of every seat, fail-soft: a broken read is an empty
+    report that SAYS it could not grade, never a 500 on the board."""
+    try:
+        pub = _distribution.published(distribution_files())
+        report = _distribution.assess(read_presence_rows(), pub, now=now,
+                                      is_kit=_presence.is_kit_machine,
+                                      is_service=_presence.is_service_identity)
+        return report, pub
+    except Exception as exc:                                 # noqa: BLE001
+        return {"machines": [], "converged": False, "graded": 0,
+                "verdict": "distribution could not be computed: %s" % type(exc).__name__}, {}
+
+
+def distribution_inbox_items(now=None):
+    report, pub = distribution_report(now)
+    try:
+        return _distribution.inbox_items(report, pub, now=now)
+    except Exception:                                        # noqa: BLE001
+        return []
 
 
 def live_sessions():

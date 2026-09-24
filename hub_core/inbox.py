@@ -463,20 +463,26 @@ def decision_items(state) -> list:
 
 # ── the addressed set ───────────────────────────────────────────────────────────────────────
 
-def items_for(state, agent: str, operator: str, *, machine: str = "", session: str = "",
-              live=None, human_gate=None, gate_satisfied=None, visible=None, now=None) -> list:
+def items_for(state, agent: str, operator: str, operator_extra=None, *, machine: str = "",
+              session: str = "", live=None, human_gate=None, gate_satisfied=None, visible=None,
+              now=None) -> list:
     """Everything currently addressed to `agent` (and, when `session` is named, to that console).
 
     Order: a message from a teammate leads (somebody reached out to THIS agent directly), then
     human gates and questions (longest wait first), then directives and answers. `visible` is
     the caller's visibility filter (the contributor veil); it runs BEFORE fingerprinting, so a
-    reader is never woken for — nor recorded as offered — an item it cannot see."""
+    reader is never woken for — nor recorded as offered — an item it cannot see.
+
+    ``operator_extra`` are computed items the adapter raises for a PERSON (a seat gone silent,
+    persistent drift): conditions that cannot fix themselves, delivered to the operator only."""
     agent = _norm(agent)
     questions = questions_for(question_items(state, human_gate=human_gate,
                                              gate_satisfied=gate_satisfied, now=now),
                               agent, operator)
     items = (message_items(state, agent, machine, now) + questions
              + directive_items(state, agent, now) + assignment_items(state, agent))
+    if agent and agent == _norm(operator):
+        items += list(operator_extra or [])
     routed = []
     for item in items:
         kept = _route(item, agent, session, live)
@@ -499,12 +505,13 @@ def fingerprint(items) -> str:
     return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def snapshot(state, agent: str, operator: str, *, hub_dir=None, **kwargs) -> dict:
+def snapshot(state, agent: str, operator: str, operator_extra=None, *, hub_dir=None,
+             **kwargs) -> dict:
     """The addressed set + its fingerprint. With `hub_dir`, an OFFER receipt is written for
     each item — only when the addressed set CHANGES: this is the wait loop's hot path and a
     console polling every few seconds must not be able to flood the record of what it was
     told. Fail-soft; receipts never break delivery."""
-    items = items_for(state, agent, operator, **kwargs)
+    items = items_for(state, agent, operator, operator_extra, **kwargs)
     fp = fingerprint(items)
     if hub_dir is not None and items:
         key = (_norm(agent), _sid(kwargs.get("session")))
@@ -640,6 +647,10 @@ def render_line(item) -> str:
     if item.get("kind") == "assignment":
         return "%s gave you %s: %s" % (item.get("from") or "the operator", item.get("id") or "",
                                        item.get("title") or "")
+    if item.get("kind") == "offline":
+        return "OFFLINE %s" % (item.get("title") or "")
+    if item.get("kind") == "drift":
+        return "DRIFT %s" % (item.get("title") or "")
     return "Directive: %s" % (item.get("title") or "")
 
 

@@ -664,9 +664,51 @@ def _fleet(events, state, inflight):
     # asleep. A console's focus becomes the card's "on" line when no lease exists, and the
     # per-console rows are the surface that stops two sessions from unknowingly working the
     # same thing.
-    sessions_by_agent = {}
+    sessions_by_agent, overlaps = {}, []
     for s in _activity_rows(state):
         sessions_by_agent.setdefault(s["agent"], []).append(s)
+    try:
+        from hub_core import presence as _presence_overlap
+        # FILE crossovers: two consoles editing the same <project>/<path> right now.
+        overlaps = _presence_overlap.file_overlaps(hub_app.live_sessions())
+    except Exception:                                        # noqa: BLE001 - never 500 the board
+        overlaps = []
+
+    # EVERY computer a person has, each with its own check-in state. A card that reads only the
+    # first machine lets a busy computer stand in for a silent one ("+1 more", "online") — the
+    # second machine's own freshness never renders. A row that names a machine without kit
+    # telemetry is a bare caller, not a computer: it is named under `phantoms` for tracing and
+    # kept out of every device list and count.
+    machines_by_agent, phantoms_by_agent = {}, {}
+    try:
+        from hub_core import presence as _presence_core
+        now_epoch = time.time()
+        for ag, seen in (hub_app.read_presence() or {}).items():
+            for m in (seen or {}).get("machines") or []:
+                name = str(m.get("machine") or "")
+                if not name:
+                    continue
+                state = _presence_core.device_state(m, now_epoch)
+                if not _presence_core.is_kit_machine(m):
+                    phantoms_by_agent.setdefault(ag, []).append(
+                        {"machine": name, "last_seen_age_s": state.get("last_seen_age_s")})
+                    continue
+                machines_by_agent.setdefault(ag, []).append({
+                    "machine": name, "connection": state["connection"],
+                    "heartbeat_age_s": state.get("heartbeat_age_s"),
+                    "last_seen_age_s": state.get("last_seen_age_s"),
+                    "client": m.get("client") or "",
+                    "consoles": [{"session": str(x.get("id") or "")[:8],
+                                  "focus": str(x.get("focus") or "")[:100],
+                                  "age_s": round(now_epoch - x["at"]) if x.get("at") else None,
+                                  "files": x.get("files") or []}
+                                 for x in (m.get("sessions") or [])
+                                 if x.get("at") and now_epoch - x["at"] <= _presence_core.SESSION_ACTIVE_S][:6]})
+    except Exception:                                        # noqa: BLE001 - never 500 the board
+        machines_by_agent, phantoms_by_agent = {}, {}
+    order = {"online": 0, "activity-only": 1, "degraded": 2, "unverified": 3, "offline": 4}
+    for rows in machines_by_agent.values():
+        rows.sort(key=lambda r: (order.get(r["connection"], 5), r.get("last_seen_age_s") or 0))
 
     cards = []
     for ag in set(lease_by_agent) | set(trails) | set(sessions_by_agent):
@@ -705,6 +747,9 @@ def _fleet(events, state, inflight):
             "age_s": lease.get("age_s") if lease else None,
             "idle_s": idle_s, "trail": trails.get(ag, []),
             "sessions": sessions[:6],
+            "machines": machines_by_agent.get(ag, []),
+            "phantoms": phantoms_by_agent.get(ag, []),
+            "overlaps": [o for o in overlaps if ag in (o["a"]["agent"], o["b"]["agent"])][:4],
             "done_total": sum(1 for e in events if e.get("agent_id") == ag
                               and e.get("type") == "task.transitioned"
                               and (e.get("payload") or {}).get("status") == "done"),
@@ -877,6 +922,52 @@ def _delivery_fast(state, cursor, served):
 
         threading.Thread(target=materialize, name="hub-delivery-projection", daemon=True).start()
     return provisional, False
+
+
+def _built(events, state, person=None):
+    try:
+        from hub_core import built as _built_core
+        from hub_core import presence as _presence_core
+        return _built_core.by_person(events, state, hub_app.read_presence_rows(),
+                                     is_service=_presence_core.is_service_identity,
+                                     is_kit=_presence_core.is_kit_machine, person=person)
+    except Exception:                                        # noqa: BLE001 - never 500 the board
+        return []
+
+
+def _built_summary(events, state):
+    """The cockpit's compact form: per person, totals and the three newest completions."""
+    return [{"person": r["person"], "identities": r["identities"], "totals": r["totals"],
+             "authored_counts": r["authored_counts"],
+             "recent": [t["title"] for t in r["tasks"][:3]]}
+            for r in _built(events, state)[:12]]
+
+
+@require_GET
+def built_json(request):
+    """GET /hub/built.json[?person=] — what each person built, derived from the ledger (completed
+    tasks, releases, authored gaps/feats/ADRs/decisions/notes), machines folded into the person
+    reporting from them."""
+    s = hub_app.store()
+    try:
+        cur = s.latest_cursor()
+        events, state = _projected(s, cur)
+    finally:
+        s.close()
+    rows = _built(events, state, person=(request.GET.get("person") or "").strip() or None)
+    return JsonResponse({"data": rows, "metadata": {
+        "people": len(rows),
+        "totals": {k: sum(r["totals"][k] for r in rows) for k in ("tasks", "deploys", "authored")},
+        "how": "derived from ledger events; a machine identity folds into the agent reporting "
+               "from it (raw presence rows, offline machines included)"}})
+
+
+def _file_overlaps(sessions_live):
+    try:
+        from hub_core import presence as _presence_overlap
+        return _presence_overlap.file_overlaps(sessions_live)[:12]
+    except Exception:                                        # noqa: BLE001
+        return []
 
 
 def _live_side_blocks(state, lease_rows=None):
@@ -1087,6 +1178,9 @@ def _live_blocks(events, state, audit, deliv, cursor):
         "updates": updates.read(hub_dir, 40),
         # THE PROMOTION LANE: finished work held back from live, oldest first (hub_core.held).
         "held": _held_rows(state),
+        "file_overlaps": _file_overlaps(sessions_live),
+        "distribution": hub_app.distribution_report()[0],
+        "built": _built_summary(events, state),
         "attention": _attention(state, audit, inflight, adher, deliv,
                                 asks=asks, error_unclaimed=error_unclaimed),
         "telemetry": telemetry.read_aggregate(hub_dir),
@@ -1195,6 +1289,9 @@ def _snapshot(served=None):
             "sessions_live": side_sessions[:12],
             "updates": updates.read(hub_dir, 40),
             "held": _held_rows(state),
+            "file_overlaps": _file_overlaps(side_sessions),
+            "distribution": hub_app.distribution_report()[0],
+            "built": _built_summary(events, state),
             "attention": _attention(state, audit, inflight, adher, deliv,
                                     asks=side_asks, error_unclaimed=side_unclaimed),
             # Task health (moving / ready-to-close / stalled / orphaned), the attended vs
@@ -1843,7 +1940,9 @@ def _addressed(state, snap, agent, **kwargs):
     The self-delivering lanes pass through the same visibility filter as the addressed set, so
     the contributor veil hides them exactly as it hides a message."""
     operator = _operator_agent()
-    base = inbox_core.snapshot(state, agent, operator, hub_dir=hub_app.HUB_DIR, **kwargs)
+    # The operator also receives what only a person can clear: seats gone silent, drift.
+    base = inbox_core.snapshot(state, agent, operator, _operator_extra(agent),
+                               hub_dir=hub_app.HUB_DIR, **kwargs)
     items = list(base.get("items") or [])
     extra = []
     live = (snap or {}).get("live") or {}
@@ -1866,6 +1965,13 @@ def _addressed(state, snap, agent, **kwargs):
             extra = []
     items += extra
     return {"items": items, "fingerprint": inbox_core.fingerprint(items), "count": len(items)}
+
+
+def _operator_extra(agent):
+    """Computed items only the operator receives: seats gone silent and persistent drift."""
+    if (agent or "").strip().lower() != _operator_agent():
+        return []
+    return hub_app.distribution_inbox_items()
 
 
 @require_GET
@@ -2125,6 +2231,50 @@ def agent_updates_json(request):
 
 
 # ── The operational error stream, whoami, and board search ──
+
+@require_GET
+def distribution_json(request):
+    """GET /hub/distribution.json — every seat graded against what this hub publishes.
+
+    Offline seats are named and never graded as drift; phantom callers and legacy rows are
+    listed and never counted; the verdict states what it did NOT grade."""
+    report, pub = hub_app.distribution_report()
+    return JsonResponse({"data": report, "metadata": {
+        "published": {k: {"sha": v["sha"], "published_at": v["published_at"]} for k, v in pub.items()},
+        "how": "each seat reports X-Hub-Artifacts (name=sha16) on every request; the hub hashes "
+               "the files it publishes (LF-normalized) and compares"}})
+
+
+@require_GET
+def ci_events_json(request):
+    """GET /hub/ci-events.json?pipeline=|job=|project=[&limit=] — the RAW CI deliveries behind a
+    CI row, newest first. Unlike the rest of the read surface this needs a credential with the
+    ``ci:read`` scope: a webhook body carries the project's URLs, branch names and the
+    committer, which is diagnostic material, not board content. The store describes itself
+    (path, size, writability), so an empty answer says whether nothing arrived or nothing can
+    be kept."""
+    from hub_core import ci_events as _ci
+    from . import hub_write
+    auth, problem = hub_write._authenticate(request)
+    if not auth or not auth.allows("ci:read"):
+        return JsonResponse({"errors": [{"code": "forbidden", "required": "ci:read",
+                                          "msg": problem or "credential lacks ci:read"}]}, status=403)
+    pipeline = (request.GET.get("pipeline") or "").strip()
+    job = (request.GET.get("job") or "").strip()
+    project = (request.GET.get("project") or "").strip()
+    if not (pipeline or job or project):
+        return JsonResponse({"errors": [{"code": "need_filter",
+                                          "msg": "name a pipeline, a job or a project"}]}, status=400)
+    try:
+        limit = int(request.GET.get("limit") or 20)
+    except ValueError:
+        limit = 20
+    rows, store = _ci.retained(hub_app.HUB_DIR, pipeline=pipeline, job=job, project=project,
+                               limit=limit)
+    return JsonResponse({"data": rows, "metadata": {"count": len(rows), "store": store,
+                         "how": "the deliveries this hub kept: two rotated files, the recent "
+                                "window, not all history"}})
+
 
 @require_GET
 def errors_json(request):

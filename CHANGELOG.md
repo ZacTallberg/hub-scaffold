@@ -200,6 +200,47 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   cold-start probes with printed latency, one-deadline rendered-page passes, vault skips that
   run before the prune.
 
+### Seats, CI results and the gate kit
+
+- **CI results become board rows.** `POST /hub/api/ci-event` takes a GitLab pipeline/job webhook
+  or a generic `{kind, project, status, ...}` event, gated by a webhook secret (refuses everything
+  without one; a named `_hub_secret_gated` gate the route audit accepts). Deploy/verify failures
+  are critical, a zero-job failed pipeline is a critical configuration rejection, a later green on
+  the same job and ref retires the red (a pipeline success only the jobs it ran), a recurrence
+  reopens, a rollback is a critical row no green retires, duplicates are dropped and the raw body
+  is kept (rotated before write). `GET /hub/ci-events.json` (needs `ci:read`), client `ci-report` /
+  `ci-events`, MCP `ci_events`, a "CI and deploy results" coverage channel, and
+  `adapters/gitlab/ensure_ci_hooks.py` (create-only project-hook reconciler; unknown is never ok).
+  The error store's context now keeps `project/ref/sha/job/jobs/trigger/restored_sha` — dropping
+  them let a green on one branch retire a failure on another.
+- **Distribution: is every seat running what this hub publishes?** Seats send `X-Hub-Client` and
+  `X-Hub-Artifacts`; `GET /hub/distribution.json`, client `distribution`, MCP `seat_distribution`
+  and a board card grade each seat (LF-normalized, version split before grading), name offline
+  seats without calling them drift, collapse 72h-gone seats, list phantom callers and legacy rows,
+  and lead with a verdict that states what it did not grade. Silent seats (6h) and persistent drift
+  on online seats reach the operator's inbox as `offline` / `drift` items.
+- **Phantom callers are not computers.** A presence row with a machine but no kit telemetry is
+  kept out of every device list and count; the agent card shows every computer a person has with
+  its own check-in state, per-computer consoles, and a same-file warning.
+- **Built.** `GET /hub/built.json`, client `built`, MCP `built_by_person` and a board card derive
+  what each person built from the ledger, folding machine identities into their person through raw
+  presence rows (most recent reporter wins; a machine name never labels a person).
+- **Files touched and file crossovers.** `X-Hub-Files` on presence, `file_overlaps` on the live
+  block, and `patterns/presence-gate.py`: a harness hook that derives a console's edited files
+  from its transcript per command segment (heredocs, redirects, commits, copies, `cd`, scripts and
+  subagents handled), folds indented env-report continuation lines, and optionally restores native
+  terminal text selection (the blunt fallback announces itself).
+- **Client transport and durability.** Several comma-separated routes to one hub, swept
+  breadth-first under a wall clock and failed over only on a route failure; separate read/write
+  timeouts; an offline queue replayed as the console that queued it, with dead letters that are
+  replayed or archived, never deleted (exit 4 queued, 5 outcome unknown); `record` and `step`
+  retry one lost optimistic-concurrency race (MCP `record_entity` too). Presence heartbeat
+  default is 60 s.
+- **Patterns.** `deploy-hardening.md` (config sync retries transport only and treats gateway 5xx
+  as unreachable, snapshots never print success without a snapshot, the deploy-record post picks
+  TLS trust by runtime, readiness gates adopted on evidence, failure outcomes reported) and
+  `machine-push-identity.md`.
+
 ### The upsert, completed to every seam the scaffold already speaks
 
 The first pass landed the capabilities; a re-audit found they were reachable only over raw

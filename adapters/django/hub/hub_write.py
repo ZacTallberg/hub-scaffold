@@ -2714,3 +2714,65 @@ def overlap_seen(request, b):
     from hub_core import overlap
     ids_ = b.get("ids") if isinstance(b.get("ids"), list) else []
     return JsonResponse({"data": {"marked": overlap.mark_seen(hub_app.HUB_DIR, ids_)}})
+
+
+# ── CI results: the one ingest whose sender is not an agent ──
+
+def _ci_secret():
+    return str(hub_app._dj_setting("HUB_CI_WEBHOOK_SECRET")
+               or os.environ.get("HUB_CI_WEBHOOK_SECRET") or "").strip()
+
+
+def webhook_secret_gated(fn):
+    """The gate for a sender that is NOT an agent: a CI system presents a shared webhook secret
+    (``X-Hub-Webhook-Token``, or GitLab's own ``X-Gitlab-Token``), never an agent credential.
+
+    A NAMED gate rather than an exception to the route audit: the view is marked
+    ``_hub_secret_gated``, refuses EVERY request while no secret is configured (an open ingest
+    that anyone can post rows to is worse than none), compares in constant time, and answers a
+    refusal 404 like the rest of the hub. The secret authorizes exactly one thing -- adding CI
+    rows to the operational stream and retiring the CI rows a later green supersedes."""
+    @csrf_exempt
+    @wraps(fn)
+    def w(request, *a, **k):
+        if request.method != "POST":
+            return HttpResponseNotAllowed(["POST"])
+        want = _ci_secret()
+        got = (request.headers.get("X-Hub-Webhook-Token")
+               or request.headers.get("X-Gitlab-Token") or "").strip()
+        if not want or not got or not hmac.compare_digest(got, want):
+            if want and got:
+                _record_refusal(request, "ci_secret_refused", "a CI delivery presented a wrong secret")
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        return fn(request, *a, **k)
+    w._hub_secret_gated = True
+    return w
+
+
+@webhook_secret_gated
+def ci_event(request):
+    """POST /hub/api/ci-event — a CI pipeline/job/deploy result. Failures become rows on the
+    operational stream; a later green on the same job and ref retires them."""
+    from hub_core import ci_events
+
+    body = _body(request)
+    if not isinstance(body, dict):
+        return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+    ignore = hub_app._dj_setting("HUB_CI_IGNORE_JOBS") or os.environ.get("HUB_CI_IGNORE_JOBS") or ""
+    if isinstance(ignore, str):
+        ignore = [j for j in ignore.split(",") if j.strip()]
+    try:
+        out = ci_events.ingest(hub_app.HUB_DIR, body, record=hub_app.record_error,
+                               ignore_jobs=ignore)
+    except Exception as exc:                                 # noqa: BLE001
+        # An ingest that errors teaches the sender to disable the hook: answer 200 and make the
+        # parse failure the hub's own warning.
+        hub_app.record_error("hub.ci", "a CI delivery could not be interpreted", severity="warning",
+                             code="ci_event_unparsed", details=type(exc).__name__,
+                             context={"component": "ci"})
+        out = {"recorded": False, "reason": "unparsed"}
+    if out.get("superseded") or out.get("reopened"):
+        hub_app.errors_changed()                     # acks moved with no new row to announce
+    out.pop("event", None)
+    ci_events.retain(hub_app.HUB_DIR, body, out, record=hub_app.record_error)
+    return JsonResponse({"data": out})
