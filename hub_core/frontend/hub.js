@@ -174,6 +174,7 @@
     { key: "caps", label: "Capabilities", icon: "stack", pick: function (d) { return d.caps || []; }, type: "cap", cols: COLS_CAP() },
     { key: "deploys", label: "Deploys", icon: "rocket", pick: function (d) { return d.deploys || []; }, type: "deploy", cols: COLS_DEPLOY() },
     { key: "notes", label: "Findings", icon: "stack", pick: function (d) { return d.notes || []; }, type: "note", cols: COLS_NOTE() },
+    { key: "knowledge", label: "Knowledge", icon: "search", build: buildKnowledgeTab },
     { key: "directives", label: "Directives", icon: "bolt", pick: function (d) { return d.directives || []; }, type: "directive", cols: COLS_DIRECTIVE() }
   ];
   TABS.forEach(function (t) { if (t.pick) t.rows = t.pick(D); });
@@ -1783,6 +1784,9 @@
     if (r.verified_by && r.verified_by.length) links.push(row("Verified by", el("div", null, r.verified_by.map(function (s) { return el("div", { class: "detail-prose", text: "• " + s }); }))));
     if (links.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Links & evidence", "branch", links)]));
 
+    var know = knowledgeRows(r);
+    if (know.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Knowledge", "search", know)]));
+
     ["body_md", "context_md", "decision_md", "consequences_md"].forEach(function (f) {
       if (r[f]) body.appendChild(el("div", { class: "detail-grid one" }, [section(f.replace("_md", "").replace(/^./, function (c) { return c.toUpperCase(); }), "info", [el("div", { class: "detail-prose", text: r[f] })])]));
     });
@@ -2631,6 +2635,186 @@
       if (anchor) launchClick(anchor, event);
     });
   }
+
+  /* ============================ KNOWLEDGE ============================ */
+  /* Ranked search over what the board KNOWS (search.json: BM25F, fused with meaning when an
+     embedder is configured) and the capability catalog (capabilities.json). Both say what they
+     could not see: the partiality notice is shown, and "no match" says it is a fact about the
+     words used, not about what the board knows. */
+  function knowledgeRows(r) {
+    var rows = [];
+    if (r.tier === "foundational") rows.push(row("Tier", "foundational — an environment fact the team cannot afford to lose"));
+    if (r.verified_as_of) rows.push(rowMono("Verified as of", r.verified_as_of));
+    if (r.verify) rows.push(rowMono("Check it now", r.verify));
+    var related = Array.isArray(r.related) ? r.related.filter(function (h) { return h && h.id; }) : [];
+    var partial = r.related_partial || {};
+    if (related.length) {
+      var settled = related.filter(function (h) { return h.adjudicated; }).length;
+      var lead = settled === related.length ? "suspected at write time, then read in full and settled"
+        : settled ? settled + " of " + related.length + " settled; the rest are only suspected — read both and judge"
+        : "suspected at write time; NOT adjudicated — read both and judge";
+      rows.push(row("Overlap", el("div", null, [el("div", { class: "cell-sub", text: lead })].concat(related.map(function (h) {
+        var bits = [];
+        if (h.similarity != null) bits.push("similarity " + h.similarity);
+        if (h.z != null) bits.push("z " + h.z);
+        if (h.basis) bits.push(h.basis);
+        if (h.shared && h.shared.length) bits.push("shared: " + h.shared.slice(0, 5).join(", "));
+        return el("div", { class: "kn-overlap" }, [
+          el("span", { class: "badge" + (h.verdict === "contradiction" || h.verdict === "duplicate" ? " b-warn" : ""),
+                       text: h.adjudicated && h.verdict ? h.verdict : "suspected" }),
+          h.exact ? el("span", { class: "badge b-warn", text: "exact text" }) : null,
+          chip("note", h.id),
+          el("span", { class: "cell-sub", text: bits.join(" · ") }),
+          h.adjudicated && h.reason ? el("div", { class: "detail-prose", text: "why: " + h.reason + " [" + (h.adjudicated_by || "?") + "]" }) : null
+        ].filter(Boolean));
+      })))));
+    }
+    if (partial.missing && partial.missing.length) {
+      rows.push(row("Overlap check", "incomplete: " + partial.missing.join(", ") + " did not run — " + (partial.reason || "no reason recorded")));
+    }
+    return rows;
+  }
+
+  function knowledgeFetch(url) {
+    return timedFetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (response) { if (!response.ok) throw new Error("HTTP " + response.status); return response.json(); });
+  }
+
+  var KN_IDLE = "Search every live lesson, finding, method, answer, task and decision on the board.";
+
+  function buildKnowledgeTab(tab) {
+    var pane = el("div", { class: "tab-content", id: "tab-knowledge", role: "tabpanel",
+      "aria-labelledby": "tab-btn-knowledge", tabindex: "0" });
+    var scroll = el("div", { class: "overview-scroll kn-scroll" });
+    var input = el("input", { type: "search", placeholder: "Ask the board — the symptom, the system, the error text…",
+      "aria-label": "Search the board's knowledge", "data-focus-key": "knowledge:q" });
+    var status = el("div", { class: "cell-sub kn-status", role: "status", "aria-live": "polite", text: KN_IDLE });
+    var notice = el("div", { class: "kn-notice" });
+    notice.hidden = true;
+    var results = el("ol", { class: "kn-results", "aria-label": "Search results" });
+    var seq = 0, timer = null;
+
+    function runSearch() {
+      var q = input.value.trim();
+      var mine = ++seq;
+      results.textContent = "";
+      notice.hidden = true;
+      if (!q) { status.textContent = KN_IDLE; return; }
+      status.textContent = "Searching…";
+      knowledgeFetch("search.json?limit=20&q=" + encodeURIComponent(q)).then(function (body) {
+        if (mine !== seq) return;
+        var md = body.metadata || {}, data = body.data || [];
+        var t = md.timing_ms || {};
+        var scored = md.scored != null ? md.scored : (md.matched || 0);
+        status.textContent = data.length + " shown of " + scored + " ranked (" + (md.matched || 0) +
+          " share a word with the question) · " + (md.candidates || 0) + " records searched · " + (md.fusion || "lexical") + (t.total != null ? " · " + t.total + " ms" : "") +
+          " · as of " + new Date().toLocaleTimeString();
+        if (md.partial) {
+          notice.hidden = false;
+          notice.textContent = "";
+          notice.appendChild(el("div", { class: "callout warn" }, [
+            el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
+            el("div", { class: "kn-partial", text: String(md.partial).replace(/<\/?memory-partial>/g, "").trim() })]));
+        }
+        if (!data.length) {
+          results.appendChild(el("li", { class: "kn-empty" }, [
+            el("div", { class: "detail-prose", text: "No record matched these words." }),
+            el("div", { class: "cell-sub", text: md.hint || "Try the same question in different words before concluding the board has not met this." })]));
+          return;
+        }
+        data.forEach(function (h) {
+          var rec = BY_ID[h.id];
+          var title = el("button", { class: "kn-title", type: "button", text: h.title || localId(h.id) });
+          if (rec) title.addEventListener("click", function () { openEntity(String(h.id).split(":")[1] || h.type, rec); });
+          else title.setAttribute("disabled", "disabled");
+          results.appendChild(el("li", { class: "kn-hit" }, [
+            el("div", { class: "kn-hit-head" }, [
+              el("span", { class: "badge", text: h.kind || h.type || "record" }), title,
+              el("span", { class: "cell-sub kn-score", title: "fused score (lexical " + h.lexical + ")", text: String(h.score) })]),
+            h.excerpt ? el("div", { class: "cell-sub kn-excerpt", text: String(h.excerpt).replace(/\s+/g, " ").slice(0, 260) }) : null,
+            el("div", { class: "cell-sub mono", text: h.id })
+          ].filter(Boolean)));
+        });
+      }).catch(function (error) {
+        if (mine !== seq) return;
+        status.textContent = "Search could not run: " + error.message + ". Nothing below is an answer.";
+      });
+    }
+    input.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(runSearch, 250); });
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") { clearTimeout(timer); runSearch(); } });
+    // A search is a shareable link: /hub/?tab=knowledge&q=<question> opens with it answered.
+    try { var kq = new URL(location.href).searchParams.get("q"); if (kq) { input.value = kq; setTimeout(runSearch, 0); } } catch (e) {}
+
+    /* Agent abilities: the catalog grouped by kind, each kind collapsed until asked for. */
+    var capsStatus = el("div", { class: "cell-sub kn-status", role: "status", text: "Reading the capability catalog…" });
+    var capsFilter = el("input", { type: "search", placeholder: "Filter abilities…", "aria-label": "Filter agent abilities",
+      "data-focus-key": "knowledge:caps" });
+    var capsList = el("div", { class: "kn-caps" });
+    var capsRows = null;
+    function renderCaps() {
+      capsList.textContent = "";
+      if (!capsRows) return;
+      var f = capsFilter.value.trim().toLowerCase();
+      var rows = capsRows.filter(function (r) { return !f || JSON.stringify(r).toLowerCase().indexOf(f) >= 0; });
+      var kinds = {};
+      rows.forEach(function (r) { var k = r.kind || "capability"; (kinds[k] = kinds[k] || []).push(r); });
+      Object.keys(kinds).sort().forEach(function (k) {
+        var det = el("details", { class: "kn-kind" }, [
+          el("summary", null, [el("span", { class: "kn-kind-name", text: k }),
+                               el("span", { class: "tab-badge", text: String(kinds[k].length) })])]);
+        if (f) det.setAttribute("open", "open");
+        kinds[k].forEach(function (r) {
+          det.appendChild(el("div", { class: "kn-cap" }, [
+            el("div", { class: "kn-cap-name", text: r.name }),
+            r.what ? el("div", { class: "detail-prose", text: r.what }) : null,
+            r.when ? el("div", { class: "cell-sub", text: "When: " + r.when }) : null,
+            r.get ? el("div", { class: "cell-sub mono", text: r.get }) : null,
+            el("div", { class: "cell-sub", text: (r.source === "catalog" ? "published catalog" : "board capability") +
+                                                  (r.kit ? " · kit " + r.kit : "") })
+          ].filter(Boolean)));
+        });
+        capsList.appendChild(det);
+      });
+      if (!rows.length) capsList.appendChild(el("div", { class: "cell-sub", text: f ? "No ability matches that filter." : "No capabilities are recorded yet." }));
+    }
+    capsFilter.addEventListener("input", renderCaps);
+    // The tab's count is the server's own count of live knowledge records (the same index the
+    // prompt hook delivers), drawn only once it has answered: a number shown while the fetch is in
+    // flight would be one nobody measured, and a count of something else (abilities) under the
+    // word "Knowledge" read as "the board knows nothing".
+    knowledgeFetch("guidance.json?memory_cap=1&memory_full=0").then(function (body) {
+      if (!tab._btn || typeof body.memory_total !== "number") return;
+      var old = tab._btn.querySelector(".tab-badge");
+      if (old) old.parentNode.removeChild(old);
+      tab._btn.appendChild(el("span", { class: "tab-badge", text: String(body.memory_total),
+                                         title: "live knowledge records" }));
+    }).catch(function () {});
+    knowledgeFetch("capabilities.json").then(function (body) {
+      var md = body.metadata || {}, pub = md.publication || {};
+      capsRows = body.data || [];
+      var src = md.sources || {};
+      capsStatus.textContent = capsRows.length + " abilities (" + (src.ledger || 0) + " on the board, " + (src.catalog || 0) +
+        " from the published catalog) · " + (pub.state === "none" ? "no catalog published" + (pub.error ? " — " + pub.error : "")
+        : "catalog " + pub.state + " at " + String(pub.commit || "").slice(0, 10) + (pub.error ? " — " + pub.error : ""));
+      renderCaps();
+    }).catch(function (error) {
+      capsStatus.textContent = "The capability catalog could not be read (" + error.message + "); this is unknown, not empty.";
+    });
+
+    scroll.appendChild(overviewHeading("Search", "What the board knows",
+      "Ranked by wording and, when an embedder is configured, by meaning. A limitation is stated, never hidden."));
+    scroll.appendChild(el("div", { class: "card kn-card" }, [
+      el("div", { class: "toolbar" }, [el("div", { class: "search-box kn-search" }, [icon("search", "s-icon"), input])]),
+      status, notice, results]));
+    scroll.appendChild(overviewHeading("Agent abilities", "What an agent can already do here",
+      "Board capabilities merged with the published catalog; one capability under two spellings is counted once."));
+    scroll.appendChild(el("div", { class: "card kn-card" }, [
+      el("div", { class: "toolbar" }, [el("div", { class: "search-box" }, [icon("search", "s-icon"), capsFilter])]),
+      capsStatus, capsList]));
+    pane.appendChild(scroll);
+    return pane;
+  }
+
 
   /* ============================ TABS ============================ */
   var _panes = {};
