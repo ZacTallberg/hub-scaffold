@@ -1,0 +1,1 @@
+{"state": "active", "summary": "The CSRF token a long-lived page sends, read at send time from the cookie name settings render", "installs": ["app_csrf"]}

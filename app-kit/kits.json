@@ -26,6 +26,54 @@
    "state": "active",
    "summary": "The Assistant Canon (64 families) as data, the coverage count, routing lanes, turn plan, correction belt, write gates and a real-model probe"
   },
+  "csrf": {
+   "files": {
+    "KIT.json": "93d6cfc0c4d17563f1680bfef387918c793ff25b",
+    "README.md": "3f0f8776f1b19a8ac4513d18de54268b5aae1714",
+    "REQUIRES.md": "2c4b74bfebafbc5074cc53d7fe519e0542078978",
+    "app_csrf/__init__.py": "17b2e7e1108dbf73ca43391b14ae442e84f25192",
+    "app_csrf/apps.py": "309251e8bb2530c12e854cc744fa01125bae9dd7",
+    "app_csrf/context_processors.py": "8e7dcb95d11100584210b4a4560c1f86b630082a",
+    "app_csrf/static/app_csrf/csrf.js": "114ad002f619fc361a1bd6b68bccc782ff94d380"
+   },
+   "installs": [
+    "app_csrf"
+   ],
+   "kit_sha": "22b83baaa53fdbc1f1c8e5b9bfb9b40d26a4fd1e",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "The CSRF token a long-lived page sends, read at send time from the cookie name settings render"
+  },
+  "error-visibility": {
+   "files": {
+    "KIT.json": "321ac65d5aaf1d6611f38898d036870b379ee2de",
+    "README.md": "aa8f2f760af9ba4e8b7c4124d9319b4f4e4ee871",
+    "REQUIRES.md": "5c58cbce1c5ea4c67a7de9ee310db49e1f347294",
+    "app_errors/__init__.py": "7fdc03cab6b7841267a49f6dcf4fbb2caa84bc29",
+    "app_errors/apps.py": "95dd36f6ba87c4c288a915170e82e64ec42b6b79",
+    "app_errors/capture.py": "425b607e2a5dfc6deacc47cf0938ef8c94dccc95",
+    "app_errors/management/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_errors/management/commands/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_errors/management/commands/error_selftest.py": "5cee18b1b456e5227a366c66933c9c5f373a1d9f",
+    "app_errors/management/commands/errors.py": "674f46a1461969489259a2439db6bb671ef651fa",
+    "app_errors/migrations/0001_initial.py": "91d770e4a0958e570d188afa5a3439355e0a7c0f",
+    "app_errors/migrations/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "app_errors/models.py": "46ccb7a3f72d47a98e703ede2588d8d58e3da414",
+    "app_errors/static/app_errors/report_errors.js": "21d001cc4ada8d7c26418b9ba05f847f804517a1",
+    "app_errors/templates/app_errors/_errors_table.html": "5e6a2115116c53bd000e16f83fecdabd0ce9bb2f",
+    "app_errors/templates/app_errors/base.html": "92628bf213a85820669185a9b5945c4332447115",
+    "app_errors/templates/app_errors/errors.html": "564632c3ba4c9e76bb99866c56ecb0000c44d5ba",
+    "app_errors/urls.py": "27f457992914f1f7916008bdd5f5e7faf8e51608",
+    "app_errors/views.py": "a6aa2851e225b09837fad9c87707199f53dbb303"
+   },
+   "installs": [
+    "app_errors"
+   ],
+   "kit_sha": "e9bd4583079fd98b8ca265fa238502fa7792687c",
+   "replaced_by": "",
+   "state": "active",
+   "summary": "Every failure an app has, on the hub: automatic producers, a local errors table, forwarding with a startup arming row, and a real self-test"
+  },
   "gate": {
    "files": {
     "KIT.json": "d2b33b8d1d4af19aa7f2d42010b426ab1808199b",
@@ -62,17 +110,18 @@
   "health": {
    "files": {
     "KIT.json": "9becf2a8266b699a0ee3ceb2e6383079f5912ea4",
-    "README.md": "0abbb618cc594b9ff9f4d5f80e62112364a1031b",
-    "REQUIRES.md": "b3efdcef3ede578069e31223006e51ccc95428c9",
+    "README.md": "7c8431274b1a521225a99081292bebce9795fd7d",
+    "REQUIRES.md": "03b90bdd115ac09cc6b1ee9beff326d49beadce7",
     "app_health/__init__.py": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
     "app_health/apps.py": "24bb98925391725ee4d256862319c5b3e99ab2fd",
     "app_health/urls.py": "6584f59b9bb54b959c350b6b368a92809f35503b",
-    "app_health/views.py": "caa9d11e7ab0a093b03b00b898936286911caf21"
+    "app_health/views.py": "caa9d11e7ab0a093b03b00b898936286911caf21",
+    "health.py": "bf7658d818814a41decd6b5be08422c7208f0d30"
    },
    "installs": [
     "app_health"
    ],
-   "kit_sha": "511451efcb5ff17e09e1b274ffeb8dceb5c05926",
+   "kit_sha": "dca503e0ad165033692d4cda6c5fd93cedd20217",
    "replaced_by": "",
    "state": "active",
    "summary": "Liveness and a readiness probe that fails on an unmigrated database"
