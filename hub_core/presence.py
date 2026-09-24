@@ -48,7 +48,7 @@ SESSION_ACTIVE_S = 900          # a console that prompted within 15 minutes is a
 SESSION_KEEP_S = 1800           # a console quiet longer than this is closed, and is pruned
 _PRUNE_INTERVAL_S = 900         # walk the presence dir at most this often on the write path
 QUIET_REWRITE_S = 30            # a timestamp-only observation of a row this fresh is skipped
-FILES_FRESH_S = 900             # a console's file list older than this is history
+FILES_FRESH_S = 600             # a console's file list older than ten minutes is history
 WORKING_S = 120                 # activity this recent reads as `working`, else `idle`
 # The console fields a session carries, besides its stamps. One list, so the write merge, the
 # read projection and the uniform row shape can never quietly disagree about what a session is.
@@ -153,6 +153,16 @@ def _prune_locked(hub_dir, now: float, force: bool = False) -> int:
     except OSError:
         pass
     return removed
+
+
+FILES_WINDOW_S = FILES_FRESH_S   # an edit older than ten minutes is history, not shared work
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def redact_focus(text: str) -> str:
+    """A focus line is read by every other console: an address pasted into a prompt must
+    not ride it there."""
+    return _EMAIL.sub("[email]", str(text or ""))
 
 
 #: Session fields a client MAY report beyond cwd/focus, each bounded. Kind/run/subject tell an
@@ -292,7 +302,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
             focus: str = "", heartbeat: bool = False, name: str = "", repo: str = "",
             app: str = "", state: str = "", runtime: str = "", files=None,
             retract_focus: str = "", extra: dict | None = None, client: str = "",
-            client_digest: str = "", artifacts=None) -> None:
+            client_digest: str = "", artifacts=None, project: str = "",
+            unattended=None) -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine),
     carrying its name, repo, app, state, focus and recently edited files. A heartbeat stamps
@@ -300,12 +311,21 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
     on a row seen within QUIET_REWRITE_S is skipped. ``extra`` carries the optional session
     fields (SESSION_FIELDS: kind, run, subject, the supervisor's digest, project, files);
     ``client`` the reporting client's version, kept per machine so a seat running an older
-    client than the hub serves is visible. Never raises."""
+    client than the hub serves is visible. ``project`` and ``unattended`` are the
+    crossover facts a client may pass directly (the same as extra project / kind). A focus line
+    is read by every other console, so an e-mail address pasted into it is redacted. Never
+    raises."""
     agent = (agent or "").strip().lower()
     if not agent:
         return
-    fields = {"cwd": cwd, "focus": focus, "name": name, "repo": repo, "app": app,
+    fields = {"cwd": cwd, "focus": redact_focus(focus), "name": name, "repo": repo, "app": app,
               "state": state, "runtime": runtime}
+    if project or unattended:
+        extra = dict(extra or {})
+        if project:
+            extra.setdefault("project", str(project).strip().lower())
+        if unattended and not extra.get("kind"):
+            extra["kind"] = "unattended"
     if files is None and isinstance(extra, dict) and extra.get("files"):
         files = _clean_session_extra({"files": extra.get("files")}).get("files")
     client = str(client or "").strip()[:80]

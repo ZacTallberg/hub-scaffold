@@ -288,6 +288,20 @@ def detect_errors(ctx) -> list:
     rows = ctx.get("errors_unclaimed") or []
     if not rows:
         return []
+    if any("state" in r for r in rows):
+        # The queue is FOLDED into problems (hub_core.problems): one line per thing somebody
+        # fixes, claimed and resolved by its problem id.
+        oldest = max((int(r.get("age_s") or 0) for r in rows), default=0)
+        return [item("errors_unclaimed", "errors", "warn", agent=operator, who="the operator",
+                     subject="errors",
+                     title="%s nobody has claimed (oldest %s)"
+                           % (_plural(len(rows), "problem"), age_phrase(oldest)),
+                     detail="; ".join(str(r.get("title") or r.get("message") or "")[:80]
+                                      for r in rows[:3]),
+                     fix="Claim each one before digging (python -m hub_core.client claim <p-id>), "
+                         "then resolve it with the root cause and evidence.",
+                     evidence={"problems": [r.get("id") for r in rows[:8]]},
+                     lanes=("errors",), deliver_owner=False)]
     oldest = max((ctx["now"] - float(r.get("epoch") or ctx["now"]) for r in rows), default=0)
     return [item("errors_unclaimed", "errors", "warn", agent=operator, who="the operator",
                  subject="errors",

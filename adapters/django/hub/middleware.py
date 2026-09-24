@@ -57,10 +57,22 @@ class LedgerBusyMiddleware:
     the board in place of the one removed; instead a WARNING row carrying the wait and the path is
     recorded — back-pressure is trended, not triaged.
 
+    The same holds for the runtime lock (``TimeoutError("runtime lock busy …")``) and for a 503 a
+    view RETURNS: only raised exceptions reach ``process_exception``, so a view that maps
+    back-pressure itself returns a 503 whose first error carries a self-described code.
+    ``SELF_DESCRIBED_503`` names those codes and whether the returning site already recorded its
+    own row (True: only the duplicate ``django.request`` twin is suppressed) or not (False: this
+    middleware writes the same warning the raised path writes, so both fold into ONE problem).
+    Codes NOT in the table keep their error row on purpose — a real fault that answers 503 must
+    still reach somebody. Extend the table by subclassing.
+
     Place it early in MIDDLEWARE (before any read gate) so a lock burst is answered whether the
     request was heading for a read or a write."""
 
     RETRY_AFTER = "2"
+    # The write seam's own busy 503 records its ledger_busy row itself (record_ledger_busy).
+    SELF_DESCRIBED_503 = {"busy": True}
+    _MAX_SNIFF_BYTES = 4096
     # Dual-capable for the same reason as NoStoreHTMLMiddleware: a sync-only middleware would
     # force an ASGI deployment's persistent SSE rail through Django's sync adaptation thread.
     # process_exception stays a plain method; Django runs exception hooks in sync mode either way.
@@ -76,30 +88,71 @@ class LedgerBusyMiddleware:
     def __call__(self, request):
         if self.is_async:
             return self.__acall__(request)
-        return self._finish(self.get_response(request))
+        return self._finish(request, self.get_response(request))
 
     async def __acall__(self, request):
-        return self._finish(await self.get_response(request))
+        return self._finish(request, await self.get_response(request))
 
-    def _finish(self, response):
-        # Views that map the condition themselves (the write seam returns a {"code": "busy"}
-        # 503) get the header from this one place rather than from each call site.
-        if response.status_code == 503 and not response.has_header("Retry-After"):
-            response["Retry-After"] = self.RETRY_AFTER
+    def _finish(self, request, response):
+        if getattr(response, "status_code", 200) == 503:
+            if not response.has_header("Retry-After"):
+                response["Retry-After"] = self.RETRY_AFTER
+            self._absorb_self_described(request, response)
         return response
 
-    def process_exception(self, request, exception):
+    # -- the returned 503 --
+    def _absorb_self_described(self, request, response):
+        if getattr(response, "_has_been_logged", False):
+            return
+        err = self._first_error(response)
+        records_itself = self.SELF_DESCRIBED_503.get(str(err.get("code") or ""))
+        if records_itself is None:
+            return
+        response._has_been_logged = True
+        if not records_itself:
+            self._record(request, str(err.get("msg") or err.get("code") or "")[:500],
+                         returned=True)
+
+    @classmethod
+    def _first_error(cls, response):
+        if getattr(response, "streaming", False):
+            return {}
+        if "json" not in (response.get("Content-Type") or "").lower():
+            return {}
+        try:
+            body = response.content
+        except Exception:                                    # noqa: BLE001
+            return {}
+        if not body or len(body) > cls._MAX_SNIFF_BYTES:
+            return {}
+        try:
+            data = json.loads(body.decode("utf-8", errors="replace"))
+        except ValueError:
+            return {}
+        errors = data.get("errors") if isinstance(data, dict) else None
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            return errors[0]
+        return {}
+
+    # -- the raised one --
+    @staticmethod
+    def is_busy(exception) -> bool:
         from hub_core.store import StoreBusy
 
         if isinstance(exception, StoreBusy):
-            waited = exception.waited_s
-        elif isinstance(exception, sqlite3.OperationalError) and (
-                "locked" in str(exception).lower() or "busy" in str(exception).lower()):
-            waited = 0.0
-        else:
+            return True
+        text = str(exception).lower()
+        if isinstance(exception, TimeoutError):
+            return "lock busy" in text
+        if isinstance(exception, sqlite3.OperationalError):
+            return "locked" in text or "busy" in text
+        return False
+
+    def process_exception(self, request, exception):
+        if not self.is_busy(exception):
             return None
-        from . import hub_app
-        hub_app.record_ledger_busy(request.path, request.method, waited, exception)
+        self._record(request, exception, returned=False,
+                     waited=float(getattr(exception, "waited_s", 0) or 0))
         response = JsonResponse(
             {"errors": [{"code": "busy", "retry_after": int(self.RETRY_AFTER),
                          "msg": "the hub ledger is busy; nothing was written — retry"}]},
@@ -108,6 +161,15 @@ class LedgerBusyMiddleware:
         response._has_been_logged = True
         return response
 
+    def _record(self, request, details, *, returned, waited=0.0):
+        """The one ledger_busy WARNING row, written through the same helper the write seam uses
+        (hub_app.record_ledger_busy), so every busy refusal folds into ONE problem."""
+        try:
+            from . import hub_app
+            hub_app.record_ledger_busy(request.path, request.method, waited,
+                                       ("returned: " if returned else "") + str(details)[:480])
+        except Exception:                                    # noqa: BLE001
+            pass                    # the refusal is served whether or not the row can be written
 
 class RouteTimingMiddleware:
     """How long each /hub route takes, per process, so a slow route is a NUMBER on

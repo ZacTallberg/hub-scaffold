@@ -140,6 +140,23 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # Presence heartbeat interval (env HUB_PRESENCE_INTERVAL_S, default 60 s, 5..300). Every beacon
 # is a request the hub serves; online/offline are derived from the interval, so a slower beat
 # stays truthful.
+# Optional: a momentarily held ledger lock answers 503 + Retry-After and a WARNING row, never
+# a 500 and a red problem (add early in MIDDLEWARE):
+#     "hub.middleware.LedgerBusyMiddleware",
+
+# Optional: the services this project runs, for the problem queue's owners and the
+# "every service, observed?" card (or the HUB_APPS_JSON environment variable). All per-service
+# keys are optional; a service that forwards an error appears even when undeclared.
+# HUB_APPS = {
+#     "budget-app": {"url": "https://app.example/budget/",
+#                    "health_url": "https://app.example/budget/health/",
+#                    "owners": ["alice"], "project": "budget"},   # project = its CI project
+# }
+# HUB_APP_SLUG = "hub"                 # the hub's own row in that table
+# Environment: HUB_DEPLOY_REFS=main,master   CI refs a push deploys from; other refs' failures
+#              are recorded but held below the bar (their author's, not the queue's)
+# Environment: HUB_OVERLAP_SYSTEMS=billing,inventory   your systems of record: two consoles in
+#              different projects naming the same one are told about each other
 
 # Optional workstation worker bridge (disabled unless explicitly enabled):
 HUB_WORKER_LAUNCH_ENABLED = False

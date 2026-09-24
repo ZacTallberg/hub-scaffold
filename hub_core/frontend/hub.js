@@ -840,6 +840,8 @@
       node.addEventListener("click", function () { focusCard("asksCard"); });
     } else if (it.route && it.route.focus === "errors") {
       node.addEventListener("click", function () { focusCard("errorsCard"); });
+    } else if (it.route && it.route.focus === "problems") {
+      node.addEventListener("click", function () { focusCard("problemsCard"); });
     } else {
       node.disabled = true;
       node.title = "nothing to open for this item";
@@ -1715,7 +1717,9 @@
     ];
     body.appendChild(el("div", { class: "detail-grid one" }, [section("Signature", "warning", idRows)]));
     body.appendChild(el("div", { class: "detail-grid one" }, [section("Message", "info", [
-      el("div", { class: "detail-prose", text: r.message || "" })])]));
+      el("div", { class: "detail-prose", text: r.message || "" }),
+      r.cause ? el("div", { class: "cell-sub mono", text: "cause: " + r.cause }) : null
+    ].filter(Boolean))]));
     var ctx = r.context || {};
     var ctxRows = Object.keys(ctx).map(function (k) { return rowMono(k, ctx[k]); });
     if (ctxRows.length) {
@@ -1726,7 +1730,7 @@
         el("pre", { class: "err-details mono", text: r.details })])]));
     }
     body.appendChild(el("p", { class: "cell-sub", text:
-      "Claim: POST api/ack-error {fingerprint: \"" + (r.fingerprint || "") + "\"} — collapses the signature off the queue without deleting rows." }));
+      "This row is one occurrence. Work it as its PROBLEM (the Problems card): claim it before digging, resolve it with the root cause — resolving acks every row behind it." }));
     if (liveRefresh) {
       refreshModal(role, r.message || "Operational error", r.source || "", "warning", body);
       return;
@@ -1812,6 +1816,13 @@
       });
       body.appendChild(el("div", { class: "detail-grid one" }, [section("Live consoles", "pulse", consoles)]));
     }
+    // UN-ENROLL is a write, and writes carry a credential the board never holds — so the
+    // device card hands over the exact commands: the machine revokes its own credential, or
+    // the operator revokes it and drops the row.
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Un-enroll", "warning", [
+      el("div", { class: "detail-prose mono", text: "on " + (c.machine || "that machine") + ": python -m hub_core.client leave --dry-run   (then without --dry-run)" }),
+      el("div", { class: "detail-prose mono", text: "operator: POST api/agent-credential {action: revoke, credential_id}  +  python -m hub_core.client forget-presence --target " + c.agent + (c.machine ? " --machine " + c.machine : "") })
+    ])]));
     if ((c.trail || []).length) {
       var trail = c.trail.slice(0, 5).map(function (t) {
         return row(t.action || "", el("div", null, [
@@ -1861,12 +1872,14 @@
     }
     if (!onBar.length) {
       var cov = meta.coverage || {};
+      var never = (cov.never_reported || []).length;
       var silent = (cov.channels || []).filter(function (c) { return c.silent; }).length;
       body.appendChild(el("div", { class: "attn-clear" }, [
-        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: never ? GLYPH.warn : GLYPH.pass }),
         doc.createTextNode(" Nothing on the board" +
-          (silent ? " — but " + silent + " of " + (cov.channels || []).length +
-            " reporting channels are silent, so read this as \u201cno report\u201d, not \u201cno failures\u201d." : "."))
+          (never ? " — but " + never + " of " + (cov.channels || []).length +
+            " expected channels have NEVER reported (" + cov.never_reported.join(", ") + "), so read this as \u201cno report\u201d, not \u201cno failures\u201d."
+           : silent ? " — " + silent + " of " + (cov.channels || []).length + " channels are quiet right now." : "."))
       ]));
     } else {
       onBar.slice(0, 8).forEach(function (r) {
@@ -1889,7 +1902,7 @@
         body.appendChild(item);
       });
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
-        "Claim a signature with POST api/ack-error {fingerprint} — acking collapses it off the queue without deleting the rows." }));
+        "These are OCCURRENCES. Work them as problems (the Problems card): claim before digging, resolve with the root cause — that acks every row behind it." }));
     }
     var deferred = rows.length - onBar.length;
     if (deferred > 0) {
@@ -1905,10 +1918,13 @@
       var covWrap = el("div", { class: "err-coverage" });
       covWrap.appendChild(el("span", { class: "err-cov-lbl", text: "channels" }));
       cov.channels.forEach(function (c) {
+        // THREE states, never two: live (in the window), quiet (has reported before), and
+        // NEVER (a coverage hole — silence there is not health).
+        var st = c.state || (c.silent ? "quiet" : "live");
         covWrap.appendChild(el("span", {
-          class: "err-cov-chip" + (c.silent ? " is-silent" : " is-live"),
-          title: c.wired || c.key,
-          text: c.label + (c.silent ? " — silent" : " · " + c.rows)
+          class: "err-cov-chip is-" + (st === "live" ? "live" : st === "never" ? (c.silence_ok ? "silent" : "never") : "silent"),
+          title: (c.wired || c.key) + (c.age_s != null ? " · last " + fmtAge(c.age_s) + " ago" : ""),
+          text: c.label + (st === "live" ? " · " + c.rows : st === "never" ? " — never reported" : " — quiet")
         }));
       });
       body.appendChild(covWrap);
@@ -2163,6 +2179,195 @@
     ]);
   }
 
+  /* ---- PROBLEMS: the stream folded into what somebody fixes ----
+     One line per problem, with its state, holder, count and recency. Writes are token-gated,
+     so the card hands over the exact command rather than a button that could not work. */
+  var PSTATE = { unclaimed: "fail", in_flight: "info", escalated: "warn", resolved: "pass" };
+  function problemCmd(verb, p, extra) {
+    return "python -m hub_core.client " + verb + " " + p.id + (extra || "");
+  }
+  function openProblemDetail(p, liveRefresh) {
+    var role = p.state === "unclaimed" ? (p.severity === "critical" ? "fail" : "warn") : "info";
+    var body = el("div");
+    var holder = p.holder || {};
+    var esc = p.escalation || null;
+    var res = p.resolved || null;
+    var idRows = [
+      row("State", el("span", { class: "badge b-" + (PSTATE[p.state] || "info"),
+        text: p.holder_phrase || String(p.state || "").replace("_", " ") })),
+      row("Severity", el("span", { class: "badge b-" + (p.severity === "critical" ? "fail" : "warn"), text: p.severity || "error" })),
+      rowMono("Problem", p.id),
+      rowMono("Where", (p.kind || "") + " · " + (p.where || "") + (p.subject ? " · " + p.subject : "")),
+      rowMono("Occurrences", (p.count || 0) + " across " + (p.rows || []).length + " signature" + ((p.rows || []).length === 1 ? "" : "s")),
+      p.age_s != null ? rowMono("Open for", fmtAge(p.age_s)) : null,
+      p.since_last_s != null ? rowMono("Last occurred", fmtAge(p.since_last_s) + " ago" + (p.fresh === false ? " (stale: listed, never pushed)" : "")) : null,
+      (p.owners || []).length ? rowMono("Owners", p.owners.join(", ")) : rowMono("Owners", "nobody on record"),
+      esc ? row("Waiting on", (esc.blocked_on || "?") + (esc.note ? " — " + esc.note : "") + " (by " + (esc.agent || "?") + ")") : null,
+      p.reopened && res ? row("Reopened", "it recurred after " + (res.by || "?") + " resolved it: " + (res.note || "")) : null,
+      p.state === "resolved" && res ? row("Resolved", (res.by || "?") + " — " + (res.note || "") + (res.evidence ? " · " + res.evidence : "")) : null,
+      p.bar === "deferred" ? row("Off the queue", p.defer_reason || "below the bar") : null
+    ];
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Problem", "warning", idRows)]));
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("What failed", "info", [
+      el("div", { class: "detail-prose", text: p.message || p.title || "" }),
+      p.cause ? el("div", { class: "cell-sub mono", text: "cause: " + p.cause }) : null,
+      p.url ? el("div", { class: "cell-sub mono", text: "link: " + p.url }) : null
+    ].filter(Boolean))]));
+    var ctx = p.context || {};
+    var ctxRows = Object.keys(ctx).map(function (k) { return rowMono(k, Array.isArray(ctx[k]) ? ctx[k].join(", ") : ctx[k]); });
+    if (ctxRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Context", "info", ctxRows)]));
+    var trace = el("pre", { class: "err-details mono", text: p.details || "(loading the stored trace…)" });
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Stored trace (head and tail)", "info", [trace])]));
+    var cmds = [];
+    if (p.state === "unclaimed" || p.state === "escalated") cmds.push(problemCmd("claim", p, " --note \"<what you are checking>\""));
+    if (p.state !== "resolved") cmds.push(problemCmd("resolve", p, " --note \"<root cause>\" --evidence <sha|url>"));
+    if (p.state === "unclaimed") cmds.push(problemCmd("escalate", p, " --blocked-on <open ask or task id>"));
+    if (holder.agent) cmds.push(problemCmd("release", p, ""));
+    body.appendChild(el("div", { class: "detail-grid one" }, [section("Work it", "checks",
+      cmds.map(function (c) { return el("div", { class: "detail-prose mono", text: c }); }))]));
+    if (!liveRefresh) {
+      // The list carries a clipped trace; the full stored one (head AND tail) is one read away.
+      timedFetch("problems.json?id=" + encodeURIComponent(p.id), { credentials: "same-origin", cache: "no-store",
+        headers: { Accept: "application/json" } }).then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) { if (j && j.data) trace.textContent = j.data.details || "(no trace stored)"; })
+        .catch(function () { trace.textContent = (p.details || "") + "\n(the full trace could not be fetched)"; });
+    }
+    if (liveRefresh) {
+      refreshModal(role, p.title || "Problem", p.where || "", "warning", body);
+      return;
+    }
+    _openModalLive = { kind: "problem", key: p.id };
+    openModal(role, p.title || "Problem", p.where || "", "warning", body);
+  }
+  function problemsCard(pm) {
+    pm = pm || {};
+    var items = pm.items || [], counts = pm.counts || {};
+    var body = el("div", { class: "card-body" });
+    if (pm.available === false) {
+      body.appendChild(el("div", { class: "callout fail" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.fail }),
+        el("div", { text: "The problem queue could not be read (" + (pm.reason || "unavailable") + ") — an empty card here means nothing." })]));
+    }
+    body.appendChild(el("p", { class: "cell-sub", text:
+      (counts.unclaimed || 0) + " unclaimed · " + (counts.in_flight || 0) + " in flight · " + (counts.escalated || 0) +
+      " escalated — from " + (counts.rows || 0) + " rows; " + (counts.deferred || 0) + " below the bar" +
+      (pm.oldest_unclaimed_s ? " · oldest unclaimed " + fmtAge(pm.oldest_unclaimed_s) : "") }));
+    if (!items.length) {
+      body.appendChild(el("div", { class: "attn-clear" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+        doc.createTextNode(" No open problem clears the bar. Read the service table before calling that healthy.")]));
+    }
+    items.slice(0, 8).forEach(function (p) {
+      var holder = p.holder || {};
+      var stateText = p.state === "unclaimed" ? "unclaimed " + fmtAge(p.age_s)
+        : p.state === "escalated" ? "waiting on " + ((p.escalation || {}).blocked_on || "?")
+        : (p.holder_phrase || String(p.state || "").replace("_", " "));
+      var item = el("button", { class: "err-item prob-item is-" + (p.state || ""), type: "button",
+        "data-focus-key": "prob:" + p.id, "aria-label": "open problem " + (p.title || "") }, [
+        el("span", { class: "err-head" }, [
+          el("span", { class: "badge b-" + (p.severity === "critical" ? "fail" : "warn"), text: p.severity || "error" }),
+          el("span", { class: "err-where", text: p.where || "" }),
+          el("span", { class: "err-age", text: "\u00d7" + (p.count || 1) + " · last " + fmtAge(p.since_last_s) + " ago" }),
+          el("span", { class: "err-claim", text: stateText })
+        ]),
+        el("span", { class: "err-msg", text: p.title || "" }),
+        p.cause ? el("span", { class: "err-meta mono", text: p.cause }) : null,
+        el("span", { class: "err-meta mono", text: p.id + (holder.agent ? " · " + (holder.agent + (holder.name ? " " + holder.name : "")) : "") })
+      ].filter(Boolean));
+      item.addEventListener("click", function () { openProblemDetail(p); });
+      body.appendChild(item);
+    });
+    return el("section", { class: "card errors-card", id: "problemsCard", "aria-labelledby": "problemsTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "problemsTitle" }, [icon("warning"),
+          doc.createTextNode((counts.unclaimed ? counts.unclaimed + " unclaimed problem" + (counts.unclaimed === 1 ? "" : "s") : "Problems") +
+            (items.length ? "  ·  " + items.length + " open" : ""))]),
+        el("span", { class: "badge b-" + (counts.unclaimed ? "fail" : "pass"), text: counts.unclaimed ? String(counts.unclaimed) : "clear" })
+      ]),
+      body
+    ]);
+  }
+
+  /* ---- EVERY SERVICE, OBSERVED? ----
+     A verdict per service from evidence only. An empty problem list for a DARK service means
+     nothing, and the card says so before anybody reads it as good news. */
+  var VERDICT = { observed: "pass", partial: "warn", dark: "fail", unbuilt: "stale" };
+  function appHealthCard(h) {
+    h = h || {};
+    var rows = h.rows || [], counts = h.counts || {};
+    var body = el("div", { class: "card-body" });
+    if (h.available === false) {
+      body.appendChild(el("div", { class: "callout fail" }, [el("div", { text: "Service health could not be computed (" + (h.reason || "unavailable") + ")." })]));
+    }
+    var ss = h.sources_seen || {};
+    if (ss.writable === false) {
+      body.appendChild(el("div", { class: "callout warn" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
+        el("div", { text: "The per-service \u201cseen\u201d store (" + (ss.file || "?") + ") is not writable, so every \u201cnever\u201d below may be false." })]));
+    }
+    rows.forEach(function (r) {
+      var fw = r.forwarder || {}, ci = r.ci || {}, chat = r.chat || {}, lv = r.live || {}, pr = r.problems || {};
+      body.appendChild(el("div", { class: "health-row is-" + r.verdict }, [
+        el("div", { class: "err-head" }, [
+          el("span", { class: "badge b-" + (VERDICT[r.verdict] || "info"), text: r.verdict }),
+          el("span", { class: "err-where", text: r.slug + (r.native ? " (this hub)" : "") }),
+          el("span", { class: "err-claim", text: pr.open ? pr.open + " open" + (pr.unclaimed ? " · " + pr.unclaimed + " unclaimed" : "") : "no open problem" })
+        ]),
+        el("div", { class: "health-chips" }, [
+          el("span", { class: "err-cov-chip is-" + (fw.state === "never" ? "never" : "live"), text: "forwarder " + fw.state + (fw.last_age_s != null ? " · " + fmtAge(fw.last_age_s) : "") }),
+          el("span", { class: "err-cov-chip is-" + (ci.state === "seen" ? "live" : "silent"), text: "ci " + ci.state }),
+          el("span", { class: "err-cov-chip is-" + (chat.state === "reported" ? "live" : "silent"), text: "agent chat " + chat.state }),
+          el("span", { class: "err-cov-chip is-" + (lv.state === "up" || lv.state === "self" ? "live" : "silent"),
+                       text: "live " + (lv.state || "unknown") + (lv.checked_age_s != null ? " · " + fmtAge(lv.checked_age_s) + " ago" : "") })
+        ]),
+        (r.gaps || []).length ? el("ul", { class: "health-gaps" }, r.gaps.map(function (g) { return el("li", { text: g }); })) : null
+      ].filter(Boolean)));
+    });
+    if (!rows.length) body.appendChild(el("p", { class: "cell-sub", text: "No service is declared (HUB_APPS) and none has reported yet." }));
+    return el("section", { class: "card", id: "appHealthCard", "aria-labelledby": "appHealthTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "appHealthTitle" }, [icon("target"),
+          doc.createTextNode((counts.observed || 0) + " of " + (h.total || rows.length) + " services observed" +
+            (counts.dark ? " · " + counts.dark + " dark" : ""))]),
+        el("span", { class: "badge b-" + (counts.dark ? "fail" : counts.partial ? "warn" : "pass"),
+                     text: counts.dark ? counts.dark + " dark" : counts.partial ? counts.partial + " partial" : "observed" })
+      ]),
+      body
+    ]);
+  }
+
+  /* ---- CROSSOVERS: consoles working the same thing ----
+     Each console is told only its own pairs; the board, read by the operator, shows all. */
+  var XKIND = { file: "fail", problem: "warn", task: "warn", project: "info", topic: "stale" };
+  function crossoversCard(x) {
+    x = x || {};
+    var pairs = x.pairs || [];
+    var body = el("div", { class: "card-body" });
+    if (!pairs.length) {
+      body.appendChild(el("div", { class: "attn-clear" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
+        doc.createTextNode(" " + (x.consoles || 0) + " live console" + (x.consoles === 1 ? "" : "s") + " — no two on the same file, problem, task or subject.")]));
+    }
+    pairs.slice(0, 8).forEach(function (s) {
+      function who(c) { return (c.agent || "?") + (c.machine ? "@" + c.machine : "") + (c.name ? " " + c.name : (c.session ? " " + c.session : "")); }
+      body.appendChild(el("div", { class: "health-row" }, [
+        el("div", { class: "err-head" }, [
+          el("span", { class: "badge b-" + (XKIND[s.kind] || "info"), text: s.kind }),
+          el("span", { class: "err-where", text: who(s.a) + "  \u2194  " + who(s.b) })
+        ]),
+        el("span", { class: "err-msg", text: s.detail || "" })
+      ]));
+    });
+    return el("section", { class: "card", id: "crossoversCard", "aria-labelledby": "crossoversTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "crossoversTitle" }, [icon("users"),
+          doc.createTextNode(pairs.length ? (x.count || pairs.length) + " crossover" + ((x.count || pairs.length) === 1 ? "" : "s") + " between live consoles" : "Crossovers")]),
+        el("span", { class: "badge b-" + (pairs.length ? "warn" : "pass"), text: pairs.length ? String(x.count || pairs.length) : "none" })
+      ]),
+      body
+    ]);
+  }
+
   function overviewHeading(kicker, title, copy) {
     return el("div", { class: "overview-heading" }, [
       el("span", { class: "overview-heading-kicker", text: kicker }),
@@ -2265,9 +2470,15 @@
     // The ask/answer loop and the operational stream, side by side: who is blocked on a
     // fact, and what is broken — the two queues that must never sit unread.
     scroll.appendChild(overviewHeading("Signals", "Questions and failures",
-      "A blocked person and an unclaimed failure are the two most expensive things a board can let sit."));
+      "A blocked person and an unclaimed problem are the two most expensive things a board can let sit."));
     scroll.appendChild(el("div", { class: "operations-grid" }, [
-      asksCard(), errorsCard(L.errors, L.error_log)
+      asksCard(), problemsCard((L.error_log || {}).problems)
+    ]));
+    scroll.appendChild(overviewHeading("Coverage", "Can every failure reach this board?",
+      "An empty queue means something only for a service whose failures can get here — and two consoles on one thing should know it."));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [
+      appHealthCard((L.error_log || {}).app_health),
+      el("div", { class: "card-stack" }, [crossoversCard(L.crossovers), errorsCard(L.errors, L.error_log)])
     ]));
 
     // Is "in progress" true, and what needs a person? The workstream buckets and the
@@ -2712,6 +2923,14 @@
       // leaving a confident stale answer on the coordination surface.
       closeModal();
       announce("That agent is no longer on the fleet view.");
+      return;
+    }
+    if (_openModalLive.kind === "problem") {
+      fresh = (((L.error_log || {}).problems || {}).items || []).filter(function (p) {
+        return p.id === _openModalLive.key; })[0];
+      if (fresh) { openProblemDetail(fresh, true); return; }
+      closeModal();
+      announce("That problem is no longer open on the queue.");
       return;
     }
     fresh = (L.errors || []).filter(function (r) {
@@ -3640,6 +3859,8 @@
       { id: "cmd:attention", title: "What needs the operator?", sub: "verb", run: function () { focusCard("attentionCard"); } },
       { id: "cmd:asks", title: "Open questions", sub: "verb", run: function () { focusCard("asksCard"); } },
       { id: "cmd:errors", title: "Operational errors", sub: "verb", run: function () { focusCard("errorsCard"); } },
+      { id: "cmd:problems", title: "Problems", sub: "verb", run: function () { focusCard("problemsCard"); } },
+      { id: "cmd:health", title: "Service health", sub: "verb", run: function () { focusCard("appHealthCard"); } },
       { id: "cmd:directives", title: "Go to Directives", sub: "tab", run: function () { activate("directives"); } },
       { id: "cmd:adherence", title: "Board adherence", sub: "verb", run: function () { focusCard("adherenceCard"); } },
       { id: "cmd:dag", title: "Dependency frontier", sub: "verb", run: function () { focusCard("dagCard"); } },
@@ -3726,6 +3947,44 @@
     var delay = 60020 - (Date.now() % 60000);
     _taskAgeTimer = setTimeout(function () { refreshTaskAges(); scheduleTaskAgeRefresh(); }, delay);
   }
+
+  /* ---- The board's own failures reach the board ----
+     An uncaught exception or rejection in this page posts to api/client-error (same-origin,
+     CSRF). Only a same-origin PATH plus line/column rides along — never a stack, never a
+     foreign script's URL (a cross-origin script's details are opaque by design, and a full
+     URL could carry a query). Throttled so a render loop cannot flood the stream. */
+  var _reported = { n: 0, since: Date.now(), seen: {} };
+  function reportBoardFailure(message, source, loc) {
+    try {
+      var now = Date.now();
+      if (now - _reported.since > 60000) { _reported = { n: 0, since: now, seen: {} }; }
+      var key = source + "|" + message;
+      if (_reported.n >= 5 || _reported.seen[key]) return;
+      _reported.n += 1; _reported.seen[key] = 1;
+      var csrf = (doc.querySelector('meta[name="csrf-token"]') || {}).content || "";
+      var body = { source: source, message: String(message || "").slice(0, 500), code: "uncaught" };
+      if (loc && loc.path) body.location = loc;
+      fetch("api/client-error", { method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+        body: JSON.stringify(body) }).catch(function () {}); // absorbs: reporting must never throw
+    } catch (e) {} // absorbs: reporting must never throw
+  }
+  function sameOriginPath(url) {
+    try {
+      var u = new URL(url, location.href);
+      return u.origin === location.origin ? u.pathname : "";
+    } catch (e) { return ""; } // absorbs: an unparseable script URL has no path to report
+  }
+  global.addEventListener("error", function (ev) {
+    if (!ev || !ev.message) return;
+    var path = sameOriginPath(ev.filename || "");
+    reportBoardFailure(ev.message, "board.error",
+      path ? { path: path, line: ev.lineno || 0, col: ev.colno || 0 } : null);
+  });
+  global.addEventListener("unhandledrejection", function (ev) {
+    var r = ev && ev.reason;
+    reportBoardFailure((r && (r.message || String(r))) || "unhandled rejection", "board.rejection", null);
+  });
 
   global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity, openById: openById,
                  closeModal: closeModal, live: function () { return LIVE; },

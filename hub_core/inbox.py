@@ -340,6 +340,20 @@ def message_items(state, agent: str, machine: str = "", now=None) -> list:
     return out
 
 
+def _pinned_elsewhere(ent, machine: str, session: str) -> bool:
+    """A directive PINNED to one computer (`machine`) or one console (`session`) is delivered
+    only there. A caller that does not say where it is cannot claim to be the pinned place —
+    an unpinned client receiving a pinned instruction is exactly the misdelivery the pin
+    exists to prevent."""
+    want_machine = str(ent.get("machine") or "").strip().lower()
+    want_session = str(ent.get("session") or "").strip()[:8]
+    if want_machine and want_machine != (machine or "").strip().lower():
+        return True
+    if want_session and want_session != (session or "").strip()[:8]:
+        return True
+    return False
+
+
 def ack_covers(directive, ack) -> bool:
     """One receipt covers one delivered answer revision, never a later correction."""
     if not directive or not ack or ack.get("directive") != directive.get("id"):
@@ -348,10 +362,14 @@ def ack_covers(directive, ack) -> bool:
     return revision is None or ack.get("delivery_revision") == revision
 
 
-def directive_items(state, agent: str, now=None) -> list:
+def directive_items(state, agent: str, now=None, *, machine: str = "", session: str = "") -> list:
     """Active directives aimed at this agent — including the answer to its own question. An
     item this agent has ALREADY ACKED (at its current revision) is closed and not addressed to
-    it any more; without that, the asker's own machine keeps announcing a reply it acknowledged."""
+    it any more; without that, the asker's own machine keeps announcing a reply it acknowledged.
+
+    A directive PINNED to a machine or console (``machine`` / ``session`` set by the writer) is
+    delivered only there. An ANSWER's ``session`` is its asking console, not a pin: it is
+    routed by the addressed set (``_route``), which lets mail for an ended console fall through."""
     agent = _norm(agent)
     now = time.time() if now is None else now
     entities = state.get("entities") or {}
@@ -367,6 +385,9 @@ def directive_items(state, agent: str, now=None) -> list:
             continue
         targets = [_norm(t) for t in (ent.get("targets") or [])]
         if agent not in targets and "all" not in targets:
+            continue
+        pin = ent if not ent.get("answers") else {"machine": ent.get("machine")}
+        if _pinned_elsewhere(pin, machine, session):
             continue
         prov = ent.get("provenance") or {}
         answered = ent.get("answers") or ""
@@ -385,6 +406,7 @@ def directive_items(state, agent: str, now=None) -> list:
                if "delivery_revision" in ent else {}),
             "remediation_cmd": _text(ent.get("remediation_cmd"), 400),
             **_written(at, now),
+            "machine": _text(ent.get("machine"), 120),
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out
@@ -480,7 +502,8 @@ def items_for(state, agent: str, operator: str, operator_extra=None, *, machine:
                                              gate_satisfied=gate_satisfied, now=now),
                               agent, operator)
     items = (message_items(state, agent, machine, now) + questions
-             + directive_items(state, agent, now) + assignment_items(state, agent))
+             + directive_items(state, agent, now, machine=machine, session=session)
+             + assignment_items(state, agent))
     if agent and agent == _norm(operator):
         items += list(operator_extra or [])
     routed = []
@@ -642,7 +665,7 @@ def render_line(item) -> str:
         return "Answer from %s: %s" % (item.get("from") or "the operator", item.get("title") or "")
     if kind == "message":
         return "Message from %s: %s" % (item.get("from") or "a board member", item.get("title") or "")
-    if item.get("kind") in ("decision", "task-stall", "attention", "overlap"):
+    if item.get("kind") in ("decision", "task-stall", "attention", "overlap", "error"):
         return str(item.get("title") or "")
     if item.get("kind") == "assignment":
         return "%s gave you %s: %s" % (item.get("from") or "the operator", item.get("id") or "",

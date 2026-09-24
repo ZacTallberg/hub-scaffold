@@ -2219,3 +2219,16 @@ a.update-ev { color: var(--accent); text-decoration: underline; }
 .built-person { font-weight: 600; }
 .built-recent { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .callout.pass { background: var(--pass); color: var(--pass-fg); }
+/* ============ Problems, service health, crossovers ============ */
+.prob-item.is-in_flight, .prob-item.is-escalated { border-left-color: var(--warn-solid, #d99a2b); }
+.prob-item.is-in_flight .err-claim, .prob-item.is-escalated .err-claim { color: var(--muted); font-weight: 600; }
+.card-stack { display: flex; flex-direction: column; gap: clamp(14px, 1.6vw, 22px); min-width: 0; }
+#appHealthCard .card-body, #crossoversCard .card-body { display: flex; flex-direction: column; gap: 8px; }
+.health-row { display: flex; flex-direction: column; gap: 5px; padding: 9px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius-sm) + 2px); background: var(--surface-2); min-width: 0; }
+.health-row.is-dark { border-left: 3px solid var(--fail-solid, #e5484d); }
+.health-row.is-partial { border-left: 3px solid var(--warn-solid, #d99a2b); }
+.health-row.is-observed { border-left: 3px solid var(--pass-solid, #2fae66); }
+.health-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.health-gaps { margin: 0; padding-left: 18px; font-size: 11.5px; color: var(--muted); }
+.health-gaps li { overflow-wrap: anywhere; }
+.err-cov-chip.is-never { color: var(--fail-solid, #e5484d); border-color: var(--fail-solid, #e5484d); border-style: dashed; font-weight: 700; }

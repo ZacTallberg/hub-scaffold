@@ -99,7 +99,7 @@ A CLI process can forward without any handler wiring:
 
 ```bash
 python -m hub_core.client app-error --app billing --kind job \
-  --message "nightly export crashed" --details "$(tail -c 1800 job.log)"
+  --message "nightly export crashed" --details "$(tail -c 30000 job.log)"
 python -m hub_core.client agent-error --agent worker-3 --source launcher \
   --message "wrapper exited 1 before claiming"
 ```
@@ -120,17 +120,48 @@ error naming the first one, and a log nothing recognises carries its first failu
 rather than the runner's "Job failed" epitaph. Extend the markers in `hub_core/ci_trace.py` to
 the vocabulary your deploy scripts actually print.
 
-## 3. Drain the queue, honestly
+## 3. A CI system — one neutral event per pipeline
 
-An unclaimed row on the bar is unassigned work, not a status light. Claim it when you pick it
-up, clear it only bounded:
+Translate your CI's own webhook (or a final pipeline step) into one POST; the Hub does the rest:
 
 ```bash
-python -m hub_core.client ack-error <fingerprint> --note "fixed in the export job"
-python -m hub_core.client ack-error <fingerprint> --reopen     # it came back
+python -m hub_core.client ci-event --project billing --status failed --ref main \
+  --sha "$COMMIT" --job unit:failed --job lint:success --link "$PIPELINE_URL"
+python -m hub_core.client ci-event --project billing --status success --ref main --job unit:success
+```
+
+A failed job lands as `ci.<project>.<job>`, one problem per (project, job) however often it
+fails. A job's failures are retired ONLY by that job passing later on the same ref — a later
+green deploy is not evidence for a job that stopped running. Failures on refs outside
+`HUB_DEPLOY_REFS` are recorded under their author and held below the bar.
+
+## 4. Prove the path with a positive control
+
+A self-test that fires one real error per channel should carry a fresh token of the shape
+`EV-SELFTEST-<12 hex>` in its message: the row proves the channel end to end, and the bar
+recognizes the token and never queues it. Rows whose message starts `PROOF` or `CANARY`, or
+contains `FORCED FAULT PROBE`, are treated the same way. All of them stay listed under
+`errors.json?include=deferred` so the probe can find its own row.
+
+## 5. Drain the queue as PROBLEMS, honestly
+
+Rows are occurrences; the board folds them into problems — the thing somebody fixes. An
+unclaimed problem is unassigned work, not a status light. Claim it BEFORE you dig, so no other
+console duplicates you; resolve it with the root cause, which acks every row behind it:
+
+```bash
+python -m hub_core.client errors --mine                     # owned by or held by me
+python -m hub_core.client errors --trace p-0123456789ab     # the stored trace, head AND tail
+python -m hub_core.client claim p-0123456789ab --note "checking the export job"
+python -m hub_core.client resolve p-0123456789ab --note "<root cause>" --evidence <sha|url>
+python -m hub_core.client escalate p-0123456789ab --blocked-on <open ask or task>
 # clears are bounded by AGE or ACK — never "everything":
 # POST /hub/api/clear-errors {"only_acked": true}
 ```
+
+A recurrence after a resolve reopens the problem. `health` answers the question the queue
+cannot answer about itself — can each service's failures reach this board at all — and
+`doctor <slug>` reads one service as BLOCKED (unclaimed) or WAITING (held, escalated).
 
 ## The properties to preserve if you adapt this
 
