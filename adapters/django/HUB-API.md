@@ -50,6 +50,12 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 - **Optional presence headers on any write** — `X-Hub-Machine`, `X-Hub-Session`, `X-Hub-Cwd`,
   `X-Hub-Focus` — feed the board's live-console view; `POST /hub/api/presence` is the seat
   heartbeat between tasks. An authenticated write refreshes your observed seat automatically.
+  Three more are sent by the client kit: `X-Hub-Files` (comma-separated `<project>/<path>` this
+  console edited recently; absent = keep the last claim, empty = clear it — the input of the
+  board's FILE crossover, derived by `patterns/presence-gate.py`), `X-Hub-Client` (the client's
+  `version+sha`) and `X-Hub-Artifacts` (`name=sha16,...` for every artifact the seat runs). A row
+  that names a machine but carries neither kit header is a CALLER, not a computer: it is listed
+  under `phantoms` and kept out of every device list, count and distribution grade.
 
 ## READ endpoints (GET, public)
 
@@ -75,6 +81,9 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/errors.json` | the operational error stream — the failures the ledger audit cannot see — with the BAR applied at read (critical/high in this system's own surfaces; foreign-scanner noise and recovered transport blips deferred, `?include=deferred` shows everything). Metadata carries the 24h histogram, trend, top sources, unclaimed count, and per-channel `coverage` so an empty list says whether it is everything. |
 | `GET /hub/search.json?q=…` | ranked multi-term search over the whole board (titles weighted over bodies, exact phrase boosted) — the pull half of "push pointers, pull content". |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
+| `GET /hub/distribution.json` | every seat graded against what this hub publishes (the client it serves, `CHARTER-CORE.md` when present, and each `HUB_DISTRIBUTED_ARTIFACTS` file): per seat `current` / `drifted` (with the stale artifacts) / `offline` (silent past 2h — named, never graded as drift) / `phantom` / `legacy`; seats gone 72h+ collapse to a count. The `verdict` leads and states what it did NOT grade. Hashes compare LF-normalized bytes (CRLF and raw forms accepted) and split `version+sha` before grading. A seat silent 6h+ becomes an OPERATOR inbox item of kind `offline`; drift on an ONLINE seat becomes kind `drift` only once the artifact has been published 6h+. |
+| `GET /hub/built.json[?person=]` | what each PERSON built, derived from the ledger, never curated: completed tasks, releases, authored gaps/feats/ADRs/decisions/notes. A machine identity folds into the agent that reports from it (raw presence rows, so an offline laptop still folds); a machine name never labels a person; service identities are never people. |
+| `GET /hub/ci-events.json?pipeline=\|job=\|project=[&limit=]` | **credential with `ci:read` required** — the raw CI deliveries behind a CI row, newest first, plus a `store` block (path, bytes, writability) so an empty answer says whether nothing arrived or nothing can be kept. Two rotated files of 4 MB each. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
 
 `GET /hub/hub.json` also honours `If-None-Match` and returns **304** when the head cursor hash is
@@ -242,9 +251,13 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | `/hub/api/ack-error` (`error:manage`) | `fingerprint`, optional `note`; or `fingerprint` + `reopen:true` | Ack collapses the signature off the queue without deleting rows; reopening a never-acked signature is `409 not_acked`, not a 200 over an untouched row. |
 | `/hub/api/clear-errors` (`error:manage`) | `older_than_hours` and/or `only_acked:true` | Bounded by AGE or ACK, never "everything"; `only_acked` is a restriction (an unacked row never drops, however old). Unbounded is `400 need_bound`. |
 | `/hub/api/client-error` (same-origin CSRF) | `source`, `message`, optional `severity`, `code` | Bounded browser diagnostics from the board itself; rows are held below the read-time bar by default. |
+| `/hub/api/ci-event` (**webhook secret**, not an agent credential) | a GitLab pipeline/job webhook body, or the generic shape `{"kind": "pipeline"\|"job"\|"deploy", "project", "status", "ref", "sha", "pipeline", "job", "jobs": [{"name","status","allow_failure"}], "trigger", "url", "finished_at", "allow_failure", "failure_reason", "restored_sha"}` | Authenticated by `X-Hub-Webhook-Token` (or GitLab's `X-Gitlab-Token`) against `HUB_CI_WEBHOOK_SECRET`; with no secret configured EVERY request is refused `404`. A failure becomes a row `ci.<project>.<job\|pipeline>`: deploy/verify/release/bootstrap jobs are `critical`, others `error`; allowed failures and `HUB_CI_IGNORE_JOBS` are dropped; a failed pipeline with NO jobs is a critical `ci_config_rejected`; a non-push trigger is named in the row. A later green on the same job AND ref, finishing after the failure, retires (acks) it — a pipeline success only the jobs it RAN. A recurrence of an acked signature reopens it. `kind: deploy` + `status: rolled_back` (or `restored_sha`) records a critical rollback that no green retires. Duplicate deliveries are dropped; the raw body is kept. Always `200` with what was done, even for an uninterpretable body (recorded as the hub's own warning), because an ingest that errors teaches the sender to disable the hook. |
 
 The sending half — LOGGING handlers for the host app, a bounded fail-soft forwarder for
 satellite services — is `patterns/error-visibility.md`; wire it before the first feature.
+CI results arrive through the CI system's own webhook (register it per project:
+`adapters/gitlab/ensure_ci_hooks.py`) or a pipeline step (`python -m hub_core.client ci-report`);
+the deploy-step failures worth reporting are in `patterns/deploy-hardening.md`.
 Rows are redacted at write and throttled per fingerprint (the count is preserved) — an
 unthrottled flood does not just add noise, it EVICTS every other error from a bounded store.
 Every write on every endpoint above is additionally screened for secret shapes and refused
@@ -253,6 +266,42 @@ be removed, only rotated. Recognizable redaction placeholders pass.
 
 See `MOUNTING.md → The evidence-resolution dial` for `tracked` (flow-first, the default) vs `strict`
 (dereferenceable-evidence mode).
+
+## The client kit (`python -m hub_core.client`)
+
+The standard-library client is the sanctioned seat-side wrapper. Beyond the loop verbs it holds
+four disciplines, each learned from a seat that lost work without knowing it:
+
+- **Several routes to ONE hub.** `HUB_API_BASE` may list comma-separated addresses (a VPN route and
+  an overlay route to the same process — routes, never replicas). They are swept BREADTH-FIRST, one
+  attempt each, under a wall clock (`HUB_CLIENT_TOTAL_BUDGET_S`, 90); the route that answered last
+  is tried first and one that failed at the transport layer is tried last for 30 minutes. Only a
+  ROUTE failure (DNS, refused, connect timeout, TLS) moves to the next address; a read timeout or a
+  5xx is the hub having been reached, and resending a write there could land it twice. Reads get
+  `HUB_CLIENT_TIMEOUT_S` (10), writes `HUB_CLIENT_WRITE_TIMEOUT_S` (30). "Unreachable" names every
+  route tried and how to point this shell at another route.
+- **Three outcomes for a write, not two.** Landed; refused; or not sent. A write whose every route
+  failed to connect is QUEUED in the seat's queue (`HUB_CLIENT_HOME`, default `~/.hub-client`),
+  stamped with the console that queued it, and replayed in order ahead of the next write — AS that
+  console (identity headers only), since a lease is held by a console. Exit `4` = queued (not on the
+  board, may still be refused), exit `5` = outcome unknown (the hub received it and did not answer;
+  read the board before resending). A replay refusal is dead-lettered, never a wedge; `flush --dead
+  [ID]` replays dead letters as their queuer and archives what is refused again, `flush
+  --dead-archive [ID]` archives by hand. Nothing is deleted. Concurrent drains remove only the
+  entries they consumed, by id.
+- **A lost version race is retried once.** `step` and `record` (create/amend a
+  gap/feat/note/adr/decision/capability, e.g. `record gap --id <id> --set status=mitigated`) read
+  the current version first; a `409`/`428` that names the current version is retried once — `step`
+  recomputes its plan from a fresh read rather than replaying a stale delta. A second miss is a live
+  race and is returned. A `409` that names no version (a lease or content refusal) raises at once.
+- **Kit telemetry.** Every request carries `X-Hub-Client` and `X-Hub-Artifacts` (the client's own
+  sha, the charter core's, and any `HUB_ARTIFACTS=name=path,...`), which is what `distribution`
+  grades and what separates a computer from a phantom caller.
+
+Read verbs: `distribution`, `built [--person]`, `ci-events --project|--pipeline|--job`. CI/deploy
+steps report with `ci-report --kind pipeline|job|deploy --project P --status S [...]`, authenticated
+by `HUB_CI_WEBHOOK_SECRET`, not an agent credential. MCP tools: `seat_distribution`,
+`built_by_person`, `record_entity` (the same one-retry versioned upsert) and `ci_events`.
 
 ## Error responses
 

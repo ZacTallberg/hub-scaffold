@@ -43,7 +43,12 @@ from a working multi-project system. Nothing here names any specific person, hos
   that keeps failures in its own log can only be debugged from a shell on its host), and
   **worker longevity** (`worker-longevity.md`: a worker's
   green condition is COMPLETIONS, not aliveness — the nine ways a seat stops finishing work and
-  the barren ladder it climbs when a cycle produces nothing). None runs unless you install it.
+  the barren ladder it climbs when a cycle produces nothing), **deploy hardening**
+  (`deploy-hardening.md`: the deploy-step failures that roll back good builds or hide bad ones, and
+  how CI/rollback results reach the board), **machine push identity**
+  (`machine-push-identity.md`), and the **presence gate** (`presence-gate.py`: a harness hook that
+  derives the files a console edited, so the board can name two consoles editing one file). None
+  runs unless you install it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.
 
 ## First-pull runbook

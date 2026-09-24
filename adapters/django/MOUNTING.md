@@ -82,6 +82,20 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 #     "level": "ERROR"}},
 #     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"}}}
 
+# Optional: CI results as board rows (POST /hub/api/ci-event). The secret is what a CI webhook
+# or pipeline step presents; with it unset the ingest refuses everything. From the environment.
+# HUB_CI_WEBHOOK_SECRET = os.environ.get("HUB_CI_WEBHOOK_SECRET", "")
+# HUB_CI_IGNORE_JOBS = "flaky_optional_job"   # comma-separated job names never recorded
+
+# Optional: extra files seats are graded against on /hub/distribution.json, {name: path}
+# relative to HUB_WORK_ROOT. A seat reports the same name via HUB_ARTIFACTS=name=path. The
+# client itself and CHARTER-CORE.md (when present) are always published.
+# HUB_DISTRIBUTED_ARTIFACTS = {"agent-profile": "config/agent-settings.json"}
+
+# Presence heartbeat interval (env HUB_PRESENCE_INTERVAL_S, default 60 s, 5..300). Every beacon
+# is a request the hub serves; online/offline are derived from the interval, so a slower beat
+# stays truthful.
+
 # Optional workstation worker bridge (disabled unless explicitly enabled):
 HUB_WORKER_LAUNCH_ENABLED = False
 HUB_WORKER_PROTOCOL = "hub-{{PROJECT_KEY}}"
