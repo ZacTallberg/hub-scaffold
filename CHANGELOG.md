@@ -34,6 +34,10 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - **Decisions are a person's call.** `work_kind: decision` is never unattended; open decisions reach
   the deciders' inbox with a board link; `POST /hub/api/task/decide` (`file | close | reply`) only
   for a `HUB_DECIDERS` credential, closing through the one done path; `task.decision` records it.
+  Turning a task into a decision always clears `unattended`. A `reply` pages the decision's
+  FILER: the fold now stamps `provenance.created_by` once from an entity's first event (schema
+  and bootstrap updated), so an unrelated later edit no longer redirects the page to its editor;
+  a task's stall owner and `recall` owner read the same field instead of the last writer.
 - **Annotated task rows and a per-project feed.** Rows carry holder, responder, pushed, handed-back,
   deployed and a CI problem joined on the task's own sha/pipeline; `GET /hub/project/<slug>/tasks.json`
   with an ETag that moves only when a reader-visible fact does; `client recall` prints the trail.

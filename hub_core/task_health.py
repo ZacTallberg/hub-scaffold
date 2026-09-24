@@ -129,8 +129,10 @@ def is_unattended(task) -> bool:
 
 
 def owner_of(task) -> str:
+    """The task's explicit owner, else whoever CREATED it -- never its last writer (a deploy
+    actor stamping a deployed step is not the task's owner)."""
     prov = task.get("provenance") or {}
-    return str(task.get("owner") or prov.get("agent") or "")
+    return str(task.get("owner") or prov.get("created_by") or prov.get("agent") or "")
 
 
 def classify(task, activity=None, now: float | None = None) -> dict:

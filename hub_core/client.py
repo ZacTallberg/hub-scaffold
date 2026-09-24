@@ -496,7 +496,8 @@ def _run_recall(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return {"id": task.get("id"), "title": task.get("title"), "status": task.get("status"),
             "priority": task.get("priority"), "work_kind": task.get("work_kind"),
             "unattended": bool(task.get("unattended")), "project": task.get("project"),
-            "owner": (task.get("provenance") or {}).get("agent"),
+            "owner": ((task.get("provenance") or {}).get("created_by")
+                      or (task.get("provenance") or {}).get("agent")),
             "holder": task.get("holder"), "responder": task.get("responder"),
             "pushed": task.get("pushed"), "deployed": task.get("deployed"),
             "handed_back": task.get("handed_back"), "auto_close": task.get("auto_close"),
