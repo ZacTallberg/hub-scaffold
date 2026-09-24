@@ -1,0 +1,1 @@
+{"state": "active", "summary": "Run, supervise and verify declared services from one strict manifest; a requested stop is not a crash", "installs": ["service_runner.py"]}
