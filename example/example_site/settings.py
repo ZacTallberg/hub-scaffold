@@ -38,6 +38,15 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # Opt-in HTTPS redirect for a site whose TLS terminates at a proxy. The LIVENESS path is
+    # exempt: a host-local probe (a rolling restart's health wait, an ops check) calls
+    # http://127.0.0.1:<port>/... directly, with no proxy and no X-Forwarded-Proto, and a
+    # redirect sends it to an https URL the app server cannot serve — every restart then
+    # reads as unhealthy and rolls back. Matched with .search against the path without its
+    # leading slash, so a mount prefix in front of /hub/ does not defeat it.
+    if os.environ.get("HUB_SSL_REDIRECT", "") == "1":
+        SECURE_SSL_REDIRECT = True
+        SECURE_REDIRECT_EXEMPT = [r"(^|/)hub/cursor\.json$"]
 
 INSTALLED_APPS = [
     "hub",  # the agent-operable /hub surface (event-sourced; renders from hub_core; token-gated writes)

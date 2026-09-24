@@ -245,10 +245,25 @@ def _error_bar(row):
     return errorlog.passes_bar(row)
 
 
-def _errors_block(limit=errorlog.READ_LIMIT):
+def _row_app(row):
+    """Which service a row belongs to — the reported app beats the one decoded from source."""
+    return str((row.get("context") or {}).get("app") or row.get("origin_app") or "").lower()
+
+
+def _errors_block(limit=errorlog.READ_LIMIT, app=""):
     """The operational error stream, bar-annotated, plus the SHAPE a reader actually needs:
-    is it getting worse, which source is responsible, and is any of it even ours."""
+    is it getting worse, which source is responsible, and is any of it even ours.
+
+    COUNT THE QUEUE, NOT THE LISTING. Every count below comes from the bar's own verdict on
+    each row, never from whatever subset a caller asked to SEE: a listing that includes the
+    deferred rows must not report them as unassigned work (a live board once answered "67
+    unclaimed" about a queue holding zero, every one of the 67 a startup notice or a
+    transport blip the bar had already dismissed). `app` narrows the stream to one service
+    before anything is counted, so a per-service reader gets that service's truth."""
     rows, metadata = errorlog.read(hub_app.HUB_DIR, limit=limit)
+    app = str(app or "").strip().lower()
+    if app:
+        rows = [r for r in rows if _row_app(r) == app]
     now = time.time()
     # A problem somebody HOLDS is not unclaimed (hub_core.item_claims): a machine's live claim on
     # a fingerprint moves it from "needs you" to "in flight: <machine>", so no second agent is
@@ -264,11 +279,15 @@ def _errors_block(limit=errorlog.READ_LIMIT):
     buckets = [0] * 24
     severities = {"critical": 0, "error": 0, "warning": 0}
     sources, external, on_bar_n, unclaimed = {}, 0, 0, []
+    claimed_n, deferred_n, deferred_open, reasons = 0, 0, 0, {}
     for row in rows:
         ok, why = _error_bar(row)
         row["bar"] = "on" if ok else "deferred"
         if not ok:
             row["defer_reason"] = why
+            deferred_n += 1
+            deferred_open += 0 if row.get("acked") else 1
+            reasons[why] = reasons.get(why, 0) + 1
         else:
             on_bar_n += 1
             held = claims.get(str(row.get("fingerprint") or ""))
@@ -277,6 +296,8 @@ def _errors_block(limit=errorlog.READ_LIMIT):
                 in_flight += 1
             elif not row.get("acked"):
                 unclaimed.append(row)
+            else:
+                claimed_n += 1
         try:
             age_h = int((now - float(row.get("epoch") or 0)) // 3600)
         except (TypeError, ValueError):
@@ -317,7 +338,16 @@ def _errors_block(limit=errorlog.READ_LIMIT):
         "top_sources": sorted(sources.values(), key=lambda s: -s["count"])[:6],
         "external_rows": external, "app_rows": max(0, len(rows) - external),
         "trend": trend, "last_24h": sum(buckets),
-        "on_board": on_bar_n, "unclaimed": len(unclaimed), "in_flight": in_flight,
+        "on_board": on_bar_n, "unclaimed": len(unclaimed), "claimed": claimed_n, "in_flight": in_flight,
+        # The queue's oldest unclaimed row. A below-bar row ageing for a day is not a queue
+        # that has been ignored for a day, and this figure is read as exactly that.
+        "oldest_unclaimed_s": max((int(now - float(r.get("epoch") or now)) for r in unclaimed),
+                                  default=0),
+        # What the bar held back, broken out under its own key rather than folded into the
+        # queue's numbers — counted, kept, one query away, and never mistaken for work.
+        "deferred": deferred_n,
+        "off_board": {"rows": deferred_n, "open": deferred_open,
+                      "reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1]))},
         # "Is this everything?" is the one question a list of errors can never answer about
         # itself, and the one a reader must have answered before an empty card may be read
         # as good news.
@@ -2571,16 +2601,18 @@ def errors_json(request):
         limit = max(1, min(errorlog.KEEP_ROWS, int(request.GET.get("limit") or errorlog.READ_LIMIT)))
     except (TypeError, ValueError):
         limit = errorlog.READ_LIMIT
-    rows, metadata, _unclaimed = _errors_block(limit)
+    # ?app= narrows to ONE service's rows — "is anything broken in budget-app?" must not need
+    # the whole window downloaded and filtered by hand; the counts describe the same slice.
+    app = re.sub(r"[^a-z0-9-]", "", (request.GET.get("app") or "").strip().lower())[:60]
+    rows, metadata, _unclaimed = _errors_block(limit, app=app)
     include = (request.GET.get("include") or "").lower()
     data = rows if include in ("deferred", "all") else [r for r in rows if r.get("bar") == "on"]
-    # ?app= narrows to ONE service's rows — "is anything broken in budget-app?" must not
-    # need the whole window downloaded and filtered by hand.
-    app = re.sub(r"[^a-z0-9-]", "", (request.GET.get("app") or "").strip().lower())[:60]
     if app:
-        data = [r for r in data if r.get("origin_app") == app
-                or str(r.get("source") or "").lower().startswith("app.%s." % app)]
+        # One service's own slice — what an app's chrome shows as "recent errors". The counts
+        # above were already computed over this slice, so they describe the same rows.
         metadata["app"] = app
+        cov = metadata.get("coverage") or {}
+        cov["channels"] = [c for c in cov.get("channels") or [] if c.get("key") == "app"]
     metadata["bar"] = ("every row recorded in the window; `bar` says which are on the board"
                        if include in ("deferred", "all") else
                        "critical and high problems in this system's own surfaces; add "

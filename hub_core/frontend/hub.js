@@ -1904,7 +1904,9 @@
       body.appendChild(el("p", { class: "cell-sub", style: "margin-top:8px", text:
         "These are OCCURRENCES. Work them as problems (the Problems card): claim before digging, resolve with the root cause — that acks every row behind it." }));
     }
-    var deferred = rows.length - onBar.length;
+    // The server's count of what the bar held back — the queue's own number, whatever subset
+    // this snapshot happened to carry.
+    var deferred = meta.deferred != null ? meta.deferred : rows.length - onBar.length;
     if (deferred > 0) {
       body.appendChild(el("p", { class: "cell-sub", text:
         deferred + " row" + (deferred === 1 ? "" : "s") + " below the bar (foreign clients, warnings, recovered blips) — never dropped; errors.json?include=deferred shows them." }));
@@ -1924,7 +1926,10 @@
         covWrap.appendChild(el("span", {
           class: "err-cov-chip is-" + (st === "live" ? "live" : st === "never" ? (c.silence_ok ? "silent" : "never") : "silent"),
           title: (c.wired || c.key) + (c.age_s != null ? " · last " + fmtAge(c.age_s) + " ago" : ""),
-          text: c.label + (st === "live" ? " · " + c.rows : st === "never" ? " — never reported" : " — quiet")
+          // The AGE is in the text, not only a colour: a channel that last reported days ago
+          // is not the same evidence as one that reported a minute ago.
+          text: c.label + (st === "live" ? " · " + c.rows + (c.age_s != null ? " · last " + fmtAge(c.age_s) + " ago" : "")
+                           : st === "never" ? " — never reported" : " — quiet")
         }));
       });
       body.appendChild(covWrap);
@@ -2461,18 +2466,18 @@
     var activity = L.activity || [];
 
     scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip, L.attention));
-    scroll.appendChild(overviewHeading("Now", "Execution and intervention",
-      "See who is advancing work and the decisions that can change throughput immediately."));
-    scroll.appendChild(el("div", { class: "operations-grid" }, [
-      fleetView(L.fleet, L.worker_health), attentionRail(L.attention)
-    ]));
-
-    // The ask/answer loop and the operational stream, side by side: who is blocked on a
-    // fact, and what is broken — the two queues that must never sit unread.
-    scroll.appendChild(overviewHeading("Signals", "Questions and failures",
-      "A blocked person and an unclaimed problem are the two most expensive things a board can let sit."));
-    scroll.appendChild(el("div", { class: "operations-grid" }, [
-      asksCard(), problemsCard((L.error_log || {}).problems)
+    scroll.appendChild(overviewHeading("Now", "Execution, questions and failures",
+      "Who is advancing work, who is blocked on a fact, and what is broken — one glance, not three."));
+    // ONE live cluster. Who is working, who needs a human and what is broken are read
+    // together, so the asks/problems pair sits in the same grid DIRECTLY under the agent cards
+    // (column 1, row 2) instead of after the grid: as a sibling below it, it started only
+    // after the grid's tallest column — the attention rail — and a long rail pushed the
+    // problems a screen away from the people. The rail spans both rows beside them without
+    // sizing either (see .live-cluster in shell.css).
+    scroll.appendChild(el("div", { class: "operations-grid live-cluster" }, [
+      fleetView(L.fleet, L.worker_health),
+      attentionRail(L.attention),
+      el("div", { class: "signals-duo" }, [asksCard(), problemsCard((L.error_log || {}).problems)])
     ]));
     scroll.appendChild(overviewHeading("Coverage", "Can every failure reach this board?",
       "An empty queue means something only for a service whose failures can get here — and two consoles on one thing should know it."));
@@ -3407,7 +3412,15 @@
   function timedFetchOnce(url, options) {
     if (!global.AbortController) return fetch(url, options);
     var controller = new global.AbortController();
-    var timer = setTimeout(function () { controller.abort(); }, 9000);
+    // Abort with a NAMED reason: a bare AbortError can then only mean the browser cancelled
+    // the request (navigation, Stop, a discarded tab). The board does not forward its own fetch
+    // failures; this is the wording a forwarding reporter should copy, and the error bar defers
+    // it bare or as String(err) ("TimeoutError: Hub did not answer ...").
+    var timer = setTimeout(function () {
+      var reason = new Error("Hub did not answer " + String(url).split("?")[0] + " within 9 seconds");
+      reason.name = "TimeoutError";
+      try { controller.abort(reason); } catch (e) { controller.abort(); }
+    }, 9000);
     options = Object.assign({}, options || {}, { signal: controller.signal });
     return fetch(url, options).then(function (response) {
       clearTimeout(timer); return response;

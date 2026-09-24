@@ -433,6 +433,14 @@ TOOLS = [
                     "only as its newest rows; this returns all of them.",
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string"}}, "required": ["type"]}},
+    {"name": "read_errors",
+     "description": "The operational error stream with the bar applied: metadata carries the "
+                    "QUEUE's counts (on_board, unclaimed, claimed, oldest_unclaimed_s) and what "
+                    "the bar held back (deferred, off_board) whatever you list. app= narrows to "
+                    "one service; include=deferred also lists the held-back rows.",
+     "inputSchema": {"type": "object", "properties": {
+         "app": {"type": "string"},
+         "include": {"enum": ["deferred", "all"]}}}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -849,6 +857,9 @@ def _call_tool(name, args, auth_headers):
     elif name == "list_collection":
         kind = re.sub(r"[^a-z]", "", str(args.get("type") or "").lower())
         status, body = _seam("/hub/%s.json" % kind, {}, auth_headers, method="get")
+    elif name == "read_errors":
+        query = {key: str(args[key]) for key in ("app", "include") if args.get(key)}
+        status, body = _seam("/hub/errors.json", query, auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

@@ -296,6 +296,8 @@ class EventStore:
     def _init_db(self):
         c = self._db
         c.execute("PRAGMA journal_mode=WAL")
+        # The wait outlasts a worst-case index rebuild under contention (a restart forces one):
+        # BEGIN_TIMEOUT_MS is the ledger-lock budget, and a lock held past it answers 503 busy.
         c.execute("PRAGMA busy_timeout=%d" % BEGIN_TIMEOUT_MS)
         c.execute(
             "CREATE TABLE IF NOT EXISTS events ("
@@ -502,8 +504,7 @@ class EventStore:
                     c.execute("DELETE FROM events")
                     c.execute("DELETE FROM heads")
                     c.execute("DELETE FROM idem")
-                    for ev in events:
-                        self._index_event(ev)
+                    self._index_events_batch(events)
                     self._stamp_jsonl_size()
                     self._install_trigger()
                     c.execute("COMMIT")
@@ -604,6 +605,33 @@ class EventStore:
             self._db.execute("INSERT OR REPLACE INTO idem(aggregate,idem_key,seq) VALUES(?,?,?)",
                              (ev["aggregate"], ev["idem_key"], ev["seq"]))
         self._db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chain_head',?)", (ev["hash"],))
+
+    def _index_events_batch(self, events):
+        """Index a whole chain in a few bulk statements instead of ~4 per event.
+
+        The heal used to run _index_event per row inside BEGIN IMMEDIATE, so the write lock was
+        held for time proportional to the ledger (seconds at a few thousand events on a slow
+        disk) — long enough for concurrent writers to exhaust busy_timeout. Row order is
+        preserved, so `heads` (INSERT OR REPLACE in seq order) still ends on each aggregate's
+        latest version and chain_head names the final event, exactly as the per-row path
+        leaves them. append() keeps the per-event path."""
+        c = self._db
+        c.executemany(
+            "INSERT INTO events(seq,event_id,ts,aggregate,type,base_version,result_version,"
+            "hash,prev_hash,idem_key,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [(ev["seq"], ev["event_id"], ev["ts"], ev["aggregate"], ev["type"],
+              ev["base_version"], ev["result_version"], ev["hash"], ev["prev_hash"],
+              ev.get("idem_key"), canonical(ev)) for ev in events])
+        c.executemany("INSERT OR REPLACE INTO heads(aggregate,version) VALUES(?,?)",
+                      [(ev["aggregate"], ev["result_version"]) for ev in events])
+        idem_rows = [(ev["aggregate"], ev["idem_key"], ev["seq"]) for ev in events
+                     if ev.get("idem_key")]
+        if idem_rows:
+            c.executemany("INSERT OR REPLACE INTO idem(aggregate,idem_key,seq) VALUES(?,?,?)",
+                          idem_rows)
+        if events:
+            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chain_head',?)",
+                      (events[-1]["hash"],))
 
     def head_version(self, aggregate) -> int:
         r = self._db.execute("SELECT version FROM heads WHERE aggregate=?", (aggregate,)).fetchone()

@@ -2232,3 +2232,46 @@ a.update-ev { color: var(--accent); text-decoration: underline; }
 .health-gaps { margin: 0; padding-left: 18px; font-size: 11.5px; color: var(--muted); }
 .health-gaps li { overflow-wrap: anywhere; }
 .err-cov-chip.is-never { color: var(--fail-solid, #e5484d); border-color: var(--fail-solid, #e5484d); border-style: dashed; font-weight: 700; }
+/* ============ The live cluster: people, then asks + errors directly under them ============
+   Who is working, who needs a human and what is broken are ONE glance. The asks/errors pair
+   takes row 2 of the left column, straight under the agent cards; the attention rail spans
+   both rows beside them WITHOUT sizing either — height:0 makes its content contribute nothing
+   to track sizing (a long rail otherwise stretched row 1 and pushed the problems a screen away
+   from the people), min-height:100% then fills the rows the left column defined, and its list
+   scrolls inside its own card. */
+.live-cluster { grid-template-rows: auto auto; }
+.live-cluster > .fleet-card { grid-column: 1; grid-row: 1; }
+.live-cluster > .attention-card {
+  grid-column: 2; grid-row: 1 / span 2;
+  height: 0; min-height: 100%; align-self: stretch;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.live-cluster > .attention-card .attn-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+.live-cluster > .signals-duo {
+  grid-column: 1; grid-row: 2;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(14px, 1.6vw, 22px); align-items: start;
+}
+.signals-duo > .card { margin: 0; }
+/* NATURAL HEIGHT, not stretch: stretched to the tallest card, a card pins its header at the
+   top and its chips at the bottom and the middle goes hollow. A card with less to say is
+   simply shorter. */
+.fleet-grid { align-items: start; }
+@media (max-width: 1100px) {
+  /* Single column: people, then asks/errors directly under them, then the rail at its
+     natural height — the height:0 trick only makes sense beside something. */
+  .live-cluster { grid-template-rows: none; }
+  .live-cluster > .fleet-card, .live-cluster > .signals-duo, .live-cluster > .attention-card {
+    grid-column: 1;
+  }
+  /* Explicit rows: the rail precedes the signals in the DOM, so auto placement would put it
+     between the people and their asks/errors. */
+  .live-cluster > .fleet-card { grid-row: 1; }
+  .live-cluster > .signals-duo { grid-row: 2; }
+  .live-cluster > .attention-card { grid-row: 3; }
+  .live-cluster > .attention-card { height: auto; min-height: 0; }
+  .live-cluster > .attention-card .attn-list { max-height: 340px; }
+}
+@media (max-width: 760px) {
+  .live-cluster > .signals-duo { grid-template-columns: minmax(0, 1fr); }
+}
