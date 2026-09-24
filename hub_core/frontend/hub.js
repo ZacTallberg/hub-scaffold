@@ -582,6 +582,7 @@
     "blocked": "Blocked", "needs-spec": "Needs spec", "circuit-open": "Circuit open",
     "adherence-drift": "Board drifting", "unlanded": "Not landed",
     "open-question": "Open question", "error-unclaimed": "Unclaimed error",
+    "stuck-question": "Stuck question", "gate": "Needs a person", "slow-route": "Slow route",
     "delivery-unmeasured-landing": "Landing unknown",
     "delivery-unmeasured-release": "Release unknown",
     "delivery-unmeasured-live": "Live state unknown"
@@ -591,6 +592,7 @@
     "governance-amber": "warn", "blocked": "info", "needs-spec": "info",
     "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
     "open-question": "warn", "error-unclaimed": "fail",
+    "stuck-question": "fail", "gate": "warn", "slow-route": "warn",
     "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
     "delivery-unmeasured-live": "warn"
   };
@@ -1035,11 +1037,16 @@
     // stops two sessions from unknowingly working the same thing.
     if ((c.sessions || []).length) {
       kids.push(el("ul", { class: "agent-sessions" }, c.sessions.slice(0, 4).map(function (s) {
-        return el("li", { class: "agent-sess" }, [
-          el("span", { class: "sess-id", text: s.session || "?" }),
-          s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null,
+        // One console: its name (or id), the project it stands in, whether THIS console holds
+        // a task (a claim is never inferred from a directory), its state and focus.
+        return el("li", { class: "agent-sess" + (s.state === "working" ? " is-working" : "") }, [
+          el("span", { class: "sess-id", text: s.name || s.session || "?" }),
+          s.project ? el("span", { class: "sess-cwd", title: s.cwd || "", text: s.project }) : (s.cwd ? el("span", { class: "sess-cwd", text: s.cwd }) : null),
+          s.project ? el("span", { class: "badge " + (s.has_task ? "b-pass" : "b-warn"),
+                                   title: s.has_task ? (s.task_title || s.task_id) : "this console holds no task for " + s.project,
+                                   text: s.has_task ? "task" : "no task" }) : null,
           s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
-          el("span", { class: "sess-age", text: s.age_s != null ? fmtAge(s.age_s) : "" })
+          el("span", { class: "sess-age", text: (s.state ? s.state + " · " : "") + (s.age_s != null ? fmtAge(s.age_s) : "") })
         ].filter(Boolean));
       })));
     }
@@ -1219,6 +1226,8 @@
       var askedMs = Date.parse(askedAt), answeredMs = Date.parse(answeredAt);
       threads.push({
         id: n.id, asker: asker, title: n.title || "", context: n.body_md || "",
+        to: String(n.to || "").toLowerCase(),
+        gate: tags.indexOf("human-only") >= 0,
         open: tags.indexOf("open") >= 0,
         answered: !!reply,
         answer: answerText,
@@ -1236,10 +1245,14 @@
         t.replyS = Math.max(0, Math.round((t.answeredMs - t.askedMs) / 1000));
       }
     });
+    // Newest first, then OPEN threads LONGEST WAIT FIRST (an unknown age last): the ask that has
+    // waited two days must lead the card, not sit under twenty fresher ones.
     threads.sort(function (a, b) { return (b.askedMs || 0) - (a.askedMs || 0); });
     threads.sort(function (a, b) {
       function rank(t) { return t.open ? 0 : (t.answered && !t.acked) ? 1 : 2; }
-      return rank(a) - rank(b);
+      var r = rank(a) - rank(b);
+      if (r || !a.open) return r;
+      return (a.waitS == null) - (b.waitS == null) || (b.waitS || 0) - (a.waitS || 0);
     });
     return threads;
   }
@@ -1249,12 +1262,14 @@
                  : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
     var kids = [
       el("span", { class: "ask-head" }, [
-        el("span", { class: "ask-from", text: t.asker || "someone" }),
+        el("span", { class: "ask-from", text: (t.asker || "someone") + (t.to ? " → " + t.to : "") }),
+        t.gate ? el("span", { class: "badge b-warn", text: "needs a person" }) : null,
+        t.stuck ? el("span", { class: "badge b-fail", text: "stuck" }) : null,
         el("span", { class: "ask-state" + (t.open ? " is-open" : t.acked ? " is-closed" : " is-answered"),
                      text: stateLbl }),
         el("time", { class: "rel-time ask-age", datetime: t.askedAt || "", "data-ts": t.askedAt || "",
                      text: relativeTime(t.askedAt) })
-      ]),
+      ].filter(Boolean)),
       el("span", { class: "ask-title", text: t.title })
     ];
     if (t.context) kids.push(el("span", { class: "ask-body", text: String(t.context).slice(0, 220) }));
@@ -1296,7 +1311,12 @@
   }
   function asksCard() {
     var threads = askThreads();
+    // STUCK is the server's threshold (live.asks_stuck), never a number re-derived here.
+    var stuckInfo = live().asks_stuck || {};
+    var stuckAfter = stuckInfo.stuck_after_seconds || 7200;
+    threads.forEach(function (t) { t.stuck = !!(t.open && !t.answered && (t.waitS || 0) >= stuckAfter); });
     var open = threads.filter(function (t) { return t.open; });
+    var stuck = open.filter(function (t) { return t.stuck; });
     var awaiting = threads.filter(function (t) { return t.answered && !t.acked && !t.open; });
     var closed = threads.length - open.length - awaiting.length;
     var body = el("div", { class: "card-body" });
@@ -1314,6 +1334,15 @@
         return el("span", { class: "ask-lane", text:
           l.agent + " · " + l.open + " open · worst " + fmtAge(l.worst) });
       })));
+    }
+    if (stuck.length) {
+      // The card LEADS with what is stuck and for how long — an ask whose age is invisible
+      // cannot be triaged, and one past the threshold is a person blocked for hours.
+      body.appendChild(el("div", { class: "ask-stuck", role: "status" }, [
+        el("strong", { text: stuck.length + " stuck" }),
+        doc.createTextNode(" — oldest " + fmtAge(stuck[0].waitS || 0) + " (waiting past " +
+          fmtAge(stuckAfter) + "; asks past the unstick window reach every console)")
+      ]));
     }
     if (!threads.length) {
       body.appendChild(el("div", { class: "attn-clear" }, [
@@ -1340,8 +1369,10 @@
     return el("section", { class: "card asks-card", id: "asksCard", "aria-labelledby": "asksTitle" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title", id: "asksTitle" }, [icon("users"),
-          doc.createTextNode("Questions" + (open.length ? "  ·  " + open.length + " open" : ""))]),
-        awaiting.length ? el("span", { class: "badge b-warn", text: awaiting.length + " undelivered" })
+          doc.createTextNode("Questions" + (open.length ? "  ·  " + open.length + " open" : "") +
+            (stuck.length ? "  ·  " + stuck.length + " stuck" : ""))]),
+        stuck.length ? el("span", { class: "badge b-fail", text: stuck.length + " stuck · oldest " + fmtAge(stuck[0].waitS || 0) })
+        : awaiting.length ? el("span", { class: "badge b-warn", text: awaiting.length + " undelivered" })
                         : el("span", { class: "badge b-" + (open.length ? "warn" : "pass"),
                                        text: open.length ? String(open.length) : "clear" })
       ]),
@@ -2673,7 +2704,20 @@
       });
     });
   }
+  // "Update Core Systems": the adopter's MANUAL repair pass (HUB_MAINTAIN_URL), in the navbar
+  // where every other action lives. A repair action that exists but cannot be clicked is a
+  // capability the board advertises and cannot deliver — and its real audience is exactly the
+  // machine whose self-update loop is broken, which no amount of self-distribution can reach.
+  // A plain link: nothing fetched, nothing intercepted; hidden when the adopter configured none.
+  function initMaintain() {
+    var cfg = D.maintain || {}, btn = doc.getElementById("maintainBtn");
+    if (!btn || !cfg.url) return;
+    btn.href = cfg.url;
+    if (cfg.label) btn.textContent = cfg.label;
+    btn.hidden = false;
+  }
   function initLaunchControls() {
+    initMaintain();
     primeLaunchControls();
     doc.addEventListener("click", function (event) {
       var anchor = event.target && event.target.closest ? event.target.closest("[data-launch]") : null;

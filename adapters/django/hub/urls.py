@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import hub_api, hub_write, hubsite, mcp_server, run_api
+from . import hub_api, hub_write, hubsite, veil, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -28,6 +28,11 @@ urlpatterns = [
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
     path("agent-updates.json", hub_api.agent_updates_json, name="agent-updates"),
+    path("receipts.json", hub_api.receipts_json, name="receipts"),
+    path("activity.json", hub_api.activity_json, name="activity"),
+    path("perf.json", hub_api.perf_json, name="perf"),
+    path("veil-audit.json", hub_api.veil_audit_json, name="veil-audit"),
+    path("tiers.json", hub_api.tiers_json, name="tiers"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     path("schema/<str:type>.schema.json", hub_api.schema_json),
     path("<str:type>.json", hub_api.type_json),
@@ -37,6 +42,7 @@ urlpatterns = [
     path("api/adr", hub_write.adr),
     path("api/capability", hub_write.capability),
     path("api/agent-credential", hub_write.agent_credential),
+    path("api/tier", hub_write.tier),
     path("api/decision", hub_write.decision),
     # The remaining entity types shipped as schemas with no writer — an agent could read and
     # validate them and had no way to create one through the API.
@@ -53,6 +59,9 @@ urlpatterns = [
     path("api/answer", hub_write.answer),
     path("api/directive", hub_write.directive),
     path("api/ack", hub_write.ack),
+    # Agent-to-agent mail, delivered by the recipient's inbox like any other addressed item.
+    path("api/message", hub_write.message),
+    path("api/message/ack", hub_write.message_ack),
     # Observed presence: the seat heartbeat (ordinary writes stamp activity on their own).
     path("api/presence", hub_write.presence_ping),
     path("api/forget-presence", hub_write.forget_presence),
@@ -74,3 +83,25 @@ urlpatterns = [
     # above, so the receipt gate, lease fencing, OCC and schema validation all apply unchanged.
     path("api/mcp", mcp_server.mcp_endpoint, name="mcp"),
 ]
+
+# EVERY ROUTE DECLARES ITS VISIBILITY (see veil.py). Writes are `open`: their credential is the
+# boundary. A route missing from this table serves no narrowed reader and fails the hub audit's
+# routes:undeclared-visibility check — a new route is private until somebody decides otherwise.
+VISIBILITY = {
+    "": "veiled", "hub.json": "veiled", "graph.json": "veiled", "next.json": "veiled",
+    "delta.json": "veiled", "questions.json": "veiled", "inbox.json": "veiled",
+    "inbox/wait": "veiled", "errors.json": "veiled", "search.json": "veiled",
+    "agent-updates.json": "veiled", "activity.json": "veiled",
+    "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
+    "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
+    # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.
+    "live/events": "member", "audit.json": "member", "receipts.json": "member",
+    "perf.json": "member", "veil-audit.json": "member", "tiers.json": "member",
+    "dag.graphml": "member",
+}
+for _pattern in urlpatterns:
+    _route = str(_pattern.pattern)
+    if _route.startswith("api/"):
+        veil.declare("open", _pattern.callback)
+    elif _route in VISIBILITY:
+        veil.declare(VISIBILITY[_route], _pattern.callback)
