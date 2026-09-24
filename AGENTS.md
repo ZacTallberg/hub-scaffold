@@ -48,12 +48,16 @@ from a working multi-project system. Nothing here names any specific person, hos
   (`agent-client-daemon.md`: delivery into consoles, three-channel per-prompt context, a second
   runtime as an adapter, a self-updater that cannot break itself, headless on Windows), the
   **route reconciler** (`route-reconciler.md`: per-entry refusal behind a mass-refusal guard, and
-  a report on every pass), and **coordination** (`coordination.md`: how the hub pairs consoles on
-  the same file, task or subsystem and what each side does with the signal). Operating write-ups
-  for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys that CI never cancels,
-  push-only change triggers, job ceilings, publications from the protected ref), `app-slots.md`
-  (allocate / stage / cut over / retire / re-adopt an app's port, service and route),
-  `directory-sign-in.md` (401 vs 503, one bind per rejected credential), and
+  a report on every pass), **coordination** (`coordination.md`: how the hub pairs consoles on
+  the same file, task or subsystem and what each side does with the signal), **deploy
+  hardening** (`deploy-hardening.md`: the deploy-step failures that roll back good builds or hide
+  bad ones, and how CI/rollback results reach the board), **machine push identity**
+  (`machine-push-identity.md`), and the **presence gate** (`presence-gate.py`: a harness hook that
+  derives the files a console edited, so the board can name two consoles editing one file).
+  Operating write-ups for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys
+  that CI never cancels, push-only change triggers, job ceilings, publications from the protected
+  ref), `app-slots.md` (allocate / stage / cut over / retire / re-adopt an app's port, service and
+  route), `directory-sign-in.md` (401 vs 503, one bind per rejected credential), and
   `shared-app-banner.md` (one linked header master for many apps). None runs unless you install
   it.
 - **campaigns** (`campaigns/`) — the verbs: the robust prompts to MAINTAIN / IMPROVE / AUGMENT / BUILD.

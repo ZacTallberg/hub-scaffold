@@ -1197,9 +1197,22 @@
     var head = el("div", { class: "agent-head" }, [
       el("span", { class: "agent-dot s-" + c.status, "aria-hidden": "true" }),
       el("span", { class: "agent-name", text: c.agent }),
-      c.machine ? el("span", { class: "agent-mach", title: "machine", text: c.machine }) : null,
       el("span", { class: "agent-status s-" + c.status, text: c.status })
     ].filter(Boolean));
+    // EVERY computer this person has, each with its own check-in state — never "+1 more" with
+    // the busy machine standing in for a silent one.
+    var machs = c.machines || [];
+    var machRow = machs.length
+      ? el("ul", { class: "agent-machs", "aria-label": "computers" }, machs.map(function (m) {
+          var heard = m.heartbeat_age_s != null ? "checked in " + fmtAge(m.heartbeat_age_s) + " ago"
+                    : m.last_seen_age_s != null ? "last seen " + fmtAge(m.last_seen_age_s) + " ago" : "never checked in";
+          return el("li", { class: "agent-mach conn-" + m.connection, title: m.machine + " — " + m.connection + ", " + heard }, [
+            el("span", { class: "mach-dot", "aria-hidden": "true" }),
+            el("span", { class: "mach-name", text: m.machine }),
+            m.connection !== "online" ? el("span", { class: "mach-state", text: m.connection }) : null
+          ].filter(Boolean));
+        }))
+      : (c.machine ? el("ul", { class: "agent-machs" }, [el("li", { class: "agent-mach", title: "machine", text: c.machine })]) : null);
     var now = c.task
       ? el("div", { class: "agent-now" }, [
           el("span", { class: "agent-now-lbl", text: "on" }),
@@ -1214,7 +1227,19 @@
           el("span", { class: "agent-now-task", text: c.focus })
         ])
       : el("div", { class: "agent-now is-idle", text: c.idle_s != null ? ("last active " + fmtAge(c.idle_s) + " ago") : "idle" });
-    var kids = [head, now];
+    var kids = [head, machRow, now].filter(Boolean);
+    if ((c.overlaps || []).length) {
+      // Two consoles editing the same file right now: the collision nobody sees from inside
+      // either console. Name the peer and the files so the two can split the work.
+      var ov = c.overlaps[0];
+      var peer = ov.a.agent === c.agent ? ov.b : ov.a;
+      kids.push(el("div", { class: "agent-overlap", role: "note" }, [
+        el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
+        el("span", { text: "Editing the same file as " + peer.agent + (peer.machine ? " @ " + peer.machine : "")
+          + ": " + ov.files.slice(0, 2).join(", ") + (ov.files.length > 2 ? " +" + (ov.files.length - 2) : "")
+          + (c.overlaps.length > 1 ? "  ·  " + (c.overlaps.length - 1) + " more" : "") })
+      ]));
+    }
     if (c.last_note) {
       // The last checkpoint note: the context that turns "working on X" into
       // "working on X, last did Y".
@@ -1240,6 +1265,8 @@
           s.task_id ? el("span", { class: "sess-held", title: "this console holds " + s.task_id,
                                    text: "holds " + localId(s.task_id) }) : null,
           s.focus ? el("span", { class: "sess-focus", text: s.focus }) : null,
+          (s.files || []).length ? el("span", { class: "sess-files", title: s.files.join("\n"),
+            text: s.files.length + (s.files.length === 1 ? " file" : " files") }) : null,
           el("span", { class: "sess-age", text: (s.state ? s.state + " · " : "") + (s.age_s != null ? fmtAge(s.age_s) : "") })
         ].filter(Boolean));
       })));
@@ -1676,7 +1703,7 @@
     var body = el("div");
     var idRows = [
       row("Status", el("span", { class: "agent-status s-" + c.status, text: c.status })),
-      c.machine ? rowMono("Machine", c.machine) : null,
+      (c.machines || []).length ? rowMono("Computers", String(c.machines.length)) : (c.machine ? rowMono("Machine", c.machine) : null),
       c.done_total ? rowMono("Completed on this board", c.done_total) : null,
       c.idle_s != null ? rowMono("Last board action", fmtAge(c.idle_s) + " ago") : null
     ];
@@ -1697,6 +1724,38 @@
       body.appendChild(el("div", { class: "detail-grid one" }, [section("Holding", "checks", [
         row("Ambient focus", c.focus),
         row("Note", "working, but not on a board task — coordinate before starting the same thing")])]));
+    }
+    // HEALTH AND CONSOLES, PER COMPUTER: each machine's own check-in and what runs on it.
+    (c.machines || []).forEach(function (m) {
+      var rows = [
+        row("Connection", el("span", { class: "agent-mach conn-" + m.connection }, [
+          el("span", { class: "mach-dot", "aria-hidden": "true" }), el("span", { text: m.connection })])),
+        rowMono("Last heartbeat", m.heartbeat_age_s != null ? fmtAge(m.heartbeat_age_s) + " ago" : "none reported"),
+        rowMono("Last seen", m.last_seen_age_s != null ? fmtAge(m.last_seen_age_s) + " ago" : "never"),
+        m.client ? rowMono("Client", m.client) : null
+      ];
+      (m.consoles || []).forEach(function (x) {
+        rows.push(row("Console " + (x.session || "?"), el("div", null, [
+          x.focus ? el("div", { class: "detail-prose", text: x.focus }) : null,
+          (x.files || []).length ? el("div", { class: "cell-sub", text: "edited: " + x.files.join(", ") }) : null,
+          x.age_s != null ? el("div", { class: "cell-sub", text: fmtAge(x.age_s) + " ago" }) : null
+        ].filter(Boolean))));
+      });
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Computer " + m.machine, "pulse", rows.filter(Boolean))]));
+    });
+    if ((c.overlaps || []).length) {
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Same files, another console", "warning",
+        c.overlaps.map(function (o) {
+          var peer = o.a.agent === c.agent && o.a.session !== o.b.session && o.b.agent !== c.agent ? o.b
+                   : (o.a.agent === c.agent ? o.b : o.a);
+          return row(peer.agent + (peer.machine ? " @ " + peer.machine : "") + (peer.session ? " · " + peer.session : ""),
+                     el("div", { class: "cell-sub", text: o.files.join(", ") }));
+        }))]));
+    }
+    if ((c.phantoms || []).length) {
+      body.appendChild(el("div", { class: "detail-grid one" }, [section("Callers, not computers", "info",
+        [row("Not counted", el("div", { class: "cell-sub", text: c.phantoms.map(function (p) { return p.machine; }).join(", ")
+          + " — named a machine without running the client kit; kept out of every device count" }))])]));
     }
     if ((c.sessions || []).length) {
       var consoles = c.sessions.map(function (sess) {
@@ -2073,6 +2132,81 @@
     ]);
   }
 
+  /* ---- DISTRIBUTION: is every seat running what this hub publishes? ----
+     The verdict comes FIRST and carries its own scope: silent seats, phantom callers and legacy
+     rows are named as NOT graded, so "all current" can never quietly exclude the seats most
+     likely to have a problem. */
+  function distributionCard(dist) {
+    dist = dist || {};
+    var machines = dist.machines || [];
+    var tone = dist.converged ? "pass" : ((dist.drifted || []).length ? "warn" : "info");
+    var body = el("div", { class: "card-body" });
+    body.appendChild(el("div", { class: "callout " + tone, role: "status" }, [
+      el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH[tone] || GLYPH.info }),
+      el("div", { text: dist.verdict || "No seat has reported yet." })
+    ]));
+    var graded = machines.filter(function (m) { return m.state === "current" || m.state === "drifted" || m.state === "offline"; });
+    if (graded.length) {
+      var list = el("ul", { class: "dist-list", "aria-label": "seats" });
+      graded.forEach(function (m) {
+        var what = m.state === "drifted" ? "stale: " + (m.stale || []).join(", ")
+                 : m.state === "offline" ? "silent " + fmtAge((m.seen_min_ago || 0) * 60) + " — not graded"
+                 : "current";
+        list.appendChild(el("li", { class: "dist-row st-" + m.state }, [
+          el("span", { class: "mach-dot", "aria-hidden": "true" }),
+          el("span", { class: "dist-mach", text: m.machine }),
+          el("span", { class: "dist-agent", text: m.agent || "" }),
+          el("span", { class: "dist-what", text: what })
+        ]));
+      });
+      body.appendChild(list);
+    }
+    var pubs = Object.keys(dist.published || {});
+    body.appendChild(el("p", { class: "cell-sub", text: pubs.length
+      ? "Published: " + pubs.map(function (k) { return k + " " + String(dist.published[k]).slice(0, 8); }).join("  ·  ")
+      : "This hub publishes nothing yet, so no seat can be graded." }));
+    return el("section", { class: "card", id: "distributionCard", "aria-labelledby": "distTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "distTitle" }, [icon("package"),
+          doc.createTextNode("Distribution" + (dist.graded != null ? "  ·  " + dist.graded + " graded" : ""))])]),
+      body
+    ]);
+  }
+
+  /* ---- BUILT: what each person produced, derived from the ledger (never curated) ---- */
+  function builtCard(rows) {
+    rows = rows || [];
+    var body = el("div", { class: "card-body" });
+    if (!rows.length) {
+      body.appendChild(el("p", { class: "cell-sub", text: "Nothing completed, released or authored yet — rows appear as work lands." }));
+    } else {
+      var list = el("ul", { class: "built-list", "aria-label": "people" });
+      rows.forEach(function (r) {
+        var t = r.totals || {};
+        var parts = [];
+        if (t.tasks) parts.push(t.tasks + (t.tasks === 1 ? " task done" : " tasks done"));
+        if (t.deploys) parts.push(t.deploys + (t.deploys === 1 ? " release" : " releases"));
+        Object.keys(r.authored_counts || {}).forEach(function (k) { parts.push(r.authored_counts[k] + " " + k + (r.authored_counts[k] === 1 ? "" : "s")); });
+        list.appendChild(el("li", { class: "built-row" }, [
+          el("div", { class: "built-head" }, [
+            el("span", { class: "built-person", text: r.person }),
+            (r.identities || []).length > 1 ? el("span", { class: "cell-sub", title: "identities folded into this person",
+              text: "also " + r.identities.filter(function (i) { return i !== r.person; }).join(", ") }) : null
+          ].filter(Boolean)),
+          el("div", { class: "cell-sub", text: parts.join("  ·  ") }),
+          (r.recent || []).length ? el("div", { class: "built-recent", text: "latest: " + r.recent.join("; ") }) : null
+        ].filter(Boolean)));
+      });
+      body.appendChild(list);
+    }
+    return el("section", { class: "card", id: "builtCard", "aria-labelledby": "builtTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "builtTitle" }, [icon("rocket"),
+          doc.createTextNode("Built" + (rows.length ? "  ·  " + rows.length + (rows.length === 1 ? " person" : " people") : ""))])]),
+      body
+    ]);
+  }
+
   function buildOverview() {
     var pane = el("div", { class: "tab-content", id: "tab-overview", role: "tabpanel",
       "aria-labelledby": "tab-btn-overview", tabindex: "0" });
@@ -2104,6 +2238,12 @@
       workstreamCard(L.task_health), needsAttentionCard(L.needs_attention)
     ]));
     scroll.appendChild(el("div", { class: "operations-grid" }, [consolesCard(L.sessions, L.crossovers)]));
+    // Seats: is every machine running what this hub publishes, and what each person built.
+    scroll.appendChild(overviewHeading("Seats", "Distribution and output",
+      "A seat that stopped converging, or went silent, cannot fix itself — it must be seen here."));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [
+      distributionCard(L.distribution), builtCard(L.built)
+    ]));
 
     var dc = dagCard(L.dag);
     scroll.appendChild(overviewHeading("Next", "The pullable frontier",

@@ -230,7 +230,7 @@ def detect_clients(ctx) -> list:
     out = []
     for agent, row in (ctx.get("presence") or {}).items():
         for m in row.get("machines") or []:
-            have = str(m.get("client") or "")
+            have = str(m.get("client_digest") or "")
             if not have or have == want:
                 continue
             machine = str(m.get("machine") or "")

@@ -46,6 +46,10 @@ urlpatterns = [
     path("held.json", R(held.held_json), name="held"),
     path("item-claims.json", R(hub_api.item_claims_json), name="item-claims"),
     path("components.json", R(hub_api.components_json), name="components"),
+    # Seat convergence and derived per-person output (same catch-all rule as above).
+    path("distribution.json", R(hub_api.distribution_json), name="distribution"),
+    path("built.json", R(hub_api.built_json), name="built"),
+    path("ci-events.json", R(hub_api.ci_events_json), name="ci-events"),
     path("dag.graphml", R(hub_api.dag_graphml), name="dag-graphml"),
     path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
     path("<str:type>.json", R(hub_api.type_json)),
@@ -102,6 +106,8 @@ urlpatterns = [
     path("api/ci-failure", hub_write.ci_failure),
     path("api/ack-error", hub_write.ack_error),
     path("api/clear-errors", hub_write.clear_errors),
+    # CI results: gated by the CI webhook secret, not an agent credential (the sender is CI).
+    path("api/ci-event", hub_write.ci_event, name="ci-event"),
     path("api/client-error", hub_api.client_error, name="client-error"),
     path("api/launch-grant", hub_write.launch_grant, name="launch-grant"),
     path("api/launch-grant/consume", hub_write.consume_launch_grant, name="consume-launch-grant"),
@@ -126,6 +132,7 @@ VISIBILITY = {
     "attention.json": "veiled", "consoles.json": "veiled",
     "project/<str:slug>/tasks.json": "veiled", "held.json": "veiled",
     "item-claims.json": "veiled", "components.json": "veiled",
+    "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.
