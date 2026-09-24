@@ -1,0 +1,18 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Not on the roster{% if app_name %} · {{ app_name }}{% endif %}</title>
+  <link rel="stylesheet" href="{% static 'app_gate/gate.css' %}">
+</head>
+<body class="gate-page">
+  <main class="gate-card" aria-labelledby="gate-title">
+    <p class="gate-eyebrow">{{ app_name|default:"This app" }}</p>
+    <h1 id="gate-title" class="gate-title">{{ username }} is not on this app's roster</h1>
+    <p class="gate-lede">Your password was accepted; this app has not been opened to you yet.
+      Ask one of its owners to run <code>manage.py roster --add {{ username }}</code>.</p>
+    <a class="gate-button" href="{% url 'app_gate:login' %}">Use a different account</a>
+  </main>
+</body>
+</html>
