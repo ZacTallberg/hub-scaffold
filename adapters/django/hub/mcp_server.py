@@ -176,6 +176,15 @@ TOOLS = [
          "addressed_by": {"type": "array", "items": {"type": "string"}},
          "superseded_by": {"type": "string"}, "agent": {"type": "string"}},
          "required": ["agent"]}},
+    {"name": "console_history",
+     "description": "Read how a console is being driven, to coach prompting: with no session, the "
+                    "stored consoles; with agent + session, that console's prompts, replies and "
+                    "one-line tool calls (never tool output). Needs history:read; answers 404 "
+                    "while the hub has histories disabled.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "machine": {"type": "string"},
+         "session": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 3000}}}},
     {"name": "create_run",
      "description": "Durably create a resumable AgentRun for work already held by this task lease.",
      "inputSchema": {"type": "object", "properties": {
@@ -380,6 +389,9 @@ def _call_tool(name, args, auth_headers):
                                               "addressed_by", "superseded_by", "agent")
                    if args.get(key)}
         status, body = _seam("/hub/api/retire", payload, auth_headers)
+    elif name == "console_history":
+        query = {key: args[key] for key in ("agent", "machine", "session", "limit") if args.get(key)}
+        status, body = _seam("/hub/history.json", query, auth_headers, method="get")
     elif name == "create_run":
         status, body = _seam("/hub/api/run", args, auth_headers)
         created = ((body.get("data") or {}).get("run") if status < 400 else None)

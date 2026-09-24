@@ -84,3 +84,9 @@ HUB_WORKER_GRANT_TTL_S = 120
 # fleet has migrated; reads remain unauthenticated and the narrow launch mint remains CSRF-gated.
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lower() == "true"
+
+# Console chat histories are OFF by default: turn them on only after the people whose consoles
+# upload have been told the operator can read them. The browser viewer check is an adopter
+# callable; "hub.viewers.debug_loopback" answers yes only under DEBUG from 127.0.0.1.
+HUB_HISTORIES_ENABLED = os.environ.get("HUB_HISTORIES_ENABLED", "").lower() == "true"
+HUB_HISTORY_VIEWER = os.environ.get("HUB_HISTORY_VIEWER") or None

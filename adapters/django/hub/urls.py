@@ -5,7 +5,7 @@ authentication when entity data is not public. NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import app_services, hub_api, hub_write, hubsite, mcp_server, run_api
+from . import app_services, histories_api, hub_api, hub_write, hubsite, mcp_server, run_api
 
 app_name = "hub"
 urlpatterns = [
@@ -27,6 +27,9 @@ urlpatterns = [
     path("errors.json", hub_api.errors_json, name="errors"),
     path("search.json", hub_api.search_json, name="search"),
     path("whoami.json", hub_api.whoami_json, name="whoami"),
+    # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
+    # or the adopter's HUB_HISTORY_VIEWER predicate (404 to everyone else).
+    path("history.json", histories_api.history_json, name="history"),
     path("dag.graphml", hub_api.dag_graphml, name="dag-graphml"),
     # Services to the apps around the hub (adapters/django/hub/app_services.py): hosted UI
     # components and their per-app properties, and one app's slice of the board. Above the
@@ -83,6 +86,7 @@ urlpatterns = [
     path("api/agent/ask", app_services.agent_ask),
     path("api/agent/history", app_services.agent_history),
     path("api/agent/conversation", app_services.agent_conversation),
+    path("api/history", histories_api.upload, name="history-upload"),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP

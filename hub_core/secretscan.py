@@ -60,3 +60,33 @@ def secret_problem(payload) -> str:
         if not _REDACTED.match(m.group(1)):
             return "a credential assignment"
     return ""
+
+
+MARK = "[REDACTED]"
+_PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)")
+_SHAPE_RX = tuple(re.compile(pattern) for pattern, _label in _SECRET_SHAPES)
+
+
+def redact(text) -> tuple[str, int]:
+    """(text with every credential-shaped span replaced by [REDACTED], spans replaced).
+
+    The substitution form of the same shapes the write door refuses, for text that must be
+    KEPT rather than refused — a console transcript that happens to hold a secret is stored
+    with the secret masked, not dropped. Idempotent: [REDACTED] is itself a placeholder the
+    assignment rule leaves alone. Redact BEFORE clipping, so a truncation can never cut a
+    secret below the length its shape needs and keep the head of it."""
+    if not text:
+        return text or "", 0
+    s, n = _PEM_BLOCK.subn(MARK, str(text))
+    for rx in _SHAPE_RX:
+        s, k = rx.subn(MARK, s)
+        n += k
+    hits = [0]
+
+    def _assign(m):
+        if _REDACTED.match(m.group(1)):
+            return m.group(0)
+        hits[0] += 1
+        return m.group(0)[:m.start(1) - m.start(0)] + MARK
+    s = _ASSIGNMENT.sub(_assign, s)
+    return s, n + hits[0]
