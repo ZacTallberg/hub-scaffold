@@ -643,10 +643,11 @@ def _reader_query(arguments: argparse.Namespace) -> str:
     return urlencode(query)
 
 
-_INBOX_HEADINGS = (("decision", "DECISIONS WAITING ON YOU"), ("question", "QUESTIONS"),
-                   ("answer", "ANSWERS"), ("directive", "DIRECTIVES"),
-                   ("task-stall", "TASK ROT"), ("attention", "NEEDS ATTENTION"),
-                   ("overlap", "CROSSOVERS"))
+_INBOX_HEADINGS = (("message", "MESSAGES"), ("gate", "GATES ONLY A PERSON CAN CLEAR"),
+                   ("decision", "DECISIONS WAITING ON YOU"), ("question", "QUESTIONS"),
+                   ("assignment", "GIVEN TO YOU"), ("answer", "ANSWERS"),
+                   ("directive", "DIRECTIVES"), ("task-stall", "TASK ROT"),
+                   ("attention", "NEEDS ATTENTION"), ("overlap", "CROSSOVERS"))
 
 
 def render_inbox(data: dict[str, Any]) -> str:
@@ -655,7 +656,13 @@ def render_inbox(data: dict[str, Any]) -> str:
     if not items:
         return "Nothing is addressed to you."
     lines = []
-    for kind, heading in _INBOX_HEADINGS:
+    known = {kind for kind, _ in _INBOX_HEADINGS}
+    # A kind this table does not name yet is still shown: an addressed item must never render
+    # as nothing just because its heading is missing.
+    headings = _INBOX_HEADINGS + tuple(
+        (kind, str(kind).upper()) for kind in dict.fromkeys(i.get("kind") for i in items)
+        if kind not in known)
+    for kind, heading in headings:
         rows = [i for i in items if i.get("kind") == kind]
         if not rows:
             continue
