@@ -145,6 +145,19 @@ The services the hub offers the apps around it (`patterns/app-services.md`) spli
 - `HUB_DIR/profiles.json`, `component-props.json` and `component-adopters.json` are mutable
   sidecars, not ledger history; back them up with `HUB_DIR`.
 
+## Console chat histories (opt-in)
+
+`HUB_HISTORIES_ENABLED` turns on a surface that holds what people typed to their assistants. It is
+off by default and must stay off until the people whose workstations upload have been told the
+operator can read it. Its boundaries: uploads need `history:write` and are redacted twice
+(workstation and receipt) with the write seam's credential shapes, replacing rather than refusing;
+only prompts, assistant text and one-line tool calls are sent — never tool output or reasoning;
+storage is a bounded sidecar under `HUB_DIR/histories/`, never the ledger, so it can be deleted;
+reads need `history:read` or the adopter's `HUB_HISTORY_VIEWER` predicate and answer the plain 404
+to everyone else. Redaction is pattern-based and cannot recognise every secret or every piece of
+personal data — treat the sidecar as sensitive, exclude it from routine backups, and keep its
+retention short.
+
 ## Worker-launch boundary
 
 Worker launch is disabled by default. When enabled:

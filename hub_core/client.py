@@ -34,6 +34,12 @@ A claim that stopped being true is retired, never deleted — the reason is appe
     python -m hub_core.client retire "the queue saturates at noon" --type note \
       --note "no longer true after the worker split"
 
+Console chat histories (off unless the hub enables them; see hub_core/histories.py)::
+
+    python -m hub_core.client history-push --agent alice --follow   # workstation uploader
+    python -m hub_core.client history --agent alice                 # list consoles
+    python -m hub_core.client history --agent alice --session 3f2a  # read one
+
 `presence` is the seat heartbeat between tasks (focus/cwd/machine/session ride HUB_MACHINE,
 HUB_SESSION_ID, or flags), and `app-error` / `agent-error` / `ack-error` feed the operational
 error stream.
@@ -436,6 +442,36 @@ def _payload_retire(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
     if arguments.addressed_by:
         payload["addressed_by"] = arguments.addressed_by
     return "retire", payload
+
+
+def _run_history_push(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Upload this workstation's new console turns (see hub_core.transcripts for what is sent)."""
+    import time as _time
+
+    from . import transcripts
+
+    agent = _agent(arguments)
+    headers = _presence_headers(arguments)
+
+    def post(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return _post(base, operation, payload, extra_headers=headers)
+
+    result = transcripts.push(post, agent, force=not arguments.follow)
+    if not arguments.follow:
+        return result
+    while True:                                   # a notifier-style loop; Ctrl-C ends it
+        print(json.dumps(result, sort_keys=True), flush=True)
+        _time.sleep(max(15, arguments.interval))
+        result = transcripts.push(post, agent)
+
+
+def _run_history(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {key: value for key, value in (("agent", arguments.agent),
+                                             ("machine", arguments.machine),
+                                             ("session", arguments.session),
+                                             ("limit", arguments.limit)) if value}
+    return _get(base, "history.json" + ("?" + urlencode(query) if query else ""))
 
 
 def _run_inbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -874,6 +910,23 @@ def _parser() -> argparse.ArgumentParser:
                         help="the id of the record that replaced this one")
     retire.add_argument("--agent")
     retire.set_defaults(payload=_payload_retire)
+
+    history_push = commands.add_parser(
+        "history-push", help="upload this workstation's new console turns (history:write scope)")
+    history_push.add_argument("--agent")
+    history_push.add_argument("--machine")
+    history_push.add_argument("--follow", action="store_true",
+                              help="keep uploading; at most one upload per interval")
+    history_push.add_argument("--interval", type=int, default=60)
+    history_push.set_defaults(runner=_run_history_push)
+
+    history = commands.add_parser(
+        "history", help="list stored consoles, or read one console's turns (history:read scope)")
+    history.add_argument("--agent")
+    history.add_argument("--machine")
+    history.add_argument("--session")
+    history.add_argument("--limit", type=int)
+    history.set_defaults(runner=_run_history)
 
     inbox = commands.add_parser("inbox", help="what is addressed to an agent right now")
     inbox.add_argument("--agent", required=True)

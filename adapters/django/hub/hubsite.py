@@ -8,7 +8,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 
 from hub_core import shell
 
-from . import hub_app
+from . import histories_api, hub_app
 from .hub_api import _snapshot, hub_json
 
 
@@ -17,4 +17,8 @@ def hub(request):
     if request.GET.get("format") == "json":
         return hub_json(request)
     _state, snap = _snapshot(request.GET.get("served"))
-    return HttpResponse(shell.render(snap, f"{hub_app.BRAND} · Hub", csrf_token=get_token(request)))
+    # Gated surfaces this viewer may open, decided HERE per request — the page never carries a
+    # credential, only the fact that the server will answer this person.
+    caps = ("history",) if histories_api.can_view(request) else ()
+    return HttpResponse(shell.render(snap, f"{hub_app.BRAND} · Hub", csrf_token=get_token(request),
+                                     viewer_caps=caps))

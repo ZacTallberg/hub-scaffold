@@ -1451,7 +1451,12 @@
           el("div", null, [
             sess.focus ? el("div", { class: "detail-prose", text: sess.focus }) : null,
             el("div", { class: "cell-sub", text: (sess.cwd || "") +
-               (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") })
+               (sess.age_s != null ? "  ·  " + fmtAge(sess.age_s) + " ago" : "") }),
+            viewerMay("history") && sess.session ? el("button", {
+              class: "chat-open", type: "button",
+              "data-key": "chat:" + c.agent + ":" + sess.session,
+              onclick: function () { openHistory(c.agent, sess.machine || "", sess.session); }
+            }, "Chat history") : null
           ].filter(Boolean)));
       });
       body.appendChild(el("div", { class: "detail-grid one" }, [section("Live consoles", "pulse", consoles)]));
@@ -1474,6 +1479,101 @@
     // exactly this dialog, and a stale answer here is the duplicate-work bug it exists to stop.
     _openModalLive = { kind: "agent", key: c.agent };
     openModal(role, c.agent, "agent", "users", body);
+  }
+
+  /* ---- CONSOLE CHAT HISTORY (operator only) ----
+     The server decides, per request, which gated surfaces THIS viewer may open and publishes
+     only that fact (meta hub-viewer); the page never holds a credential. The dialog reads one
+     console's stored turns oldest to newest, folds each run of tool calls into one line, and
+     re-reads on the board's own repaint no more often than every 20 s — with the file's ETag,
+     so an unchanged console costs a 304. */
+  var VIEWER_CAPS = (function () {
+    var m = doc.querySelector('meta[name="hub-viewer"]');
+    return ((m && m.getAttribute("content")) || "").split(/\s+/).filter(Boolean);
+  })();
+  function viewerMay(cap) { return VIEWER_CAPS.indexOf(cap) >= 0; }
+  var HISTORY_REFRESH_MS = 20000;
+  var _history = null;
+  var CHAT_ROLE = { user: "Person", assistant: "Assistant", tool: "Tool", event: "Event" };
+  function chatTime(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000);
+    return isNaN(d.getTime()) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+  function historyBody(doc_) {
+    var body = el("div", { class: "chat-log" });
+    if (!doc_ || doc_.state === "not_uploaded" || !(doc_.turns || []).length) {
+      body.appendChild(el("div", { class: "callout" }, [
+        el("div", { text: "Nothing uploaded for this console yet. Histories arrive from the workstation's uploader (history-push) at most once a minute." })]));
+      return body;
+    }
+    var meta = [];
+    if (doc_.title) meta.push(doc_.title);
+    if (doc_.cwd) meta.push(doc_.cwd);
+    meta.push(fmtInt(doc_.served) + " of " + fmtInt(doc_.turn_count) + " turns shown" +
+              (doc_.earlier_not_served ? " (" + fmtInt(doc_.earlier_not_served) + " earlier not shown)" : ""));
+    if (doc_.trimmed) meta.push("older turns were trimmed by the per-console cap");
+    body.appendChild(el("div", { class: "cell-sub chat-meta", text: meta.join("  ·  ") }));
+    var turns = doc_.turns, i = 0;
+    while (i < turns.length) {
+      var t = turns[i];
+      if (t.role === "tool") {
+        var run = [];
+        while (i < turns.length && turns[i].role === "tool") { run.push(turns[i]); i++; }
+        body.appendChild(el("details", { class: "chat-tools" }, [
+          el("summary", { text: run.length === 1 ? run[0].text : run.length + " tool calls — " + run[0].text }),
+          run.length > 1 ? el("ul", null, run.map(function (x) { return el("li", { class: "mono", text: x.text }); })) : null
+        ]));
+        continue;
+      }
+      body.appendChild(el("div", { class: "chat-turn chat-" + t.role }, [
+        el("div", { class: "chat-head" }, [
+          el("span", { class: "chat-role", text: CHAT_ROLE[t.role] || t.role }),
+          el("span", { class: "cell-sub", text: chatTime(t.ts) })]),
+        el("div", { class: t.role === "event" ? "cell-sub" : "detail-prose", text: t.text })
+      ]));
+      i++;
+    }
+    return body;
+  }
+  function loadHistory(h, render) {
+    var q = "history.json?agent=" + encodeURIComponent(h.agent) + "&session=" + encodeURIComponent(h.session) +
+            (h.machine ? "&machine=" + encodeURIComponent(h.machine) : "");
+    var headers = { Accept: "application/json" };
+    if (h.etag) headers["If-None-Match"] = h.etag;
+    h.fetchedAt = Date.now();
+    return timedFetch(q, { credentials: "same-origin", cache: "no-store", headers: headers })
+      .then(function (response) {
+        if (response.status === 304) return null;
+        if (response.status === 404) throw new Error("not available to this viewer (404)");
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        h.etag = response.headers.get("ETag") || "";
+        return response.json();
+      })
+      .then(function (payload) { if (payload) { h.doc = payload.data; render(); } })
+      .catch(function (err) { h.error = String(err && err.message || err); render(); });
+  }
+  function renderHistory(liveRefresh) {
+    var h = _history; if (!h) return;
+    var body = h.error ? el("div", { class: "callout fail" }, [el("div", { text: "Could not read this console's history: " + h.error })])
+                       : historyBody(h.doc);
+    var subtitle = h.agent + (h.machine ? " @ " + h.machine : "") + "  ·  " + h.session;
+    if (!liveRefresh) {
+      _openModalLive = { kind: "history", key: h.agent + ":" + h.session };
+      openModal("info", "Chat history", subtitle, "users", body);
+      return;
+    }
+    refreshModal("info", "Chat history", subtitle, "users", body);
+    if (h.doc && !h.landed) {                           // first arrival: newest at the bottom,
+      h.landed = true;                                  // like the console; later refreshes keep
+      var log = doc.getElementById("modalBody");        // wherever the reader has scrolled to
+      if (log) log.scrollTop = log.scrollHeight;
+    }
+  }
+  function openHistory(agent, machine, session) {
+    _history = { agent: agent, machine: machine, session: session, doc: null, etag: "", error: "" };
+    renderHistory(false);
+    loadHistory(_history, function () { renderHistory(true); });
   }
 
   /* ---- ERRORS: the operational stream the ledger audit cannot see ----
@@ -1978,6 +2078,12 @@
     var m = doc.getElementById("universalModal");
     if (!m || !m.classList.contains("show")) return;
     var L = live(), fresh = null;
+    if (_openModalLive.kind === "history") {
+      if (_history && Date.now() - (_history.fetchedAt || 0) >= HISTORY_REFRESH_MS) {
+        loadHistory(_history, function () { renderHistory(true); });
+      }
+      return;
+    }
     if (_openModalLive.kind === "agent") {
       fresh = (L.fleet || []).filter(function (c) { return c.agent === _openModalLive.key; })[0];
       if (fresh) { openAgentDetail(fresh, true); return; }
