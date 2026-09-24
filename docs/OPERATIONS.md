@@ -60,15 +60,20 @@ JSONL, or SQLite mutation is an offline recovery operation only: drain live writ
 | `.attest-secret` | Launch-grant signing secret | Yes if launch continuity matters; keep secret |
 | `grants/*.used` | Consumed nonces | Retain at least through maximum grant lifetime |
 | `grants/decisions.jsonl` | Launch grant/consume/refusal audit trail | According to audit policy |
+| `profiles.json` | Per-person presentation state: theme, sizes, face, agent placement, stars, per-app overrides, and the person's mark (a small image) | Yes; mutable, not ledger history, and it holds a picture of each person who set one |
+| `component-props.json`, `component-adopters.json` | Per-app component settings (with a short change history) and the apps observed loading each component | Yes for the settings; the adopters list repopulates as pages load |
+| `histories/` (only when `HUB_HISTORIES_ENABLED`) | Console chat histories: what people typed to their assistants, redacted by pattern only; pruned after `HUB_HISTORY_RETENTION_DAYS` (default 45) | **No — excluded from routine backups.** Sensitive; keep it on the hub's own disk and let retention delete it |
 
 Exact launch sidecar names are implementation details and may grow; in practice, back up the whole
-`HUB_DIR` while preserving permissions. Never store `HUB_DIR` on ephemeral container storage unless
-loss of the complete board is acceptable.
+`HUB_DIR` **except `histories/`** while preserving permissions: a backup copy outlives the 45-day
+retention and would keep what people typed to their assistants long after the hub deleted it.
+Never store `HUB_DIR` on ephemeral container storage unless loss of the complete board is
+acceptable.
 
 ## Backup and restore
 
 1. Stop or drain Hub writers, or take a filesystem snapshot with atomic snapshot semantics.
-2. Copy the whole `HUB_DIR` to protected storage.
+2. Copy the whole `HUB_DIR` to protected storage, excluding `histories/` (see the table above).
 3. During an explicitly scoped disaster-recovery operation, restore into a disposable separate
    path, set `HUB_DIR`, and open the EventStore.
 4. Because restore is a destructive-data boundary, use one decisive integrity observation such as
