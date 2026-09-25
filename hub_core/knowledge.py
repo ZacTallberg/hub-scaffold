@@ -22,6 +22,7 @@ import hashlib
 import re
 
 from . import record_state
+from . import staleness
 
 #: A record in one of these states is history. It must never be served as current knowledge.
 #: ONE definition, owned by hub_core.record_state (the retire verb writes these statuses):
@@ -200,6 +201,18 @@ def headline(ent, kind) -> str:
     return title
 
 
+def label_inputs(ent, kind) -> dict:
+    """The inputs of the record's ONE label (hub_core.staleness), from the same rule/why text
+    every surface ships for it -- so the index, search and the feed can never label one record
+    two ways. Only knowledge records carry one."""
+    rule, why = rule_and_why(ent, kind)
+    return staleness.label_inputs(ent, title=title_of(ent), rule=rule, why=why)
+
+
+def label_of(ent, kind, now=None) -> str:
+    return staleness.render_inputs(label_inputs(ent, kind), now=now)
+
+
 def memory_rows(state) -> list:
     """Every live knowledge record as an index row, in STANDING ORDER: foundational first,
     then most recently updated. Recency alone is inverted against value — the earliest records
@@ -223,6 +236,9 @@ def memory_rows(state) -> list:
                      # as standing law.
                      "verified_as_of": ent.get("verified_as_of") or "",
                      "verify": str(ent.get("verify") or "")[:200],
+                     # The label's inputs, computed once per corpus build; the served row
+                     # carries the RENDERED label (age applied at read time), never these.
+                     "_label": label_inputs(ent, kind),
                      "rule": rule, "why": why,
                      "updated": prov.get("updated_at") or ""})
     rows.sort(key=lambda r: r["updated"], reverse=True)
@@ -287,7 +303,12 @@ def put_op(ent, kind) -> dict:
             "author": prov.get("agent") or "", "verified_as_of": ent.get("verified_as_of") or "",
             "verify": str(ent.get("verify") or "")[:400], "version": ent.get("version") or 0,
             "seq": int(prov.get("seq") or 0), "kind_rank": KIND_RANK.get(kind, 9),
-            "text_sha": _sha(title, rule, why)}
+            "text_sha": _sha(title, rule, why),
+            # The same label the prompt index and search print, plus what the re-check found,
+            # so a mirror renders CHECK FAILED exactly as the hub does.
+            "label": label_of(ent, kind)}
+    if isinstance(ent.get("recheck"), dict):
+        item["recheck"] = ent["recheck"]
     for key in ("answers", "supersedes", "superseded_by"):
         if ent.get(key):
             item[key] = ent[key]
