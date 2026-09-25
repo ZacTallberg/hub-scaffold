@@ -448,31 +448,164 @@ def _touch_channel(hub_dir, source: str, now: float) -> None:
         pass
 
 
+class _Unreadable(Exception):
+    """The sources-seen store EXISTS and could not be read: the one state a writer must never
+    build on."""
+
+
+def _read_sources_seen_strict(hub_dir) -> dict:
+    """The store for a READ-MODIFY-WRITE: {} only when the file does not exist.
+
+    read_sources_seen() answers {} for a MISSING file and for an UNREADABLE one alike, and a
+    stamp built its write on that answer -- so one read that lost a race with another process's
+    replace (a sharing violation on Windows, a half-visible file elsewhere) wrote back a store
+    holding only the family being stamped, and every app's history went with it. On the
+    instance this was lifted from, that is exactly what happened the day the hub became two
+    processes: apps that had proved their forwarders read "never reported" afterwards.
+    Retried briefly; still unreadable -> _Unreadable, and nothing is written."""
+    path = _sources_seen_path(hub_dir)
+    for attempt in range(4):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except OSError:
+            time.sleep(0.05 * (attempt + 1))
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            time.sleep(0.05 * (attempt + 1))
+            continue
+        if isinstance(data, dict):
+            return data
+        break
+    raise _Unreadable(str(path))
+
+
+def _merge_family(prior, first, last, count=1) -> dict:
+    """History only grows: the earliest first, the latest last, counts added."""
+    prior = prior if isinstance(prior, dict) else {}
+    firsts = [float(x) for x in (prior.get("first"), first) if x is not None and x != ""]
+    lasts = [float(x) for x in (prior.get("last"), last) if x is not None and x != ""]
+    return {"first": min(firsts) if firsts else None, "last": max(lasts) if lasts else None,
+            "count": int(prior.get("count") or 0) + int(count or 0)}
+
+
+def _write_sources_seen_locked(hub_dir, update) -> bool:
+    """Read (strictly), apply ``update(data) -> changed``, write -- under ONE cross-process
+    lock, so two processes can never interleave a read and a replace. The store only shrinks
+    past _SOURCES_MAX, and then by its stalest families."""
+    path = _sources_seen_path(hub_dir)
+    with ProcessFileLock(Path(hub_dir), name=".sources-seen.lock", timeout=5):
+        data = _read_sources_seen_strict(hub_dir)
+        if not update(data):
+            return False
+        if len(data) > _SOURCES_MAX:
+            data = dict(sorted(data.items(),
+                               key=lambda kv: float((kv[1] or {}).get("last") or 0))[-_SOURCES_MAX:])
+        atomic.write_json(path, data)
+        return True
+
+
 def _touch_family(hub_dir, source: str, now: float) -> None:
     keys = [k for k in (family_of(source), chat_family_of(source)) if k]
     if not keys:
         return
-    path = _sources_seen_path(hub_dir)
-    try:
-        data = _read_json(path)
+    # Cheap pre-check without the lock: most stamps fall inside the write interval.
+    snap = read_sources_seen(hub_dir)
+    if all(isinstance(snap.get(k), dict) and (now - float(snap[k].get("last") or 0)) < _SEEN_WRITE_MIN_S
+           for k in keys):
+        return
+
+    def _apply(data):
         wrote = False
         for fam in keys:
             prior = data.get(fam) if isinstance(data.get(fam), dict) else {}
             if prior and (now - float(prior.get("last") or 0)) < _SEEN_WRITE_MIN_S:
                 continue
-            data[fam] = {"first": prior.get("first") or now, "last": now,
-                         "count": int(prior.get("count") or 0) + 1}
+            data[fam] = _merge_family(prior, prior.get("first") or now, now, 1)
             wrote = True
-        if not wrote:
-            return
-        if len(data) > _SOURCES_MAX:
-            data = dict(sorted(data.items(),
-                               key=lambda kv: float((kv[1] or {}).get("last") or 0))[-_SOURCES_MAX:])
-        _write_json(path, data)
-    except OSError as exc:
+        return wrote
+    try:
+        _write_sources_seen_locked(hub_dir, _apply)
+    except (OSError, TimeoutError, _Unreadable) as exc:
         # NEVER silent: a stamp that cannot be written makes the board say "never" about an
         # app that reports fine. Once an hour it becomes an error row of the hub's own.
         _stamp_failure(hub_dir, source, exc, now)
+
+
+_BACKFILL_EVERY_S = 600
+_BACKFILL_AT: dict = {}
+
+
+def backfill_sources_seen(hub_dir, now: float | None = None, force: bool = False) -> int:
+    """Fold every row the error log still holds into the durable per-family stamps,
+    incrementally (from the byte offset it last reached; from 0 when the log shrank, i.e. after
+    compaction). The store is a summary of the log and the log is the evidence that remains: a
+    family the store lost -- or never had, because the stamp began after the app's forwarder
+    proved itself -- is recovered from the rows, and written down BEFORE compaction can take
+    them. Throttled per hub dir; returns how many families changed; never raises."""
+    now = time.time() if now is None else now
+    key = str(hub_dir)
+    if not force and now - _BACKFILL_AT.get(key, 0.0) < _BACKFILL_EVERY_S:
+        return 0
+    _BACKFILL_AT[key] = now
+    path = _errors_path(hub_dir)
+    mark_path = Path(hub_dir) / "sources-seen.backfill.json"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    try:
+        offset = int((_read_json(mark_path) or {}).get("offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    if offset > size:
+        offset = 0
+    if offset == size:
+        return 0
+    found: dict = {}
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            for line in fh:
+                if not line.endswith(b"\n"):
+                    break                                # a row still being written
+                offset += len(line)
+                try:
+                    row = json.loads(line.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                ep = _epoch(row.get("epoch") if row.get("epoch") is not None else row.get("ts"))
+                if ep == float("-inf") or ep <= 0:
+                    continue
+                for fam in (family_of(row.get("source")), chat_family_of(row.get("source"))):
+                    if fam:
+                        lo, hi, n = found.get(fam, (ep, ep, 0))
+                        found[fam] = (min(lo, ep), max(hi, ep), n + 1)
+    except OSError:
+        return 0
+    changed = []
+
+    def _apply(data):
+        for fam, (lo, hi, n) in found.items():
+            prior = data.get(fam) if isinstance(data.get(fam), dict) else None
+            if prior and float(prior.get("first") or hi) <= lo and float(prior.get("last") or 0) >= hi:
+                continue
+            data[fam] = _merge_family(prior, lo, hi, 0 if prior else n)
+            changed.append(fam)
+        return bool(changed)
+    try:
+        if found:
+            _write_sources_seen_locked(hub_dir, _apply)
+        atomic.write_json(mark_path, {"offset": offset, "size": size, "at": now})
+    except (_Unreadable, OSError, TimeoutError) as exc:
+        _stamp_failure(hub_dir, "backfill", exc, now)
+        return 0
+    return len(changed)
 
 
 def _stamp_failure(hub_dir, source: str, exc: BaseException, now: float) -> None:

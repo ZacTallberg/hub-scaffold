@@ -84,6 +84,36 @@ def grade(reported, accepted) -> str:
         else "stale"
 
 
+def grade_pinned(reported, want: str, got_pin: str = "", install: str = "") -> tuple:
+    """(grade, note) for a PINNED artifact -- one released by moving a pin (a commit, a version)
+    rather than by publishing bytes the hub can hash. The seat reports what it RUNS
+    (``<name>=<version>``), the pin it last RECEIVED (``<name>.pin=``) and its installer's result
+    (``<name>.inst=``).
+
+    * no version reported -> ``unreported``: nothing says which one it runs, so a pin bump
+      cannot be seen landing there (never "current").
+    * the version is the pin -> ``current``.
+    * it has not received the current pin yet, or its install of it failed -> ``stale``.
+    * it HAS the current pin and runs something else -> ``current`` with a note: an installer
+      that leaves a newer or locally edited tree alone did so on purpose."""
+    want = str(want or "").strip().lower()
+    ver = _sha_half(reported).strip().lower()
+    if not want:
+        return "unpublished", ""
+    if not ver:
+        return "unreported", "version unreported"
+    if want.startswith(ver) or ver.startswith(want):
+        return "current", ""
+    got = str(got_pin or "").strip().lower()
+    if got and not (want.startswith(got) or got.startswith(want)):
+        return "stale", "runs %s; has not received pin %s yet" % (ver[:12], want[:12])
+    if str(install or "").strip().lower() in ("failed", "error", "refused"):
+        return "stale", "install of pin %s %s" % (want[:12], install)
+    if not got:
+        return "stale", "runs %s, pinned %s" % (ver[:12], want[:12])
+    return "current", "on pin %s, tree at %s (left alone: newer or local)" % (want[:12], ver[:12])
+
+
 def _epoch(value) -> float:
     try:
         return float(value or 0)
@@ -92,7 +122,7 @@ def _epoch(value) -> float:
 
 
 def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
-           is_service=None) -> dict:
+           is_service=None, pins: dict | None = None) -> dict:
     """Every (seat, artifact) against the published truth, plus a verdict that states its scope."""
     now = time.time() if now is None else now
     is_kit = is_kit or (lambda r: bool(r.get("machine")) and bool(r.get("client") or r.get("artifacts")))
@@ -131,7 +161,16 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
             reported["client"] = row["client"]         # version+sha form, split by grade()
         checks = {artifact: grade(reported.get(artifact), meta.get("accepted"))
                   for artifact, meta in pub.items()}
+        notes = {}
+        for artifact, want in (pins or {}).items():
+            checks[artifact], note = grade_pinned(reported.get(artifact), want,
+                                                  reported.get(artifact + ".pin", ""),
+                                                  reported.get(artifact + ".inst", ""))
+            if note:
+                notes[artifact] = note
         entry["artifacts"] = checks
+        if notes:
+            entry["notes"] = notes
         stale = sorted(k for k, v in checks.items() if v == "stale")
         entry["state"] = "drifted" if stale else "current"
         if stale:
@@ -140,7 +179,7 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
         machines.append(entry)
 
     graded = [m for m in machines if m.get("state") in ("current", "drifted")]
-    if not pub:
+    if not pub and not pins:
         head = "nothing is published, so nothing was graded"
     elif not graded:
         head = "no online seat to grade"
@@ -160,6 +199,7 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
         scope.append("%d legacy row(s) not graded" % len(legacy))
     return {
         "published": {k: v["sha"] for k, v in pub.items()},
+        "pinned": {k: str(v)[:W] for k, v in (pins or {}).items()},
         "machines": machines,
         "converged": bool(graded) and not drifted,
         "graded": len(graded),
