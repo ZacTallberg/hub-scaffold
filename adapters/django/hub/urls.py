@@ -6,8 +6,9 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, deploy_close, handoff_api, held, histories_api, hub_api, hub_write,
-               hubsite, knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
+from . import (app_services, candidates, deploy_close, handoff_api, held, histories_api, hub_api,
+               hub_write, hubsite, knowledge_api, knowledge_write, veil, mcp_server, read_auth,
+               run_api)
 
 R = read_auth.reader
 
@@ -43,6 +44,9 @@ urlpatterns = [
     path("guidance.json", R(knowledge_api.guidance_json), name="guidance"),
     path("knowledge/since", R(knowledge_api.knowledge_since), name="knowledge-since"),
     path("capabilities.json", R(knowledge_api.capabilities_json), name="capabilities"),
+    # Observer-distilled candidates held for a person before they become knowledge (never in
+    # the ledger, never served by a knowledge surface until adopted).
+    path("knowledge-candidates.json", R(candidates.candidates_json), name="knowledge-candidates"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
     # Standing documents rendered through their facet fences for the presenting credential.
     path("doctrine.json", R(hub_api.doctrine_json), name="doctrine"),
@@ -106,6 +110,12 @@ urlpatterns = [
     path("api/finding", knowledge_write.finding),
     path("api/method", knowledge_write.method),
     path("api/review", knowledge_write.review),
+    # Attach a state claim's check (and/or re-date it) without rewriting the record.
+    path("api/attest", knowledge_write.attest),
+    # The review-first candidate queue: file what an observer distilled; a decider adopts or
+    # declines it (candidates.py).
+    path("api/knowledge-candidates", candidates.submit),
+    path("api/knowledge-candidate/decide", candidates.decide),
     # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
     # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
     path("api/retire", hub_write.retire),
@@ -209,6 +219,8 @@ VISIBILITY = {
     "history.json": "member", "doctrine.json": "veiled",
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
     "capabilities.json": "veiled",
+    # Candidates are unreviewed model output about internal systems: members only.
+    "knowledge-candidates.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "ci-status.json": "member",
     "deploy-reconcile.json": "member",

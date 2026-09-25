@@ -554,6 +554,36 @@ TOOLS = [
          "relates_to": {"type": "array", "items": {"type": "string"}},
          "expected_version": {"type": "integer"}},
          "required": ["kind", "agent", "title"]}},
+    {"name": "attest_record",
+     "description": "Attach the check that answers a knowledge record's claim NOW (verify: a "
+                    "command or URL) and/or re-date it (verified_as_of YYYY-MM-DD), without "
+                    "rewriting the record. A state claim with no check is labelled UNVERIFIED.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "id": {"type": "string"}, "verify": {"type": "string"},
+         "verified_as_of": {"type": "string"}},
+         "required": ["agent", "id"]}},
+    {"name": "propose_knowledge",
+     "description": "Queue a candidate lesson (distilled from a session) for a PERSON to adopt or "
+                    "decline. Never served by any knowledge surface until adopted.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"},
+         "items": {"type": "array", "items": {"type": "object", "properties": {
+             "id": {"type": "string"}, "text": {"type": "string"}, "kind": {"type": "string"},
+             "importance": {"type": "integer"}, "project": {"type": "string"}},
+             "required": ["id", "text"]}}},
+         "required": ["agent", "items"]}},
+    {"name": "knowledge_candidates",
+     "description": "The review-first queue of candidate lessons (status open|adopted|declined|all).",
+     "inputSchema": {"type": "object", "properties": {
+         "status": {"enum": ["open", "adopted", "declined", "all"]}}}},
+    {"name": "decide_candidate",
+     "description": "Adopt a knowledge candidate as a lesson or finding, or decline it with a "
+                    "reason. A decider's credential only (HUB_DECIDERS); agents are refused.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "id": {"type": "string"},
+         "decision": {"enum": ["adopt", "decline"]}, "as": {"enum": ["lesson", "finding"]},
+         "note": {"type": "string"}},
+         "required": ["agent", "id", "decision"]}},
     {"name": "record_gap",
      "description": "Record a GAP — a named deficiency someone could own and close, with a severity.",
      "inputSchema": {"type": "object", "properties": {
@@ -1131,6 +1161,18 @@ def _call_tool(name, args, auth_headers):
         else:
             payload = {k: v for k, v in args.items() if k != "kind" and v not in (None, "")}
             status, body = _seam("/hub/api/" + kind, payload, auth_headers)
+    elif name == "attest_record":
+        status, body = _seam("/hub/api/attest", {k: v for k, v in args.items() if v not in (None, "")},
+                             auth_headers)
+    elif name == "propose_knowledge":
+        status, body = _seam("/hub/api/knowledge-candidates",
+                             {k: v for k, v in args.items() if v not in (None, "")}, auth_headers)
+    elif name == "knowledge_candidates":
+        status, body = _seam("/hub/knowledge-candidates.json",
+                             {"status": str(args.get("status") or "open")}, auth_headers, method="get")
+    elif name == "decide_candidate":
+        status, body = _seam("/hub/api/knowledge-candidate/decide",
+                             {k: v for k, v in args.items() if v not in (None, "")}, auth_headers)
     elif name == "record_gap":
         from hub_core.client_knowledge import gap_text
         payload = {k: v for k, v in args.items() if v not in (None, "") and k != "note"}
