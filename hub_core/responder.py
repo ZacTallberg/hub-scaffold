@@ -87,6 +87,7 @@ TASK_BOUND_S = 5400           # a task: build, push, wait for the deploy to go g
 SHIP_BY_MARGIN_MIN = 8        # the session is told to push/record this long before the kill
 MAX_ATTEMPTS = 2              # per item, ever, on this machine; then it is a person's
 MAX_SPAWN_PER_POLL = 3        # one poll never starts more launchers than this
+REOFFER_S = 600               # a CLEARED item the board still offers is re-tried this rarely
 FRESH_S = 24 * 3600           # an error older than this is listed for a person, never worked
 LOCK_STALE_S = 900            # a lane lock nobody has touched for this long is a dead holder's
 LOCK_BEAT_S = 60
@@ -931,8 +932,12 @@ def poll(dry_run: bool = False) -> dict:
     launched, skipped = [], {}
     for item_id in work["items"]:
         record = responses.get(item_id) or {}
-        if record.get("state") == "done":
+        done_age = (time.time() - float(record.get("at") or 0)) if record.get("state") == "done" else None
+        if done_age is not None and done_age < REOFFER_S:
             skipped[item_id] = "already cleared by an earlier run"
+        elif done_age is not None and int(record.get("attempts") or 0) >= MAX_ATTEMPTS:
+            # Recorded cleared, still offered, budget spent: a person's, and said so.
+            skipped[item_id] = "recorded cleared yet still offered; attempt budget spent, a person's now"
         elif int(record.get("attempts") or 0) >= MAX_ATTEMPTS:
             skipped[item_id] = "attempt budget spent; a person's now"
         elif record.get("state") == "running" and _pid_alive(record.get("pid")):
@@ -940,6 +945,10 @@ def poll(dry_run: bool = False) -> dict:
         elif len(launched) >= MAX_SPAWN_PER_POLL:
             skipped[item_id] = "per-poll launch cap; next poll"
         else:
+            # Includes an item recorded CLEARED that the board still offers REOFFER_S later: the
+            # record may be a false clear (the run read a queue emptied by a hub restart), or
+            # the condition came back. `find_work` just re-read the board, so the offer is
+            # current; the per-item attempt budget still bounds how often this can happen.
             launched.append(item_id)
     if not dry_run:
         for item_id in launched:
