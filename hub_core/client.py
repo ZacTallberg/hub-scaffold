@@ -2243,7 +2243,7 @@ def _problem_line(p: dict[str, Any]) -> str:
 
 
 def _run_errors(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
-    """The QUEUE, folded into problems (never raw rows): --mine (owned by or held by me),
+    """The QUEUE, folded into problems (never raw rows): --mine (reach me first or held by me; anyone may take any),
     --app <slug>, --all (include what the bar holds back), --resolved; --trace <p-id> prints
     one problem with its full stored trace (head AND tail). --include deferred|all reads the
     raw error stream instead, with the queue's own counts first."""
@@ -3601,7 +3601,9 @@ def _parser() -> argparse.ArgumentParser:
 
     errors = commands.add_parser("errors", help="the operational queue, folded into PROBLEMS")
     errors.add_argument("--agent")
-    errors.add_argument("--mine", action="store_true", help="problems I own or hold")
+    errors.add_argument("--mine", action="store_true",
+                        help="problems that reach me first (declared owner) or that I hold; "
+                             "any agent may take any problem")
     errors.add_argument("--app", help="one service's problems")
     errors.add_argument("--all", action="store_true",
                         help="include what the read-time bar holds back (with the reason)")

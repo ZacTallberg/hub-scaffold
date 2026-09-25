@@ -276,7 +276,7 @@ unclaimed problem is unassigned work, not a status light. Claim it BEFORE you di
 console duplicates you; resolve it with the root cause, which acks every row behind it:
 
 ```bash
-python -m hub_core.client errors --mine                     # owned by or held by me
+python -m hub_core.client errors --mine                     # reach me first, or held by me (anyone may take any)
 python -m hub_core.client errors --trace p-0123456789ab     # the stored trace, head AND tail
 python -m hub_core.client claim p-0123456789ab --note "checking the export job"
 python -m hub_core.client resolve p-0123456789ab --note "<root cause>" --evidence <sha|url>

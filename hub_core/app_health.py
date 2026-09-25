@@ -142,6 +142,39 @@ def _float(value):
         return None
 
 
+def host_liveness(host: str, tenants: list, live: dict, now: float) -> tuple:
+    """(liveness row, how it was derived) for a HOST with no health URL of its own, from the
+    probes of the services it serves (those declaring `hosted_in: <host>`).
+
+    A host that only serves other services has no public URL to probe, so it read "liveness is
+    not probed" forever while every service it serves was probed every sweep. Its liveness is
+    theirs: up when any served service answered on a FRESH probe; down only when EVERY freshly
+    probed one is down (that is the host, not one service); `({}, "")` when none has a fresh
+    probe, so the honest "not probed" gap still stands. It never borrows one tenant's URL —
+    that would charge the host with that tenant's own outage."""
+    fresh = []
+    for t in tenants:
+        row = live.get(t)
+        if not isinstance(row, dict) or row.get("at") is None:
+            continue
+        at = _float(row.get("at"))
+        if at is None:
+            continue
+        if now - at <= LIVENESS_STALE_S:
+            fresh.append((t, row, at))
+    if not fresh:
+        return {}, ""
+    up = [(t, r, at) for t, r, at in fresh if r.get("state") == "up"]
+    newest = max(at for _t, _r, at in fresh)
+    how = ("liveness derived from the %d service(s) %s serves: %d of %d freshly probed answering"
+           % (len(tenants), host, len(up), len(fresh)))
+    if up:
+        last_ok = max((_float(r.get("last_ok_at")) if r.get("last_ok_at") is not None else at)
+                      for _t, r, at in up)
+        return {"state": "up", "at": newest, "last_ok_at": last_ok}, how
+    return {"state": "down", "at": newest}, how
+
+
 def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
          native_deploy: dict | None = None, now: float | None = None) -> tuple:
     """(rows, metadata): one row per declared or reporting service, dark first."""
@@ -166,6 +199,21 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
     for fam in families:
         if fam.startswith("app."):
             slugs.add(fam[len("app."):])
+    # A RETIRED service is not a service to observe, whichever channel still names it. Its
+    # process may keep running (and its forwarder keep posting) until somebody stops it, which
+    # put a retired service back in this table as "partial: liveness not probed" — gaps that ARE
+    # the retirement, not something anyone can arm. Its errors still fold into problems; only the
+    # observe-me verdict is withheld. A service hosted inside another stays: the host still
+    # speaks for it.
+    retired = {str(k).lower() for k, v in apps.items()
+               if isinstance(v, dict) and str(v.get("status") or "") == "retired"
+               and not v.get("hosted_in")}
+    slugs -= retired - {native}
+    tenants_of: dict = {}
+    for t, v in apps.items():
+        host = str((v or {}).get("hosted_in") or "").lower() if isinstance(v, dict) else ""
+        if host and str(t).lower() not in retired:
+            tenants_of.setdefault(host, []).append(str(t).lower())
     out = []
     for slug in sorted(slugs):
         cfg = apps.get(slug) if isinstance(apps.get(slug), dict) else {}
@@ -190,7 +238,14 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
                 and (p["where"] == slug or (p["kind"] == "ci" and p["where"] == project))]
         unclaimed = [p for p in mine if p["state"] == "unclaimed"]
         dep = (native_deploy or {}) if is_native else {}
+        derived = ""
+        if not lv and not is_native and not cfg.get("health_url") and tenants_of.get(slug):
+            lv, derived = host_liveness(slug, sorted(tenants_of[slug]), live, now)
         gaps = []
+        # NOTES are observations that are not defects: a stage nobody can clear from here (it
+        # ends with a host step) held as a GAP keeps the row `partial` forever, and every
+        # responder offered it comes back not-cleared on a condition no agent can change.
+        notes = [derived] if derived else []
         if is_native:
             # The hub records its own server errors directly; it has no forwarder to wire.
             fwd = fwd or {"first": 0, "last": now, "count": window["total"]}
@@ -199,9 +254,9 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
                         "(POST /hub/api/app-error with app=%s), or its failures stay in its "
                         "own logs" % slug)
         if hosted_in and ci:
-            gaps.append("ships inside %s: its CI events are the host's" % hosted_in)
+            notes.append("ships inside %s: its CI events are the host's" % hosted_in)
         lv_age = (now - float(lv["at"])) if lv.get("at") else None
-        if not cfg.get("health_url") and not is_native:
+        if not cfg.get("health_url") and not is_native and not derived:
             gaps.append("liveness is not probed: no health_url declared for it in HUB_APPS")
         elif lv and (lv_age is None or lv_age > LIVENESS_STALE_S):
             gaps.append("liveness was last probed %d min ago, so \"%s\" is what the probe saw "
@@ -247,12 +302,13 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
                          "oldest_s": max((int(p.get("age_s") or 0) for p in unclaimed), default=0),
                          "ids": [p["id"] for p in mine[:4]]},
             "gaps": gaps,
+            "notes": notes,
             "verdict": verdict,
         })
     rank = {"dark": 0, "partial": 1, "observed": 2, "unbuilt": 3}
     out.sort(key=lambda r: (rank.get(r["verdict"], 3), -r["problems"]["unclaimed"], r["slug"]))
     counts = {k: sum(1 for r in out if r["verdict"] == k) for k in rank}
-    meta = {"counts": counts, "total": len(out),
+    meta = {"counts": counts, "total": len(out), "retired_withheld": sorted(retired - {native}),
             "sources_seen": errorlog.sources_seen_store(hub_dir),
             "liveness_stale_s": LIVENESS_STALE_S,
             "note": ("a verdict of 'never' means nothing when the stamp store is not writable; "
@@ -278,12 +334,16 @@ def doctor(hub_dir, slug: str, state=None, *, apps: dict | None = None, native: 
     history = [p for p in mine if p["state"] == "resolved"]
     blockers = [p for p in open_ if p["state"] == "unclaimed"]
     waiting = [p for p in open_ if p["state"] in ("in_flight", "escalated")]
-    if row is None:
+    if row is None and slug in (meta.get("retired_withheld") or []):
+        verdict = "retired"
+        lines = ["%s is declared retired in HUB_APPS: it is not observed, and its remaining "
+                 "errors still fold into problems" % slug]
+    elif row is None:
         verdict = "unknown"
         lines = ["nothing named %r is declared in HUB_APPS or has ever reported to this hub" % slug]
     else:
         verdict = "blocked" if blockers else ("waiting" if waiting else row["verdict"])
-        lines = list(row["gaps"])
+        lines = list(row["gaps"]) + ["note: " + n for n in (row.get("notes") or [])]
         for p in blockers:
             lines.append("BLOCKED on %s (unclaimed %s): %s" % (
                 p["id"], _problems.age_phrase(p.get("age_s")), p["title"][:160]))

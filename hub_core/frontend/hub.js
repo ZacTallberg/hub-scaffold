@@ -2379,7 +2379,7 @@
       rowMono("Occurrences", (p.count || 0) + " across " + (p.rows || []).length + " signature" + ((p.rows || []).length === 1 ? "" : "s")),
       p.age_s != null ? rowMono("Open for", fmtAge(p.age_s)) : null,
       p.since_last_s != null ? rowMono("Last occurred", fmtAge(p.since_last_s) + " ago" + (p.fresh === false ? " (stale: listed, never pushed)" : "")) : null,
-      (p.owners || []).length ? rowMono("Owners", p.owners.join(", ")) : rowMono("Owners", "nobody on record"),
+      rowMono("Reaches first", ((p.owners || []).length ? p.owners.join(", ") : "nobody on record") + " (anyone may take it)"),
       esc ? row("Waiting on", (esc.blocked_on || "?") + (esc.note ? " — " + esc.note : "") + " (by " + (esc.agent || "?") + ")") : null,
       p.reopened && res ? row("Reopened", "it recurred after " + (res.by || "?") + " resolved it: " + (res.note || "")) : null,
       p.state === "resolved" && res ? row("Resolved", (res.by || "?") + " — " + (res.note || "") + (res.evidence ? " · " + res.evidence : "")) : null,
@@ -2498,7 +2498,8 @@
           el("span", { class: "err-cov-chip is-" + (lv.state === "up" || lv.state === "self" ? "live" : "silent"),
                        text: "live " + (lv.state || "unknown") + (lv.checked_age_s != null ? " · " + fmtAge(lv.checked_age_s) + " ago" : "") })
         ]),
-        (r.gaps || []).length ? el("ul", { class: "health-gaps" }, r.gaps.map(function (g) { return el("li", { text: g }); })) : null
+        (r.gaps || []).length ? el("ul", { class: "health-gaps" }, r.gaps.map(function (g) { return el("li", { text: g }); })) : null,
+        (r.notes || []).length ? el("ul", { class: "health-gaps health-notes" }, r.notes.map(function (n) { return el("li", { class: "cell-sub", text: "note: " + n }); })) : null
       ].filter(Boolean)));
     });
     if (!rows.length) body.appendChild(el("p", { class: "cell-sub", text: "No service is declared (HUB_APPS) and none has reported yet." }));
