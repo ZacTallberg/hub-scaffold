@@ -170,6 +170,48 @@ TOOLS = [
     {"name": "held_queue",
      "description": "The promotion queue: every open hold, oldest first, with its age and urgency.",
      "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}}},
+    {"name": "submit_handoff",
+     "description": "Hand commits this machine cannot push to a machine that can: a git bundle "
+                    "(base64 of `git bundle create f origin/<branch>..HEAD`) for a task. The "
+                    "origin must be on a host the operator allows; a publisher rebases, pushes "
+                    "and puts a `pushed` checkpoint with the sha on the task.",
+     "inputSchema": {"type": "object", "properties": {
+         "task": {"type": "string"}, "project": {"type": "string"},
+         "remote": {"type": "string"}, "branch": {"type": "string"},
+         "base": {"type": "string"}, "head": {"type": "string"},
+         "bundle_b64": {"type": "string"}, "commits": {"type": "integer"},
+         "subject": {"type": "string"}, "note": {"type": "string"},
+         "idem_key": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["task", "project", "remote", "base", "head", "bundle_b64"]}},
+    {"name": "handoff_queue",
+     "description": "The publish hand-off queue: open hand-offs oldest first (status=all|"
+                    "published|failed for history, task=<id> for one task).",
+     "inputSchema": {"type": "object", "properties": {
+         "status": {"type": "string"}, "task": {"type": "string"}}}},
+    {"name": "claim_handoff",
+     "description": "Lease the oldest open hand-off (or id) to THIS publisher: a token and a "
+                    "fence; only the newest claim may fetch the bundle or report.",
+     "inputSchema": {"type": "object", "properties": {
+         "machine": {"type": "string"}, "id": {"type": "string"},
+         "ttl_s": {"type": "integer"}, "agent": {"type": "string"}},
+         "required": ["machine"]}},
+    {"name": "fetch_handoff_bundle",
+     "description": "The leased hand-off's bundle as base64, for the lease holder only.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "token": {"type": "string"}, "fence": {"type": "integer"},
+         "agent": {"type": "string"}},
+         "required": ["id", "token", "fence"]}},
+    {"name": "report_handoff",
+     "description": "Report a leased hand-off: published (pushed_sha, the full sha now on the "
+                    "branch -- never forced), failed (reason, conflicts), or released (reason: "
+                    "this machine cannot push either; another publisher takes it).",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "token": {"type": "string"}, "fence": {"type": "integer"},
+         "outcome": {"type": "string", "enum": ["published", "failed", "released"]},
+         "pushed_sha": {"type": "string"}, "reason": {"type": "string"},
+         "conflicts": {"type": "array", "items": {"type": "string"}},
+         "note": {"type": "string"}, "machine": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["id", "token", "fence", "outcome"]}},
     {"name": "claim_item",
      "description": "Claim a non-task item (a question id or an error fingerprint) for ONE machine "
                     "so two machines never work the same thing; the same machine re-claims "
@@ -886,6 +928,28 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/held.json",
                              {"repo": args["repo"]} if args.get("repo") else {},
                              auth_headers, method="get")
+    elif name == "submit_handoff":
+        payload = {k: args[k] for k in ("task", "project", "remote", "branch", "base", "head",
+                                        "bundle_b64", "commits", "subject", "note", "idem_key",
+                                        "agent") if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff", payload, auth_headers)
+    elif name == "handoff_queue":
+        status, body = _seam("/hub/handoffs.json",
+                             {k: args[k] for k in ("status", "task") if args.get(k)},
+                             auth_headers, method="get")
+    elif name == "claim_handoff":
+        payload = {k: args[k] for k in ("machine", "id", "ttl_s", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff/claim", payload, auth_headers)
+    elif name == "fetch_handoff_bundle":
+        payload = {k: args[k] for k in ("id", "token", "fence", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff/bundle", payload, auth_headers)
+    elif name == "report_handoff":
+        payload = {k: args[k] for k in ("id", "token", "fence", "outcome", "pushed_sha", "reason",
+                                        "conflicts", "note", "machine", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff/result", payload, auth_headers)
     elif name == "claim_item":
         payload = {k: args[k] for k in ("item", "machine", "release", "agent", "session")
                    if args.get(k) not in (None, "")}

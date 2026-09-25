@@ -82,6 +82,8 @@ HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see bel
 #                                         # their commits count as evidence/lineage for their tasks
 # HUB_COMMIT_RESOLVER = "pkg.module:fn"   # fn(project, sha) -> True/False/None for a project with
 #                                         # no checkout; None means "could not ask", never "no"
+# HUB_HANDOFF_GIT_HOSTS = ["git.example.com"]  # hosts a publish hand-off may name (unset =
+#                                         # every hand-off refused; "file" admits file:// remotes)
 # HUB_LEASE_SWEEP_GRACE_S = 3600          # hand back an in-progress task this long after its lease
 # HUB_LEASE_SWEEP_UNHELD_S = 14400        # ...or this long after it went quiet with no lease
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from

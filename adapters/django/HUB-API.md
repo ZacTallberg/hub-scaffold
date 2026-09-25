@@ -83,6 +83,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/<type>.json` | a WHOLE collection as `{data, count, cursor, metadata}`, rows in exactly the snapshot's shape — type is the singular (`task, run, adr, feat, gap, cap, deploy, note, directive, ack`) or the snapshot key (`tasks`, `notes`, …). Conditional on a per-collection tag (304 when unchanged). |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). A task also carries `holder` (the live lease's agent, console and liveness, or `null`; the fencing token never leaves the claims directory), `readiness` (the same classification as `next.json`, so `stale_reclaim:true` tells a launcher "a run that ended left this in progress" without attempting a claim) and `handed_back` (runs that ended with it unfinished). A task read with `?lineage=1` also carries its **lineage ladder** (see below). |
 | `GET /hub/held.json[?repo=]` | the promotion queue: every OPEN hold, oldest first, with `age_s`, `urgency` (info/warn/critical, four times faster for a commit on one disk only), its holder and a one-line `detail`; metadata counts promoted and abandoned. |
+| `GET /hub/handoffs.json[?status=open\|all\|published\|failed&task=]` | the publish hand-off queue: OPEN hand-offs oldest first (member visibility), each with its task, project, branch, base/head, bytes, `claims`, the live `claim` (holder, fence, `expires_in_s`, never its token) and `age_s`; `metadata.open` counts what waits. |
 | `GET /hub/item-claims.json` | every per-machine item claim still in force: `{item: {machine, session, agent, age_s, releases_in_s, holder_state, gone_s, frees_in_s}}`; a claim whose console is GONE past the grace is omitted. |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
@@ -314,6 +315,40 @@ and the record keeps `hub_saw: "local_only"`. The refusal's `searched` names eve
 and what each saw. `POST /hub/api/held/promote` requires `evidence` (the pipeline, sha or URL of the
 rebuild that ran); `POST /hub/api/held/abandon` requires `reason`. Open holds ride the rail with
 urgency climbing by age.
+
+### The publish hand-off lane (`handoff`)
+
+A worker whose machine cannot push (an unregistered per-machine key, a credential manager that
+cannot prompt unattended) hands its commits to a machine that can; see
+`patterns/publish-handoff.md`. Nothing is created unless the operator lists the git hosts a
+hand-off may point at in `HUB_HANDOFF_GIT_HOSTS` (a list or a comma-separated string; the
+pseudo-host `file` admits `file://` remotes). Unset, every submission is refused
+`403 handoff_disabled`.
+
+`POST /hub/api/handoff` (`handoff:submit`) `{task, project, remote, base, head, bundle_b64,
+[branch, commits, subject, note, idem_key]}` stores a git bundle of `base..head` (20 MB decoded
+ceiling, read from the request stream -- it is token-gated by the same credential check as every
+write, not by `@writer`, whose body read stops at Django's upload limit). Refused: `bad_task`,
+`task_not_found`, `host_not_allowed` (the origin is not on an allowed host), `project_mismatch`,
+`bad_sha`, `nothing_to_publish`, `bad_bundle`, `bundle_head_mismatch`, `bundle_base_mismatch` (the
+bundle must have `base` as its prerequisite), `base_not_on_server` (the commit resolver shows the
+base on no server), `bundle_too_large` (413), and a secret-shaped field outside the bundle. A
+credential in `remote` is stripped before it is stored. Idempotent on `idem_key`
+(`replayed`); the same head already waiting answers that record (`duplicate`).
+
+`POST /hub/api/handoff/claim` (`handoff:publish`) `{machine, [id, ttl_s]}` leases the oldest open
+hand-off (or `id`): `{token, fence, ttl_s, ...record}`, or `data: null`. The fence increases with
+every claim; TTL is 60-1800 s (default 900). A hand-off whose lease lapsed `MAX_CLAIMS` (3) times
+with no result is closed `failed`. `POST /hub/api/handoff/bundle` `{id, token, fence}` answers
+`{bundle_b64, bytes, sha256}` to the newest claim only (`409 not_holder` otherwise).
+`POST /hub/api/handoff/result` `{id, token, fence, outcome, [pushed_sha | reason, conflicts,
+note]}`: `published` needs the full `pushed_sha` and is refused `pushed_sha_not_on_server` when
+the commit resolver shows it on no server (`verified: null` when it could not ask); `failed` and
+`released` need a `reason`, and `released` ("this machine cannot push either") returns the
+hand-off to the queue without spending a claim. A stale fence or wrong token is `409 not_holder`.
+A terminal result writes a checkpoint onto the task -- `kind: "pushed"` with the `sha` for a
+publish, which the deploy close reads -- and messages the author's machine;
+`data.notified` says whether each landed.
 
 ### Evidence in the task's own project
 
