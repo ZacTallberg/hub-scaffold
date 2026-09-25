@@ -117,7 +117,11 @@ def load_focus(sid) -> str:
     return str(_load_receipt(sid).get("memory_focus") or "")
 
 
-def save_delivered(sid, keys, focus=None) -> None:
+def save_delivered(sid, keys, focus=None, phases=None) -> None:
+    """Write the receipt. ``focus`` is the focus this block was ranked for (None keeps the prior
+    one). ``phases`` is WHERE THE TIME WENT on this prompt (fetch, render, the pack write, the
+    total, and the outcome) — kept beside the keys so a slow or timed-out prompt is diagnosable
+    afterwards instead of reading only "exceeded its deadline"."""
     path = _receipt_path(sid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +131,8 @@ def save_delivered(sid, keys, focus=None) -> None:
         if focus is not None or prior:
             body["memory_focus"] = focus if focus is not None else prior
         tmp = path.with_suffix(".tmp")
+        if phases:
+            body["last"] = phases
         tmp.write_text(json.dumps(body), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:

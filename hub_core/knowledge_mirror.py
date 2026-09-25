@@ -29,15 +29,20 @@ Discipline:
 
 THE HAND-OFF. When local memory serves knowledge, the hub block must not ALSO be printed, or
 every record arrives twice; when local memory is not healthy, the hub block must be printed, or
-the prompt gets nothing. Both sides therefore decide on the same three facts, read from files:
+the prompt gets nothing. So there is ONE decider: this writer, on every pass, computes
+`hub_core.memory_feed.decide()` from three facts --
 
   1. the switch is on (HUB_LOCAL_KNOWLEDGE=1) -- default OFF;
-  2. the mirror is fresh: its last pass came back caught up (`more` false) with no error,
-     within FRESH_S;
+  2. the mirror is current (`memory_feed.mirror_fresh`: caught up at `ok_at` within its window;
+     a later failed poll does not disqualify it -- knowledge is not live state);
   3. local recall is healthy: the engine's health file (HUB_LOCAL_MEMORY_HEALTH, JSON with
-     `retrieval_mode` and `ts`) says its last recall ran in a healthy mode within HEALTHY_S.
+     `retrieval_mode` and `ts`) says its last recall ran a full mode (HUB_LOCAL_MEMORY_MODES,
+     default `hybrid`) recently (`memory_feed.recall_healthy`) --
 
-Any doubt -- a missing file, an unreadable one, an error -- fails CLOSED to the hub block.
+and writes `owns` + `decided_at` into the sidecar. The prompt hook (`local_owner`) and the
+local engine both obey that bit through `memory_feed.owner()` and run no test of their own; a
+decision older than `memory_feed.DECISION_FRESH_S` means the decider stopped, and both fall
+back to the hub block. Any doubt fails CLOSED to the hub block.
 Stdlib only.
 """
 from __future__ import annotations
@@ -53,10 +58,6 @@ BOOTSTRAP_INTERVAL_S = 5         # while `more` is true, keep paging on the next
 PAGE_LIMIT = 500                 # the hub's own cap (knowledge.FEED_MAX)
 MAX_PAGES_PER_PASS = 12
 COMPACT_BYTES = 24 * 1024 * 1024
-#: "Fresh" = a caught-up, error-free pass within two of a daemon's five-minute polls.
-FRESH_S = 600
-#: Local recall is healthy when its last recall ran a healthy mode within this window.
-HEALTHY_S = 900
 #: A machine whose recent recalls fell back to a degraded mode is not current; "recent" so a
 #: machine nobody has prompted today is not graded on an old line.
 DEGRADED_WINDOW_S = 3600
@@ -64,9 +65,12 @@ ROUTE = "knowledge/since"
 
 
 def default_feed() -> Path:
-    state = os.environ.get("HUB_CLIENT_STATE_DIR") or os.path.join("~", ".hub-client")
-    return Path(os.path.expanduser(os.environ.get("HUB_KNOWLEDGE_FEED")
-                                   or os.path.join(state, "feeds", "knowledge.jsonl")))
+    """HUB_KNOWLEDGE_FEED, else ``knowledge.jsonl`` in the agent-neutral feeds directory a local
+    engine reads (``memory_feed.feeds_dir()``: HUB_MEMORY_FEEDS_DIR, else ~/.agent-memory/feeds)
+    -- one place, so the writer, the hook and the engine read the same sidecar."""
+    from . import memory_feed
+    raw = os.environ.get("HUB_KNOWLEDGE_FEED", "").strip()
+    return Path(os.path.expanduser(raw)) if raw else memory_feed.feeds_dir() / "knowledge.jsonl"
 
 
 def sidecar_path(feed: Path) -> Path:
@@ -92,8 +96,21 @@ def switch_on() -> bool:
 
 def _write_state(feed: Path, state: dict, now: float) -> None:
     """The sidecar, rewritten on EVERY pass (not only on a poll) so a flipped switch reaches the
-    local engine within one pass. Atomic: written aside and swapped in."""
-    doc = dict(state, feed=feed.stem, local_owns=switch_on(), written_at=now)
+    local engine within one pass. Atomic: written aside and swapped in. THIS is the one decider:
+    `owns` + `decided_at` are `memory_feed.decide()` over the state being written."""
+    from . import memory_feed
+    health = _health_doc()
+    last_full = float(state.get("recall_full_at") or 0)
+    try:
+        if health and str(health.get("retrieval_mode") or "").lower() in healthy_modes():
+            last_full = max(last_full, float(health.get("ts") or 0))
+    except (TypeError, ValueError):
+        pass
+    owns = memory_feed.decide(switch_on=switch_on(), mirror_state=state,
+                              recall_healthy=memory_feed.recall_healthy(
+                                  health, last_full, now, modes=healthy_modes()), now=now)
+    doc = dict(state, feed=feed.stem, local_owns=switch_on(), owns=owns, decided_at=now,
+               recall_full_at=last_full or None, written_at=now)
     side = sidecar_path(feed)
     try:
         side.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +212,10 @@ def tick(get, feed: Path, *, now: float | None = None, min_interval: float = MIN
         state.update(cursor=cursor, etag=etag, more=more, polled_at=now, ok_at=now, error="",
                      written=int(state.get("written") or 0) + written, pages=pages)
     except Exception as exc:                            # noqa: BLE001 - a mirror never stops its caller
-        state.update(cursor=cursor, polled_at=now, more=False,
+        # `more` is left as it was: a FAILED poll never reads as a caught-up mirror (an
+        # interrupted first bootstrap must not look complete), and `ok_at` stays the last
+        # caught-up poll's time -- the mirror's age, not this poll's luck, decides currency.
+        state.update(cursor=cursor, polled_at=now,
                      error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
         _write_state(feed, state, now)
         return {"status": "error", "error": state["error"], "feed": str(feed)}
@@ -217,15 +237,14 @@ def _quote(text: str) -> str:
 # ── the hand-off decision, and the health line a machine reports ──
 
 def feed_state(feed: Path | None = None, *, now: float | None = None) -> str:
-    """fresh | stale | absent -- the ONE definition of "the local mirror is fresh"."""
+    """fresh | stale | absent, by the ONE definition of a current mirror
+    (``memory_feed.mirror_fresh``)."""
+    from . import memory_feed
     feed = feed or default_feed()
     st = read_state(feed)
     if not st:
         return "absent"
-    now = time.time() if now is None else now
-    ok = (not st.get("error")) and st.get("more") is False \
-        and st.get("ok_at") is not None and now - float(st.get("ok_at") or 0) <= FRESH_S
-    return "fresh" if ok else "stale"
+    return "fresh" if memory_feed.mirror_fresh(st, now) else "stale"
 
 
 def _health_doc() -> dict | None:
@@ -240,17 +259,12 @@ def _health_doc() -> dict | None:
 
 
 def local_owner(feed: Path | None = None, *, now: float | None = None) -> bool:
-    """True when LOCAL memory, not the hub block, serves this prompt's knowledge: the switch is
-    on, the mirror is fresh, and local recall is healthy. Fails CLOSED: any doubt is False."""
+    """True when LOCAL memory, not the hub block, serves this prompt's knowledge -- read from the
+    decider's `owns` bit in this feed's sidecar by `memory_feed.sidecar_owns`, the same rule
+    `memory_feed.owner()` applies for the engine. Runs no test of its own. Fails CLOSED."""
+    from . import memory_feed
     try:
-        if not switch_on() or feed_state(feed, now=now) != "fresh":
-            return False
-        doc = _health_doc()
-        if not doc or doc.get("ts") is None:
-            return False
-        now = time.time() if now is None else now
-        return (str(doc.get("retrieval_mode") or "").lower() in healthy_modes()
-                and now - float(doc["ts"]) <= HEALTHY_S)
+        return memory_feed.sidecar_owns(read_state(feed or default_feed()), now)[0] is True
     except Exception:                                   # noqa: BLE001
         return False
 

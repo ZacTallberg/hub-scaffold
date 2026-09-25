@@ -41,6 +41,7 @@ urlpatterns = [
     # Knowledge: related records, the per-prompt memory index, the mirror feed, and the
     # published capability catalog. Above the catch-all for the same reason as the rest.
     path("related.json", R(knowledge_api.related_json), name="related"),
+    path("triggers.json", R(knowledge_api.triggers_json), name="triggers"),
     path("guidance.json", R(knowledge_api.guidance_json), name="guidance"),
     path("knowledge/since", R(knowledge_api.knowledge_since), name="knowledge-since"),
     path("capabilities.json", R(knowledge_api.capabilities_json), name="capabilities"),
@@ -229,7 +230,8 @@ VISIBILITY = {
     "app-feed.json": "veiled", "app-fixes.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
     "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
-    "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
+    "related.json": "veiled", "triggers.json": "veiled", "guidance.json": "veiled",
+    "knowledge/since": "veiled",
     "capabilities.json": "veiled", "eval.json": "member",
     # Candidates are unreviewed model output about internal systems: members only.
     "knowledge-candidates.json": "member",
