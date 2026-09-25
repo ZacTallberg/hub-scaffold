@@ -17,6 +17,11 @@ board loses the difference, so each has its own verb::
     python -m hub_core.client prompt-context --hook < hook.json         # from a prompt hook
     python -m hub_core.client knowledge-sync --out ~/.hub-client/knowledge.json
     python -m hub_core.client adjudicate                                 # needs HUB_JUDGE_URL
+    python -m hub_core.client attest example:note:l-3f8a1c2b4d5e --verify "https://example.com/health"
+    python -m hub_core.client recheck-knowledge                          # read-only GETs, never exec
+    python -m hub_core.client detect-contradictions                      # needs HUB_JUDGE_URL
+    python -m hub_core.client propose-knowledge "..."   # then knowledge-candidates / decide-candidate
+    python -m hub_core.client ship-outbox --outbox ~/.observer/outbox.jsonl
 
 Registered by `client._parser`; kept in its own module so the core client stays small.
 """
@@ -344,6 +349,232 @@ def _run_adjudicate(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+# ── standing: attest, re-check, contradictions ──
+
+def _payload_attest(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments), "id": arguments.ref}
+    if arguments.verify:
+        payload["verify"] = arguments.verify
+    if arguments.asof:
+        payload["verified_as_of"] = arguments.asof
+    return "attest", payload
+
+
+def _knowledge_notes(base: str) -> list[dict[str, Any]]:
+    """Every live knowledge note (lesson / finding / method / crystallized note), read through
+    the served collection route."""
+    from . import knowledge
+    notes = [n for n in (_c._get(base, "note.json").get("data") or []) if isinstance(n, dict)]
+    superseded = knowledge.superseded_ids({"entities": {n.get("id"): n for n in notes}})
+    return [n for n in notes if knowledge.knowledge_kind(n) not in (None, "review")
+            and not knowledge.is_dead(n, superseded)]
+
+
+def _run_recheck(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Run every live knowledge record's `verify` check (one bounded read-only GET for a URL or
+    read-only curl; anything else is skipped and says why -- nothing is ever executed) and write
+    what it found back through the served API. Exit 3 when the hub refused a write-back: a
+    re-check that cannot record its result is indistinguishable from one that never ran."""
+    from . import recheck
+
+    def write(eid, fields, version):
+        try:
+            _c._post(base, "note", {"id": eid, "agent": _agent(arguments), "expected_version": version,
+                                    **fields}, extra_headers=_c._presence_headers(arguments))
+            return True, "written"
+        except (RuntimeError, ValueError) as error:
+            return False, str(error)[:300]
+
+    result = recheck.run_pass(_knowledge_notes(base), write=write, limit=arguments.limit,
+                              dry_run=arguments.dry_run,
+                              out=lambda line: print(line, file=sys.stderr))
+    if result.get("write_refused"):
+        result["_exit"] = 3
+    return result
+
+
+def _cache_path(arguments: argparse.Namespace):
+    from pathlib import Path
+    from . import prompt_context
+    if arguments.cache:
+        return Path(os.path.expanduser(arguments.cache))
+    return prompt_context.state_dir() / "contradictions.json"
+
+
+_MARKER = re.compile(r"\[(contradiction:[0-9a-f]{12})\]")
+
+
+def _run_contradictions(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Compare every rule-bearing sentence of the served doctrine with its closest live lessons
+    (the hub's related-records seam), have the judge model (HUB_JUDGE_URL on THIS machine) read
+    each pair, collect the lesson-vs-lesson contradictions the adjudicator already settled, and
+    file each contradiction ONCE as a review (a delivered human gate). Reports only: it never
+    edits doctrine or a lesson. Exit 2 with judging to do and no model; 3 when a review write was
+    refused."""
+    from urllib.parse import quote
+    from . import contradictions
+    _utf8_stdout()
+    docs = arguments.doc or []
+    if not docs:
+        # The served list rides every doctrine answer, including the 404 for an unknown name.
+        try:
+            docs = list((_c._get(base, "doctrine.json").get("data") or {}).get("served") or [])
+        except _c.HubRefused as refused:
+            errs = (refused.body or {}).get("errors") if isinstance(refused.body, dict) else None
+            docs = list(next((e.get("served") for e in errs or [] if isinstance(e, dict)
+                              and isinstance(e.get("served"), list)), []))
+    lines: list = []
+    for name in docs:
+        text = (_c._get(base, f"doctrine.json?doc={quote(name)}").get("data") or {}).get("text") or ""
+        lines += contradictions.doctrine_lines(text, source=name)
+    every = [n for n in (_c._get(base, "note.json").get("data") or []) if isinstance(n, dict)]
+    lessons = {n["id"]: n for n in _knowledge_notes(base) if "lesson" in (n.get("tags") or [])}
+    # Every marker already on the board, whatever its status: an answered review is a decision,
+    # and a rerun must never file it again or reopen it.
+    filed = {m for n in every for m in _MARKER.findall(str(n.get("title") or ""))}
+
+    def neighbours(text):
+        res = _c._get(base, "related.json?text=" + quote(text[:1500]))
+        body, meta = res.get("data") or {}, res.get("metadata") or {}
+        lex, sem = meta.get("lexical") or {}, meta.get("semantic") or {}
+        if lex.get("weighted") is False and sem.get("semantic") is False:
+            return [], "neither basis ran: %s; %s" % (lex.get("reason") or "wording off",
+                                                      sem.get("reason") or "meaning off")
+        scored: dict = {}
+        for h in (body.get("lexical") or []) + (body.get("semantic") or []):
+            eid = h.get("id")
+            sim = float(h.get("similarity") or h.get("cosine") or 0)
+            if eid and sim >= scored.get(eid, -1.0):
+                scored[eid] = sim
+        return sorted(scored, key=lambda e: -scored[e]), ""
+
+    def raise_review(question, context, relates_to):
+        payload = {"agent": _agent(arguments), "question": question,
+                   "context": context + "\n\nThis is a human gate: nothing it covers changes "
+                                        "until a person answers.",
+                   "anyway": True, "review": True}
+        if relates_to:
+            payload["relates_to"] = relates_to
+        try:
+            _c._post(base, "ask", payload, extra_headers=_c._presence_headers(arguments))
+            return True, "filed"
+        except (RuntimeError, ValueError) as error:
+            return False, str(error)[:300]
+
+    path = _cache_path(arguments)
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    result = contradictions.run_pass(lines=lines, lessons=lessons, neighbours=neighbours,
+                                     filed=filed, raise_review=raise_review, cache=cache,
+                                     limit=arguments.limit, dry_run=arguments.dry_run,
+                                     out=lambda line: print(line, file=sys.stderr))
+    if not arguments.dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, indent=1, sort_keys=True), encoding="utf-8")
+    result["cache"] = str(path)
+    if result.get("lookup_blind"):
+        result["msg_lookup"] = ("%d doctrine line(s) could not be compared at all: %s"
+                                % (result["lookup_blind"], result.get("lookup_reason")))
+    if result.get("needs_model"):
+        result["_exit"] = 2
+        result["msg"] = ("%d pair(s) need a reader and no judge model is configured here "
+                         "(set HUB_JUDGE_URL and HUB_JUDGE_MODEL)" % result["needs_model"])
+    elif result.get("write_refused"):
+        result["_exit"] = 3
+    return result
+
+
+# ── knowledge candidates: review-first, never auto-promoted ──
+
+def _payload_propose(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    import hashlib
+    text = " ".join(arguments.text.split())
+    item: dict[str, Any] = {"id": arguments.id or
+                            ("cand:" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]),
+                            "text": text}
+    for key in ("kind", "importance", "project"):
+        if getattr(arguments, key, None) not in (None, ""):
+            item[key] = getattr(arguments, key)
+    return "knowledge-candidates", {"agent": _agent(arguments), "items": [item]}
+
+
+def _run_candidates(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    return _c._get(base, "knowledge-candidates.json?status=" + arguments.status)
+
+
+def _payload_decide_candidate(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    payload: dict[str, Any] = {"agent": _agent(arguments), "id": arguments.id,
+                               "decision": arguments.decision, "as": arguments.as_}
+    if arguments.note:
+        payload["note"] = arguments.note
+    return "knowledge-candidate/decide", payload
+
+
+OUTBOX_BATCH = 100
+
+
+def ship_outbox(base: str, source, state_path, agent: str, post=None) -> dict[str, Any]:
+    """Send an observer's outbox (a JSONL file of candidates, one object per line) to the queue.
+
+    Complete lines only, and the byte offset moves only after the hub accepted the batch, so a
+    failed send is resent whole next time (the queue is idempotent by id). A file that shrank was
+    replaced: it is resent from the start. At most OUTBOX_BATCH items per call."""
+    from pathlib import Path
+    source, state_path = Path(source), Path(state_path)
+    try:
+        st = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    if not source.exists():
+        return {"outbox": str(source), "sent": 0, "msg": "no outbox file"}
+    size = source.stat().st_size
+    offset = int(st.get("offset") or 0)
+    if size < offset:
+        offset = 0
+    with open(source, "rb") as fh:
+        fh.seek(offset)
+        data = fh.read()
+    end = data.rfind(b"\n")
+    if end < 0:
+        return {"outbox": str(source), "sent": 0, "offset": offset, "msg": "nothing new"}
+    items, consumed = [], 0
+    for raw in data[:end + 1].split(b"\n")[:-1]:
+        if len(items) >= OUTBOX_BATCH:
+            break
+        consumed += len(raw) + 1
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            items.append(obj)
+    result: dict[str, Any] = {"outbox": str(source), "sent": len(items)}
+    if items:
+        post = post or (lambda payload: _c._post(base, "knowledge-candidates", payload))
+        body = post({"agent": agent, "items": items}) or {}
+        d = (body.get("data") or {}) if isinstance(body, dict) else {}
+        result.update(added=d.get("added"), already_queued=d.get("already_queued"),
+                      refused=d.get("refused") or [])
+    st["offset"] = offset + consumed
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(st), encoding="utf-8")
+    result["offset"] = st["offset"]
+    return result
+
+
+def _run_ship_outbox(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from pathlib import Path
+    from . import prompt_context
+    source = Path(os.path.expanduser(arguments.outbox))
+    state = (Path(os.path.expanduser(arguments.state)) if arguments.state
+             else prompt_context.state_dir() / "outbox-state.json")
+    return ship_outbox(base, source, state, _agent(arguments))
+
+
 # ── registration ──
 
 def register(commands) -> None:
@@ -456,6 +687,60 @@ def register(commands) -> None:
     ksync.add_argument("--out", required=True)
     ksync.add_argument("--limit", type=int, default=500)
     ksync.set_defaults(runner=_run_knowledge_sync)
+
+    att = commands.add_parser("attest", help="attach the check that answers a knowledge record's "
+                              "claim NOW (and/or re-date it) without rewriting the record")
+    att.add_argument("ref", help="the full id of a lesson, finding or method (search prints them)")
+    att.add_argument("--verify", help="the command or URL that answers it now")
+    att.add_argument("--asof", help="YYYY-MM-DD, the day the claim was last known true (default today)")
+    att.add_argument("--agent")
+    att.set_defaults(payload=_payload_attest)
+
+    rck = commands.add_parser("recheck-knowledge", help="run every knowledge record's verify check "
+                              "(read-only GETs only; nothing is executed) and record the result")
+    rck.add_argument("--limit", type=int, default=500)
+    rck.add_argument("--dry-run", action="store_true", dest="dry_run")
+    rck.add_argument("--agent")
+    rck.set_defaults(runner=_run_recheck)
+
+    con = commands.add_parser("detect-contradictions", help="doctrine vs lessons (and settled lesson "
+                              "pairs): file each contradiction once as a review; edits nothing")
+    con.add_argument("--doc", action="append", help="a served doctrine document (default: all served)")
+    con.add_argument("--limit", type=int, default=120, help="max model judgements this run")
+    con.add_argument("--cache", help="verdict cache file (default: the client state dir)")
+    con.add_argument("--dry-run", action="store_true", dest="dry_run")
+    con.add_argument("--agent")
+    con.set_defaults(runner=_run_contradictions)
+
+    prop = commands.add_parser("propose-knowledge", help="queue a candidate lesson for a person to "
+                               "adopt or decline (never served until adopted)")
+    prop.add_argument("text")
+    prop.add_argument("--id", help="a stable candidate id (default: derived from the text)")
+    prop.add_argument("--kind")
+    prop.add_argument("--importance", type=int)
+    prop.add_argument("--project")
+    prop.add_argument("--agent")
+    prop.set_defaults(payload=_payload_propose)
+
+    cands = commands.add_parser("knowledge-candidates", help="the review-first candidate queue")
+    cands.add_argument("--status", default="open", choices=("open", "adopted", "declined", "all"))
+    cands.set_defaults(runner=_run_candidates)
+
+    dec = commands.add_parser("decide-candidate", help="adopt a candidate as a lesson/finding, or "
+                              "decline it (a decider's credential only)")
+    dec.add_argument("id")
+    dec.add_argument("decision", choices=("adopt", "decline"))
+    dec.add_argument("--as", dest="as_", default="lesson", choices=("lesson", "finding"))
+    dec.add_argument("--note", help="required to decline: why")
+    dec.add_argument("--agent")
+    dec.set_defaults(payload=_payload_decide_candidate)
+
+    ship = commands.add_parser("ship-outbox", help="send an observer's JSONL outbox of candidates "
+                               "to the review-first queue (offset committed only on acceptance)")
+    ship.add_argument("--outbox", required=True)
+    ship.add_argument("--state", help="offset file (default: the client state dir)")
+    ship.add_argument("--agent")
+    ship.set_defaults(runner=_run_ship_outbox)
 
     adj = commands.add_parser("adjudicate", help="settle lesson overlap suspicions (rules, then a judge model)")
     adj.add_argument("--limit", type=int, default=0, help="max model judgements this run")

@@ -274,3 +274,63 @@ def _record_writer(verb):
 finding = _record_writer("finding")
 method = _record_writer("method")
 review = _record_writer("review")
+
+
+# ── attest: attach the check that proves a record's STATE, without rewriting it ──
+
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@writer(scope="note:write")
+def attest(request, b):
+    """Attach the check that answers a knowledge record's claim NOW, and/or re-date it.
+
+    Body: id (a full note id), verify (the command or URL that answers it now), verified_as_of
+    (YYYY-MM-DD, the day it was last known true; defaults to today). At least one of the two.
+
+    A state claim with no check is labelled UNVERIFIED on every knowledge surface until someone
+    who knows the truth says where it lives. Only these two fields change: the record keeps its
+    text, its id, its overlap tags and its history -- rewriting the whole record to add a check
+    is how a correction silently loses the story behind it. A new check starts with a clean
+    re-check state, so a CHECK FAILED against the OLD check is not carried onto the new one."""
+    import datetime as _dt
+    agent = b.get("agent") or "agent"
+    eid = _resolve(b.get("id") or b.get("ref"))
+    verify = _norm(b.get("verify"))
+    asof = str(b.get("verified_as_of") or b.get("asof") or "").strip()[:10]
+    if not eid:
+        return JsonResponse({"errors": [{"code": "need_id", "msg": "the full id of a lesson, "
+                                         "finding or method (search prints them)"}]}, status=400)
+    if not verify and not asof:
+        return JsonResponse({"errors": [{"code": "need_verify_or_asof",
+            "msg": "attest needs verify (the command or URL that answers it now) and/or "
+                   "verified_as_of (YYYY-MM-DD)"}]}, status=400)
+    if asof and not _ISO_DAY.match(asof):
+        return JsonResponse({"errors": [{"code": "bad_asof", "msg": "verified_as_of is YYYY-MM-DD"}]},
+                            status=400)
+    for attempt in (0, 1):
+        state = hub_app.current_state()
+        ent = (state.get("entities") or {}).get(eid)
+        if not ent:
+            return JsonResponse({"errors": [{"code": "not_found", "msg": eid}]}, status=404)
+        kind = knowledge.knowledge_kind(ent)
+        if ent.get("type") != "note" or kind is None or kind == "review":
+            return JsonResponse({"errors": [{"code": "not_knowledge",
+                "msg": "%s is not a lesson, finding or method" % eid}]}, status=409)
+        payload = {"verified_as_of": asof or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")}
+        if verify:
+            payload["verify"] = verify
+            if verify != _norm(ent.get("verify")) and isinstance(ent.get("recheck"), dict):
+                # The old check's verdict does not describe the new check.
+                payload["recheck"] = {"status": "skipped", "checked_at": payload["verified_as_of"],
+                                      "detail": "check replaced by attest; not re-run yet"}
+                payload["tags"] = [t for t in (ent.get("tags") or []) if t != "needs-review"]
+        resp, status = _append("note", eid, payload, expected_version=ent.get("version"),
+                               agent=agent, idem=b.get("idem_key"), etype="note.created")
+        if status != 409 or attempt:
+            break
+    if status in (200, 201):
+        resp.setdefault("data", {}).update(
+            {"attested": {k: payload[k] for k in ("verify", "verified_as_of") if k in payload},
+             "label": knowledge.label_of({**ent, **payload}, kind)})
+    return JsonResponse(resp, status=status)
