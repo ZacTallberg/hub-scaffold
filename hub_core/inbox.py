@@ -93,6 +93,13 @@ AUTOMATION_TAGS = {"probe", "selfcheck", "automated", "healthcheck", "heartbeat"
 # matched by the adopter's gate pattern, it is delivered as a gate: never widened to every
 # console, never handed to a responder that would retire it before a human saw it.
 HUMAN_ONLY_TAG = "human-only"
+# A SYNTHETIC ask is a self-test FOR MACHINES (the responder's daily canary): the loop it
+# proves exists precisely so no person has to attend it. It is kept OUT of every delivery by
+# default -- a person's inbox, the notifier's long-poll, the fingerprint that wakes them --
+# and handed only to a reader that opts in (?include=synthetic: the responder). It is NOT an
+# automation tag: those are dropped for every reader, and a canary the responder cannot see
+# is a canary that can only ever time out -- or, worse, read as "retired" and pass.
+SYNTHETIC_TAG = "synthetic"
 
 
 def _text(value, limit=2000) -> str:
@@ -252,6 +259,7 @@ def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> 
             "age_s": _age_s(at),
             **({"unstuck": True} if unstuck else {}),
             **({"human_only": True} if human_only else {}),
+            **({"synthetic": True} if SYNTHETIC_TAG in tags else {}),
             **({"granted": granted,
                 "granted_note": "the approval this ask wanted has landed (%s); close it with "
                                 "`answer`" % granted} if granted else {}),
@@ -513,7 +521,7 @@ def decision_items(state) -> list:
 
 def items_for(state, agent: str, operator: str, operator_extra=None, *, machine: str = "",
               session: str = "", live=None, human_gate=None, gate_satisfied=None, visible=None,
-              now=None) -> list:
+              synthetic=False, now=None) -> list:
     """Everything currently addressed to `agent` (and, when `session` is named, to that console).
 
     Order: a message from a teammate leads (somebody reached out to THIS agent directly), then
@@ -522,11 +530,16 @@ def items_for(state, agent: str, operator: str, operator_extra=None, *, machine:
     reader is never woken for — nor recorded as offered — an item it cannot see.
 
     ``operator_extra`` are computed items the adapter raises for a PERSON (a seat gone silent,
-    persistent drift): conditions that cannot fix themselves, delivered to the operator only."""
+    persistent drift): conditions that cannot fix themselves, delivered to the operator only.
+
+    ``synthetic`` admits self-test asks (SYNTHETIC_TAG). Off by default, so a person -- and the
+    notifier that toasts them -- is never woken for a canary; the responder opts in."""
     agent = _norm(agent)
     questions = questions_for(question_items(state, human_gate=human_gate,
                                              gate_satisfied=gate_satisfied, now=now),
                               agent, operator)
+    if not synthetic:
+        questions = [q for q in questions if not q.get("synthetic")]
     items = (message_items(state, agent, machine, now) + questions
              + directive_items(state, agent, now, machine=machine, session=session)
              + assignment_items(state, agent))

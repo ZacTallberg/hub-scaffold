@@ -359,7 +359,9 @@ def find_work(base: str) -> dict:
     """Categorise the board for this responder. Read-only. ``items`` are the ids a responder
     may be launched for; ``surfaced`` counts what is visible and deliberately NOT worked."""
     items, reasons, surfaced = [], [], {}
-    inbox = (hub._get(base, "inbox.json?agent=" + quote(_agent())).get("data") or {})
+    # include=synthetic: the canary is addressed to machines, so only this reader is handed it.
+    inbox = (hub._get(base, "inbox.json?include=synthetic&agent=" + quote(_agent())).get("data")
+             or {})
     asks = [i for i in (inbox.get("items") or []) if isinstance(i, dict)
             and i.get("kind") == "question"]
     gates = [i for i in asks if _review_gate(i)]
@@ -434,7 +436,8 @@ def resolve_item(base: str, item_id: str) -> dict | None:
                 "body": ("priority: %s\nacceptance (definition of done): %s\n%s" % (
                     task.get("priority") or "", task.get("acceptance") or "",
                     ("plan so far:\n" + plan) if plan else ""))[:3800]}
-    inbox = (hub._get(base, "inbox.json?agent=" + quote(_agent())).get("data") or {})
+    inbox = (hub._get(base, "inbox.json?include=synthetic&agent=" + quote(_agent())).get("data")
+             or {})
     for entry in inbox.get("items") or []:
         if isinstance(entry, dict) and str(entry.get("id")) == item_id \
                 and entry.get("kind") == "question":
@@ -1017,6 +1020,9 @@ def canary() -> dict:
             # Asked AS this identity: a scoped credential may only write as its own subject,
             # and the operator's inbox carries every open question whoever asked it.
             "agent": _agent(), "anyway": True,
+            # A self-test FOR MACHINES: never raised to a person (their inbox, the notifier),
+            # only to readers that ask for synthetic items -- this responder.
+            "synthetic": True,
             "question": "RESPONDER CANARY %s: reply with the single word CONFIRMED." % stamp,
             "context": "Synthetic end-to-end probe of the unattended responder loop, filed once a "
                        "day. Answering it IS the probe passing; answer normally."})

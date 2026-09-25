@@ -318,6 +318,10 @@ def detect_questions(ctx) -> list:
     operator = ctx.get("operator") or ""
     out = []
     for q in ctx.get("questions") or []:
+        # A synthetic ask (the responder canary) is a self-test for machines: the canary judges
+        # its own loop, so its wait is never a person's to-do.
+        if q.get("synthetic"):
+            continue
         waited = task_health.age_s(q.get("at"), ctx["now"])
         if waited is None or waited < QUESTION_WAIT_S:
             continue
