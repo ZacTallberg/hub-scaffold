@@ -22,6 +22,9 @@
      HELP          info bubbles on anything marked data-ab-info; a guided tour and an "About
                    this app" read-me derived from what is on screen when opened.
      PEOPLE        a People and Permissions box speaking the data-access-url contract.
+     COMPONENTS    this app's settings for the hosted components, handed on to them as
+                   window.HubComponentProps + a `hub:component-props` event, and a Component
+                   settings box (drawn from the hub's schema) for whoever the hub says may edit.
    Standard browser APIs only; no framework, no build step. */
 (function () {
   "use strict";
@@ -959,8 +962,11 @@
     body.appendChild(identityCard());
     body.appendChild(section("Your apps", "hub", starredRows()));
     body.appendChild(section("", "app", list(island("profile")).map(function (it) { return item(it, "app"); })) || el("span"));
-    if (isAdmin(role)) {
-      body.appendChild(section("Admins only", "admin", [peopleRow()].concat(
+    // Component settings are offered on the HUB's word (can_edit), not the band's role -- but a
+    // super admin previewing the drawer as a lower role sees what that role would.
+    var cpRow = PERSPECTIVE && !isAdmin(role) ? null : componentsRow();
+    if (isAdmin(role) || cpRow) {
+      body.appendChild(section("Admins only", "admin", [peopleRow(), cpRow].concat(
         list(island("admin")).map(function (it) { return item(it, "admin"); }))) || el("span"));
     }
     var foot = el("div", { class: "ab-drawer-foot" });
@@ -1558,6 +1564,287 @@
   tourScrim.addEventListener("click", endTour);
   tourBtn.addEventListener("click", function (e) { e.stopPropagation(); startTour(); });
 
+  /* ------------------------------------------------- component settings ----
+     What the operator sets for the hosted components on THIS app -- not a person's choice
+     (that is Preferences) but the app's, for everyone who uses it: the agent's welcome and
+     suggested questions, the search bar's pre-text, which of the app's own controls come off
+     the band. The hub stores them per app (hub_core/components.py) and serves them beside the
+     components, with the SCHEMA each component's manifest declares:
+
+       GET  {hub}/components/props/<app>.json   {props, schema, can_edit, updated_at[, updated_by, history]}
+       POST {hub}/api/component-props           {app, props}  (CSRF; the hub re-decides who may)
+
+     The banner reads them on every page and HANDS THEM ON: window.HubComponentProps for a
+     component that loads after it, and a `hub:component-props` window event for one already
+     running ({app, props, preview}). No component reaches into another.
+
+     The editor is drawn FROM THE SCHEMA, so a component that declares a new property brings
+     its own control with no change here. It is offered only when the hub says this reader
+     can_edit (the adopter's HUB_COMPONENT_EDITOR decides; the band never does). A change is
+     PREVIEWED on this page at once -- the same event, marked preview -- and only Save makes it
+     everyone's; closing the box, Discard or Escape put the page back on what is saved. */
+  var CP_URL = (D.props || (HUB + "/components/props/" + encodeURIComponent(APP) + ".json"));
+  var CP_SAVE_URL = HUB + "/api/component-props";
+  var CP = null, CP_META = null, CP_ERR = "", CP_DRAFT = null, CP_TAB = "";
+  var CP_SAVE = { busy: false, note: "", error: "" };
+  var cpBox = el("div", { class: "ab-box ab-cp ab-surface", role: "dialog", "aria-modal": "true",
+                          "aria-label": "Component settings", hidden: true });
+  var cpFoot = null;
+  function cpClone(o) { return JSON.parse(JSON.stringify(o || {})); }
+  function cpSchema() { return list(CP_META && CP_META.schema); }
+  function cpVal(props, comp, f) {
+    var c = props && props[comp];
+    return c && c[f.key] !== undefined && c[f.key] !== null ? c[f.key] : f["default"];
+  }
+  function cpSame(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+  function cpDirty() { return !!CP_DRAFT && !cpSame(CP_DRAFT, CP || {}); }
+  function publishProps(props, preview) {
+    var detail = { app: APP, props: props || {}, preview: !!preview };
+    try { win.HubComponentProps = detail; } catch (e) {}
+    try { win.dispatchEvent(new CustomEvent("hub:component-props", { detail: detail })); } catch (e) {}
+  }
+  function cpUrl() { return CP_URL + (CP_URL.indexOf("?") >= 0 ? "&" : "?") + "component=banner"; }
+  function cpLoad(then) {
+    fetch(cpUrl(), { credentials: "same-origin", cache: "no-cache", headers: { Accept: "application/json" } })
+      .then(function (r) {
+        return r.json().then(function (b) {
+          if (!r.ok || !b || b.ok === false) throw new Error((b && b.reason) || "the hub answered HTTP " + r.status);
+          return b;
+        }, function () { throw new Error("the hub answered HTTP " + r.status + " without JSON"); });
+      })
+      .then(function (b) {
+        CP_META = b; CP_ERR = ""; CP = b.props || {};
+        if (!CP_DRAFT) publishProps(CP, false);
+        if (then) then();
+      })
+      .catch(function (err) {
+        // Said where it is looked for -- the editor -- and never on the band: the components
+        // keep their own defaults, which is exactly what an app with no settings looks like.
+        CP_ERR = String(err && err.message || err);
+        console.warn(LOG + "component settings could not be read: " + CP_ERR);
+        if (then) then();
+      });
+  }
+  function componentsRow() {
+    if (!(CP_META && CP_META.can_edit) || !cpSchema().length) return null;
+    var n = el("button", { class: "ab-row ab-tier-admin", type: "button",
+                           "data-ab-info": "What the shared components show on " + APP_NAME + " for everyone -- the agent's welcome, the search bar's pre-text, controls taken off the band. Previewed here before you save." }, [
+      icon("sliders", "ab-row-glyph"), el("span", { class: "ab-row-text" }, [el("span", { text: "Component settings" }),
+        el("small", { text: cpSchema().length + " component" + (cpSchema().length === 1 ? "" : "s") })])]);
+    n.addEventListener("click", function (e) { e.stopPropagation(); openComponentBox(n); });
+    return n;
+  }
+  function openComponentBox(anchor) {
+    closeOpen();
+    CP_DRAFT = cpClone(CP);
+    CP_SAVE = { busy: false, note: "", error: "" };
+    if (!CP_TAB && cpSchema().length) CP_TAB = cpSchema()[0].component;
+    placeUnderChrome(cpBox);
+    openAs("components", anchor, function () {
+      cpBox.hidden = true;
+      // An unsaved preview never outlives the person looking at it.
+      if (CP_DRAFT) { CP_DRAFT = null; publishProps(CP, false); }
+    }, true);
+    cpBox.hidden = false;
+    cpFill();
+    // Read afresh: somebody else may have saved since this page loaded, and a draft built on
+    // a stale record would put their change back.
+    cpLoad(function () {
+      if (!(openThing && openThing.kind === "components")) return;
+      if (!cpDirty()) CP_DRAFT = cpClone(CP);
+      cpFill();
+    });
+  }
+  function cpSet(comp, key, value) {
+    CP_DRAFT[comp] = CP_DRAFT[comp] || {};
+    CP_DRAFT[comp][key] = value;
+    CP_SAVE.note = ""; CP_SAVE.error = "";
+    publishProps(CP_DRAFT, true);
+    cpPaintFoot();
+  }
+  function cpField(comp, f) {
+    var value = cpVal(CP_DRAFT, comp, f), id = "ab-cp-" + comp + "-" + f.key;
+    var opts = list(f.options);
+    var control;
+    if (f.type === "choice" && opts.length <= 4) {
+      control = el("div", { class: "ab-seg", role: "radiogroup", "aria-labelledby": id + "-l" });
+      opts.forEach(function (o) {
+        var on = String(value) === String(o.value);
+        var b = el("button", { class: "ab-seg-b" + (on ? " ab-on" : ""), type: "button", role: "radio",
+                               "aria-checked": on ? "true" : "false", text: o.label || o.value });
+        b.addEventListener("click", function (e) {
+          e.stopPropagation();
+          Array.prototype.forEach.call(control.children, function (x) { x.classList.remove("ab-on"); x.setAttribute("aria-checked", "false"); });
+          b.classList.add("ab-on"); b.setAttribute("aria-checked", "true");
+          cpSet(comp, f.key, o.value);
+        });
+        control.appendChild(b);
+      });
+    } else if (f.type === "choice") {
+      control = el("select", { class: "ab-select", id: id });
+      opts.forEach(function (o) { control.appendChild(el("option", { value: o.value, selected: String(value) === String(o.value), text: o.label || o.value })); });
+      control.addEventListener("change", function () { cpSet(comp, f.key, control.value); });
+    } else if (f.type === "multi") {
+      control = el("div", { class: "ab-cp-multi", role: "group", "aria-labelledby": id + "-l" });
+      var picked = list(value).slice();
+      var all = el("button", { class: "ab-link", type: "button" });
+      var paintAll = function () { all.textContent = picked.length === opts.length ? "Clear all" : "Select all"; };
+      var boxes = opts.map(function (o) {
+        var cb = el("input", { type: "checkbox", checked: picked.indexOf(o.value) >= 0 });
+        cb.addEventListener("change", function () {
+          picked = opts.filter(function (x, i) { return boxes[i].firstChild.checked; }).map(function (x) { return x.value; });
+          cpSet(comp, f.key, picked); paintAll();
+        });
+        return el("label", { class: "ab-cp-check" }, [cb, el("span", { text: o.label || o.value })]);
+      });
+      // A select-all toggle, because "every one of them" is the common answer and a row of
+      // clicks to say it invites a missed box.
+      all.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var on = picked.length !== opts.length;
+        boxes.forEach(function (b) { b.firstChild.checked = on; });
+        picked = on ? opts.map(function (x) { return x.value; }) : [];
+        cpSet(comp, f.key, picked); paintAll();
+      });
+      paintAll();
+      boxes.forEach(function (b) { control.appendChild(b); });
+      control.appendChild(all);
+    } else {
+      // text and list. A list is one item per line; the count is shown against its cap so the
+      // hub's refusal of one item too many is never the first anyone hears of the limit.
+      var isList = f.type === "list", lines = parseInt(f.lines || (isList ? 4 : 1), 10) || 1;
+      var max = parseInt(f.max || 200, 10), maxItems = parseInt(f.max_items || 8, 10);
+      var input = lines > 1 || isList
+        ? el("textarea", { class: "ab-input ab-cp-text", id: id, rows: String(Math.max(lines, isList ? Math.min(maxItems, 6) : 2)) })
+        : el("input", { class: "ab-input ab-cp-text", id: id, type: "text", maxlength: String(max) });
+      input.value = isList ? list(value).join("\n") : String(value || "");
+      var count = el("small", { class: "ab-cp-count" });
+      var items = function () { return input.value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean); };
+      var paintCount = function () {
+        if (isList) {
+          var got = items(), long = got.filter(function (s) { return s.length > max; }).length;
+          count.textContent = got.length + " of " + maxItems + (long ? " · " + long + " longer than " + max + " characters" : "");
+          count.classList.toggle("ab-warn", got.length > maxItems || long > 0);
+        } else {
+          count.textContent = input.value.length + " of " + max;
+          count.classList.toggle("ab-warn", input.value.length > max);
+        }
+      };
+      input.addEventListener("input", function () { cpSet(comp, f.key, isList ? items() : input.value); paintCount(); });
+      paintCount();
+      control = el("div", { class: "ab-cp-textwrap" }, [input, count]);
+    }
+    var reset = null;
+    if (!cpSame(value, f["default"])) {
+      reset = el("button", { class: "ab-link", type: "button", text: "Back to default" });
+      reset.addEventListener("click", function (e) { e.stopPropagation(); cpSet(comp, f.key, cpClone(f["default"])); cpFill(); });
+    }
+    return el("div", { class: "ab-pref ab-cp-field" }, [
+      el("span", { class: "ab-pref-label", id: id + "-l" }, [el("label", { "for": id, text: f.label || f.key }), reset]),
+      f.hint ? el("small", { class: "ab-cp-hint", text: f.hint }) : null,
+      control]);
+  }
+  function cpWhen(v) { if (!v) return ""; var d = new Date(v); return isNaN(d.getTime()) ? String(v) : d.toLocaleString(); }
+  function cpPaintFoot() {
+    if (!cpFoot) return;
+    cpFoot.textContent = "";
+    var dirty = cpDirty();
+    var line = CP_SAVE.busy ? "Saving…"
+      : CP_SAVE.error ? "Not saved: " + CP_SAVE.error
+      : CP_SAVE.note ? CP_SAVE.note
+      : dirty ? "Unsaved — previewed on this page only. Save makes it what everyone using " + APP_NAME + " sees."
+      : CP_META && CP_META.updated_at ? "Last changed " + cpWhen(CP_META.updated_at) + (CP_META.updated_by ? " by " + CP_META.updated_by : "") + "."
+      : "Every setting is at its default.";
+    cpFoot.appendChild(el("span", { class: "ab-savebar-q" + (CP_SAVE.error ? " ab-warn" : ""), role: "status", "aria-live": "polite", text: line }));
+    var save = el("button", { class: "ab-primary", type: "button", text: "Save for everyone", disabled: !dirty || CP_SAVE.busy });
+    save.addEventListener("click", function (e) { e.stopPropagation(); cpSave(); });
+    var discard = el("button", { class: "ab-secondary", type: "button", text: "Discard", disabled: !dirty || CP_SAVE.busy });
+    discard.addEventListener("click", function (e) {
+      e.stopPropagation(); CP_DRAFT = cpClone(CP); CP_SAVE = { busy: false, note: "", error: "" };
+      publishProps(CP, false); cpFill();
+    });
+    cpFoot.appendChild(save); cpFoot.appendChild(discard);
+  }
+  function cpFill() {
+    cpBox.textContent = "";
+    var close = bandBtn("x", "Close");
+    close.addEventListener("click", function (e) { e.stopPropagation(); closeOpen(); });
+    cpBox.appendChild(el("div", { class: "ab-box-head" }, [el("div", null, [
+      el("strong", { text: "Component settings for " + APP_NAME }),
+      el("small", { text: "For everyone using " + APP_NAME + ", not just you. Your own look is in Preferences." })]), close]));
+    var body = el("div", { class: "ab-box-body" });
+    var sections = cpSchema();
+    if (CP_ERR && !CP_META) {
+      body.appendChild(el("p", { class: "ab-note ab-warn", text: "The hub's settings for this app could not be read: " + CP_ERR + "." }));
+    } else if (!CP_META) {
+      body.appendChild(el("p", { class: "ab-note", text: "Reading this app's settings…" }));
+    } else if (!sections.length) {
+      body.appendChild(el("p", { class: "ab-note", text: "No hosted component declares a setting yet." }));
+    } else {
+      if (!sections.some(function (s) { return s.component === CP_TAB; })) CP_TAB = sections[0].component;
+      var tabs = el("div", { class: "ab-cp-tabs", role: "tablist", "aria-label": "Components" });
+      sections.forEach(function (s, i) {
+        var on = s.component === CP_TAB;
+        var t = el("button", { class: "ab-cp-tab" + (on ? " ab-on" : ""), type: "button", role: "tab",
+                               "aria-selected": on ? "true" : "false", tabindex: on ? "0" : "-1", text: s.title || s.component });
+        t.addEventListener("click", function (e) { e.stopPropagation(); CP_TAB = s.component; cpFill(); });
+        t.addEventListener("keydown", function (e) {
+          var step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+          if (!step) return;
+          e.preventDefault();
+          CP_TAB = sections[(i + step + sections.length) % sections.length].component; cpFill();
+          var next = cpBox.querySelector(".ab-cp-tab.ab-on"); if (next) next.focus();
+        });
+        tabs.appendChild(t);
+      });
+      body.appendChild(tabs);
+      var sec = sections.filter(function (s) { return s.component === CP_TAB; })[0];
+      var panel = el("div", { class: "ab-cp-panel", role: "tabpanel", "aria-label": sec.title || sec.component });
+      list(sec.fields).forEach(function (f) { if (f && f.key) panel.appendChild(cpField(sec.component, f)); });
+      body.appendChild(panel);
+      var hist = list(CP_META.history).slice().reverse();
+      if (hist.length) {
+        body.appendChild(el("details", { class: "ab-cp-hist" }, [el("summary", { text: "Recent changes (" + hist.length + ")" })].concat(
+          hist.map(function (h) {
+            return el("p", { class: "ab-pp-ev" }, [el("small", { text: cpWhen(h.at) }),
+              el("span", { text: " " + (h.by || "someone") + " changed " + list(h.changed).join(", ") })]);
+          }))));
+      }
+    }
+    cpBox.appendChild(body);
+    cpFoot = el("div", { class: "ab-savebar ab-cp-foot", role: "group", "aria-label": "Save component settings" });
+    cpBox.appendChild(cpFoot);
+    cpPaintFoot();
+  }
+  function cpSave() {
+    if (!CP_DRAFT || CP_SAVE.busy) return;
+    CP_SAVE = { busy: true, note: "", error: "" }; cpPaintFoot();
+    fetch(CP_SAVE_URL, { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "X-CSRFToken": csrf() },
+      body: JSON.stringify({ app: APP, props: CP_DRAFT }) })
+      .then(function (r) {
+        return r.json().then(function (b) { return { r: r, b: b || {} }; }, function () { return { r: r, b: {} }; });
+      })
+      .then(function (res) {
+        var d = res.b.data;
+        if (!res.r.ok || !d) {
+          var err = (list(res.b.errors)[0] || {}).msg;
+          throw new Error(err || (res.r.status === 404 ? "this page has no route to save component settings (HTTP 404)" : "the hub answered HTTP " + res.r.status));
+        }
+        CP = d.props || {};
+        CP_META = CP_META || {};
+        CP_META.props = CP; CP_META.updated_at = d.updated_at; CP_META.updated_by = d.updated_by; CP_META.history = d.history;
+        CP_DRAFT = cpClone(CP);
+        publishProps(CP, false);
+        var refused = list(d.refused);
+        CP_SAVE = { busy: false, error: "", note: refused.length
+          ? "Saved, except " + refused.join(", ") + " (not an allowed value — the rest is live)."
+          : "Saved — everyone using " + APP_NAME + " sees this on their next page." };
+        cpFill();
+      })
+      .catch(function (err) { CP_SAVE = { busy: false, note: "", error: String(err && err.message || err) }; cpPaintFoot(); });
+  }
+
   /* The read-me is a dialog that is HIDDEN until opened -- [hidden] is enforced with
      !important in the stylesheet, because a transparent box that is merely invisible still
      swallows every click and wheel over the page beneath it. */
@@ -1618,13 +1905,14 @@
      Every body-appended surface is created ABOVE this line and appended HERE, once: appending
      a surface before its declaration runs against `undefined` (var hoists the name, not the
      value), throws, and silently kills every line after it at load. */
-  [scrim, chip, info, appsPop, drawer, markMenu, fileInput, crop, ppBox, tourScrim, tourRing, tourCard, readBox]
+  [scrim, chip, info, appsPop, drawer, markMenu, fileInput, crop, ppBox, cpBox, tourScrim, tourRing, tourCard, readBox]
     .forEach(function (n) { doc.body.appendChild(n); });
   applyPrefs();
   slotSync();
   buildNav();
   publishChrome();
   loadProfile();
+  cpLoad(function () { if (openThing && openThing.kind === "drawer") fillDrawer(); });
   if (accessUrl() && isAdmin(realRole())) accessLoad(function () { if (openThing && openThing.kind === "drawer") fillDrawer(); });
   win.addEventListener("load", function () { slotSync(); publishChrome(); });
   mount.setAttribute("data-ab-ready", "1");

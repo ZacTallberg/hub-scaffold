@@ -93,6 +93,16 @@ def reach(person: str) -> dict:
     return {"budget-app": role, "reporting": "viewer", "timesheets": "member"}
 
 
+def may_configure_components(request, slug: str) -> bool:
+    """The ``HUB_COMPONENT_EDITOR`` seam for the example: a super admin on the demo roster may
+    change a demo app's component properties from the banner. A real adopter answers from its
+    own roster (per app) behind its own sign-in. Nothing but DEBUG, and only the demo apps."""
+    if not getattr(settings, "DEBUG", False) or slug not in APPS:
+        return False
+    person = viewers.person(request)
+    return bool(person) and _role_of(_load(), person) == "super-admin"
+
+
 def _label(role: str) -> str:
     return next((r["label"] for r in ROLES if r["value"] == role), role)
 
