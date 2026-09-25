@@ -1245,6 +1245,7 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "questions": asks, "errors_unclaimed": error_unclaimed,
            "hub_client": hub_client_version()}
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
+                       ("retired", lambda: _presence.retired_rows(hub_app.HUB_DIR)),
                        ("credentials", lambda: agent_auth.CredentialRegistry(
                            hub_app.HUB_DIR).list_public())):
         try:

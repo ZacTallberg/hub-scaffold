@@ -139,6 +139,8 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # relative to HUB_WORK_ROOT. A seat reports the same name via HUB_ARTIFACTS=name=path. The
 # client itself and CHARTER-CORE.md (when present) are always published.
 # HUB_DISTRIBUTED_ARTIFACTS = {"agent-profile": "config/agent-settings.json"}
+# Optional: the one interpreter line seats must run ("major.minor"). Unset = not graded.
+# HUB_REQUIRED_PYTHON = "3.13"
 
 # Presence heartbeat interval (env HUB_PRESENCE_INTERVAL_S, default 60 s, 5..300). Every beacon
 # is a request the hub serves; online/offline are derived from the interval, so a slower beat

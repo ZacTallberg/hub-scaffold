@@ -118,6 +118,7 @@
       "decided_at": { "type": "string" },
       "then": { "enum": ["file", "close"] },
       "followup": { "$ref": "hub:common#/$defs/idref" } }, "required": ["text", "decided_by", "decided_at", "then"] },
+    "needs_person": { "type": "object", "additionalProperties": false, "description": "Set by an unattended launcher that gave up on this task at its run cap: a PERSON must take it from here. The attention list delivers it to the task's owner (at once for P0) and names the pushed commit when there is one, because the queue alone shows it as ordinary todo.", "properties": { "reason": { "type": "string", "maxLength": 600 }, "sha": { "type": "string", "maxLength": 40 }, "at": { "type": "string" }, "by": { "type": "string", "maxLength": 120 } } },
     "auto_close": { "type": "object", "additionalProperties": false, "description": "What a verified deploy's automatic close did with this task: closed, or refused and why — so a task waiting on a close that cannot fire says so.", "properties": {
       "state": { "enum": ["closed", "refused"] },
       "why": { "type": "string", "maxLength": 200 },
