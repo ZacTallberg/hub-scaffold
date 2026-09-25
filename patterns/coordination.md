@@ -52,7 +52,11 @@ reaches them, and the split for its kind.
 
 1. **A worktree or scratch path is not a project, and its folder name is not a subject.** A console
    reviewing code in a throwaway worktree named after a feature was paired "both on <feature>" with
-   the console actually building it.
+   the console actually building it. But a worktree's FILES are the repository's files: a file is
+   compared as (project, path inside the repository), the worktree's project read from the console
+   standing in it, so `hub/x.py` edited in the main checkout and in a worktree of the same
+   repository is ONE file and pairs as `file` (before this, worktree paths were dropped and two
+   consoles editing one file from two checkouts never collided).
 2. **Words the hub writes into a focus are a status, not a subject.** Two consoles that had each just
    "finished <id>" of unrelated tasks were paired "both on finished".
 3. **One person's own windows in one repository is how they work.** Only the same FILE or TASK pairs

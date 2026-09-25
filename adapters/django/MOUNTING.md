@@ -136,6 +136,9 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # or pipeline step presents; with it unset the ingest refuses everything. From the environment.
 # HUB_CI_WEBHOOK_SECRET = os.environ.get("HUB_CI_WEBHOOK_SECRET", "")
 # HUB_CI_IGNORE_JOBS = "flaky_optional_job"   # comma-separated job names never recorded
+# HUB_CI_DEPLOY_JOB_CLOSES = "deploy"  # opt-in: a GREEN job with one of these name prefixes on the
+#                                       # default branch closes tasks like a release record would,
+#                                       # for a project whose deploy never posts /hub/api/deploy
 
 # Optional: extra files seats are graded against on /hub/distribution.json, {name: path}
 # relative to HUB_WORK_ROOT. A seat reports the same name via HUB_ARTIFACTS=name=path. The
@@ -143,6 +146,15 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # HUB_DISTRIBUTED_ARTIFACTS = {"agent-profile": "config/agent-settings.json"}
 # Optional: the one interpreter line seats must run ("major.minor"). Unset = not graded.
 # HUB_REQUIRED_PYTHON = "3.13"
+# Artifacts released by moving a PIN instead of publishing bytes, {name: version}. A seat reports
+# name=@<running>, name.pin=@<pin received>, name.inst=@<install result> via HUB_ARTIFACTS.
+# HUB_DISTRIBUTION_PINS = {"companion-tool": "1a2b3c4d5e6f"}
+# Knowledge attached to an EVENT (task start, problem claim, doctor, CI problem items) is only
+# a record scored at least this close to the event's subject; nothing clears it, nothing attached.
+# HUB_EVENT_KNOWLEDGE_CUT = 0.48
+# A message older than this is delivered marked LATE, saying what became of its subject
+# (env HUB_LATE_MESSAGE_S, default 6 h). The prompt hook's relevance cut for meaning-ranked
+# rows is the client's env HUB_PROMPT_RELEVANCE_CUT (0.48) / HUB_PROMPT_RELEVANCE_MAX (6).
 
 # Presence heartbeat interval (env HUB_PRESENCE_INTERVAL_S, default 60 s, 5..300). Every beacon
 # is a request the hub serves; online/offline are derived from the interval, so a slower beat

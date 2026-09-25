@@ -148,6 +148,10 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
     now = now or time.time()
     apps = apps or {}
     live = read_liveness(hub_dir)
+    # The whole retained log, folded into the durable store before compaction can take it: an
+    # app that proved its forwarder keeps reading "quiet since X", never "never". Throttled and
+    # incremental inside; never raises.
+    errorlog.backfill_sources_seen(hub_dir, now=now)
     families = errorlog.read_sources_seen(hub_dir)
     err_rows, _meta = errorlog.read(hub_dir, limit=errorlog.KEEP_ROWS)
     probs, _pmeta = _problems.read(hub_dir, state, include="all", now=now)

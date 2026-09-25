@@ -376,7 +376,13 @@ def _rank_by_wording(rows, focus, key, why_not):
                      "reason": "ranked by the focus's WORDS, not its meaning (%s)" % reason}
 
 
-def memory_index(state, key, *, cap=40, focus="", full=0):
+#: A restated record ranks above an equally close one learned once: +REINFORCED_BOOST per
+#: restatement, capped at REINFORCED_CAP. `score` stays the raw cosine a reader cuts on.
+REINFORCED_BOOST = 0.01
+REINFORCED_CAP = 5
+
+
+def memory_index(state, key, *, cap=40, focus="", full=0, peer=""):
     """(rows, total, rank_meta): the knowledge index, ranked by the console's focus when it can
     be, in standing order with the stated reason when it cannot."""
     with _PROMPT_CORPUS_LOCK:
@@ -398,9 +404,16 @@ def memory_index(state, key, *, cap=40, focus="", full=0):
                 ordered, meta = semantic.rank_by_focus([r["id"] for r in rows], conn, focus)
             finally:
                 conn.close()
+            meta = dict(meta)
+            scores = meta.pop("scores", None) or {}
             if meta.get("ranked"):
                 at = {r["id"]: r for r in rows}
-                rows = [at[i] for i in ordered if i in at]
+                rows = [dict(at[i], _score=scores.get(i)) for i in ordered if i in at]
+                boosted = [(r["_score"] if r.get("_score") is not None else -1.0)
+                           + REINFORCED_BOOST * min(int(r.get("reinforced") or 0), REINFORCED_CAP)
+                           for r in rows]
+                rows = [r for _b, _n, r in sorted(zip(boosted, range(len(rows)), rows),
+                                                   key=lambda t: (-t[0], t[1]))]
                 # Whether THIS request paid for the embed or read a warm cache.
                 meta["focus_cache"] = "hit" if warm.get("hit") else "embedded-now"
             elif not ok and warm.get("reason"):
@@ -409,15 +422,37 @@ def memory_index(state, key, *, cap=40, focus="", full=0):
             meta = {"ranked": False, "reason": "%s: %s" % (type(exc).__name__, exc)}
         if not meta.get("ranked"):
             rows, meta = _rank_by_wording(rows, focus, key, meta)
+    # PEER SIMILARITY: how close a peer's message is to what THIS console is doing, so a
+    # client re-ranks only when the two diverge. Same embedder, same bounded wait; any failure
+    # is None with its reason, never a guess.
+    peer = " ".join(str(peer or "").split())[:400]
+    if peer:
+        if not focus:
+            meta["peer_similarity"], meta["peer_reason"] = None, "no focus to compare against"
+        else:
+            try:
+                conn = semantic.connect(hub_app.HUB_DIR)
+                try:
+                    sim, why = semantic.pair_similarity(conn, focus, peer)
+                finally:
+                    conn.close()
+            except Exception as exc:                           # noqa: BLE001
+                sim, why = None, "%s: %s" % (type(exc).__name__, exc)
+            meta["peer_similarity"] = sim
+            if why:
+                meta["peer_reason"] = why
     out = []
     now = datetime.now(timezone.utc)
     for i, r in enumerate(rows[:cap]):
-        row = {k: r[k] for k in ("id", "type", "title", "tier", "verified_as_of", "verify") if r.get(k)}
+        row = {k: r[k] for k in ("id", "type", "title", "tier", "verified_as_of", "verify",
+                                 "reinforced") if r.get(k)}
         # The record's ONE label (STATE / UNVERIFIED / CHECK FAILED), identical on search and the
         # feed; the prompt block prints it instead of a bare date.
         label = staleness.render_inputs(r.get("_label"), now=now)
         if label:
             row["label"] = label
+        if r.get("_score") is not None:
+            row["score"] = r["_score"]
         if i < full:
             rule = knowledge.clip(r.get("rule"), MEMORY_RULE_CHARS)
             why = knowledge.clip(r.get("why"), MEMORY_WHY_CHARS)
@@ -486,10 +521,75 @@ def guidance_json(request):
     except ValueError:
         cap, full = 40, 0
     state, key = _state_and_key()
-    memory, total, rank = memory_index(state, key, cap=cap, focus=focus, full=full)
+    # ?peer=<a peer message's text> answers memory_rank.peer_similarity (cosine against focus).
+    peer = (request.GET.get("peer") or "").strip()[:400]
+    memory, total, rank = memory_index(state, key, cap=cap, focus=focus, full=full, peer=peer)
     return JsonResponse({"memory": memory, "memory_total": total, "memory_rank": rank,
                          "live": _live(state, key, agent),
                          "metadata": {"agent": agent or None, "head": {"seq": key[1], "hash": key[2]}}})
+
+
+# ── knowledge attached to an EVENT ──
+#
+# The per-prompt index ranks the corpus by what a console is doing. An EVENT -- claiming a
+# problem, starting a task, a CI failure landing, asking doctor why a service is not healthy --
+# has a sharper subject than any prompt, and it is exactly when a record the board already paid
+# for saves the next hour. So those responses carry the top records for THAT subject, by the
+# same cosine (`score`) the index uses, and only above a cut-off: when nothing clears it,
+# nothing is attached (a weak neighbour is noise; on the instance this was lifted from, nearest
+# neighbours of a failed command's text were relevant about 4 times in 30).
+
+def _cut_setting(name, default):
+    try:
+        import os
+        return float(hub_app._dj_setting(name, None) or os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+EVENT_KNOWLEDGE_K = 3
+_EVK_CACHE: dict = {}
+_EVK_LOCK = threading.Lock()
+_EVK_TTL_S = 3600
+
+
+def event_knowledge(subject: str, *, k: int = EVENT_KNOWLEDGE_K, cut: float | None = None) -> list:
+    """``[{id, type, title, score, rule?}]`` -- at most ``k`` records whose cosine to
+    ``subject`` is at least the cut (HUB_EVENT_KNOWLEDGE_CUT, default 0.48); [] when none clears
+    it, when there is no embedder, or on any failure. Cached per subject for an hour, so a frame
+    re-delivered every wait cycle does not re-rank. Never raises."""
+    subject = " ".join(str(subject or "").split())[:400]
+    if not subject:
+        return []
+    cut = _cut_setting("HUB_EVENT_KNOWLEDGE_CUT", 0.48) if cut is None else cut
+    now = time.time()
+    with _EVK_LOCK:
+        hit = _EVK_CACHE.get(subject)
+    if hit and now - hit[0] < _EVK_TTL_S:
+        return copy.deepcopy(hit[1])
+    out = []
+    try:
+        state, key = _state_and_key()
+        rows, _total, meta = memory_index(state, key, cap=max(k * 4, 12), focus=subject, full=k * 4)
+        if meta.get("ranked") and meta.get("by") != "wording":
+            for r in rows:
+                sc = r.get("score")
+                if sc is None or sc < cut:
+                    continue
+                item = {"id": r.get("id"), "type": r.get("type"), "title": r.get("title"),
+                        "score": sc}
+                if r.get("rule") and r["rule"] != r.get("title"):
+                    item["rule"] = knowledge.clip(r["rule"], 300)
+                out.append(item)
+                if len(out) >= k:
+                    break
+    except Exception:                                          # noqa: BLE001 - a hint, never a failure
+        return []
+    with _EVK_LOCK:
+        if len(_EVK_CACHE) > 500:
+            _EVK_CACHE.clear()
+        _EVK_CACHE[subject] = (now, out)
+    return copy.deepcopy(out)
 
 
 # ── /hub/knowledge/since: the append-only feed a machine mirrors and ranks locally ──

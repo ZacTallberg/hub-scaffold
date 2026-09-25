@@ -643,13 +643,33 @@ def rank_by_focus(ids, conn, focus_text) -> tuple:
                     key=lambda p: (-p[0], p[1]))
     ordered = [e for _s, e in scored] + [e for e in ids if e not in vectors]
     meta = {"ranked": True, "compared": len(vectors), "unvectored": len(ids) - len(vectors),
-            "top_similarity": round(scored[0][0], 4) if scored else None}
+            "top_similarity": round(scored[0][0], 4) if scored else None,
+            # The raw cosine per record, so a reader can cut by RELEVANCE instead of filling a
+            # budget with whatever ranked next. Callers take what they render and drop the rest.
+            "scores": {e: round(sc, 4) for sc, e in scored}}
     if memo is not None:
         with _RANK_LOCK:
             if len(_RANK_MEMO) >= 256:
                 _RANK_MEMO.clear()
             _RANK_MEMO[memo] = (list(ordered), dict(meta))
     return ordered, meta
+
+
+def pair_similarity(conn, a_text: str, b_text: str, *, timeout: float = FOCUS_WARM_TIMEOUT_S) -> tuple:
+    """``(cosine rounded to 4dp, reason)`` between two texts through the focus cache: each is
+    embedded at most once (ensure_focus) and read back. On any failure ``(None, reason)`` --
+    never a guess."""
+    try:
+        for text in (a_text, b_text):
+            ok, meta = ensure_focus(conn, text, timeout=timeout)
+            if not ok:
+                return None, "could not embed: %s" % (meta.get("reason") or "unknown")
+        va, vb = cached_focus(conn, a_text), cached_focus(conn, b_text)
+        if va is None or vb is None:
+            return None, "no cached vector"
+        return round(cosine(va, vb), 4), ""
+    except Exception as exc:                                 # noqa: BLE001
+        return None, "%s: %s" % (type(exc).__name__, str(exc)[:120])
 
 
 #: What a caller waits for the semantic overlap half when it DOES run inline (the adjudication
