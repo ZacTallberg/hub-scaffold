@@ -170,6 +170,48 @@ TOOLS = [
     {"name": "held_queue",
      "description": "The promotion queue: every open hold, oldest first, with its age and urgency.",
      "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}}},
+    {"name": "submit_handoff",
+     "description": "Hand commits this machine cannot push to a machine that can: a git bundle "
+                    "(base64 of `git bundle create f origin/<branch>..HEAD`) for a task. The "
+                    "origin must be on a host the operator allows; a publisher rebases, pushes "
+                    "and puts a `pushed` checkpoint with the sha on the task.",
+     "inputSchema": {"type": "object", "properties": {
+         "task": {"type": "string"}, "project": {"type": "string"},
+         "remote": {"type": "string"}, "branch": {"type": "string"},
+         "base": {"type": "string"}, "head": {"type": "string"},
+         "bundle_b64": {"type": "string"}, "commits": {"type": "integer"},
+         "subject": {"type": "string"}, "note": {"type": "string"},
+         "idem_key": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["task", "project", "remote", "base", "head", "bundle_b64"]}},
+    {"name": "handoff_queue",
+     "description": "The publish hand-off queue: open hand-offs oldest first (status=all|"
+                    "published|failed for history, task=<id> for one task).",
+     "inputSchema": {"type": "object", "properties": {
+         "status": {"type": "string"}, "task": {"type": "string"}}}},
+    {"name": "claim_handoff",
+     "description": "Lease the oldest open hand-off (or id) to THIS publisher: a token and a "
+                    "fence; only the newest claim may fetch the bundle or report.",
+     "inputSchema": {"type": "object", "properties": {
+         "machine": {"type": "string"}, "id": {"type": "string"},
+         "ttl_s": {"type": "integer"}, "agent": {"type": "string"}},
+         "required": ["machine"]}},
+    {"name": "fetch_handoff_bundle",
+     "description": "The leased hand-off's bundle as base64, for the lease holder only.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "token": {"type": "string"}, "fence": {"type": "integer"},
+         "agent": {"type": "string"}},
+         "required": ["id", "token", "fence"]}},
+    {"name": "report_handoff",
+     "description": "Report a leased hand-off: published (pushed_sha, the full sha now on the "
+                    "branch -- never forced), failed (reason, conflicts), or released (reason: "
+                    "this machine cannot push either; another publisher takes it).",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "token": {"type": "string"}, "fence": {"type": "integer"},
+         "outcome": {"type": "string", "enum": ["published", "failed", "released"]},
+         "pushed_sha": {"type": "string"}, "reason": {"type": "string"},
+         "conflicts": {"type": "array", "items": {"type": "string"}},
+         "note": {"type": "string"}, "machine": {"type": "string"}, "agent": {"type": "string"}},
+         "required": ["id", "token", "fence", "outcome"]}},
     {"name": "claim_item",
      "description": "Claim a non-task item (a question id or an error fingerprint) for ONE machine "
                     "so two machines never work the same thing; the same machine re-claims "
@@ -494,6 +536,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "pipeline": {"type": "string"}, "job": {"type": "string"},
          "project": {"type": "string"}, "limit": {"type": "integer"}}}},
+    {"name": "ci_status",
+     "description": "What CI last said about one commit: found, status, active (still running), "
+                    "project, pipeline. No delivery body; an ordinary member read.",
+     "inputSchema": {"type": "object", "properties": {"sha": {"type": "string"}},
+                     "required": ["sha"]}},
     {"name": "list_collection",
      "description": "Every row of one board collection (task, adr, feat, gap, cap, deploy, "
                     "note, directive, ack, run). The board snapshot may carry a large collection "
@@ -530,6 +577,36 @@ TOOLS = [
          "relates_to": {"type": "array", "items": {"type": "string"}},
          "expected_version": {"type": "integer"}},
          "required": ["kind", "agent", "title"]}},
+    {"name": "attest_record",
+     "description": "Attach the check that answers a knowledge record's claim NOW (verify: a "
+                    "command or URL) and/or re-date it (verified_as_of YYYY-MM-DD), without "
+                    "rewriting the record. A state claim with no check is labelled UNVERIFIED.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "id": {"type": "string"}, "verify": {"type": "string"},
+         "verified_as_of": {"type": "string"}},
+         "required": ["agent", "id"]}},
+    {"name": "propose_knowledge",
+     "description": "Queue a candidate lesson (distilled from a session) for a PERSON to adopt or "
+                    "decline. Never served by any knowledge surface until adopted.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"},
+         "items": {"type": "array", "items": {"type": "object", "properties": {
+             "id": {"type": "string"}, "text": {"type": "string"}, "kind": {"type": "string"},
+             "importance": {"type": "integer"}, "project": {"type": "string"}},
+             "required": ["id", "text"]}}},
+         "required": ["agent", "items"]}},
+    {"name": "knowledge_candidates",
+     "description": "The review-first queue of candidate lessons (status open|adopted|declined|all).",
+     "inputSchema": {"type": "object", "properties": {
+         "status": {"enum": ["open", "adopted", "declined", "all"]}}}},
+    {"name": "decide_candidate",
+     "description": "Adopt a knowledge candidate as a lesson or finding, or decline it with a "
+                    "reason. A decider's credential only (HUB_DECIDERS); agents are refused.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "id": {"type": "string"},
+         "decision": {"enum": ["adopt", "decline"]}, "as": {"enum": ["lesson", "finding"]},
+         "note": {"type": "string"}},
+         "required": ["agent", "id", "decision"]}},
     {"name": "record_gap",
      "description": "Record a GAP — a named deficiency someone could own and close, with a severity.",
      "inputSchema": {"type": "object", "properties": {
@@ -922,6 +999,28 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/held.json",
                              {"repo": args["repo"]} if args.get("repo") else {},
                              auth_headers, method="get")
+    elif name == "submit_handoff":
+        payload = {k: args[k] for k in ("task", "project", "remote", "branch", "base", "head",
+                                        "bundle_b64", "commits", "subject", "note", "idem_key",
+                                        "agent") if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff", payload, auth_headers)
+    elif name == "handoff_queue":
+        status, body = _seam("/hub/handoffs.json",
+                             {k: args[k] for k in ("status", "task") if args.get(k)},
+                             auth_headers, method="get")
+    elif name == "claim_handoff":
+        payload = {k: args[k] for k in ("machine", "id", "ttl_s", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff/claim", payload, auth_headers)
+    elif name == "fetch_handoff_bundle":
+        payload = {k: args[k] for k in ("id", "token", "fence", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff/bundle", payload, auth_headers)
+    elif name == "report_handoff":
+        payload = {k: args[k] for k in ("id", "token", "fence", "outcome", "pushed_sha", "reason",
+                                        "conflicts", "note", "machine", "agent")
+                   if args.get(k) not in (None, "")}
+        status, body = _seam("/hub/api/handoff/result", payload, auth_headers)
     elif name == "claim_item":
         payload = {k: args[k] for k in ("item", "machine", "release", "agent", "session")
                    if args.get(k) not in (None, "")}
@@ -1078,6 +1177,9 @@ def _call_tool(name, args, auth_headers):
     elif name == "ci_events":
         query = {k: args[k] for k in ("pipeline", "job", "project", "limit") if args.get(k)}
         status, body = _seam("/hub/ci-events.json", query, auth_headers, method="get")
+    elif name == "ci_status":
+        status, body = _seam("/hub/ci-status.json", {"sha": args.get("sha") or ""}, auth_headers,
+                             method="get")
     elif name == "record_entity":
         fields = dict(args.get("fields") or {})
         if args.get("agent"):
@@ -1111,6 +1213,18 @@ def _call_tool(name, args, auth_headers):
         else:
             payload = {k: v for k, v in args.items() if k != "kind" and v not in (None, "")}
             status, body = _seam("/hub/api/" + kind, payload, auth_headers)
+    elif name == "attest_record":
+        status, body = _seam("/hub/api/attest", {k: v for k, v in args.items() if v not in (None, "")},
+                             auth_headers)
+    elif name == "propose_knowledge":
+        status, body = _seam("/hub/api/knowledge-candidates",
+                             {k: v for k, v in args.items() if v not in (None, "")}, auth_headers)
+    elif name == "knowledge_candidates":
+        status, body = _seam("/hub/knowledge-candidates.json",
+                             {"status": str(args.get("status") or "open")}, auth_headers, method="get")
+    elif name == "decide_candidate":
+        status, body = _seam("/hub/api/knowledge-candidate/decide",
+                             {k: v for k, v in args.items() if v not in (None, "")}, auth_headers)
     elif name == "record_gap":
         from hub_core.client_knowledge import gap_text
         payload = {k: v for k, v in args.items() if v not in (None, "") and k != "note"}

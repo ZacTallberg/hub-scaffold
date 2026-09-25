@@ -121,6 +121,8 @@ Task lifecycle beyond the loop::
     python -m hub_core.client attention                                # what needs a person, and the fix
     python -m hub_core.client consoles --session 1a2b3c4d              # live consoles + crossovers
     python -m hub_core.client feed billing                             # one project's task feed
+    python -m hub_core.client handoff proj:task:0042                   # push refused here? hand it off
+    python -m hub_core.client publish-handoff --machine build-01       # push one with THIS machine
 
 Every call sends X-Hub-Client-Version (a digest of this client). The hub shows seats running a
 different client than it serves; HUB_CLIENT_SELF_UPDATE=1 lets a stale client fast-forward its
@@ -137,6 +139,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import random
 import re
 import sys
@@ -973,6 +976,11 @@ def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, 
         "X-Hub-Session-Kind": os.environ.get("HUB_SESSION_KIND", ""),
         "X-Hub-Run": os.environ.get("HUB_RUN_ID", ""),
         "X-Hub-Subject": os.environ.get("HUB_SUBJECT", ""),
+        # Facts about the computer the distribution view grades: the interpreter this client
+        # runs on, and -- when the adopter's push probe (patterns/machine-push-identity.md)
+        # exports it -- whether this machine can push (yes | no | unknown).
+        "X-Hub-Python": platform.python_version(),
+        "X-Hub-Push": os.environ.get("HUB_PUSH_STATE", ""),
     }
     if arguments is not None:
         if getattr(arguments, "machine", None):
@@ -1827,6 +1835,267 @@ def _payload_abandon(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]
 def _run_held(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
     return _get(base, "held.json" + (f"?repo={quote(arguments.repo)}" if arguments.repo else ""))
+
+
+# ---- the publish hand-off (hub_core/handoff.py): commits a machine cannot push, pushed by one
+# that can. Both verbs run NOW or fail loud -- a multi-megabyte bundle is never queued to replay.
+
+HANDOFF_MAX_BYTES = 20 * 1024 * 1024       # the hub's ceiling (hub_core.handoff.MAX_BUNDLE_BYTES)
+HANDOFF_UPLOAD_TIMEOUT_S = 180
+
+
+def _git_env() -> dict[str, str]:
+    """git that never waits on a person: no terminal prompt, no credential-manager dialog, and
+    ssh in batch mode so an unknown host key or a passphrase is an immediate, named failure."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=20")
+    return env
+
+
+def _git(args: list[str], cwd: str | None = None, timeout: int = 300,
+         env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    """(rc, stdout, stderr) of one non-interactive git call. Decoded as UTF-8 with replacement:
+    a server banner in another encoding otherwise raises in the reader thread and the call
+    comes back with an EMPTY stderr, so the refusal it carried is lost."""
+    import subprocess
+    try:
+        run = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=timeout,
+                             env=env or _git_env(), stdin=subprocess.DEVNULL)
+        return run.returncode, (run.stdout or "").strip(), (run.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out after %ds" % timeout
+    except OSError as error:
+        return 127, "", "git could not run: %s" % error
+
+
+def _git_refusal(stderr: str, fallback: str) -> str:
+    """The line of git's output that NAMES the failure (a denial, a fatal, a could-not), never
+    the generic trailer and never a bare "fetch failed" when git said why."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    named = [ln for ln in lines if re.search(r"(?i)denied|fatal|could not|error|refused|rejected|"
+                                             r"timed out|not found|unable", ln)]
+    return ((named or lines or [fallback])[0])[:200]
+
+
+def _strip_url_credentials(url: str) -> str:
+    return re.sub(r"^([a-z][a-z0-9+.\-]*://)[^/@]*@", r"\1", str(url or "").strip(), flags=re.I)
+
+
+def _remote_project(url: str) -> str:
+    """The repository path an origin URL names (team/budget-app), '' when unreadable."""
+    url = str(url or "").strip()
+    m = (re.match(r"^file://(?:localhost)?(/.+?)(?:\.git)?/?$", url, re.I)
+         or re.match(r"^[a-z][a-z0-9+.\-]*://(?:[^/@]*@)?[^/:]+(?::\d+)?/(.+?)(?:\.git)?/?$",
+                     url, re.I)
+         or re.match(r"^(?:[^@/]+@)?[^:/]+:(?!//)(.+?)(?:\.git)?/?$", url))
+    if not m:
+        return ""
+    path = m.group(1).strip("/")
+    if url.lower().startswith("file://"):
+        path = "/".join(path.split("/")[-2:])      # a filesystem path: the project is its tail
+    return path
+
+
+def _run_handoff(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Hand this checkout's unpushed commits to a machine that CAN push.
+
+    For a push refused for auth (a per-machine key the forge never registered, a credential
+    manager that cannot prompt unattended): the commits between origin/<branch> and HEAD go to
+    the hub as a git bundle; a publisher rebases them onto the current branch, pushes, and puts
+    the pushed sha on the task. Never stop at a local patch file -- a patch on one disk is work
+    nobody else can reach."""
+    import base64
+    import hashlib
+    import tempfile
+    task = str(arguments.task_id or "").strip()
+    where = arguments.repo or os.getcwd()
+    if not os.path.isdir(where):
+        raise ValueError("handoff --repo is the checkout DIRECTORY holding the commits; %r is not "
+                         "a directory" % where)
+    code, top, err = _git(["rev-parse", "--show-toplevel"], where, 30)
+    if code or not top:
+        raise ValueError("handoff: %s is not inside a git checkout (%s)" % (where, err[:200]))
+    code, remote, _err = _git(["remote", "get-url", "origin"], top, 30)
+    remote = _strip_url_credentials(remote)       # a credential never leaves in a URL
+    project = arguments.project or _remote_project(remote)
+    if code or not remote or not project:
+        raise ValueError("handoff: this checkout has no origin remote to publish to")
+    branch = arguments.branch
+    # FETCH FIRST -- but a machine that cannot push often cannot fetch either (the same key or
+    # credential manager). Then the last-fetched origin/<branch> is the base; the publisher
+    # rebases onto the real head anyway. Say so, naming what the fetch was told.
+    fcode, _out, ferr = _git(["fetch", "-q", "origin", branch], top, 180)
+    stale = _git_refusal(ferr, "fetch failed with rc %s" % fcode) if fcode else ""
+    if stale:
+        print("handoff: could not refresh origin/%s here (%s); using the last-fetched one as the "
+              "base. The publisher rebases onto the current %s." % (branch, stale, branch),
+              file=sys.stderr)
+    upstream = "origin/%s" % branch
+    code, base_sha, _err = _git(["rev-parse", "--verify", upstream + "^{commit}"], top, 30)
+    if code or not base_sha:
+        raise ValueError("handoff: this checkout has no %s to compute the commits from" % upstream)
+    _c, head, _e = _git(["rev-parse", "--verify", "HEAD^{commit}"], top, 30)
+    _c, count, _e = _git(["rev-list", "--count", upstream + "..HEAD"], top, 30)
+    if not count or count == "0":
+        raise ValueError("handoff REFUSED: %s..HEAD is empty -- nothing committed to publish. "
+                         "Commit your change first." % upstream)
+    anc, _o, _e = _git(["merge-base", "--is-ancestor", upstream, "HEAD"], top, 30)
+    if anc:
+        raise ValueError("handoff REFUSED: HEAD is not a fast-forward of %s (it does not contain "
+                         "%s). Rebase first: git rebase %s" % (upstream, base_sha[:12], upstream))
+    _c, dirty, _e = _git(["status", "--porcelain", "--untracked-files=no"], top, 30)
+    if dirty:
+        print("handoff: WARNING -- uncommitted changes are NOT in the hand-off, only the %s "
+              "commit(s) are:\n%s" % (count, dirty[:600]), file=sys.stderr)
+    _c, subject, _e = _git(["log", "-1", "--format=%s", "HEAD"], top, 30)
+    fd, bundle = tempfile.mkstemp(prefix="handoff-", suffix=".bundle")
+    os.close(fd)
+    try:
+        code, _o, err = _git(["bundle", "create", bundle, upstream + "..HEAD"], top, 300)
+        if code:
+            raise ValueError("handoff: git bundle create failed: %s"
+                             % _git_refusal(err, "rc %s" % code))
+        code, _o, err = _git(["bundle", "verify", bundle], top, 120)
+        if code:
+            raise ValueError("handoff: the bundle does not verify: %s"
+                             % _git_refusal(err, "rc %s" % code))
+        with open(bundle, "rb") as fh:
+            data = fh.read()
+    finally:
+        try:
+            os.remove(bundle)
+        except OSError:
+            pass
+    if len(data) > HANDOFF_MAX_BYTES:
+        raise ValueError("handoff REFUSED: the bundle is %.1f MB; the hub takes %d MB. Something "
+                         "large is committed -- check `git diff --stat %s..HEAD`."
+                         % (len(data) / 1048576.0, HANDOFF_MAX_BYTES >> 20, upstream))
+    # ONE KEY PER (task, repo, commits): a resend after a lost response replays the record the
+    # first attempt made instead of queueing the same commits twice.
+    idem = "handoff:" + hashlib.sha256(("%s|%s|%s|%s" % (task, project, base_sha, head))
+                                       .encode("utf-8")).hexdigest()[:24]
+    payload = {"agent": _agent(arguments), "task": task, "project": project, "remote": remote,
+               "branch": branch, "base": base_sha, "head": head, "commits": int(count),
+               "subject": subject[:200], "machine": os.environ.get("HUB_MACHINE", ""),
+               "session": os.environ.get("HUB_SESSION_ID", "")[:64],
+               "note": ("origin/%s not refreshed: %s" % (branch, stale)) if stale else "",
+               "bundle_b64": base64.b64encode(data).decode("ascii"), "idem_key": idem}
+    result = _post(base, "handoff", payload, timeout=HANDOFF_UPLOAD_TIMEOUT_S)
+    record = result.get("data") or {}
+    if record.get("status") == "failed" and record.get("replayed"):
+        # The same commits were handed off before and that attempt FAILED: a new attempt.
+        payload["idem_key"] = idem + ":" + uuid.uuid4().hex[:8]
+        result = _post(base, "handoff", payload, timeout=HANDOFF_UPLOAD_TIMEOUT_S)
+        record = result.get("data") or {}
+    how = ("already queued (same commits)" if record.get("duplicate") else
+           "already recorded (a resend)" if record.get("replayed") else "queued")
+    print("handoff: %s %s -- %s commit(s) of %s (%s..%s, %d bytes) for %s."
+          % (record.get("id") or "?", how, count, project, base_sha[:12], head[:12], len(data),
+             task), file=sys.stderr)
+    return result
+
+
+def _publish_one(base: Any, arguments: argparse.Namespace, lease: dict[str, Any],
+                 work: str) -> dict[str, Any]:
+    """Fetch the bundle under the lease, rebase onto the current branch, push (never forced),
+    and report. A clone or push this machine is refused RELEASES the hand-off ("not me") so a
+    publisher that can push takes it; a conflict FAILS it with the conflicting paths."""
+    import base64
+    hid, token, fence = lease["id"], lease["token"], lease["fence"]
+    branch = lease.get("branch") or "main"
+    machine = arguments.machine or os.environ.get("HUB_MACHINE", "")
+    agent = _agent(arguments)
+
+    def report(outcome: str, **fields: Any) -> dict[str, Any]:
+        payload = {"agent": agent, "id": hid, "token": token, "fence": fence,
+                   "outcome": outcome, "machine": machine}
+        payload.update({k: v for k, v in fields.items() if v})
+        return _post(base, "handoff/result", payload)
+
+    got = (_post(base, "handoff/bundle", {"agent": agent, "id": hid, "token": token,
+                                          "fence": fence}).get("data") or {})
+    data = base64.b64decode(got.get("bundle_b64") or "")
+    bundle = os.path.join(work, "%s.bundle" % hid)
+    with open(bundle, "wb") as fh:
+        fh.write(data)
+    repo = os.path.join(work, "repo")
+    remote = lease.get("remote") or ""
+    code, _o, err = _git(["clone", "-q", "--no-tags", "--branch", branch, remote, repo], work, 900)
+    if code:
+        return report("released", reason="this publisher could not clone %s: %s"
+                      % (lease.get("project"), _git_refusal(err, "rc %s" % code)))
+    ident: list[str] = []
+    _c, email, _e = _git(["config", "user.email"], repo, 15)
+    if not email:
+        ident = ["-c", "user.name=%s" % agent, "-c", "user.email=%s@users.noreply.invalid" % agent]
+    code, _o, err = _git(["fetch", "-q", bundle, "HEAD"], repo, 300)
+    if code:
+        return report("failed", reason="the bundle would not fetch: %s"
+                      % _git_refusal(err, "rc %s" % code))
+    _c, fetched, _e = _git(["rev-parse", "FETCH_HEAD"], repo, 15)
+    if fetched.lower() != str(lease.get("head") or "").lower():
+        return report("failed", reason="the bundle carries %s, not the recorded head %s"
+                      % (fetched[:12], str(lease.get("head"))[:12]))
+    _git(["checkout", "-q", "-B", "handoff", "FETCH_HEAD"], repo, 60)
+    for attempt in (1, 2):
+        code, _o, err = _git([*ident, "rebase", "-q", "origin/" + branch], repo, 300)
+        if code:
+            _c, names, _e = _git(["diff", "--name-only", "--diff-filter=U"], repo, 30)
+            _git(["rebase", "--abort"], repo, 60)
+            return report("failed", reason="the commits do not rebase cleanly onto the current %s"
+                          % branch, conflicts=[n for n in names.splitlines() if n][:50])
+        code, _o, err = _git(["push", "-q", "origin", "HEAD:refs/heads/" + branch], repo, 600)
+        if not code:
+            break
+        refusal = _git_refusal(err, "rc %s" % code)
+        raced = (re.search(r"(?i)non-fast-forward|fetch first|rejected", err)
+                 and not re.search(r"(?i)denied|permission|authenticat", err))
+        if attempt == 1 and raced:
+            _git(["fetch", "-q", "origin", branch], repo, 300)   # raced another push: once more
+            continue
+        return report("released", reason="this publisher's push was refused: %s" % refusal)
+    _c, sha, _e = _git(["rev-parse", "HEAD"], repo, 15)
+    return report("published", pushed_sha=sha.lower(),
+                  note="rebased onto %s and pushed by %s" % (branch, agent))
+
+
+def _run_publish_handoff(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Take the oldest open hand-off (or --id), publish it with THIS machine's rights, report.
+    One per call; run it again (or on a schedule) to drain the queue."""
+    import shutil
+    import tempfile
+    machine = arguments.machine or os.environ.get("HUB_MACHINE", "")
+    if not machine:
+        raise ValueError("publish-handoff needs --machine (or HUB_MACHINE): a lease is per machine")
+    payload: dict[str, Any] = {"agent": _agent(arguments), "machine": machine}
+    if arguments.id:
+        payload["id"] = arguments.id
+    if arguments.ttl_s:
+        payload["ttl_s"] = arguments.ttl_s
+    lease = _post(base, "handoff/claim", payload).get("data")
+    if not lease:
+        return {"data": None, "msg": "no hand-off is waiting"}
+    work = tempfile.mkdtemp(prefix="hub-handoff-")
+    try:
+        return _publish_one(base, arguments, lease, work)
+    except HubRefused:
+        raise
+    except Exception as error:                               # noqa: BLE001 - report, never strand
+        return _post(base, "handoff/result", {
+            "agent": _agent(arguments), "id": lease["id"], "token": lease["token"],
+            "fence": lease["fence"], "outcome": "released", "machine": machine,
+            "reason": "the publisher crashed: %s: %s" % (type(error).__name__, str(error)[:300])})
+    finally:
+        shutil.rmtree(work, ignore_errors=True)            # only the scratch directory WE made
+
+
+def _run_handoffs(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    query = {k: v for k, v in (("status", arguments.status), ("task", arguments.task)) if v}
+    return _get(base, "handoffs.json" + ("?" + urlencode(query) if query else ""))
 
 
 def _run_lineage(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -2736,6 +3005,27 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
+def _lift_note_sha(arguments: argparse.Namespace, verb: str) -> str:
+    """A commit sha written in the note with no --sha becomes the structured --sha -- NEVER a
+    refusal. What a deploy record closes a task by, and what an unattended launcher reads to wait
+    for a pipeline, is the structured field; a sha buried in prose was only a fallback guess. A
+    refusal was tried on the origin system and lost the checkpoint of every unattended run that
+    wrote its sha in words, so the first sha-looking token is lifted, a warning names it when
+    there were several, and the write always goes. An explicit --kind means the caller chose the
+    checkpoint's shape, so nothing is lifted. Returns the sha it lifted, or ''."""
+    if getattr(arguments, "sha", None) or getattr(arguments, "kind", None):
+        return ""
+    from .task_rows import note_shas
+    found = note_shas(getattr(arguments, "note", "") or "")
+    if not found:
+        return ""
+    arguments.sha = found[0]
+    if len(found) > 1:
+        print("warning: the %s note names %d commits (%s); recorded %s as its --sha. Pass --sha "
+              "to choose." % (verb, len(found), ", ".join(found[:5]), found[0]), file=sys.stderr)
+    return found[0]
+
+
 def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """Record one checkpoint: mark a plan step done with the note the board surfaces.
 
@@ -2750,6 +3040,7 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     `--pipeline-url`) records a `pushed` checkpoint naming the commit; `--kind` sets any other
     schema kind. The write is a minimal delta under OCC, re-applied on a version race."""
     from . import checkpoints as _cp
+    lifted = _lift_note_sha(arguments, "step")
     kind = arguments.kind or ("pushed" if arguments.sha else "checkpoint")
     picked: dict[str, Any] = {}
 
@@ -2770,6 +3061,8 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     out: dict[str, Any] = {"updated": result, "step": picked.get("step"),
                            "kind": picked.get("kind") or "checkpoint",
                            "progress": f"{counts['done']}/{counts['total']}"}
+    if lifted:
+        out["sha_from_note"] = lifted
     if counts["lifecycle"] or counts["placeholders"]:
         out["not_counted"] = {"lifecycle": counts["lifecycle"],
                               "placeholders": counts["placeholders"]}
@@ -2853,6 +3146,12 @@ def _run_distribution(base: Any, arguments: argparse.Namespace) -> dict[str, Any
 def _run_built(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
     return _get(base, "built.json" + (f"?person={quote(arguments.person)}" if arguments.person else ""))
+
+
+def _run_ci_status(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """What CI last said about one commit (GET /hub/ci-status.json?sha=)."""
+    from urllib.parse import urlencode
+    return _get(base, "ci-status.json?" + urlencode({"sha": arguments.sha}))
 
 
 def _run_ci_events(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -3319,6 +3618,29 @@ def _parser() -> argparse.ArgumentParser:
     held = commands.add_parser("held", help="the promotion queue: what is held, oldest first")
     held.add_argument("--repo")
     held.set_defaults(runner=_run_held)
+
+    handoff = commands.add_parser("handoff", help="hand this checkout's unpushed commits to a "
+                                                  "machine that CAN push (a bundle via the hub)")
+    handoff.add_argument("task_id", help="the full task id the commits are for")
+    handoff.add_argument("--repo", help="the checkout directory (default: the current directory)")
+    handoff.add_argument("--branch", default="main", help="the branch to publish onto (main)")
+    handoff.add_argument("--project", help="the repository path, when origin does not name it")
+    handoff.add_argument("--agent")
+    handoff.set_defaults(runner=_run_handoff)
+
+    publish = commands.add_parser("publish-handoff", help="take the oldest open hand-off, rebase "
+                                                          "it onto its branch, push it (never "
+                                                          "forced) and report")
+    publish.add_argument("--id", help="one hand-off (h-<12 hex>) instead of the oldest")
+    publish.add_argument("--machine", help="this publisher's machine (default HUB_MACHINE)")
+    publish.add_argument("--ttl-s", dest="ttl_s", type=int, help="lease length (60-1800 s)")
+    publish.add_argument("--agent")
+    publish.set_defaults(runner=_run_publish_handoff)
+
+    handoffs = commands.add_parser("handoffs", help="the hand-off queue: open, oldest first")
+    handoffs.add_argument("--status", help="open (default) | all | published | failed")
+    handoffs.add_argument("--task")
+    handoffs.set_defaults(runner=_run_handoffs)
 
     lineage = commands.add_parser("lineage", help="trace a task hop by hop to what is serving it")
     lineage.add_argument("task_id")
@@ -3926,7 +4248,8 @@ def _parser() -> argparse.ArgumentParser:
     step.add_argument("--step", help="step text fragment or 1-based index (grows the plan); "
                                      "default = first undone work step")
     step.add_argument("--note", help="what actually happened at this checkpoint")
-    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed)")
+    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed); when "
+                      "absent, a sha written in --note is lifted into it")
     step.add_argument("--pipeline", help="the numeric id of the pipeline that built --sha")
     step.add_argument("--pipeline-url", dest="pipeline_url")
     step.add_argument("--kind", help="checkpoint kind (default checkpoint, or pushed with --sha)")
@@ -4014,6 +4337,10 @@ def _parser() -> argparse.ArgumentParser:
     ci_events.add_argument("--project")
     ci_events.add_argument("--limit", type=int)
     ci_events.set_defaults(runner=_run_ci_events)
+    ci_status = commands.add_parser("ci-status",
+                                    help="what CI last said about one commit (found/status/active)")
+    ci_status.add_argument("sha")
+    ci_status.set_defaults(runner=_run_ci_status)
 
     # Knowledge: share/finding/method/review/gap, recall, related, capabilities, the per-prompt
     # knowledge block, the local mirror, and overlap adjudication (hub_core/client_knowledge.py).

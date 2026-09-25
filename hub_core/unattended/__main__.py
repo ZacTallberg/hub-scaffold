@@ -394,6 +394,9 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
             board.flag_needs_person(item_id, capped + " without closing")
             board.defer(item_id, now + board.CAPPED_RECHECK_S, capped + "; a person's", attempts)
             return {"item": item_id, "outcome": "left-for-a-person", "why": capped}
+        if item.get("pipeline_wait"):
+            # A hand-back whose pushed commit still has a pipeline running: nothing new to read.
+            return {"item": item_id, "outcome": "waiting", "why": item["pipeline_wait"]}
 
     # CLAIM FIRST for anything that is not a task (a task has its fenced lease): before a run is
     # queued, so a machine that loses the race writes no ledger row and spends nothing.

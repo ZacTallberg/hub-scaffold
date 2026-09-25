@@ -105,7 +105,11 @@ def worker_env(extra: dict | None = None) -> dict:
     env["HUB_UNATTENDED"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    # ssh must never wait on a person: BatchMode turns a host-key or passphrase prompt into an
+    # immediate, named failure, and ConnectTimeout bounds a dead path (a clone that "timed out
+    # after 900 s" was an unanswered prompt on the origin system, reported as a bad key).
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=20 "
+                                      "-o ServerAliveInterval=15 -o ServerAliveCountMax=8")
     for key, value in (extra or {}).items():
         env[key] = str(value)
     return env

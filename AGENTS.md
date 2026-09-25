@@ -68,7 +68,9 @@ from a working multi-project system. Nothing here names any specific person, hos
   `python -m hub_core.unattended`: one bounded Claude Code or Codex session per board item,
   outcome read from the board, hand-back with proof, lane faults never charged, hop-bounded
   escalation, needs-attention conditions the hub marks agent-clearable, and a hand-off publisher
-  that pushes what a machine that could not push left behind), and **doctrine publish** (`doctrine-publish.md`).
+  that pushes what a machine that could not push left behind), the **publish hand-off**
+  (`publish-handoff.md`: a worker whose machine cannot push hands its commits, as a bundle, to a
+  publisher that can -- fenced lease, never forced), and **doctrine publish** (`doctrine-publish.md`).
   Operating write-ups for what an adopter wires itself: `ci-pipeline.md` (forward-only deploys
   that CI never cancels, push-only change triggers, job ceilings, publications from the protected
   ref), `app-slots.md` (allocate / stage / cut over / retire / re-adopt an app's port, service and

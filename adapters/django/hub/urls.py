@@ -6,8 +6,9 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, evals_api, evidence_api, held, histories_api, hub_api, hub_write,
-               hubsite, knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
+from . import (app_services, candidates, deploy_close, evals_api, evidence_api, handoff_api, held,
+               histories_api, hub_api, hub_write, hubsite, knowledge_api, knowledge_write, veil,
+               mcp_server, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -48,6 +49,9 @@ urlpatterns = [
     path("evidence.json", R(evidence_api.evidence_json), name="evidence"),
     # The standing-eval trend (hub_core.evals): runs scored on the board's own data.
     path("eval.json", R(evals_api.eval_json), name="eval"),
+    # Observer-distilled candidates held for a person before they become knowledge (never in
+    # the ledger, never served by a knowledge surface until adopted).
+    path("knowledge-candidates.json", R(candidates.candidates_json), name="knowledge-candidates"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
     # Standing documents rendered through their facet fences for the presenting credential.
     path("doctrine.json", R(hub_api.doctrine_json), name="doctrine"),
@@ -66,11 +70,16 @@ urlpatterns = [
     # Both sit ABOVE the generic <type>.json catch-all.
     path("held.json", R(held.held_json), name="held"),
     path("item-claims.json", R(hub_api.item_claims_json), name="item-claims"),
+    # The publish hand-off queue: commits a machine that cannot push handed to one that can.
+    path("handoffs.json", R(handoff_api.handoffs_json), name="handoffs"),
     path("components.json", R(hub_api.components_json), name="components"),
     # Seat convergence and derived per-person output (same catch-all rule as above).
     path("distribution.json", R(hub_api.distribution_json), name="distribution"),
     path("built.json", R(hub_api.built_json), name="built"),
     path("ci-events.json", R(hub_api.ci_events_json), name="ci-events"),
+    path("ci-status.json", R(hub_api.ci_status_json), name="ci-status"),
+    # The last deploy-close replay (state in a file: every hub process answers the same).
+    path("deploy-reconcile.json", R(deploy_close.reconcile_json), name="deploy-reconcile"),
     # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
     # or the adopter's HUB_HISTORY_VIEWER predicate (404 to everyone else).
     path("history.json", R(histories_api.history_json), name="history"),
@@ -107,10 +116,18 @@ urlpatterns = [
     path("api/method", knowledge_write.method),
     path("api/review", knowledge_write.review),
     path("api/eval", evals_api.post),
+    # Attach a state claim's check (and/or re-date it) without rewriting the record.
+    path("api/attest", knowledge_write.attest),
+    # The review-first candidate queue: file what an observer distilled; a decider adopts or
+    # declines it (candidates.py).
+    path("api/knowledge-candidates", candidates.submit),
+    path("api/knowledge-candidate/decide", candidates.decide),
     # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
     # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
     path("api/retire", hub_write.retire),
     path("api/deploy", hub_write.deploy),
+    # Replay the newest deploy record through the close matcher and retry every refused close.
+    path("api/deploy/reconcile", deploy_close.reconcile_view),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
     # Give a task to a named agent: `to` is the recipient, `agent` stays the writer.
@@ -121,6 +138,11 @@ urlpatterns = [
     path("api/held", held.hold),
     path("api/held/promote", held.promote),
     path("api/held/abandon", held.abandon),
+    # The publish hand-off lane: upload a bundle, lease one, fetch it, report the push.
+    path("api/handoff", handoff_api.submit),
+    path("api/handoff/claim", handoff_api.claim),
+    path("api/handoff/bundle", handoff_api.bundle),
+    path("api/handoff/result", handoff_api.result),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
     # Letting go of a task: back to the queue for an unattended worker (hand) or just released
@@ -198,7 +220,7 @@ VISIBILITY = {
     "agent-updates.json": "veiled", "activity.json": "veiled",
     "attention.json": "veiled", "consoles.json": "veiled",
     "project/<str:slug>/tasks.json": "veiled", "held.json": "veiled",
-    "item-claims.json": "veiled", "components.json": "veiled",
+    "item-claims.json": "veiled", "components.json": "veiled", "handoffs.json": "member",
     "problems.json": "veiled", "app_health.json": "veiled", "doctor.json": "veiled",
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
@@ -206,7 +228,11 @@ VISIBILITY = {
     "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
     "capabilities.json": "veiled", "eval.json": "member",
+    # Candidates are unreviewed model output about internal systems: members only.
+    "knowledge-candidates.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
+    "ci-status.json": "member",
+    "deploy-reconcile.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.
