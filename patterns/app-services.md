@@ -143,3 +143,23 @@ one, suggest questions for the agent. The hub validates the answer against the c
 sent (unknown ids dropped and counted, only optional items hideable, nothing destructive
 pinned), so a model can make a menu less useful but never make it do something new. No model,
 or one that fails, leaves the catalog's own order with no "organised" star.
+
+## 6. The table — interaction hosted, persistence the app's
+
+    <section data-hub-table data-app="budget-app" data-table="#ledger">
+      <div data-ht-toolbar> … <details data-ht-more>…</details></div>
+      <table id="ledger"> <th data-field="supplier" draggable="true">Supplier</th> … </table>
+    </section>
+    <link rel="stylesheet" href="/hub/components/table/table.css">
+    <script src="/hub/components/table/table.js"></script>
+
+Headings are the drag handle, pins appear only for the column under the pointer, pinned columns
+stick, every column is sized from its heading's edge (a drag moves that one column; a column is
+never narrower than its own heading), faint column rules come in two tiers, and a toolbar never
+wraps -- what does not fit moves into its `…` menu by declared rank. Every layout change is a
+cancelable `hub-table:*` event on the mount, so an app that saves layouts saves them its own way;
+without that, the viewer's layout is kept in their browser. Where the app declares its own lanes,
+a Suggest panel draws the app's model-shaped cuts of the table (the counts are the app's own
+measurement; a slow lane answers 202 and is polled) and a Request button files what the table
+cannot do as board work through the app's own credential. The contract is the component's
+`manifest.json`.
