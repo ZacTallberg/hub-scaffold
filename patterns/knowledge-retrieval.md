@@ -33,9 +33,92 @@ duplicate / correction / contradiction / unrelated with one sentence of reason. 
 (an unparseable reply leaves the entry open) and exits 2 when there is judging to do and no
 model, so a scheduled pass that settles nothing is loud. It writes back through the served API.
 
+A verdict recorded on a lesson changes nothing by itself: a duplicate stays two records, both
+served, both ranked. **Consolidation** (§1a) is the half that acts on it.
+
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
 `--verified-as-of YYYY-MM-DD`; every surface prints both.
+
+## 1a. Consolidate: fold what the board knows twice, and say when each rule applies
+
+On the instance this was lifted from, about one new lesson in eight restated a record already on
+the board — the same fact filed as a finding and then a lesson on one day, or re-learned days
+later by an agent the first record never reached. `python -m hub_core.client consolidate` runs
+where the judge (`HUB_JUDGE_*`) and the embedder (`HUB_EMBED_*`) are reachable, reads the board
+through `note.json`, and writes back only through `POST /hub/api/note` (the one mutation
+entrance). Engine: `hub_core/consolidate.py` (stdlib, store-free — the verb injects the writer).
+Like `adjudicate`, it is a client verb only, not an MCP tool: it needs a judge and an embedder
+on the calling machine and runs for minutes, which a tool call inside a console is not for.
+
+1. **Candidates** — every pair of live lessons and findings whose cosine is an outlier for BOTH
+   ends' own similarity distribution (z ≥ 3, the write-time tagger's relative criterion; an
+   absolute cosine means nothing across a model swap). Two findings are never a pair. A board of
+   fewer than about eleven records cannot produce z ≥ 3 and the run says so. Vectors are cached
+   locally by text hash, so only edited or new records are embedded again.
+2. **Verdicts** — duplicate / correction / contradiction / related / unrelated plus which record
+   to keep, cached by the text hashes of both records: a run never re-reads what an earlier run
+   read. An unparseable or self-contradictory reply (duplicate with keep=both) leaves the pair
+   unjudged and counted — never coerced.
+3. **Plan** — duplicates fold (union-find, clusters over five are reported, not folded) into ONE
+   canonical lesson, the most foundational then the oldest, which gains `reinforced_by` (who else
+   learned it, when, their story); a folded lesson becomes `superseded` with `superseded_by`, a
+   folded finding keeps standing and is tagged `folded-into:<id>`. A correction supersedes the
+   rule it corrects. A contradiction is written onto the lesson's `related` as a settled verdict,
+   where `recall` prints it for a person.
+4. **`applies_when`** — for every live lesson, the literal strings whose appearance means the rule
+   applies NOW: `errors` (text as the tool prints it), `commands`, `paths`, `systems`. This is what
+   a tool-time hook matches; similarity over a failed command's output rarely returns the record
+   that explains it. Command triggers must name the **defective form**, never the bare tool:
+   `<...>` placeholders for the varying parts (`git show <rev>:.<dotfile>`, `sudo -S <cmd> <<`); a
+   flag that is wrong on only one command is written WITH that command
+   (`APP_AUTH_REQUIRED=false <...> manage.py test`, never the bare flag, which is harmless
+   elsewhere); a misuse typable in two shells gets one trigger per form (POSIX and
+   `$env:APP_AUTH_REQUIRED=<...> manage.py test`). The parser keeps a command only if it carries a
+   placeholder, a shell operator, `$`, an assignment, or three words — measured on real tool
+   calls, two bare-tool triggers matched hundreds of calls each and cut a hook's precision from
+   about 64% to about 20%. Generic strings and incident debris (shas, timestamps) are dropped.
+   The prompt version (`TRIGGER_VERSION`) is part of the cache key, so a prompt change re-derives
+   every lesson. A fold hands its members' triggers to the canonical rule. The hook that matches
+   these at tool time is adopter wiring; the field is the contract.
+5. **Re-learn count** — per ISO week, lessons filed and how many restated an older record
+   (`relearned`: another author or more than a day later; `double_filed`: same author within a
+   day). The scaffold has no served trend store: the run prints it (`RELEARN`) and returns it.
+
+**The review-first apply contract.**
+
+- **A dry run is the default** and prints every verdict with both texts, every action, and every
+  derived trigger. It writes nothing on the board.
+- **An apply writes only what an earlier dry run judged.** `--apply` judges nothing new and derives
+  no new triggers; it replays the cached plan, so an apply must use the dry run's `--state-dir`.
+  Otherwise pairs judged in the same run as the apply would be written unread.
+- **Hold-backs.** `--except <id>,<id>` drops every action touching a held record (and its
+  `applies_when`), each printed `HELD BY REVIEWER`. `--apply-limit` caps writes per run.
+- **Nothing is deleted; everything is revertible.** Before each write the record's full prior
+  state is appended to `<state-dir>/runs/<run>.jsonl`. `--revert <run>` restores every record the
+  run touched; `--revert <run> --only <id>` restores one without undoing the approved rest. A hub
+  write MERGES, so revert states every key the run wrote explicitly (prior value or the empty
+  form; a lesson's status defaults to `standing`) — re-sending a payload without an added key
+  leaves the key standing. Each revert carries its own idempotency key, so a corrective second
+  revert writes instead of replaying the first.
+- **Parse or refuse.** `--from-trigger FILE` reads the last non-comment line: `apply [limit=N]
+  [except <ids>]`, `revert <run> [only <ids>]`, anything else a dry run. Every token must be
+  understood; an unreadable limit or a hold-back with no ids exits 4 before any write, and the
+  run prints `PARSED mode=… apply_limit=… exclude=… only=…` with the file and git HEAD of the
+  code that parsed it. On the source instance an ignored hold-back was written through and the
+  held record superseded; the trace could not say which code ran.
+- **A schedule never writes.** `--scheduled` forces a dry run and refuses `--apply`, `--revert`
+  and `--from-trigger`: re-reading an `apply` line nightly would re-apply yesterday's plan and,
+  because an apply judges nothing new, the loop would stall on old verdicts. Only a deliberate
+  invocation (a person, or a pushed trigger line) writes.
+- **The code that runs must contain the commit that asked.** A trigger line pushed with a commit
+  is executed by whatever checkout the runner has; pass `--require-commit <sha>` (e.g. the
+  pipeline's commit) and the verb refuses with exit 5 unless `git merge-base --is-ancestor <sha>
+  HEAD` holds for the code running, printing `CODE_UNDER_TEST` when it does.
+
+Exit status: 0 ran (a dry run proposing nothing is a result) · 2 judging, deriving or embedding
+to do and no model · 3 the hub refused a write · 4 trigger line or scheduled-write refused ·
+5 code under test does not contain the required commit.
 
 ## 2. Find by meaning
 
