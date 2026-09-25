@@ -1264,6 +1264,8 @@ def claim(request, b):
                             machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
+        if res.get("created") and isinstance(res.get("took_over_from"), dict):
+            _notify_taken_over(eid, str(ent.get("title") or ""), agent, res["took_over_from"])
         if status != "in_progress":
             transition, transition_status = _append(
                 "task", eid, {"type": "task", "status": "in_progress"},
@@ -1286,6 +1288,17 @@ def claim(request, b):
                     hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=transition_status)
             res["version"] = transition["data"]["version"]
+            # A task START carries what the board already knows about THIS task (its title
+            # and acceptance as the query, above the relevance cut-off; nothing when nothing
+            # clears it). Only on the start: a renewal re-claims too, and learns nothing new.
+            try:
+                from .knowledge_api import event_knowledge
+                known = event_knowledge("%s %s" % (ent.get("title") or "",
+                                                   str(ent.get("acceptance") or "")[:200]))
+                if known:
+                    res["knowledge"] = known
+            except Exception:                                # noqa: BLE001 - a hint, never a failure
+                pass
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
@@ -2133,6 +2146,39 @@ def answer(request, b):
             pass
 
     question_text = str(note_ent.get("title") or "")
+    # AN ASK FOR A PERSON IS NOT CLOSED BY ITS ASKER'S OWN UNATTENDED PASS. Measured on the
+    # instance this was lifted from: most answered asks had been "answered" by the asker's own
+    # identity, many by a responder -- a question put to the operator, closed by a pass of the
+    # machine that asked it before any person saw it. For an ask addressed to the operator (or
+    # to nobody, which is the operator's), an unattended answer from the asker is kept on the
+    # note as a PROPOSED answer and the ask stays open for a person.
+    answerer = str(b.get("agent") or request.hub_auth.subject or "").strip().lower()
+    operator = str(_operator_name() or "").strip().lower()
+    addressed = str(note_ent.get("to") or "").strip().lower()
+    for_person = (not addressed) or addressed == operator
+    if (for_person and answerer == asker and answerer != operator
+            and (b.get("unattended") is True or _unattended_hop(request, b))):
+        proposal = {"text": text[:4000], "by": answerer,
+                    "session": str(request.headers.get("X-Hub-Session") or "")[:64],
+                    "at": _utc_now()}
+
+        def _with_proposal(current):
+            # Rebuilt from the note as it stands at each attempt, so a concurrent proposal
+            # or edit survives.
+            base = dict(current or note_ent)
+            kept = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+            prior = [dict(x) for x in (base.get("proposed_answers") or []) if isinstance(x, dict)]
+            kept["proposed_answers"] = (prior + [proposal])[-5:]
+            return kept
+        presp, pstatus = _append_fresh("note", question_id, _with_proposal, agent=answerer,
+                                       idem=None, etype="note.created",
+                                       operation="answer:propose")
+        if pstatus not in (200, 201):
+            return JsonResponse(presp, status=pstatus)
+        return JsonResponse({"data": {
+            "id": question_id, "proposed": True, "question_still_open": True,
+            "why": "an ask for a person is not closed by its own asker's unattended pass; your "
+                   "answer is recorded on it as a proposal for the person to confirm"}})
     # HONEST ATTRIBUTION, mechanically -- the mirror of the ask's hop stamp. An answer an
     # unattended run wrote reads identically to one a person wrote unless it SAYS so, and the
     # asker deserves to know which they got. Structured (`unattended`) for every surface, and
@@ -2398,6 +2444,11 @@ def message(request, b):
     if target_session:
         payload["session"] = target_session
     machine = str(b.get("machine") or "").strip().lower()[:60]
+    if not machine and target_session:
+        # A message for a CONSOLE is a message for that console's MACHINE: stamped here so
+        # that when the console ends, delivery prefers another console on the same computer
+        # instead of whichever console of the agent happened to be freshest.
+        machine = _session_machine(to, target_session)
     if machine:
         payload["machine"] = machine
     resp, status = _append("note", eid, payload,
@@ -2408,6 +2459,46 @@ def message(request, b):
         if target_session:
             resp["data"]["session"] = target_session
     return JsonResponse(resp, status=status)
+
+
+def _session_machine(agent, session) -> str:
+    """The machine a live console of ``agent`` runs on, from presence; '' when unknown."""
+    from hub_core.inbox import sid_match
+    try:
+        for row in hub_app.live_sessions():
+            if (str(row.get("agent") or "").lower() == str(agent or "").lower()
+                    and sid_match(row.get("session_id") or row.get("session"), session)):
+                return str(row.get("machine") or "").strip().lower()[:60]
+    except Exception:                                        # noqa: BLE001 - a hint, never a failure
+        pass
+    return ""
+
+
+def _notify_taken_over(task_id, title, new_agent, prev) -> None:
+    """Tell the agent whose lease was taken over that it lost the task. Addressed to the AGENT
+    on its MACHINE, never to its console: the console that lost the task is usually the one
+    that is gone (that is why the lease was released), so a console-pinned notice reaches
+    nobody. From the new holder, so a reply goes to the one party worth talking to."""
+    old = str((prev or {}).get("agent") or "").strip().lower()
+    if not old or not _valid_agent_name(old) or old == str(new_agent or "").lower():
+        return
+    try:
+        body = ("%s (%s) was held by your console %s, which the hub could prove is gone; %s has "
+                "taken it over. Its checkpoints stand. If you are still on it, reply to %s "
+                "before doing more." % (task_id, title[:120], str(prev.get("session") or "?")[:8],
+                                        new_agent, new_agent))
+        local = "m-takeover-%s" % hashlib.sha256(
+            ("%s|%s|%s" % (task_id, prev.get("at"), new_agent)).encode("utf-8")).hexdigest()[:12]
+        note = {"type": "note", "category": "context", "status": "standing",
+                "title": "%s was taken over by %s" % (task_id, new_agent),
+                "tags": ["message", "open"], "to": old, "from_agent": str(new_agent),
+                "body_md": body}
+        if prev.get("machine"):
+            note["machine"] = str(prev["machine"]).strip().lower()[:60]
+        _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), note,
+                expected_version=None, agent=str(new_agent), idem=None, etype="note.created")
+    except Exception:                                        # noqa: BLE001 - never break a claim
+        pass
 
 
 @writer(scope="message:write")
@@ -3060,8 +3151,18 @@ def problem_claim(request, b):
     if refusal:
         return JsonResponse({"errors": [refusal]}, status=409)
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "claim": entry, "title": found.get("title"),
-                                  "rows": len(found.get("rows") or [])}}, status=201)
+    data = {"problem": pid, "claim": entry, "title": found.get("title"),
+            "rows": len(found.get("rows") or [])}
+    # What the board already knows about THIS failure, above the relevance cut-off.
+    try:
+        from .knowledge_api import event_knowledge
+        known = event_knowledge(" ".join(str(found.get(k) or "") for k in
+                                         ("title", "cause", "where", "code")))
+        if known:
+            data["knowledge"] = known
+    except Exception:                                        # noqa: BLE001
+        pass
+    return JsonResponse({"data": data}, status=201)
 
 
 @writer(scope="problem:resolve")
@@ -3214,9 +3315,65 @@ def ci_event_webhook(request):
         out = {"recorded": False, "reason": "unparsed"}
     if out.get("superseded") or out.get("reopened"):
         hub_app.errors_changed()                     # acks moved with no new row to announce
+    closes = _deploy_job_closes(body)
+    if closes:
+        out["deploy_close"] = closes
     out.pop("event", None)
     ci_events.retain(hub_app.HUB_DIR, body, out, record=hub_app.record_error)
     return JsonResponse({"data": out})
+
+
+_DEFAULT_REFS = ("main", "master")
+
+
+def _deploy_job_closes(body) -> str:
+    """A green DEPLOY job on the default branch runs the deploy-close matcher as if a release
+    record had been posted -- for a project whose deploy never posts one (opt-in).
+
+    On the instance this was lifted from, one project's deploy script posted its release record
+    to a DIFFERENT hub, so this one held none of its records and no task of that project could
+    ever close from its own deploy. Its deploy job restarts the services and smoke-tests them
+    before it goes green, so its success was the verification the record would have claimed.
+    That equivalence is the adopter's to assert, so it is OFF unless HUB_CI_DEPLOY_JOB_CLOSES
+    names the job-name prefixes it trusts ("deploy" is typical). A sha that already has a
+    release record is left to it. Runs in a thread: the webhook answers at once. Never raises."""
+    try:
+        from hub_core import ci_events as _ci
+        prefixes = hub_app._dj_setting("HUB_CI_DEPLOY_JOB_CLOSES") or os.environ.get(
+            "HUB_CI_DEPLOY_JOB_CLOSES") or ""
+        if isinstance(prefixes, str):
+            prefixes = [p.strip().lower() for p in prefixes.split(",") if p.strip()]
+        if not prefixes:
+            return ""
+        ev = _ci.normalize(body)
+        if ev.get("kind") != "job" or ev.get("status") != "success":
+            return ""
+        name = str(ev.get("job") or "").lower()
+        if not any(name.startswith(p) for p in prefixes):
+            return ""
+        if str(ev.get("ref") or "") not in _DEFAULT_REFS:
+            return ""
+        sha = str(ev.get("sha") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+            return ""
+        entities = hub_app.current_state().get("entities") or {}
+        if any(isinstance(e, dict) and e.get("type") == "deploy"
+               and str(e.get("sha") or "").lower().startswith(sha[:12]) for e in entities.values()):
+            return ""                    # a verified release record exists; it closes its tasks
+        deploy_id = "ci-job:%s:%s" % (ev.get("project") or "project", sha[:12])
+
+        def _run():
+            try:
+                close_deployed_tasks(deploy_id, sha)
+            except Exception as exc:                         # noqa: BLE001
+                hub_app.record_error("hub.deploy-close", "deploy-job task closure failed: %s"
+                                     % type(exc).__name__, severity="error",
+                                     context={"component": "hub-write", "deploy": deploy_id})
+        import threading
+        threading.Thread(target=_run, name="hub-ci-deploy-close", daemon=True).start()
+        return deploy_id
+    except Exception:                                        # noqa: BLE001 - never break intake
+        return ""
 
 
 @writer(scope="enroll:leave")
