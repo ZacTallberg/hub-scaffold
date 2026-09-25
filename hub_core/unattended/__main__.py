@@ -172,6 +172,8 @@ def respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
     elif item["handed_back"] >= board.TASK_MAX_RUNS:
         return {"item": item_id, "outcome": "left-for-a-person",
                 "why": "handed back %d times across machines" % item["handed_back"]}
+    elif item.get("pipeline_wait"):
+        return {"item": item_id, "outcome": "waiting", "why": item["pipeline_wait"]}
 
     bound = _bound(kind)
     run_id = board.new_run_id()

@@ -2653,6 +2653,27 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
+def _lift_note_sha(arguments: argparse.Namespace, verb: str) -> str:
+    """A commit sha written in the note with no --sha becomes the structured --sha -- NEVER a
+    refusal. What a deploy record closes a task by, and what an unattended launcher reads to wait
+    for a pipeline, is the structured field; a sha buried in prose was only a fallback guess. A
+    refusal was tried on the origin system and lost the checkpoint of every unattended run that
+    wrote its sha in words, so the first sha-looking token is lifted, a warning names it when
+    there were several, and the write always goes. An explicit --kind means the caller chose the
+    checkpoint's shape, so nothing is lifted. Returns the sha it lifted, or ''."""
+    if getattr(arguments, "sha", None) or getattr(arguments, "kind", None):
+        return ""
+    from .task_rows import note_shas
+    found = note_shas(getattr(arguments, "note", "") or "")
+    if not found:
+        return ""
+    arguments.sha = found[0]
+    if len(found) > 1:
+        print("warning: the %s note names %d commits (%s); recorded %s as its --sha. Pass --sha "
+              "to choose." % (verb, len(found), ", ".join(found[:5]), found[0]), file=sys.stderr)
+    return found[0]
+
+
 def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """Record one checkpoint: mark a plan step done with the note the board surfaces.
 
@@ -2667,6 +2688,7 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     `--pipeline-url`) records a `pushed` checkpoint naming the commit; `--kind` sets any other
     schema kind. The write is a minimal delta under OCC, re-applied on a version race."""
     from . import checkpoints as _cp
+    lifted = _lift_note_sha(arguments, "step")
     kind = arguments.kind or ("pushed" if arguments.sha else "checkpoint")
     picked: dict[str, Any] = {}
 
@@ -2687,6 +2709,8 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     out: dict[str, Any] = {"updated": result, "step": picked.get("step"),
                            "kind": picked.get("kind") or "checkpoint",
                            "progress": f"{counts['done']}/{counts['total']}"}
+    if lifted:
+        out["sha_from_note"] = lifted
     if counts["lifecycle"] or counts["placeholders"]:
         out["not_counted"] = {"lifecycle": counts["lifecycle"],
                               "placeholders": counts["placeholders"]}
@@ -2770,6 +2794,12 @@ def _run_distribution(base: Any, arguments: argparse.Namespace) -> dict[str, Any
 def _run_built(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import quote
     return _get(base, "built.json" + (f"?person={quote(arguments.person)}" if arguments.person else ""))
+
+
+def _run_ci_status(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """What CI last said about one commit (GET /hub/ci-status.json?sha=)."""
+    from urllib.parse import urlencode
+    return _get(base, "ci-status.json?" + urlencode({"sha": arguments.sha}))
 
 
 def _run_ci_events(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -3808,7 +3838,8 @@ def _parser() -> argparse.ArgumentParser:
     step.add_argument("--step", help="step text fragment or 1-based index (grows the plan); "
                                      "default = first undone work step")
     step.add_argument("--note", help="what actually happened at this checkpoint")
-    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed)")
+    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed); when "
+                      "absent, a sha written in --note is lifted into it")
     step.add_argument("--pipeline", help="the numeric id of the pipeline that built --sha")
     step.add_argument("--pipeline-url", dest="pipeline_url")
     step.add_argument("--kind", help="checkpoint kind (default checkpoint, or pushed with --sha)")
@@ -3896,6 +3927,10 @@ def _parser() -> argparse.ArgumentParser:
     ci_events.add_argument("--project")
     ci_events.add_argument("--limit", type=int)
     ci_events.set_defaults(runner=_run_ci_events)
+    ci_status = commands.add_parser("ci-status",
+                                    help="what CI last said about one commit (found/status/active)")
+    ci_status.add_argument("sha")
+    ci_status.set_defaults(runner=_run_ci_status)
 
     # Knowledge: share/finding/method/review/gap, recall, related, capabilities, the per-prompt
     # knowledge block, the local mirror, and overlap adjudication (hub_core/client_knowledge.py).

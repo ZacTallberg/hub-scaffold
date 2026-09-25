@@ -471,6 +471,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "pipeline": {"type": "string"}, "job": {"type": "string"},
          "project": {"type": "string"}, "limit": {"type": "integer"}}}},
+    {"name": "ci_status",
+     "description": "What CI last said about one commit: found, status, active (still running), "
+                    "project, pipeline. No delivery body; an ordinary member read.",
+     "inputSchema": {"type": "object", "properties": {"sha": {"type": "string"}},
+                     "required": ["sha"]}},
     {"name": "list_collection",
      "description": "Every row of one board collection (task, adr, feat, gap, cap, deploy, "
                     "note, directive, ack, run). The board snapshot may carry a large collection "
@@ -1026,6 +1031,9 @@ def _call_tool(name, args, auth_headers):
     elif name == "ci_events":
         query = {k: args[k] for k in ("pipeline", "job", "project", "limit") if args.get(k)}
         status, body = _seam("/hub/ci-events.json", query, auth_headers, method="get")
+    elif name == "ci_status":
+        status, body = _seam("/hub/ci-status.json", {"sha": args.get("sha") or ""}, auth_headers,
+                             method="get")
     elif name == "record_entity":
         fields = dict(args.get("fields") or {})
         if args.get("agent"):

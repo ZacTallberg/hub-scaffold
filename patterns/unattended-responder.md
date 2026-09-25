@@ -73,6 +73,15 @@ goes through `POST /hub/api/hand-back` (client `hand-back`, MCP `hand_back_task`
   MORE finished each time a run died on it. The board's progress, the agent view, the adherence
   score and the client's `step` all skip them.
 
+A handed-back task is NOT re-offered while the pipeline of the commit its run pushed is still
+running (`board.pipeline_wait`, reading `GET /hub/ci-status.json?sha=`): the next run could only
+re-read a pipeline that has not answered, and re-runs of exactly that shape were a third of one
+fleet's task tokens. It waits until the pipeline is terminal — green means the next run verifies
+and finishes, red means it fixes — and never forever: 10 minutes when no pipeline has reported for
+the sha, 25 when the hub's CI status is unreadable. A run that pushed nothing waits for nothing.
+This needs CI deliveries reaching the hub (`patterns/ci-evidence.md`); without them every
+hand-back simply waits the no-pipeline window once.
+
 A launcher killed so hard that it died too is swept by the next launcher (`sweep`, and at the start
 of every `respond`): its journal names the leases, its pid is gone, and the same proof applies.
 

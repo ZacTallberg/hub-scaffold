@@ -66,6 +66,7 @@ urlpatterns = [
     path("distribution.json", R(hub_api.distribution_json), name="distribution"),
     path("built.json", R(hub_api.built_json), name="built"),
     path("ci-events.json", R(hub_api.ci_events_json), name="ci-events"),
+    path("ci-status.json", R(hub_api.ci_status_json), name="ci-status"),
     # The last deploy-close replay (state in a file: every hub process answers the same).
     path("deploy-reconcile.json", R(deploy_close.reconcile_json), name="deploy-reconcile"),
     # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
@@ -202,6 +203,7 @@ VISIBILITY = {
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
     "capabilities.json": "veiled",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
+    "ci-status.json": "member",
     "deploy-reconcile.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

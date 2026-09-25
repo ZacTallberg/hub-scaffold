@@ -39,6 +39,23 @@ decoration.
   against a wrong path answers "yes".
 - Capture the probe's output and decode it as UTF-8 with replacement: a login banner with curly
   quotes crashed a probe decoding with the console code page, losing a "yes".
+- **A probe that runs on every machine must never present a stored password.** Where the code host
+  authenticates against a directory with lockout, an expired password cached in a credential helper
+  counts toward lockout every time the probe replays it — on every machine, every few hours. So:
+  the SSH leg is keys only (`BatchMode=yes`, `PasswordAuthentication=no`,
+  `KbdInteractiveAuthentication=no`); for the probe the credential-helper list is emptied
+  (`-c credential.helper=`) and askpass is off (`-c core.askPass=`, `GIT_ASKPASS`/`SSH_ASKPASS`
+  unset — one askpass helper is a GUI dialog that hung an unattended probe); HTTPS is probed only
+  with an explicit token header meant for it, otherwise it is not probed (`unknown`).
+- Push to a ref that can never collide: `refs/heads/<probe-prefix>-<machine>-<nonce>`, with
+  `--dry-run`, so the probe authenticates to receive-pack and sends nothing.
+- Bound the probe by killing its **process tree**: a timeout that kills git and then waits on pipes
+  a transport helper still holds is not a bound (a stalled HTTPS probe hung past three minutes).
+- Cache by verdict: an auth answer (yes or no) is re-proved every few hours and never retried
+  sooner — retrying a "no" is exactly the lockout loop; only a network `unknown` re-asks hourly.
+- Report it: export the verdict as `HUB_PUSH_STATE=yes|no|unknown` for the client, which sends it as
+  `X-Hub-Push`; the distribution view shows it per seat, and a seat that cannot push hands its
+  commits to one that can (`patterns/publish-handoff.md`).
 
 ## Only a positive refusal needs a person
 

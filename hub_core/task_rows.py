@@ -46,6 +46,15 @@ def note_sha(text) -> str:
     return m.group(0) if m else ""
 
 
+def note_shas(text) -> list:
+    """Every distinct commit sha written in prose, in order (the same rule as note_sha)."""
+    out = []
+    for m in _NOTE_SHA.finditer(str(text or "")):
+        if m.group(0) not in out:
+            out.append(m.group(0))
+    return out
+
+
 def pushed(task: dict) -> dict | None:
     typed = checkpoints.latest(task, "pushed")
     if typed and typed.get("sha"):
