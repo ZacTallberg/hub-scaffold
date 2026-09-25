@@ -195,6 +195,11 @@ def run_bounded(argv, *, workspace: str, bound_s: int, env: dict, on_beat=None,
     for a bounded wait, so one that returns far later than it asked was not waiting — the machine
     was asleep — and that overrun is summed as ``suspended_s``: a measurement, not a guess.
 
+    ``on_beat`` may return a non-empty REASON to stop the run: the item was finished or taken by
+    somebody else while this session worked on it. The tree is killed and proven reaped exactly
+    as at the ceiling, ``rc`` is None, and ``timing["superseded"]`` carries the reason -- the
+    caller records that outcome, never "cleared" and never a try on the item.
+
     ``timing``: ``session_s`` (start to exit or kill), ``suspended_s``, ``kill_s`` (kill to
     reaped), ``reaped`` (the reaper's own verdict) and, when the session finished but would not
     exit, ``finished_hung_s``."""
@@ -265,9 +270,20 @@ def run_bounded(argv, *, workspace: str, bound_s: int, env: dict, on_beat=None,
                         break
                     if on_beat is not None:
                         try:
-                            on_beat()
+                            stop = on_beat()
                         except Exception:  # noqa: BLE001 - a heartbeat never kills the run
-                            pass
+                            stop = None
+                        if isinstance(stop, str) and stop:
+                            timing["superseded"] = stop
+                            killed_at = time.time()
+                            _kill_tree(proc)
+                            try:
+                                out, _err = proc.communicate(timeout=15)
+                            except Exception:  # noqa: BLE001
+                                out = ""
+                            rc = None
+                            log("run: stopped the session: %s" % stop)
+                            break
         finally:
             timing["session_s"] = int((killed_at or time.time()) - started)
             timing["reaped"] = reap(proc)

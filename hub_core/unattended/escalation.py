@@ -31,15 +31,22 @@ _PROSE_STAMP = re.compile(r"via=responder(?:\s+hop=(\d+))?")
 
 
 def hop_of(item: dict) -> int:
-    """The item's escalation depth: the structured field, else a legacy prose stamp
-    (``via=responder hop=N``; a bare ``via=responder`` counts as hop 1)."""
-    try:
-        structured = int(item.get("hop") or 0)
-    except (TypeError, ValueError):
-        structured = 0
+    """The item's escalation depth.
+
+    The hub STAMPS ``hop`` on an ask from the caller's own process (never the model), so when
+    the field is present it is the AUTHORITY -- including ``0``, which is a meaningful value (a
+    person's question that merely QUOTES a responder's words is still hop 0). Only an item
+    without the field (an older hub, or a task whose text carries the marker) falls back to the
+    legacy prose stamp (``via=responder hop=N``; a bare ``via=responder`` counts as hop 1)."""
+    raw = item.get("hop")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
     text = "%s %s" % (item.get("title") or "", item.get("body") or "")
     prose = [int(m.group(1) or 1) for m in _PROSE_STAMP.finditer(text)]
-    return max([structured] + prose)
+    return max([0] + prose)
 
 
 def workable(item: dict) -> tuple[bool, str]:
