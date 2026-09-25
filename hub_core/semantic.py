@@ -584,6 +584,31 @@ def cached_focus(conn, text: str):
     return _unpack(row[0]) if row else None
 
 
+#: The embedder circuit: after a TRANSPORT failure (unreachable, timed out, refused) the
+#: prompt-path and overlap-path embeds are skipped for this long. A down embedder used to be
+#: asked on every uncached focus and every overlap lookup, each paying its full timeout before
+#: falling back — seconds per prompt against a hook's budget, and minutes per adjudication pass
+#: spent waiting on the same outage once per record. A cached focus still ranks meaningfully,
+#: because that needs no embed.
+EMBED_RETRY_S = 60
+_EMBED_DOWN: dict = {"until": 0.0, "why": ""}
+
+
+def embed_circuit() -> str:
+    """"" when the embedder may be asked; otherwise why not, and for how much longer."""
+    left = _EMBED_DOWN["until"] - time.time()
+    if left <= 0:
+        return ""
+    return "embed unreachable (not retried for %d s; last: %s)" % (int(left) + 1, _EMBED_DOWN["why"])
+
+
+def _trip_if_down(reason: str) -> None:
+    """Open the circuit on a transport failure only: an HTTP error or a shape complaint is
+    answered per call, and the next text may well succeed."""
+    if str(reason or "").startswith("embed unreachable"):
+        _EMBED_DOWN.update(until=time.time() + EMBED_RETRY_S, why=str(reason)[:160])
+
+
 def ensure_focus(conn, text: str, *, timeout: float = FOCUS_WARM_TIMEOUT_S) -> tuple:
     """Embed and cache this focus if needed — ON the prompt path, bounded.
 
@@ -596,9 +621,13 @@ def ensure_focus(conn, text: str, *, timeout: float = FOCUS_WARM_TIMEOUT_S) -> t
         return False, {"cached": False, "reason": "no focus"}
     if cached_focus(conn, text) is not None:
         return True, {"cached": True, "hit": True}
+    down = embed_circuit()
+    if down:
+        return False, {"cached": False, "reason": down, "circuit": True}
     try:
         vec = embed([text], is_query=True, timeout=timeout)[0]
     except (EmbedUnavailable, ValueError) as exc:
+        _trip_if_down(str(exc))
         return False, {"cached": False, "reason": str(exc)}
     try:
         conn.execute("INSERT INTO focus_vectors (text_sha, dim, vec, at) VALUES (?,?,?,?)"
@@ -666,9 +695,13 @@ def related(text: str, conn, *, z_min: float, cos_min: float = 0.0, exclude=(), 
     corpus" survives a model swap and a corpus that doubles; an absolute cosine does not.
     `cos_min` is only a floor against a corpus of near-identical records.
     """
+    down = embed_circuit()
+    if down:
+        return [], {"semantic": False, "reason": down, "circuit": True}
     try:
         qvec = embed([text], is_query=False, timeout=timeout)[0]
     except (EmbedUnavailable, ValueError) as exc:
+        _trip_if_down(str(exc))
         return [], {"semantic": False, "reason": str(exc)}
     skip = set(exclude)
     sims = [(cosine(qvec, vec), eid) for eid, vec in vectors_for(conn).items()

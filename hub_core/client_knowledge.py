@@ -342,6 +342,12 @@ def _run_adjudicate(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
         result["_exit"] = 2
         result["msg"] = ("%d overlap(s) need a reader and no judge model is configured here "
                          "(set HUB_JUDGE_URL and HUB_JUDGE_MODEL)" % result["needs_model"])
+    if result.get("embedder") not in (None, "reachable", "not needed"):
+        # An embedder outage is ONE named line, never a traceback or a silent partial pass: the
+        # semantic halves stay deferred (the next pass with a live embedder fills them) and the
+        # rule and model halves still ran.
+        print("EMBED UNAVAILABLE: %s (%d lesson(s) keep their semantic half deferred)"
+              % (result["embedder"], result.get("semantic_deferred") or 0), file=sys.stderr)
     return result
 
 

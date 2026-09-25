@@ -128,10 +128,42 @@ def _row(m) -> str:
     return row
 
 
+#: When the hub could only rank by WORDS, each matching row carries `lexical_score`: the share
+#: of THIS query's own BM25 ceiling it answers (0..1). Read from real focuses, not a round
+#: number: the top row must reach LEXICAL_SCORE_MIN, a later row LEXICAL_FOLLOW_MIN AND
+#: LEXICAL_FOLLOW_FRAC of the top, at most LEXICAL_RELEVANT_MAX rows — fewer than a meaning-based
+#: ranking would get, because a shared word is weaker evidence of relevance than a close meaning.
+LEXICAL_SCORE_MIN = 0.25
+LEXICAL_FOLLOW_MIN = 0.24
+LEXICAL_FOLLOW_FRAC = 0.6
+LEXICAL_RELEVANT_MAX = 4
+
+
+def lexical_cut(memory) -> tuple:
+    """(rows that clear the word-match cut, how many scored rows were considered)."""
+    scored = [m for m in memory if isinstance(m.get("lexical_score"), (int, float))]
+    scored.sort(key=lambda m: -float(m["lexical_score"]))
+    if not scored or float(scored[0]["lexical_score"]) < LEXICAL_SCORE_MIN:
+        return [], len(scored)
+    top = float(scored[0]["lexical_score"])
+    follow = max(LEXICAL_FOLLOW_MIN, LEXICAL_FOLLOW_FRAC * top)
+    kept = [scored[0]] + [m for m in scored[1:] if float(m["lexical_score"]) >= follow]
+    return kept[:LEXICAL_RELEVANT_MAX], len(scored)
+
+
 def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
     """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
     the receipt keys of rows that actually rendered, and the rendered rows that did not fit."""
     memory = list(payload.get("memory") or [])
+    rank = payload.get("memory_rank") or {}
+    word_cut = None
+    if rank.get("ranked") and rank.get("by") == "wording" and any(
+            isinstance(m.get("lexical_score"), (int, float)) for m in memory):
+        # WORD MATCHES ARE CUT, NOT PADDED. A standing-order tail under a "ranked" header reads
+        # as relevance it is not; a prompt that got nothing because no record matched well
+        # enough must SAY so rather than look like one where nothing applied.
+        memory, considered = lexical_cut(memory)
+        word_cut = {"kept": len(memory), "considered": considered}
     already, fresh = [], []
     if delivered:
         memory = memory[:DELTA_RANK_WINDOW]
@@ -150,11 +182,21 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
     else:
         fresh = memory
     memory_block, kept_keys, spill = "", [], []
+    if word_cut is not None and not word_cut["kept"]:
+        memory_block = ("<hub-knowledge>\nBOARD KNOWLEDGE was NOT delivered for this prompt: it could "
+                        "only be ranked by WORDS (%s) and no record matched them strongly enough "
+                        "(%d word match(es) considered). Search it yourself: %s search \"<symptom>\"\n"
+                        "</hub-knowledge>" % (re.sub(r"[<>]", "", str(
+                            rank.get("semantic_reason") or rank.get("reason")
+                            or "no meaning-based ranking"))[:160],
+                                              word_cut["considered"], client_hint))
     if fresh or already:
-        rank = payload.get("memory_rank") or {}
         if rank.get("ranked") and rank.get("by") == "wording":
             order = ("ranked by the WORDS of what this console is doing, not their meaning — "
                      "a record phrased differently sits lower")
+            if word_cut is not None:
+                order += ("; only the %d that matched them strongly are shown — check each applies"
+                          % word_cut["kept"])
         elif rank.get("ranked"):
             order = "ranked for what this console is doing"
         else:
