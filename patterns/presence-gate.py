@@ -396,10 +396,30 @@ def reconcile_terminal_selection(settings: Path, report) -> str:
     if choice is None:
         return "nothing to do"
     key, value = choice
+    # The settings file belongs to the person and to every tool that registers hooks in it, so
+    # the write keeps the four rules of hub_core/settings_io.py (this gate stays standalone):
+    # utf-8-sig read, refuse an unparseable file (above), a byte-for-byte backup and an atomic
+    # replace, then RE-READ and require everything but the one env key to be unchanged —
+    # otherwise the backup is restored and the write is reported, never silently kept.
+    before = json.dumps({k: v for k, v in doc.items() if k != "env"}, sort_keys=True)
+    env_before = {k: v for k, v in (doc.get("env") or {}).items() if k != key}
     doc.setdefault("env", {})[key] = value
+    backup = settings.with_name(settings.name + ".bak")
+    shutil.copy2(settings, backup)
     tmp = settings.with_suffix(".gate-tmp.%d" % os.getpid())
     tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     os.replace(tmp, settings)
+    try:
+        after = json.loads(settings.read_text(encoding="utf-8-sig"))
+        kept = (json.dumps({k: v for k, v in after.items() if k != "env"}, sort_keys=True) == before
+                and {k: v for k, v in (after.get("env") or {}).items() if k != key} == env_before)
+    except (OSError, ValueError, AttributeError):
+        kept = False
+    if not kept:
+        shutil.copy2(backup, settings)
+        report("a settings write would have changed more than %s; the original was restored" % key,
+               "settings_write_restored", "error")
+        return "restored"
     if key == MOUSE_ALL_ENV:
         report("native text selection was restored with the BLUNT switch (%s), so wheel scrolling "
                "is now off in this terminal. This client is %s, below %s, the first version with "

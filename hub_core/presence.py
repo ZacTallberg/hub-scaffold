@@ -58,7 +58,6 @@ from .process_lock import ProcessFileLock
 
 SESSION_ACTIVE_S = 900          # a console that prompted within 15 minutes is a live console
 SESSION_KEEP_S = 1800           # a console quiet longer than this is closed, and is pruned
-FILES_FRESH_S = 900             # a reported file list older than this is history, not current work
 MAX_FILES = 24                  # a console's recent-files list is a hint, never an inventory
 _PRUNE_INTERVAL_S = 900         # walk the presence dir at most this often on the write path
 QUIET_REWRITE_S = 30            # a timestamp-only observation of a row this fresh is skipped

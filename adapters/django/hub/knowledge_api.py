@@ -329,6 +329,54 @@ RELATED_Z = 3.0
 RELATED_COS_MIN = 0.55
 
 
+# ── /hub/triggers.json: which live lesson an error, a command or a path names ──
+
+_TRIGGER_MEMO = {"key": None, "index": None}
+_TRIGGER_LOCK = threading.Lock()
+
+
+def _trigger_index(state, key):
+    """The board's trigger index at this ledger head: the SAME fold and filters a workstation's
+    hook applies to its mirror (hub_core.lesson_triggers), built from the feed's own put ops so
+    a record retired on the board can never match here while it is revoked everywhere else."""
+    with _TRIGGER_LOCK:
+        if _TRIGGER_MEMO["key"] == key and _TRIGGER_MEMO["index"] is not None:
+            return _TRIGGER_MEMO["index"]
+    ops, _last, _more = knowledge.ledger_ops(state, 0, 10 ** 9)
+    from hub_core import lesson_triggers, memory_feed
+    index = lesson_triggers.build_index(lesson_triggers.trigger_records(memory_feed.apply_ops(ops)))
+    with _TRIGGER_LOCK:
+        _TRIGGER_MEMO.update(key=key, index=index)
+    return index
+
+
+@require_GET
+def triggers_json(request):
+    """Which live knowledge record's ``applies_when`` names this moment.
+
+        GET /hub/triggers.json?error=<tool output>|command=<command>|path=<file path>[&context=]
+
+    Deterministic, literal matching — the rules the workstation hook uses (``<...>`` is one
+    non-space value, errors match output, commands match the command, paths match at a segment
+    boundary, systems only order), minus what only a workstation has: its corpus guard and its
+    once-per-session receipt. ``metadata.rejected`` names the triggers the index ignores and why,
+    so a trigger that never fires can be told from one that did not match."""
+    from hub_core import lesson_triggers
+    event = {k: (request.GET.get(k) or "")[:8000] for k in ("error", "command", "path", "context")}
+    if not (event["error"] or event["command"] or event["path"]):
+        return JsonResponse({"errors": [{"code": "need_error_command_or_path",
+                                         "msg": "give ?error=, ?command= or ?path="}]}, status=400)
+    state, key = _state_and_key()
+    index = _trigger_index(state, key)
+    hits = lesson_triggers.match(event, index)
+    return JsonResponse({"data": [lesson_triggers.public_hit(h) for h in hits[:10]],
+                         "metadata": {"records_with_triggers": len(index.get("records") or []),
+                                      "matched": len(hits), "shown": min(len(hits), 10),
+                                      "per_event_cap_on_workstations": lesson_triggers.MAX_PER_EVENT,
+                                      "rejected": index.get("rejected") or {},
+                                      "head": {"seq": key[1]}}})
+
+
 # ── the per-prompt memory index ──
 
 MEMORY_CAP_MAX = 200
