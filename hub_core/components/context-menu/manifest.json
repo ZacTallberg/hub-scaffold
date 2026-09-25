@@ -1,0 +1,98 @@
+{
+  "name": "context-menu",
+  "title": "Context menu",
+  "version": "1.0.1",
+  "what": "One right-click menu any app links. The APP declares what can be right-clicked on its pages (kinds: a card, a row, an order) and what can be done to each (items) in one JSON catalog island; the component does everything a menu does -- pointer, Shift+F10 and the Menu key, touch long-press, arrow keys and type-ahead, tabs, submenus, a check on the current value, press-twice confirmation for anything destructive, the writes through the app's own endpoints and their toasts, each person's recently-used row, and a facts line showing the values behind the state. SMART (optional): with data-smart-url the hub's configured model organises the declared items for this app, page, kind and role -- pins the likeliest at the top, splits a long menu into tabs, drops optional items that make no sense here, and offers up to three questions for the page's agent. It can only name ids the app declared; it can never add or change an action, and a model that is down leaves the catalog's own order.",
+  "link": [
+    "<link rel=\"stylesheet\" href=\"{hub}/components/context-menu/context-menu.css\">",
+    "<script src=\"{hub}/components/context-menu/context-menu.js\"></script>"
+  ],
+  "mount": {
+    "element": "<div id=\"hub-menu\" hidden data-app=\"<slug>\" ...><script type=\"application/json\" data-menu=\"catalog\">{...}</script></div> -- link the script WITHOUT defer, immediately after the mount (and after the agent component when the page has one)",
+    "attributes": {
+      "data-app": "REQUIRED: the app slug; keys the recently-used memory, the props record and the smart pass",
+      "data-app-name": "the name a person knows the app by",
+      "data-page": "a short key for the page (board, list, register); the smart pass organises per page. Defaults to the path.",
+      "data-role": "the reader's rung in this app (admin, member, visitor, ...); the model organises for it. Never a gate -- the app's endpoints gate every write.",
+      "data-smart-url": "optional: a POST path on the APP's own origin that forwards the body to POST /hub/api/menu/rank with the app's hub credential (scope menu:rank). No smart-url, no model: the catalog's own order, and no star.",
+      "data-props": "optional: the hub's component-properties route for this app"
+    }
+  },
+  "bridge": {
+    "smart": "POST JSON (the request below) -> forward to POST /hub/api/menu/rank with the app's hub credential (scope menu:rank); return the hub's JSON unchanged. Let the bridge wait a little longer than the hub's own model timeout, so the hub's verdict is the one a reader sees."
+  },
+  "catalog": {
+    "shape": "{\"kinds\": {\"<kind>\": {\"label\": \"Card\", \"match\": \"[data-task]\", \"id\": \"display-id task\", \"head\": \"{display-id}\", \"facts\": [{\"key\": \"owner-name\", \"label\": \"Owner\"}], \"tabs\": [{\"label\": \"Do\", \"items\": [\"ids\"]}], \"items\": [\"ITEM\", {\"sep\": true}]}, \"page\": {\"...\": \"optional: a right-click on empty page\"}}}",
+    "kind": "match is a CSS selector (default [data-hcm=\"<kind>\"]); id names the data-* attribute(s) holding the target's id, first set wins (default hcm-id). EVERY data-* attribute of the matched element is a fact, keyed without 'data-' ({status}, {owner}); {id}, {href} (the first link inside), {href-abs}, {text}, {page}, {origin} and {kind} are always there. tabs is optional: a catalog that declares its own tabs keeps them and the model does not re-tab it.",
+    "item": "{\"id\": \"move\", \"label\": \"Move to\", \"icon\": \"columns\" | \"ph:<icon-font classes>\" | \"dot\", \"color\": \"a CSS colour or {fact}\", \"hint\": \"...\", \"kbd\": \"...\", \"when\": COND, \"on\": COND, \"maybe\": true, \"danger\": true, \"confirm\": \"Delete {display-id}?\", \"disabled\": \"why\", \"sub\": [ITEM], \"do\": ACTION}",
+    "cond": "{\"status\": \"3\"} equal, {\"!status\": \"3\"} not equal, {\"owner\": \"*\"} present, {\"owner\": \"\"} absent; values may be {templated}; all clauses must hold. `when` decides whether the item is drawn; `on` draws the check for the current value.",
+    "action": {
+      "navigate": "{\"type\": \"navigate\", \"url\": \"...\"}",
+      "open": "{\"type\": \"open\", \"url\": \"...\"} -- a new tab",
+      "copy": "{\"type\": \"copy\", \"text\": \"{href-abs}\", \"toast\": \"Link copied.\"} -- falls back to a selection copy where the clipboard API is unavailable",
+      "post": "{\"type\": \"post\", \"url\": \"...\", \"values\": {}, \"toast\": \"...\", \"then\": \"reload\" | {\"htmx\": {\"url\": \"\", \"target\": \"\", \"swap\": \"\"}} | {\"event\": \"name\", \"target\": \"selector\"} | {\"navigate\": \"url\"}} -- form-encoded, with X-CSRFToken (body[data-csrf], a csrfmiddlewaretoken input, or a *csrftoken cookie) and HX-Request. A 4xx/5xx toasts the server's own words; a 204 is 'Nothing changed.'; only a 2xx with content earns the item's toast.",
+      "htmx": "{\"type\": \"htmx\", \"method\": \"GET\", \"url\": \"...\", \"target\": \"#modal-slot\", \"swap\": \"innerHTML\"} -- success is read off the request: a 204 or an HX-Trigger response is the app speaking for itself",
+      "click": "{\"type\": \"click\", \"selector\": \"...\"} -- presses a control inside the target (or on the page): reuse the app's own button rather than re-describe it",
+      "emit": "{\"type\": \"emit\", \"event\": \"app:thing\", \"detail\": {}} -- the app's own script does it",
+      "ask": "{\"type\": \"ask\", \"question\": \"...\"} -- asks the page's agent component (hub:agent-ask); without an agent that takes it, the question is copied to the clipboard and the toast says so",
+      "reload": "{\"type\": \"reload\"}"
+    }
+  },
+  "smart": {
+    "request": "POST <smart-url>  {app, app_name, page, kind, kind_label, role, items: [{id, label, hint, group, sub, maybe, danger}], facts: {key: short value, 40 chars or fewer}, recent: [{id, n}], has_agent}",
+    "hub": "The hub asks the model it is configured with (HUB_MENU_MODEL_URL / HUB_MENU_MODEL, else the HUB_JUDGE_* model) and VALIDATES the answer: unknown ids are dropped and counted, only `maybe` items may be hidden, a destructive item is never pinned. Cached six hours per (app, page, kind, role, item set). GET /hub/api/menu/rank reports whether a model is configured, the timeout and the counts since the process started -- never the model's address.",
+    "ok": "{\"ok\": true, \"ranking\": {\"pinned\": [\"ids\"], \"tabs\": [{\"label\": \"\", \"items\": [\"ids\"]}], \"hidden\": [\"ids\"], \"asks\": [{\"label\": \"\", \"question\": \"\"}], \"note\": \"...\", \"model\": \"<name>\", \"ms\": 0}, \"cached\": false, \"dropped\": 0}",
+    "failed": "{\"ok\": false, \"reason\": \"unconfigured\" | \"failed\", \"error\": \"...\"} -- the menu draws the catalog's order with no star; the mount gets data-hcm-smart=\"unconfigured\" or \"failed\"",
+    "never_waits": "The menu is drawn before the answer. The component prefetches once per kind when the page loads and keeps the answer for the session, so a slow model costs nothing."
+  },
+  "events": {
+    "hub-menu:ready": "on document: {version, kinds}",
+    "hub-menu:open": "on document, cancelable -- preventDefault keeps the browser's own menu; detail.add(item) adds an item for THIS target",
+    "hub-menu:action": "on document: {kind, id, item, target, facts, action} before any action runs",
+    "hub-menu:done": "on document: {kind, id, item, status, body} after a post or htmx action landed",
+    "hub:agent-ask": "dispatched on document for an `ask` action, cancelable, detail {question}; the agent component cancels it once it has taken the question",
+    "hub:component-props": "window event, detail {app, props}; props['context-menu'] overrides the fetched values without a reload",
+    "window.HubMenu": "{version, open(target, x, y), close(), register(kind, def), kinds(), smart()} -- smart() reports each kind's model state and error, for debugging from the console"
+  },
+  "rules": [
+    "THE HUB SERVES THE COMPONENT AND NEVER AN APP'S DATA. Every URL in a catalog is a path on the app's own origin behind its own sign-in; the component can only run what the catalog declared.",
+    "A WRITE GOES THROUGH THE APP'S OWN ENDPOINT, the one its drawer or form already uses, so the app's permission checks and audit trail apply exactly as they do there. Declare a write item with `when` on the reader's rights; the endpoint still decides.",
+    "NOTHING DESTRUCTIVE FIRES ON ONE PRESS. An item with `confirm` arms on the first press and runs on the second, on the same open; anything else disarms it. `danger` marks it. The model may never pin one.",
+    "A MODEL FAILURE DOES NOTHING. No model, a timeout or a bad reply leaves the catalog's own order and no star; the model can never add an item, remove a core item, or change an action.",
+    "SUCCESS IS WHAT THE APP SAID. A refusal toasts the server's words; a 204 or an HX-Trigger response is the app speaking for itself; only a 2xx with content earns the item's own toast.",
+    "TEXT FIELDS KEEP THE BROWSER'S MENU. A right-click inside input, textarea, select or contenteditable, or anything under [data-hcm-native], is left alone.",
+    "SCROLL CLOSES IT ONLY WHEN THE TARGET MOVED, and the menu takes focus back once if the page's own handler took it on the same gesture.",
+    "AN ERROR IN THE COMPONENT IS RETHROWN off the stack so the app's error visibility forwards it; the gesture falls back to the browser's own menu.",
+    "A LIVE PAGE THAT SWAPS THE TARGET OUT closes the menu (htmx:afterSettle), so it never writes to a record that is no longer there."
+  ],
+  "keyboard": {
+    "Shift+F10 or the Menu key": "open for the focused target",
+    "Arrow Up/Down, Home, End": "move",
+    "Arrow Right / Left": "open / close a submenu",
+    "Tab / Shift+Tab": "next / previous tab",
+    "a letter": "jump to the next item starting with it",
+    "Escape": "close, and focus goes back to the target"
+  },
+  "props": [
+    {"key": "smart", "label": "Organised by the model", "type": "choice", "default": "on",
+     "hint": "On: the hub's model arranges this app's declared actions -- the likeliest at the top, tabs when there are many, questions for the agent -- and can never add or change an action. Off: the catalog's own order.",
+     "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]},
+    {"key": "tabs", "label": "Tabs", "type": "choice", "default": "auto",
+     "hint": "Split a long menu into tabs. Never keeps one list, however long.",
+     "options": [{"value": "auto", "label": "When there are many"}, {"value": "off", "label": "Never"}]},
+    {"key": "recent", "label": "Recently used row", "type": "choice", "default": "on",
+     "hint": "Each person's own two most-used actions at the top, once they have used them a few times. Kept in their browser only.",
+     "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]},
+    {"key": "head", "label": "Header line", "type": "choice", "default": "on",
+     "hint": "What was right-clicked, named at the top of the menu.",
+     "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]},
+    {"key": "facts", "label": "Facts line", "type": "choice", "default": "on",
+     "hint": "The values the app says matter (owner, due, status) under the header.",
+     "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]}
+  ],
+  "publishes": {
+    "html_attributes": ["data-hcm-ready", "data-hcm-version", "data-hcm-smart"],
+    "events_read": ["hub:component-props"],
+    "events_dispatched": ["hub-menu:ready", "hub-menu:open", "hub-menu:action", "hub-menu:done", "hub:agent-ask"]
+  }
+}

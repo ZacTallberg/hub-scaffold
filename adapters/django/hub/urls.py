@@ -174,6 +174,7 @@ urlpatterns = [
     path("api/agent/ask", app_services.agent_ask),
     path("api/agent/history", app_services.agent_history),
     path("api/agent/conversation", app_services.agent_conversation),
+    path("api/menu/rank", app_services.menu_rank_view),
     path("api/history", histories_api.upload, name="history-upload"),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),

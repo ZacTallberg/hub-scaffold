@@ -117,3 +117,29 @@ placement preference; a docked, resizable panel that pushes the page instead of 
 failed (with retry) and empty states. Any element with `data-hub-agent-open`, or a
 `hub:agent-open` window event (`detail: {question}`), opens it. Agent text is rendered as text,
 never HTML.
+
+## 5. The context menu — the app declares, the hub organises
+
+    <div id="hub-menu" hidden data-app="budget-app" data-page="ledger" data-role="member"
+         data-smart-url="/budget/menu/rank" data-props="/hub/components/props/budget-app.json">
+      <script type="application/json" data-menu="catalog">{"kinds": {"row": {...}}}</script>
+    </div>
+    <link rel="stylesheet" href="/hub/components/context-menu/context-menu.css">
+    <script src="/hub/components/context-menu/context-menu.js"></script>
+
+The app names what can be right-clicked (a kind: a CSS selector plus the `data-*` facts on the
+element) and what can be done to each (items: navigate, open, copy, post to the app's own
+endpoint, open an htmx partial, press the app's own button, emit an event, ask the agent). The
+component owns everything a menu owes a person: pointer, Shift+F10 and the Menu key, touch
+long-press, arrows and type-ahead, tabs, submenus, checks on the current value, press-twice
+confirmation for anything destructive, toasts that repeat what the app actually answered, and
+each person's recently-used row. The full catalog contract is the component's
+`manifest.json`.
+
+The optional smart pass is the same bridge shape as the agent's: the app's server forwards the
+component's request to `POST /hub/api/menu/rank` with a credential scoped `menu:rank`, and the
+hub asks its configured model how to ORGANISE the declared items -- pin, tab, drop an optional
+one, suggest questions for the agent. The hub validates the answer against the catalog it was
+sent (unknown ids dropped and counted, only optional items hideable, nothing destructive
+pinned), so a model can make a menu less useful but never make it do something new. No model,
+or one that fails, leaves the catalog's own order with no "organised" star.

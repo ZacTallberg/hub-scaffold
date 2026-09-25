@@ -1,0 +1,164 @@
+/* =============================================================================
+   CONTEXT MENU — hosted component styles.  v1.0.1
+
+   Link it; never copy it. Every token and class is `--hcm-*` / `.hcm-*`, so nothing
+   the app or the other hosted components own is touched.
+
+   THEMING. Each colour is a token over the app's own (`--surface`, `--surface-2`,
+   `--text`, `--muted`, `--border`, `--accent`) with a neutral fallback, redeclared
+   under `:root[data-theme="dark"]` and under `prefers-color-scheme: dark` guarded by
+   `:root:not([data-theme="light"])`, so an app with no switch follows the OS and a
+   deliberate light choice is never overridden.
+
+   MOTION. One 90 ms fade on open; none under prefers-reduced-motion.
+   ============================================================================= */
+
+:root {
+  --hcm-surface: var(--surface, #ffffff);
+  --hcm-raise: var(--surface-2, #f4f5f7);
+  --hcm-fg: var(--text, #1d2330);
+  --hcm-soft: var(--muted, #5d6677);
+  --hcm-mute: var(--muted, #6b7383);
+  --hcm-line: var(--border, #d9dde5);
+  --hcm-accent: var(--accent, #2f5bd3);
+  --hcm-danger: #a32121;
+  --hcm-danger-bg: #fdecec;
+  --hcm-shadow: 0 12px 32px rgba(15, 23, 42, .18);
+  --hcm-radius: 10px;
+  --hcm-font: inherit;
+  --hcm-z: 2300;
+}
+:root[data-theme="dark"] {
+  --hcm-surface: var(--surface, #161b24);
+  --hcm-raise: var(--surface-2, #1f2632);
+  --hcm-fg: var(--text, #e7ebf2);
+  --hcm-soft: var(--muted, #9aa4b5);
+  --hcm-mute: var(--muted, #8a94a6);
+  --hcm-line: var(--border, #2d3542);
+  --hcm-accent: var(--accent, #7aa2ff);
+  --hcm-danger: #f6a3a3;
+  --hcm-danger-bg: rgba(246, 163, 163, .14);
+  --hcm-shadow: 0 12px 32px rgba(0, 0, 0, .55);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --hcm-surface: var(--surface, #161b24);
+    --hcm-raise: var(--surface-2, #1f2632);
+    --hcm-fg: var(--text, #e7ebf2);
+    --hcm-soft: var(--muted, #9aa4b5);
+    --hcm-mute: var(--muted, #8a94a6);
+    --hcm-line: var(--border, #2d3542);
+    --hcm-accent: var(--accent, #7aa2ff);
+    --hcm-danger: #f6a3a3;
+    --hcm-danger-bg: rgba(246, 163, 163, .14);
+    --hcm-shadow: 0 12px 32px rgba(0, 0, 0, .55);
+  }
+}
+
+/* The menu itself: fixed, above the page and every app drawer but below a modal
+   dialog (the banner's boxes sit above it). */
+.hcm {
+  position: fixed; z-index: var(--hcm-z);
+  min-width: 208px; max-width: 320px; padding: 5px;
+  border: 1px solid var(--hcm-line); border-radius: var(--hcm-radius);
+  background: var(--hcm-surface); color: var(--hcm-fg);
+  box-shadow: var(--hcm-shadow);
+  font: 13px/1.35 var(--hcm-font); text-align: left;
+  box-sizing: border-box;
+  animation: hcm-in 90ms ease-out;
+}
+.hcm *, .hcm *::before, .hcm *::after { box-sizing: border-box; }
+@keyframes hcm-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .hcm { animation: none; } }
+
+/* THE GLYPHS ARE STROKE-ONLY and this file says so itself: an app's reset
+   (`svg { fill: currentColor }`) would fill them solid. */
+.hcm svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7;
+           stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; display: inline-block; }
+.hcm-item > .hcm-ico { color: var(--hcm-soft); display: inline-flex; width: 15px; justify-content: center; }
+.hcm-item > .hcm-ico .ph { font-size: 15px; line-height: 1; }
+.hcm-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: currentColor; }
+
+.hcm-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px 5px; color: var(--hcm-mute);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hcm-head-kind { font-family: var(--hcm-font); font-size: 11px; text-transform: uppercase;
+                 letter-spacing: .04em; color: var(--hcm-mute); }
+.hcm-head-id { overflow: hidden; text-overflow: ellipsis; }
+/* The "agent powered" star: only when a ranking from the model has been applied. */
+.hcm-star { margin-left: auto; color: var(--hcm-mute); opacity: .8; }
+.hcm-star svg { width: 12px; height: 12px; }
+.hcm-star[data-busy="1"] { animation: hcm-pulse 1.2s ease-in-out infinite; }
+@keyframes hcm-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .hcm-star[data-busy="1"] { animation: none; } }
+
+.hcm-tabs { display: flex; gap: 2px; margin: 0 2px 4px; border-bottom: 1px solid var(--hcm-line); }
+.hcm-tab {
+  flex: 1 1 auto; padding: 5px 8px 6px; border: 0; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; background: none; color: var(--hcm-soft); font: inherit; font-size: 12px;
+  cursor: pointer; white-space: nowrap;
+}
+.hcm-tab[aria-selected="true"] { color: var(--hcm-fg); border-bottom-color: var(--hcm-accent); font-weight: 600; }
+.hcm-tab:hover, .hcm-tab:focus-visible { color: var(--hcm-fg); outline: none; background: var(--hcm-raise); border-radius: 6px 6px 0 0; }
+.hcm-pane[hidden] { display: none; }
+
+.hcm-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 6px 10px; border: 0; border-radius: 6px; background: none;
+  color: var(--hcm-fg); font: inherit; text-align: left; cursor: pointer; white-space: nowrap;
+}
+.hcm-item > span { overflow: hidden; text-overflow: ellipsis; }
+.hcm-item:hover, .hcm-item:focus-visible { background: var(--hcm-raise); outline: none; }
+.hcm-item[disabled] { color: var(--hcm-mute); cursor: default; }
+.hcm-item[disabled]:hover { background: none; }
+.hcm-item.is-on { font-weight: 600; }
+.hcm-check { margin-left: auto; color: var(--hcm-accent); }
+.hcm-check svg { width: 13px; height: 13px; }
+.hcm-item.is-danger { color: var(--hcm-danger); }
+.hcm-item.is-danger > .hcm-ico { color: inherit; }
+.hcm-item.is-danger:hover, .hcm-item.is-danger:focus-visible { background: var(--hcm-danger-bg); }
+/* A destructive item asks in place: the second press within the same open confirms. */
+.hcm-item.is-confirm { background: var(--hcm-danger-bg); font-weight: 600; }
+.hcm-item.is-confirm > span::after { content: " \2014 press again to confirm"; font-weight: 400; }
+.hcm-hint { display: block; font-size: 11px; color: var(--hcm-mute); white-space: normal; margin-top: 1px; }
+.hcm-kbd { margin-left: auto; font-size: 11px; color: var(--hcm-mute); font-family: ui-monospace, monospace; }
+.hcm-caret { margin-left: auto; color: var(--hcm-mute); }
+.hcm-caret svg { width: 12px; height: 12px; }
+
+.hcm-sep { height: 1px; margin: 5px 4px; background: var(--hcm-line); }
+.hcm-label { padding: 6px 10px 2px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--hcm-mute); }
+
+/* Facts under the head: the values that produced the state ("Owner alice · Due Fri"). */
+.hcm-facts { display: flex; flex-wrap: wrap; gap: 4px 8px; padding: 0 10px 6px; font-size: 11px; color: var(--hcm-soft); }
+.hcm-facts b { font-weight: 600; color: var(--hcm-fg); }
+
+/* Submenus */
+.hcm-sub { position: relative; }
+.hcm-panel { display: none; position: absolute; top: -5px; left: 100%; margin-left: 2px; animation: none; }
+.hcm-sub:hover > .hcm-panel, .hcm-sub.is-open > .hcm-panel { display: block; }
+.hcm.flip-subs .hcm-panel { left: auto; right: 100%; margin: 0 2px 0 0; }
+.hcm-panel.hcm-scroll { max-height: min(60vh, 420px); overflow-y: auto; }
+
+.hcm-empty { padding: 8px 10px; color: var(--hcm-mute); font-size: 12px; white-space: normal; }
+.hcm-note { padding: 4px 10px 6px; color: var(--hcm-mute); font-size: 11px; white-space: normal; border-top: 1px solid var(--hcm-line); margin-top: 4px; }
+
+/* The toast a menu action answers with ("Link copied", "That change was refused: ...") */
+.hcm-toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: calc(var(--hcm-z) + 1);
+  max-width: min(92vw, 520px); padding: 9px 14px; border-radius: 8px;
+  background: var(--hcm-fg); color: var(--hcm-surface); font: 13px/1.4 var(--hcm-font);
+  box-shadow: var(--hcm-shadow); animation: hcm-in 120ms ease-out;
+}
+.hcm-toast.is-error { background: var(--hcm-danger); color: var(--hcm-surface); }
+@media (prefers-reduced-motion: reduce) { .hcm-toast { animation: none; } }
+
+/* Phone: the menu becomes a bottom sheet so a long-press has room to land. */
+@media (max-width: 480px) {
+  .hcm { left: 8px !important; right: 8px !important; top: auto !important; bottom: 8px !important;
+         max-width: none; max-height: 70vh; overflow-y: auto; }
+  .hcm-panel { position: static; margin: 0 0 0 14px; }
+  .hcm.flip-subs .hcm-panel { margin: 0 0 0 14px; }
+}
