@@ -129,6 +129,14 @@ sessions never open a console the board could otherwise see.
 
 ## The canary tells the truth or says nothing
 
+The canary is a question FOR MACHINES, so it is filed `synthetic`: it stays on the record
+(`questions.json`, where the canary is judged) but is delivered only to a reader that asks for
+it with `inbox.json?include=synthetic` — the responder. A person's inbox, the `inbox/wait`
+notifier and its fingerprint never carry it, so a daily self-test never spends a person's
+attention or a notifier's cooldown slot ahead of a real question. It is deliberately NOT one of
+the automation tags, which every reader drops: a canary its own responder cannot see can only
+time out, or read as "retired" and pass.
+
 With `HUB_RESPONDER_CANARY=1`, `poll` files a synthetic question through the real ask path once
 a day and later judges whether the loop answered it. Three rules keep that verdict honest:
 
