@@ -16,7 +16,14 @@ The contract every item keeps:
 * It REACHES a person through the inbox: critical at once, warn after OWNER_PATIENCE_S to its
   owner, and to the operator once it has stood OPERATOR_PATIENCE_S. Info lives on the card only.
   A condition another lane already delivers (a question, an error, a decision) is SHOWN here and
-  not delivered twice (``lanes``). Nothing here ever launches work: most fixes need the person.
+  not delivered twice (``lanes``).
+* It names WHO CAN CLEAR IT (``actor``): ``agent`` or ``person``. Rarely does a condition truly
+  need a person: an agent item reaches its owner's inbox at ANY severity once it has stood
+  OWNER_PATIENCE_S (critical at once), and an unattended responder may take it
+  (hub_core.responder), under its attempt cap. Only the short list in PERSON_ONLY -- the things
+  an agent structurally cannot do -- waits for a human. On the instance this was lifted from,
+  over half of one operator's attention list could have been cleared by an agent and none ever
+  was, because the list launched nothing.
 * A source that could not be read never breaks the list: it is named in ``sources`` and the
   verdict, and the detectors that needed it stay SILENT rather than guess — an alarm that lies
   is worse than none, and a verdict that drops what it could not measure always passes.
@@ -49,6 +56,24 @@ CLEARED_KEEP = 30
 SEVERITIES = ("critical", "warn", "info")
 AREAS = ("seats", "tasks", "communication", "credentials", "errors", "hub")
 
+#: What ONLY a person can do; everything else is an agent's (a task to verify and close, a lease
+#: to reclaim or hand back, a stale client to update). Each entry names the one thing an agent
+#: structurally cannot do.
+PERSON_ONLY = {
+    "seat_silent": "the machine is off or off the network; nothing runs there to take the work",
+    "untracked_consoles": "an attended console's claim is its person's to make",
+    "credential_expiring": "a credential is rotated or re-issued at its source system",
+    "question_waiting": "an ask is answered through the ask lane, not here",
+    "errors_unclaimed": "the problems lane already offers every unclaimed problem",
+}
+#: Agent items that only the machine they name can clear (an install, a client update).
+ON_ITS_MACHINE = {"client_stale"}
+
+
+def actor_for(kind: str) -> str:
+    """``person`` for PERSON_ONLY kinds, else ``agent``."""
+    return "person" if kind in PERSON_ONLY else "agent"
+
 
 def item(kind, area, severity, *, title, fix, who, detail="", agent="", machine="", subject="",
          evidence=None, lanes=(), deliver_owner=True) -> dict:
@@ -60,7 +85,8 @@ def item(kind, area, severity, *, title, fix, who, detail="", agent="", machine=
     return {"id": ident, "kind": kind, "area": area, "severity": severity,
             "agent": str(agent or "").lower(), "machine": str(machine or ""), "who": who or "",
             "title": title, "detail": detail, "fix": fix, "evidence": evidence or {},
-            "lanes": list(lanes), "deliver_owner": deliver_owner}
+            "lanes": list(lanes), "deliver_owner": deliver_owner,
+            "actor": actor_for(kind), "on_its_machine": kind in ON_ITS_MACHINE}
 
 
 def age_phrase(seconds) -> str:
@@ -131,21 +157,25 @@ def detect_unstarted(ctx) -> list:
 
 
 def detect_leases(ctx) -> list:
-    """A task held by a console that is no longer live. The board reads in flight, nobody is on
+    """A task held by a console that is PROVABLY gone. The board reads in flight, nobody is on
     it, and every automatic close refuses it (the hub never finishes a task another agent holds).
-    Fires only when the live console list was actually read: with no consoles at all every lease
-    looks orphaned, and an alarm that cannot tell those apart is worse than none."""
+
+    ABSENT FROM THE CONSOLE LIST IS NOT GONE. An idle console can drop out of the live rows
+    while its session is alive; on the instance this was lifted from, this fired on a task held
+    by a console that was working the whole time, and -- once agent items reached responders --
+    several responders spent their sessions confirming the holder was live. So it fires only on
+    the liveness verdict the adapter attaches to each lease (``holder_state == "gone"``: the
+    holder's machine is reporting and that console is not among its live ones). A lease with no
+    verdict, or any other verdict, is left alone until it expires on its own."""
     sessions = ctx.get("sessions")
     if not sessions:
         return []
-    live = {str(r.get("session") or "")[:8] for r in sessions if not r.get("finished")}
-    live.discard("")
     tasks = {t.get("id"): t for t in ctx.get("tasks") or [] if isinstance(t, dict)}
     out = []
     for lease in ctx.get("leases") or []:
         sid = str(lease.get("session") or "")[:8]
         tid = str(lease.get("task") or "")
-        if not sid or sid in live:
+        if not sid or str(lease.get("holder_state") or "") != "gone":
             continue
         if str((tasks.get(tid) or {}).get("status") or "") != "in_progress":
             continue
@@ -447,7 +477,9 @@ def as_inbox_item(it: dict, *, escalated: bool = False) -> dict:
     lines.append("Fix: %s" % it["fix"])
     if it.get("evidence"):
         lines.append("Evidence: %s" % json.dumps(it["evidence"], default=str)[:500])
-    return {"kind": "attention",
+    return {"kind": "attention", "actor": it.get("actor") or actor_for(it.get("kind") or ""),
+            "attention_kind": it.get("kind") or "", "machine": it.get("machine") or "",
+            "on_its_machine": bool(it.get("on_its_machine")),
             "id": "attention:%s:%d%s" % (it["id"], int(it.get("since") or 0),
                                          ":escalated" if escalated else ""),
             "from": "the hub", "severity": it["severity"], "area": it["area"],
@@ -466,9 +498,17 @@ def items_for(agent: str, payload: dict | None) -> list:
     operator = str(payload.get("operator") or "").lower()
     out = []
     for it in payload.get("items") or []:
+        owner = it.get("agent") or operator
+        if owner == agent and (it.get("actor") or actor_for(it.get("kind") or "")) == "agent":
+            # AN AGENT'S ITEM TRAVELS at any severity, lanes or not: a responder may take it,
+            # so "another lane tells the operator" is no reason to hold it back. It still waits
+            # OWNER_PATIENCE_S (critical at once), so a condition that clears itself in minutes
+            # never spends a session.
+            if it["severity"] == "critical" or it["age_s"] >= OWNER_PATIENCE_S:
+                out.append(as_inbox_item(it))
+            continue
         if it["severity"] == "info":
             continue
-        owner = it.get("agent") or operator
         if owner == agent:
             if not it.get("deliver_owner", True):
                 continue

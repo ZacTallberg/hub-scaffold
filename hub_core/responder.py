@@ -355,6 +355,42 @@ def _unattended(task: dict) -> bool:
     return UNATTENDED_CAPABILITY in [str(c).lower() for c in caps]
 
 
+#: A task whose newest checkpoint is a PUSH younger than this, with no deployed checkpoint after
+#: it, is held: its pipeline may still be running, and the verified deploy closes it
+#: (hub_core.task_completion). Relaunching it re-does work that is already on its way out.
+PUSH_HOLD_S = 6 * 3600
+
+
+def _awaiting_deploy(task: dict, now: float) -> bool:
+    import datetime as _dt
+    rows = [s for s in (task.get("plan") or []) if isinstance(s, dict) and s.get("done")]
+    if not rows:
+        return False
+    last = max(rows, key=lambda s: str(s.get("note_at") or ""))
+    if not last.get("sha") or last.get("kind") == "deployed":
+        return False
+    try:
+        at = _dt.datetime.fromisoformat(str(last.get("note_at") or "").replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=_dt.timezone.utc)
+    except ValueError:
+        return False
+    return 0 <= now - at.timestamp() < PUSH_HOLD_S
+
+
+def _attention_is_ours(item) -> bool:
+    """A needs-attention item this machine's responder may take: the hub says an AGENT can
+    clear it (hub_core.attention.PERSON_ONLY names the rest), and one that only the machine it
+    names can clear is taken only there."""
+    if not isinstance(item, dict) or item.get("kind") != "attention" or not item.get("id"):
+        return False
+    if item.get("actor") != "agent":
+        return False
+    if item.get("on_its_machine"):
+        return bool(item.get("machine")) and str(item["machine"]).strip().lower() == _machine().lower()
+    return True
+
+
 def find_work(base: str) -> dict:
     """Categorise the board for this responder. Read-only. ``items`` are the ids a responder
     may be launched for; ``surfaced`` counts what is visible and deliberately NOT worked."""
@@ -385,9 +421,26 @@ def find_work(base: str) -> dict:
     if stale:
         surfaced["stale_unclaimed_errors_left_for_a_person"] = len(stale)
 
+    # NEEDS-ATTENTION IS WORK. An item the hub says an AGENT can clear (actor "agent") is taken
+    # like an ask; one that only the machine it names can clear is taken only there. Person-only
+    # conditions are left on the card.
+    mine = [i for i in (inbox.get("items") or []) if _attention_is_ours(i)]
+    if mine:
+        reasons.append("%d needs-attention item(s) an agent can clear" % len(mine))
+        items += [str(i["id"]) for i in mine]
+    left = sum(1 for i in (inbox.get("items") or [])
+               if isinstance(i, dict) and i.get("kind") == "attention" and not _attention_is_ours(i))
+    if left:
+        surfaced["attention_left_for_a_person"] = left
+
     tasks = hub._get(base, "task.json").get("data") or []
+    held = [t for t in tasks if isinstance(t, dict) and t.get("status") == "todo"
+            and _unattended(t) and _awaiting_deploy(t, now)]
+    if held:
+        surfaced["tasks_held_for_their_pushed_deploy"] = len(held)
     marked = [t for t in tasks if isinstance(t, dict) and t.get("status") == "todo"
-              and _unattended(t) and not _looped("%s %s" % (t.get("title"), t.get("acceptance")))]
+              and _unattended(t) and not _looped("%s %s" % (t.get("title"), t.get("acceptance")))
+              and not _awaiting_deploy(t, now)]
     if marked:
         reasons.append("%d task(s) marked for the unattended lane" % len(marked))
         items += [str(t["id"]) for t in marked]
@@ -424,6 +477,8 @@ def resolve_item(base: str, item_id: str) -> dict | None:
             raise
         if task.get("status") != "todo" or not _unattended(task):
             return None
+        if _awaiting_deploy(task, time.time()):
+            return None                   # its push is on its way out; the deploy closes it
         if _looped("%s %s" % (task.get("title"), task.get("acceptance"))):
             return None
         plan = "\n".join("- [%s] %s%s" % ("x" if p.get("done") else " ", p.get("step") or "",
@@ -436,6 +491,9 @@ def resolve_item(base: str, item_id: str) -> dict | None:
                     ("plan so far:\n" + plan) if plan else ""))[:3800]}
     inbox = (hub._get(base, "inbox.json?agent=" + quote(_agent())).get("data") or {})
     for entry in inbox.get("items") or []:
+        if isinstance(entry, dict) and str(entry.get("id")) == item_id and _attention_is_ours(entry):
+            return {"kind": "attention", "id": item_id, "title": str(entry.get("title") or ""),
+                    "from": entry.get("from") or "", "body": str(entry.get("body") or "")[:3800]}
         if isinstance(entry, dict) and str(entry.get("id")) == item_id \
                 and entry.get("kind") == "question":
             if _review_gate(entry) or _looped("%s %s" % (entry.get("title"), entry.get("body"))):
@@ -561,6 +619,10 @@ CLOSE THE LOOP, by kind:
 - error    -> `ack-error <fingerprint> --note "claimed: <what you are checking>"` FIRST, so every
               other console sees it is in flight; fix the cause and ship; then
               `ack-error <fingerprint> --note "resolved: <root cause> evidence <sha|url>"`.
+- attention-> a condition the hub computed from current state. Do what its `Fix:` line says (a
+              task to verify on the deployed result and finish, a lease to reclaim or hand
+              back, a client to update). It clears ITSELF the moment the fact goes; there is
+              nothing to acknowledge. If the fix needs a person after all, escalate with `ask`.
 If you cannot resolve it with confidence, escalate with `ask` (the client stamps it so no other
 responder picks it up) and exit.
 
