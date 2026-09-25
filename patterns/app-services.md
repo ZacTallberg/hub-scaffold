@@ -38,14 +38,24 @@ A component declares its settings in its manifest (`props`: fields of type `choi
     python -m hub_core.client component-props --app budget-app \
       --set agent.greeting="Ask about budgets" --set 'agent.entry=["float","header"]'
 
-- The write needs `component:configure` — it changes what EVERY person on that app sees, so it
-  is an operator credential, not something a browser can do.
+- The write changes what EVERY person on that app sees, so it is named exactly two ways: a
+  credential with `component:configure` (the client verb above, the MCP tool
+  `set_component_props`), or the signed-in, same-origin, CSRF-checked browser of a person the
+  adopter's `HUB_COMPONENT_EDITOR` predicate — a `(request, slug) -> bool` behind its own
+  sign-in, typically "a super admin of THAT app" — admits. Unset, failing or raising: nobody in
+  a browser. That browser door is the shared banner's **Component settings** box
+  (`patterns/app-banner.md`): one tab per component that declares properties, drawn from the
+  served schema, each change previewed on the page before Save makes it everyone's.
+- The GET answers `can_edit` for the reader (it drives whether the banner OFFERS the editor; the
+  POST re-decides), and only to an editor `updated_by` and the short change history.
 - A save is a FULL set: a property left out returns to its default. Only non-default values are
   stored, so a later change to a default reaches every app that never chose otherwise.
 - A value outside its field is **refused and listed**, never clamped to a neighbour.
 - Components read `GET /hub/components/props/<slug>.json` on load and also honour
-  `window.HubComponentProps` and a `hub:component-props` window event (`detail: {app, props}`),
-  so an editor can preview a change without a reload.
+  `window.HubComponentProps` and a `hub:component-props` window event
+  (`detail: {app, props, preview}`). The banner reads the record on every page and publishes
+  both, so a component that loads after it starts right and one already running follows a
+  preview without a reload.
 
 ## 3. One app's slice of the board
 

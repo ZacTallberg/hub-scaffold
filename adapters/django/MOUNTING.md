@@ -193,6 +193,10 @@ HUB_APPS = [{"slug": "budget-app", "name": "Budget", "url": "https://budget.exam
 # (person) -> {slug: role}: ACTIVE grants only, matched under every spelling your access
 # system keeps for that person (short name, UPN, email); unset = nothing listed
 HUB_REACH = "myproject.access.grants_for"
+# (request, slug) -> bool: may this browser change that app's component properties from the
+# banner's Component settings box? Typically "a super admin of THAT app". Unset = nobody in a
+# browser (a credential with component:configure still can).
+HUB_COMPONENT_EDITOR = "myproject.access.may_configure_components"
 ```
 
 `hub.viewers.debug_person` (with `HUB_DEBUG_PERSON`) is for a developer's own machine only:

@@ -153,6 +153,12 @@ The services the hub offers the apps around it (`patterns/app-services.md`) spli
   it the person is whoever the resolver says: a `?person=` naming anyone else answers 404, a POST
   must pass Django's CSRF check, and an unresolved request gets the 404 of an unknown route.
   `hub.viewers.debug_person` exists for a developer's loopback under DEBUG only.
+- `POST /hub/api/component-props` changes what EVERY person on one app sees. Beside the
+  `component:configure` credential it has one browser door, shut until the adopter names
+  `HUB_COMPONENT_EDITOR` (a `(request, slug) -> bool`): the person must also be named by
+  `HUB_PERSON`, the request must pass Django's CSRF check, and the predicate must answer exactly
+  `True` for THAT app — unset, failing, raising or anything else refuses. The props GET tells a
+  reader only whether they may edit; who changed what is shown to editors alone.
 - The profile GET lists the apps a person can reach from `HUB_APPS` joined with the adopter's
   `HUB_REACH` seam. The seam must return ACTIVE grants only and match every spelling of the
   person's name its access system keeps; unset or failing, it lists nothing.

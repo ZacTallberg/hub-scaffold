@@ -124,7 +124,7 @@ def resolve(item_id: str) -> dict | None:
                 "handed_back": int(data.get("handed_back") or 0),
                 "from": str((data.get("provenance") or {}).get("agent") or "")}
     try:
-        inbox = _read("inbox.json?agent=%s" % quote(agent())).get("data") or {}
+        inbox = _read("inbox.json?include=synthetic&agent=%s" % quote(agent())).get("data") or {}
     except RuntimeError:
         return {"kind": "unavailable", "id": item_id}
     for item in inbox.get("items") or []:
@@ -142,7 +142,8 @@ def scan() -> dict:
     out = {"workable": [], "waiting": [], "hub": "", "errors": []}
     try:
         out["hub"] = base()
-        inbox = _read("inbox.json?agent=%s" % quote(agent())).get("data") or {}
+        # include=synthetic: a self-test ask (a canary) is for this reader, never a person.
+        inbox = _read("inbox.json?include=synthetic&agent=%s" % quote(agent())).get("data") or {}
         for item in inbox.get("items") or []:
             if not isinstance(item, dict) or item.get("kind") != "question":
                 continue
