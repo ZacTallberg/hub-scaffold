@@ -24,7 +24,13 @@ What each module owns:
 * ``board``      — outcome from the board's state, resume of work a dead run left, hand-back at
                    teardown with proof, the fleet-wide attempt cap.
 * ``worktree``   — a task runs in its own git worktree of a dedicated clone, never a person's
-                   checkout; kept while it holds anything unpushed, removed only on proof.
+                   checkout; kept while it holds anything unpushed, removed only on proof; no
+                   URL it reads or builds carries a credential.
+* ``publisher``  — the publish hand-off: a machine that PROVED it can push replays a bundle a
+                   machine that could not left, rebased and never forced.
+
+Beyond tasks and questions the launcher works NEEDS-ATTENTION conditions the hub marks
+``actor: agent``, one at a time in their own lane, cleared only when the hub's list drops them.
 
 Standard library only, like the rest of ``hub_core``. Everything talks to the hub through its
 served HTTP seam (``hub_core.client``); nothing here touches the ledger.
@@ -76,11 +82,59 @@ def read_json(path: Path, default):
     return default
 
 
-def write_json(path: Path, data) -> None:
-    """Atomic replace; fail-soft (bookkeeping must never turn into the failure)."""
+#: How long a ledger replace keeps retrying a destination another process holds open.
+REPLACE_RETRY_S = 5.0
+
+
+def write_json(path: Path, data) -> bool:
+    """Atomic replace that is RETRIED, never silently dropped; returns whether it landed.
+
+    On Windows ``os.replace`` answers WinError 5 while anything holds the destination open -- a
+    reader of the ledger, an indexer, an antivirus scanner touching a file just written. A bare
+    ``except OSError: pass`` then lost the write without a trace, and a queued or running run
+    vanished from the ledger. The retry is bounded by a monotonic DEADLINE (an attempt count
+    measures nothing without a clock: with a patched or instant sleep, ten tries take
+    microseconds), and a write that still fails is logged. Bookkeeping never raises."""
+    from ..atomic import replace
+    tmp = path.with_suffix(".tmp.%d" % os.getpid())
     try:
-        tmp = path.with_suffix(".tmp.%d" % os.getpid())
         tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        replace(tmp, path, timeout_s=REPLACE_RETRY_S)
+        return True
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        log("ledger write LOST for %s (%s: %s)" % (path.name, type(exc).__name__, exc))
+        return False
+
+
+def load_env_file(path: Path) -> list:
+    """Settings for a scheduled run, which inherits no shell environment: ``KEY=VALUE`` lines,
+    only ``HUB_*`` keys, an already-set variable wins. A token pasted into the file is refused;
+    ``HUB_AGENT_TOKEN_FILE`` names a file only this user can read, so the credential stays out
+    of the task definition, the registry and every process argument."""
+    loaded = []
+    try:
+        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
     except OSError:
-        pass
+        lines = []
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        key, value = key.strip(), value.strip().strip('"')
+        if not sep or line.lstrip().startswith("#") or not key.startswith("HUB_"):
+            continue
+        if key in ("HUB_AGENT_TOKEN", "HUB_WRITE_TOKEN"):
+            continue
+        if not os.environ.get(key):
+            os.environ[key] = value
+            loaded.append(key)
+    token_file = os.environ.get("HUB_AGENT_TOKEN_FILE")
+    if token_file and not os.environ.get("HUB_AGENT_TOKEN"):
+        try:
+            os.environ["HUB_AGENT_TOKEN"] = Path(token_file).read_text(encoding="utf-8-sig").strip()
+            loaded.append("HUB_AGENT_TOKEN(from file)")
+        except OSError:
+            pass
+    return loaded

@@ -57,6 +57,25 @@ Act on it before you continue, and coordinate the work rather than standing down
 Say what you are on in your own words (`presence --focus "<text>"`): an honest focus is what
 lets the hub match you to the person who would want to know.
 
+## Applications are shared: authorship is a routing hint, never a permission
+
+Every application on a board belongs to everybody working it. The "owner" a slot or a status line
+prints is who provisioned it — who hears about it first — never who may fix, deploy or finish it.
+Standing down because somebody else built an application, filed the task or is offline is a
+coordination bug: an application sat undeployed for days while its builder was away, and the fix
+was one push anybody could make.
+
+- Coordinate only with what is LIVE: a console editing the same files right now (a crossover names
+  it) or a live claim on the same item. Tell them, split the work, keep going. A lease held by an
+  ended or silent session is free.
+- When you change an application somebody else was working on, leave a note on its task or message
+  them with what you changed and why. That is courtesy, not permission.
+- What waits on a person is decided by BUSINESS IMPACT, never by authorship: the one approval the
+  operator reserved, irreversible operations, mass writes to a system of record, messages to real
+  people, and changes to how a figure is computed, to data access, or to roles and permissions (the
+  operator's yes). The unattended charter says the same: a core change waits on the operator, never
+  on "the app's owner".
+
 ## Record the right KIND of thing
 
 When the only record verb is "lesson", everything becomes a lesson and every other tab goes
