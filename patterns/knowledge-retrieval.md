@@ -91,6 +91,29 @@ rows it already holds in one line, and keeps the whole output under 9,500 charac
 did not fit are written to a pack file whose path is printed, and only rows that rendered become
 receipt keys. An unreachable board prints one marked line and exits 0.
 
+**Ranked by words is cut, never padded.** Without a usable embedder (none configured, or down)
+the index is ranked by BM25F over each row's rule and story, and every matching row carries
+`lexical_score`: its score as a share of THIS query's own ceiling (the score a record matching
+every query term fully would reach — terms no record contains count, because they are the part
+of the question the corpus does not answer). Identifiers in the focus (board ids, shas, run
+counts) are stripped first: they are never shared vocabulary. Scores relative to the best hit
+came back flat and cut nothing; against the ceiling they separate. The block then shows only the
+rows that clear the cut (the top row at 0.25 or more, a later one at 0.24 and 60% of the top, at
+most four) under a header that says the ranking was by words — and when nothing clears it, it
+says so in one line instead of delivering standing-order titles that read as relevance.
+
+**A down embedder is asked once a minute, not once a prompt.** After a transport failure the
+focus and overlap embeds are skipped for 60 s (`semantic.EMBED_RETRY_S`); a focus whose vector
+is already cached still ranks by meaning. An adjudication pass likewise takes the first
+"unreachable" as the answer for the rest of the pass and reports `embedder` in its summary,
+instead of paying the timeout once per lesson.
+
+**One decider for who delivers.** If a machine hands per-prompt knowledge to a local mirror
+(its own recall ranks the mirrored corpus), exactly ONE process decides — switch on, mirror
+caught up, local recall healthy — and writes the bit with its decision time into a sidecar both
+sides read back. Two deciders with different freshness rules duplicate some prompts and starve
+others; a decision older than a few heartbeats (the decider died) means the hub block.
+
 A machine that wants the whole corpus locally (to rank offline, or to feed another tool) mirrors
 it with `python -m hub_core.client knowledge-sync --out <file>`, which pages
 `/hub/knowledge/since` once and afterwards asks only for what changed.

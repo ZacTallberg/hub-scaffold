@@ -217,6 +217,16 @@ def fill_deferred(lesson: dict, lookup_related) -> tuple:
     return related[:12], partial, added
 
 
+def embedder_is_down(reason) -> bool:
+    """True when a failed semantic lookup says the ENDPOINT is gone, not that this text found
+    nothing: a refused or timed-out connection, an unresolvable name, the hub's open embed
+    circuit, or no embedder configured. An HTTP error or a shape complaint is answered per call
+    — the next text may well succeed."""
+    low = str(reason or "").lower()
+    return ("embed unreachable" in low or "no embedder configured" in low or "timed out" in low
+            or "connection refused" in low)
+
+
 def run_pass(lessons, *, get_entity, lookup_related, write, cfg=None, limit: int = 0,
              dry_run: bool = False) -> dict:
     """Settle every unadjudicated overlap on `lessons`; returns the counts a caller prints.
@@ -229,14 +239,37 @@ def run_pass(lessons, *, get_entity, lookup_related, write, cfg=None, limit: int
     out = {"lessons": 0, "open_entries": 0, "by_rule": 0, "by_model": 0, "unparsed": 0,
            "needs_model": 0, "deferred_filled": 0, "semantic_deferred": 0, "written": 0,
            "write_failed": 0, "dry_run": dry_run, "model": cfg.get("model") or None,
-           "failures": []}
+           "embedder": "not needed", "failures": []}
     judged = 0
+    # ONE EMBEDDER VERDICT PER PASS, not one wait per lesson. With the embedder down, each
+    # lesson's deferred semantic lookup paid the full timeout and a pass of a few hundred
+    # lessons spent nearly all its time waiting on one outage (while holding whatever lock or
+    # queue slot the schedule gave it). The first "unreachable" settles it for the rest of the
+    # pass: a lesson whose only missing basis is the semantic one is counted still-deferred
+    # without a call, and the summary names the reason.
+    embed_down = {"why": ""}
+
+    def lookup(eid):
+        data, meta = lookup_related(eid)
+        sem = (meta or {}).get("semantic") or {}
+        if sem.get("semantic"):
+            out["embedder"] = "reachable"
+        elif embedder_is_down(sem.get("reason")) and not embed_down["why"]:
+            embed_down["why"] = str(sem.get("reason"))[:200]
+        return data, meta
     for lesson in lessons:
         if not _is_lesson(lesson) or _dead(lesson):
             continue
-        related, partial, filled = fill_deferred(lesson, lookup_related)
+        missing = [m for m in ((lesson.get("related_partial") or {}).get("missing") or []) if m]
+        if embed_down["why"] and missing == ["semantic"]:
+            out["semantic_deferred"] += 1
+            related, partial, filled = ([dict(r) for r in (lesson.get("related") or []) if isinstance(r, dict)],
+                                        lesson.get("related_partial") or None, 0)
+        else:
+            related, partial, filled = fill_deferred(lesson, lookup)
         out["deferred_filled"] += filled
-        if partial and "semantic" in (partial.get("missing") or []):
+        if partial and "semantic" in (partial.get("missing") or []) and not (
+                embed_down["why"] and missing == ["semantic"]):
             out["semantic_deferred"] += 1
         changed = filled > 0 or partial != (lesson.get("related_partial") or None)
         open_here = [r for r in related if not r.get("adjudicated")]
@@ -283,6 +316,8 @@ def run_pass(lessons, *, get_entity, lookup_related, write, cfg=None, limit: int
         else:
             out["write_failed"] += 1
             out["failures"].append({"lesson": lesson["id"], "reason": detail})
+    if embed_down["why"]:
+        out["embedder"] = embed_down["why"]
     if not out["failures"]:
         out.pop("failures")
     return out
