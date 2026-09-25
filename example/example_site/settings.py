@@ -94,6 +94,9 @@ HUB_DONE_STRICTNESS = os.environ.get("HUB_DONE_STRICTNESS", "tracked")  # eviden
 # slug to a local checkout (read with plain git). A project with no checkout can instead be asked
 # through HUB_COMMIT_RESOLVER = "package.module:function" (function(project, sha) -> True/False/None).
 HUB_PROJECT_REPOS = json.loads(os.environ.get("HUB_PROJECT_REPOS", "") or "{}")
+# The publish hand-off lane (patterns/publish-handoff.md): the git hosts a hand-off may name.
+# Empty (the default) refuses every hand-off; "file" admits file:// remotes for a local trial.
+HUB_HANDOFF_GIT_HOSTS = [h for h in os.environ.get("HUB_HANDOFF_GIT_HOSTS", "").split(",") if h.strip()]
 
 # How long a console the Hub can PROVE is gone keeps what it held (task leases and item claims)
 # before they are released, measured from its last-seen stamp. Default 30 minutes.
