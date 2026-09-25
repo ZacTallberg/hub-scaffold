@@ -14,6 +14,7 @@ board loses the difference, so each has its own verb::
     python -m hub_core.client gap "Half the services report no errors" --severity P1 --note "..."
     python -m hub_core.client recall example:note:l-3f8a1c2b4d5e      # or a phrase
     python -m hub_core.client capabilities --q "retry"
+    python -m hub_core.client evals --suite retrieval-answered-asks  # the standing-eval trend
     python -m hub_core.client prompt-context --hook < hook.json         # from a prompt hook
     python -m hub_core.client knowledge-sync --out ~/.hub-client/knowledge.json
     python -m hub_core.client adjudicate                                 # needs HUB_JUDGE_URL
@@ -210,6 +211,37 @@ def _run_capabilities(base: str, arguments: argparse.Namespace) -> dict[str, Any
     from urllib.parse import urlencode
     query = {k: v for k, v in (("kind", arguments.kind), ("q", arguments.q)) if v}
     return _c._get(base, "capabilities.json" + (("?" + urlencode(query)) if query else ""))
+
+
+def _run_evals(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """The standing-eval trend (GET /hub/eval.json), or --record a run measured elsewhere
+    (POST /hub/api/eval, eval:write). A recorded run is printed AS STORED."""
+    from urllib.parse import urlencode
+    if arguments.record:
+        try:
+            with open(os.path.expanduser(arguments.record), encoding="utf-8-sig") as fh:
+                run = json.load(fh)
+        except (OSError, ValueError) as error:
+            raise ValueError("--record needs a JSON run file: %s" % error)
+        if not isinstance(run, dict):
+            raise ValueError("--record: the file must hold one JSON object")
+        if arguments.suite:
+            run["suite"] = arguments.suite
+        run.setdefault("agent", _agent(arguments))
+        return _c._post(base, "eval", run, extra_headers=_c._presence_headers(arguments))
+    query = {"limit": arguments.limit}
+    if arguments.suite:
+        query["suite"] = arguments.suite
+    body = _c._get(base, "eval.json?" + urlencode(query))
+    rows = body.get("data") or []
+    lines = ["suites: %s" % (", ".join((body.get("metadata") or {}).get("suites") or []) or "none recorded")]
+    for row in rows:
+        cells = "; ".join("%s %s" % (name, " ".join("%s=%s" % (k, v) for k, v in sorted(fig.items())))
+                          for name, fig in sorted((row.get("paths") or {}).items()))
+        lines.append("%s %-28s pairs=%s excluded=%s  %s"
+                     % (row.get("at", "?"), row.get("suite", "?"), row.get("pairs", 0),
+                        row.get("excluded", 0), cells))
+    return {"lines": lines} if not arguments.json else body
 
 
 def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
@@ -464,6 +496,16 @@ def register(commands) -> None:
     caps.add_argument("--kind")
     caps.add_argument("--q")
     caps.set_defaults(runner=_run_capabilities)
+
+    ev = commands.add_parser("evals", help="the standing-eval trend (runs scored on the board's own "
+                             "data), or --record one run measured elsewhere (eval:write)")
+    ev.add_argument("--suite", help="one suite (e.g. retrieval-answered-asks)")
+    ev.add_argument("--limit", type=int, default=20)
+    ev.add_argument("--record", metavar="RUN.json",
+                    help="POST this run: {suite, pairs, excluded, paths: {<path>: {n, @1, @5, ...}}}")
+    ev.add_argument("--json", action="store_true", help="the raw trend body")
+    ev.add_argument("--agent")
+    ev.set_defaults(runner=_run_evals)
 
     if "prompt-context" in commands.choices:
         # ONE prompt-context verb: the three-channel payload (doctrine / live / nudge) by
