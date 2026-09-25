@@ -22,7 +22,7 @@
       the window grows. Moved, not copied: one set of controls.
    4. SUGGEST (optional, only where the app declares a model lane). A person
       says what they are trying to do; the APP's endpoint asks its model and
-      answers with lenses -- a titled cut of the table, a row count the app
+      answers with presets -- a titled cut of the table, a row count the app
       measured with its own filter, the URL that opens it. The component draws
       them. It never calls a model and never names one. A slow lane may answer
       202 and be polled.
@@ -990,47 +990,47 @@
     if (!this.panel) this.buildPanel();
     this.panel.hidden = false;
     this.body.textContent = "";
-    var lenses = Array.isArray(answer.lenses) ? answer.lenses : [];
+    var presets = Array.isArray(answer.presets) ? answer.presets : [];
 
     var meta = el("p", "ht-shape__meta");
-    meta.textContent = lenses.length
-      ? lenses.length + " cut" + (lenses.length === 1 ? "" : "s") + " of " + (answer.rows != null ? answer.rows + " rows" : "the table") +
+    meta.textContent = presets.length
+      ? presets.length + " cut" + (presets.length === 1 ? "" : "s") + " of " + (answer.rows != null ? answer.rows + " rows" : "the table") +
         (answer.goal ? " for “" + answer.goal + "”" : ", worth a look") +
         (answer.ms ? " · " + (answer.ms / 1000).toFixed(1) + "s" : "")
       : "No cut of this table fits that.";
     this.body.appendChild(meta);
 
-    if (lenses.length) {
-      var grid = el("div", "ht-lenses");
-      lenses.forEach(function (lens) {
-        var card = el("article", "ht-lens" + (lens.count === 0 ? " is-empty" : ""));
-        var top = el("div", "ht-lens__top");
-        top.appendChild(el("h4", "ht-lens__title", lens.title || "Untitled"));
-        var n = el("span", "ht-lens__n");
-        n.appendChild(el("b", null, String(lens.count != null ? lens.count : "?")));
-        n.appendChild(doc.createTextNode(" of " + (lens.of != null ? lens.of : "?")));
+    if (presets.length) {
+      var grid = el("div", "ht-presets");
+      presets.forEach(function (preset) {
+        var card = el("article", "ht-preset" + (preset.count === 0 ? " is-empty" : ""));
+        var top = el("div", "ht-preset__top");
+        top.appendChild(el("h4", "ht-preset__title", preset.title || "Untitled"));
+        var n = el("span", "ht-preset__n");
+        n.appendChild(el("b", null, String(preset.count != null ? preset.count : "?")));
+        n.appendChild(doc.createTextNode(" of " + (preset.of != null ? preset.of : "?")));
         n.title = "Rows this cut shows, counted by the app with the table's own filter";
         top.appendChild(n);
         card.appendChild(top);
-        if (lens.why) card.appendChild(el("p", "ht-lens__why", lens.why));
-        var chips = el("div", "ht-lens__chips");
-        (lens.chips || []).forEach(function (c) { chips.appendChild(el("span", "ht-chip", c)); });
-        (lens.column_words || []).forEach(function (c) { chips.appendChild(el("span", "ht-chip ht-chip--cols", c)); });
+        if (preset.why) card.appendChild(el("p", "ht-preset__why", preset.why));
+        var chips = el("div", "ht-preset__chips");
+        (preset.chips || []).forEach(function (c) { chips.appendChild(el("span", "ht-chip", c)); });
+        (preset.column_words || []).forEach(function (c) { chips.appendChild(el("span", "ht-chip ht-chip--cols", c)); });
         if (chips.childNodes.length) card.appendChild(chips);
-        var act = el("div", "ht-lens__act");
-        var open = el("a", "ht-btn ht-btn--primary", lens.count === 0 ? "Open (empty now)" : "Open");
-        open.href = lens.url || "?";
+        var act = el("div", "ht-preset__act");
+        var open = el("a", "ht-btn ht-btn--primary", preset.count === 0 ? "Open (empty now)" : "Open");
+        open.href = preset.url || "?";
         act.appendChild(open);
-        var cols = lens.columns || {};
+        var cols = preset.columns || {};
         if ((cols.show && cols.show.length) || (cols.hide && cols.hide.length) || (cols.pin && cols.pin.length)) {
           var withCols = el("button", "ht-btn", "Open with these columns");
           withCols.type = "button";
-          withCols.title = (lens.column_words || []).join("; ");
+          withCols.title = (preset.column_words || []).join("; ");
           withCols.addEventListener("click", function () {
             withCols.disabled = true;
             withCols.textContent = "Arranging…";
-            if (announce(self.mount, "layout", { columns: cols, url: lens.url })) {
-              location.href = lens.url || location.href;
+            if (announce(self.mount, "layout", { columns: cols, url: preset.url })) {
+              location.href = preset.url || location.href;
             }
           });
           act.appendChild(withCols);
@@ -1084,7 +1084,7 @@
       }
       btn.disabled = true;
       btn.textContent = "Filing…";
-      postJSON(D.requestUrl, { goal: goal, lenses: answer.lenses || [], gap: answer.gap || "",
+      postJSON(D.requestUrl, { goal: goal, presets: answer.presets || [], gap: answer.gap || "",
                                current_query: location.search }, self.app)
         .then(function (res) {
           foot.textContent = "";
