@@ -1119,6 +1119,11 @@ def _live_side_blocks(state, lease_rows=None):
     # EVERY SERVICE, OBSERVED? — the one card that says whether an empty queue means anything.
     try:
         apps = hub_app.apps_config()
+        # The board is a READER of liveness, so it asks for a sweep the way the apps route does
+        # (single-flight, background, never blocking this read). Without it liveness was probed
+        # only while somebody had the apps view open, and every healthy service on the board
+        # read "liveness was last probed N min ago" -- a gap that was never the service's.
+        app_health.sweep_in_background(hub_app.HUB_DIR, apps)
         health, health_meta = app_health.rows(hub_app.HUB_DIR, state, apps=apps,
                                               native=hub_app.native_slug(),
                                               native_deploy=hub_app.native_deploy(state))
@@ -1261,6 +1266,7 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "answers": _unread_answers(state),
            "hub_client": hub_client_version()}
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
+                       ("retired", lambda: _presence.retired_rows(hub_app.HUB_DIR)),
                        ("credentials", lambda: agent_auth.CredentialRegistry(
                            hub_app.HUB_DIR).list_public())):
         try:
@@ -1355,6 +1361,14 @@ def _sweep_leases():
     except Exception:                                        # noqa: BLE001
         import logging
         logging.getLogger("hub.lease_sweep").warning("sweep pass failed", exc_info=True)
+    # A deploy close refused while a lease was held is retried on the same kind of throttle --
+    # in ONE background thread, never on this read (deploy_close.sweep_async).
+    try:
+        from . import deploy_close
+        deploy_close.sweep_async()
+    except Exception:                                        # noqa: BLE001
+        import logging
+        logging.getLogger("hub.deploy_close").warning("close sweep did not start", exc_info=True)
 
 
 def _snapshot(served=None):
@@ -2741,6 +2755,20 @@ def distribution_json(request):
         "published": {k: {"sha": v["sha"], "published_at": v["published_at"]} for k, v in pub.items()},
         "how": "each seat reports X-Hub-Artifacts (name=sha16) on every request; the hub hashes "
                "the files it publishes (LF-normalized) and compares"}})
+
+
+@require_GET
+def ci_status_json(request):
+    """GET /hub/ci-status.json?sha= — what CI last said about one commit (hub_core.ci_events
+    .sha_status): found, status, active, project, pipeline, at. No delivery body is returned, so
+    this is an ordinary member read, unlike ci-events.json."""
+    from hub_core import ci_events as _ci
+    sha = (request.GET.get("sha") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        return JsonResponse({"errors": [{"code": "bad_sha",
+                                          "msg": "name a commit: 7 to 40 hex characters"}]},
+                            status=400)
+    return JsonResponse({"data": _ci.sha_status(hub_app.HUB_DIR, sha)})
 
 
 @require_GET

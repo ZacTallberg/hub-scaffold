@@ -46,6 +46,15 @@ def note_sha(text) -> str:
     return m.group(0) if m else ""
 
 
+def note_shas(text) -> list:
+    """Every distinct commit sha written in prose, in order (the same rule as note_sha)."""
+    out = []
+    for m in _NOTE_SHA.finditer(str(text or "")):
+        if m.group(0) not in out:
+            out.append(m.group(0))
+    return out
+
+
 def pushed(task: dict) -> dict | None:
     typed = checkpoints.latest(task, "pushed")
     if typed and typed.get("sha"):
@@ -65,13 +74,19 @@ def pushed(task: dict) -> dict | None:
 
 
 def handed_back(task: dict) -> dict | None:
-    rows = [s for s in task.get("plan") or [] if isinstance(s, dict) and s.get("kind") == "handed_back"]
-    if not rows:
+    """Runs that ended with the task unfinished (the launcher's ``handed_back`` rows, which its
+    run cap counts), plus -- reported apart, never counted as runs -- the times the hub released
+    an expired lease (``lease_released``)."""
+    plan = [s for s in task.get("plan") or [] if isinstance(s, dict)]
+    rows = [s for s in plan if s.get("kind") == "handed_back"]
+    released = [s for s in plan if s.get("kind") == "lease_released"]
+    if not rows and not released:
         return None
     return {"times": sum(checkpoints.total_runs(s) for s in rows),
             "idle": sum(checkpoints.idle_runs(s) for s in rows),
             "charged": sum(checkpoints.charged_runs(s) for s in rows),
-            "at": max(str(s.get("note_at") or "") for s in rows)}
+            "lease_released": sum(int(s.get("times") or 1) for s in released),
+            "at": max(str(s.get("note_at") or "") for s in rows + released)}
 
 
 def charged_runs(step) -> int:

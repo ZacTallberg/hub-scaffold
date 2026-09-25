@@ -23,6 +23,15 @@ API (`hub_core.client` is the reference caller) and prove each part by its real 
   writes between the receiver and any worker thread.
 - A delivery older than ~10 minutes says when it was WRITTEN (`written` on the item) and is
   silent when the stamp is missing or in the future — a guessed age is worse than none.
+- Keep a short ledger of the consoles that ENDED on this machine (id, name, subject; a couple of
+  weeks) that outlives the per-console record. Without it the daemon cannot prove a retired
+  console was this box's, and mail for it goes nowhere; with it, that mail lands as box mail in the
+  newest ATTENDED console. A finished or unattended console is never a live delivery target: on one
+  measured inbox 8 of 9 addressed items were going to such a console's dead pipe.
+- Every frame the Hub delivers carries a **reply line** saying how to answer it: the Hub is not a
+  peer console, so "reply to the sender" through a console-to-console channel reaches nobody. Name
+  the verb (`message --to <agent> [--session]`, claim/resolve for a problem) instead. Advertise a
+  console-to-console channel only for an attended live console on the same machine.
 
 ## 2. Per-prompt context: three channels, three receipts
 
@@ -50,6 +59,26 @@ content version, so a renderer change is detectable; give the per-prompt copy it
   --min-interval 300` on every heartbeat) and the per-prompt verb stops printing the ranked block
   only when the switch is on, the mirror is fresh, and local recall is healthy — the same three
   facts the engine reads, so exactly one side emits (`patterns/knowledge-retrieval.md` §3).
+
+Two more rules keep the live channel cheap:
+
+- **Standing lists are change-gated per console.** A list that is usually the same between prompts
+  (open questions, addressed items) is re-shown only when its content hash changes, or as a
+  reminder every few hours — never on every prompt. Crossovers render once per prompt, from the
+  Hub's own verdict; a console never runs a weaker local detector alongside it, and the Hub says
+  explicitly when it checked and found nothing (a count of 0, never an absent field), so "checked,
+  nothing" is not mistaken for "not checked".
+- **Expensive per-prompt work is warmed off the prompt path.** If the Hub ranks context against a
+  console's focus (an embedding, a search), the daemon asks for it when the focus CHANGES, on its
+  own tick with a bounded timeout, and the prompt hook sends a focus that is already warm. A prompt
+  that pays for an embedding inline is a prompt that waits on the network.
+
+The same daemon is the natural carrier for the OTHER direction: a local session observer that
+distils "worth remembering" candidates appends them to an outbox file, and the daemon's heartbeat
+ships it (`python -m hub_core.client ship-outbox --outbox <file>`) at most every few minutes and
+only when the file grew. The offset moves only after the hub accepted the batch, so a dropped
+connection resends; the hub's candidate queue is review-first and idempotent by id
+(`patterns/knowledge-retrieval.md`), so a resend never duplicates or reopens anything.
 
 ## 3. A second agent runtime is an adapter, not a fork
 

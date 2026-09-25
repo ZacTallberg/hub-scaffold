@@ -82,6 +82,8 @@ HUB_DONE_STRICTNESS = "tracked"       # the evidence-resolution dial — see bel
 #                                         # their commits count as evidence/lineage for their tasks
 # HUB_COMMIT_RESOLVER = "pkg.module:fn"   # fn(project, sha) -> True/False/None for a project with
 #                                         # no checkout; None means "could not ask", never "no"
+# HUB_HANDOFF_GIT_HOSTS = ["git.example.com"]  # hosts a publish hand-off may name (unset =
+#                                         # every hand-off refused; "file" admits file:// remotes)
 # HUB_LEASE_SWEEP_GRACE_S = 3600          # hand back an in-progress task this long after its lease
 # HUB_LEASE_SWEEP_UNHELD_S = 14400        # ...or this long after it went quiet with no lease
 HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answers come from
@@ -139,6 +141,8 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # relative to HUB_WORK_ROOT. A seat reports the same name via HUB_ARTIFACTS=name=path. The
 # client itself and CHARTER-CORE.md (when present) are always published.
 # HUB_DISTRIBUTED_ARTIFACTS = {"agent-profile": "config/agent-settings.json"}
+# Optional: the one interpreter line seats must run ("major.minor"). Unset = not graded.
+# HUB_REQUIRED_PYTHON = "3.13"
 
 # Presence heartbeat interval (env HUB_PRESENCE_INTERVAL_S, default 60 s, 5..300). Every beacon
 # is a request the hub serves; online/offline are derived from the interval, so a slower beat

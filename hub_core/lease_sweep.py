@@ -11,10 +11,16 @@ being read.
 
 WHAT THIS IS. The hub holds the one fact that survives every one of those deaths: the LEASE. An
 expired lease on an in-progress task is proof -- not inference -- that nobody is on it. This
-module turns that proof into the missing half of the promise: one `handed_back` lifecycle row
+module turns that proof into the missing half of the promise: one `lease_released` lifecycle row
 naming who held it and how long ago it lapsed, and the task back to `todo`, where the queue
 offers it again. The row is a lifecycle row (hub_core.plan), so no completeness count ever reads
 an abandonment as progress.
+
+ITS OWN KIND, NEVER `handed_back`. That kind is the unattended launcher's, and the launcher's
+run cap counts it: a task handed back ``TASK_MAX_RUNS`` times is left for a person. A lease
+expiring (a person's among them) is not a run giving up; written as `handed_back`, half the rows
+the cap summed on the origin system were this sweep's, and a task could reach the cap without a
+responder ever running out of time on it. Readers that mean "back on the queue" read both kinds.
 
 A LEASE IS HELD BY A LIVE CONSOLE. A clock is only the backstop: when the Hub can PROVE the
 console that holds a still-unexpired lease is gone (hub_core.liveness: its machine is reporting
@@ -131,10 +137,15 @@ def handback_reason(task: dict, lease: dict | None, now: float | None = None, *,
             "stand." % phrase(age))
 
 
+#: The kind this sweep writes (a hub_core.plan LIFECYCLE kind), distinct from the launcher's
+#: `handed_back` so the launcher's run cap never counts an expired lease as a run giving up.
+RELEASE_KIND = "lease_released"
+
+
 def handback_payload(task: dict, why: str) -> dict:
     """The minimal delta that hands one task back: status todo and one self-counting row."""
     return {"type": "task", "status": "todo",
-            "plan": _plan.with_lifecycle_row(task, "handed_back", why[:80], why)}
+            "plan": _plan.with_lifecycle_row(task, RELEASE_KIND, why[:80], why)}
 
 
 def candidates(entities: dict, read_lease, now: float | None = None, *,
