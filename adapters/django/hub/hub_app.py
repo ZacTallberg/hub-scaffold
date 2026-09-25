@@ -615,6 +615,52 @@ def read_posture_adapter(state):
                             "entire content is deliberately public")]
 
 
+def served_files_veil_adapter(state):
+    """Files the hub hands to EVERY reader must not name a hidden facet.
+
+    The hosted components are served `open` (a narrowed reader gets them byte for byte) and the
+    published artifacts (the client, the charter core, HUB_DISTRIBUTED_ARTIFACTS) are what every
+    seat installs. The response veil scrubs JSON; it never sees these bytes. A comment naming a
+    hidden term in one of them tells a contributor that the thing exists -- and the moment it is
+    caught after deploy the only remedy is to withhold the file from them. So the audit reads
+    the same files through the contributor veil (markdown after its facet fences are stripped)
+    and names file, line and facet. Silent when no facets are declared."""
+    try:
+        from hub_core import components as _components
+        from . import veil as _veil
+        v = _veil.Veil("contributor")
+        if v.open:
+            return []
+        if v.broken:
+            return [_sv("veil:served-files", "served files name no hidden facet",
+                        "PROJECT/facets.json does not parse; the veil cannot know what is hidden",
+                        "a readable facet registry", remediation="fix PROJECT/facets.json")]
+        files = [p for p in Path(_components.COMPONENTS).rglob("*") if p.is_file()]
+        files += [p for p in distribution_files().values() if Path(p).is_file()]
+    except Exception as exc:                                 # noqa: BLE001 - fail closed, loudly
+        return [_sv("veil:served-files", "served files name no hidden facet",
+                    "could not enumerate served files: %s" % type(exc).__name__, "enumerable")]
+    viols = []
+    for path in files:
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if str(path).lower().endswith(".md"):
+            text = v.strip(text)
+        for n, line in enumerate(text.splitlines(), 1):
+            facet = v.hit(line)
+            if facet:
+                viols.append(_sv("veil:served-files", "served files name no hidden facet",
+                                 "%s:%d names facet %r" % (Path(path).name, n, facet),
+                                 "no hidden term in any file served to every reader",
+                                 remediation="reword the line, or (markdown) wrap it in a facet "
+                                             "fence so a narrowed reader never receives it"))
+                if len(viols) >= 50:
+                    return viols
+    return viols
+
+
 def identity_settings_adapter(state):
     """One project must present one entity namespace at every discovery and mutation edge."""
     configured = str(PROJECT_KEY or "").strip().lower()
@@ -724,7 +770,8 @@ def _run_audit_with_store(s, served=None) -> dict:
                         legacy_entity_schema_baseline=entity_schema_baseline,
                         adapters=[settings_ast_adapter, identity_settings_adapter,
                                   storage_runtime_adapter,
-                                  route_guard_adapter, read_posture_adapter])
+                                  route_guard_adapter, read_posture_adapter,
+                                  served_files_veil_adapter])
 
 
 def run_audit(st=None, served=None) -> dict:
