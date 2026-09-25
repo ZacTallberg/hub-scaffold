@@ -859,8 +859,117 @@ _SNAP_CACHE = {"key": None, "value": None}
 # Per-phase build timings of the snapshot: the last build and the worst seen per phase in this
 # process, so "the board is slow" names a phase instead of a feeling.
 _SNAP_TIMINGS = {"last": {}, "worst": {}, "count": 0}
-_AUDIT_CACHE = {"key": None, "value": None}
+_AUDIT_CACHE = {"key": None, "value": None, "at": 0.0, "running": False, "dir": None,
+                "loaded": None}
+_AUDIT_LOCK = threading.Lock()
 _DELIVERY_CACHE = {"values": {}, "building": set()}
+
+
+# ---- the board's audit, off the request path -------------------------------------------------
+#
+# run_audit walks the whole ledger. Memoized on the head, it still ran ON A READER'S REQUEST for
+# every cold process and every new event: on the instance this was lifted from, the snapshot's
+# audit phase measured tens of seconds at its worst while clients with an 8 s budget timed out on
+# the board. The board therefore serves the LAST COMPLETED audit, labelled with the head it was
+# computed for and its age (`served_from`), while ONE background thread computes the current
+# one; the result is persisted so a restarted process serves the previous audit at once.
+# Where the audit is a guard, nothing changed: /hub/audit.json (and hubaudit) run their own
+# audit synchronously and never read this cache. Only the board's health badge may trail the
+# head by a few seconds, and it says so.
+
+def _audit_path():
+    return hub_app.HUB_DIR / "board-audit-last.json"
+
+
+def _audit_load_disk():
+    """One cache per ledger directory: a process pointed at another HUB_DIR is never served
+    another ledger's audit."""
+    here = str(hub_app.HUB_DIR)
+    with _AUDIT_LOCK:
+        if _AUDIT_CACHE["dir"] != here:
+            _AUDIT_CACHE.update(key=None, value=None, at=0.0, dir=here, loaded=None)
+        if _AUDIT_CACHE["loaded"] == here:
+            return
+        _AUDIT_CACHE["loaded"] = here
+    try:
+        doc = json.loads(_audit_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(doc, dict) and isinstance(doc.get("audit"), dict):
+        with _AUDIT_LOCK:
+            if _AUDIT_CACHE["value"] is None:
+                _AUDIT_CACHE.update(key=tuple(doc.get("key") or ()) or None, value=doc["audit"],
+                                    at=float(doc.get("at") or 0))
+
+
+def _audit_compute(key, served):
+    audit = dict(hub_app.run_audit(served=served))
+    at = time.time()
+    with _AUDIT_LOCK:
+        _AUDIT_CACHE.update(key=key, value=audit, at=at)
+    try:
+        from hub_core import atomic as _atomic
+        _atomic.write_json(_audit_path(), json.loads(json.dumps(
+            {"key": list(key), "audit": audit, "at": at}, default=str)))
+    except Exception:                                        # noqa: BLE001 - a cache, never a failure
+        pass
+    return audit
+
+
+def _audit_refresh_async(key, served) -> bool:
+    with _AUDIT_LOCK:
+        if _AUDIT_CACHE["running"]:
+            return False
+        _AUDIT_CACHE["running"] = True
+
+    def _run():
+        try:
+            _audit_compute(key, served)
+        except Exception:                                    # noqa: BLE001
+            logging.getLogger(__name__).warning("background board audit failed", exc_info=True)
+        finally:
+            _AUDIT_CACHE["running"] = False
+    try:
+        threading.Thread(target=_run, name="hub-board-audit", daemon=True).start()
+    except Exception:                                        # noqa: BLE001
+        _AUDIT_CACHE["running"] = False
+        return False
+    return True
+
+
+def board_audit(key, served=None) -> dict:
+    """The audit for the board at `key`: current when computed, else the last completed one
+    with `served_from` {stale, head_seq, age_s} while one background thread computes the
+    current one. Computed on the request only when there is nothing at all to serve (a fresh
+    ledger directory)."""
+    _audit_load_disk()
+    with _AUDIT_LOCK:
+        have_key, have, at = _AUDIT_CACHE["key"], _AUDIT_CACHE["value"], _AUDIT_CACHE["at"]
+    key = tuple(json.loads(json.dumps(list(key), default=str)))
+    if have is not None and have_key == key:
+        return have
+    if have is None:
+        return _audit_compute(key, served)
+    _audit_refresh_async(key, served)
+    out = dict(have)
+    out["served_from"] = {"stale": True, "head_seq": (list(have_key or []) + [None])[0],
+                          "age_s": int(max(0.0, time.time() - at)),
+                          "note": "the audit of an earlier head; the current one is being computed"}
+    return out
+
+
+def audit_warm(served=None) -> None:
+    """For the background role: compute the audit for the current head if it is not yet."""
+    s = hub_app.store()
+    try:
+        cur = s.latest_cursor()
+    finally:
+        s.close()
+    key = tuple(json.loads(json.dumps([cur["seq"], cur["hash"], served, hub_app._git_head()],
+                                      default=str)))
+    _audit_load_disk()
+    if _AUDIT_CACHE["key"] != key:
+        _audit_compute(key, served)
 _DELIVERY_LOCK = threading.RLock()
 
 
@@ -1275,6 +1384,15 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
             ctx["sources"][name] = "unreadable: %s" % type(exc).__name__
     ctx["presence"] = {k: v for k, v in (ctx.get("presence") or {}).items()
                        if not _presence.is_service_identity(k)}
+    # Each session-bearing lease carries its holder's liveness verdict: an orphaned-lease item
+    # needs EVIDENCE its holder is gone, never a console missing from one list.
+    if any(lease.get("session") for lease in ctx.get("leases") or []):
+        try:
+            roster_ = hub_app.roster()
+            ctx["leases"] = [dict(lease, holder_state=hub_app.lease_verdict(lease, roster_)["state"])
+                             if lease.get("session") else lease for lease in ctx["leases"]]
+        except Exception as exc:                             # noqa: BLE001
+            ctx["sources"]["liveness"] = "unreadable: %s" % type(exc).__name__
     try:
         return attention_core.build(hub_app.HUB_DIR, ctx)
     except Exception as exc:                                 # noqa: BLE001
@@ -1353,11 +1471,12 @@ def _live_blocks(events, state, audit, deliv, cursor):
 
 
 def _sweep_leases():
-    """A task nobody holds is handed back HERE, on the board's own read path, not by whatever
-    died holding it (hub_core.lease_sweep). Throttled inside; never breaks a read."""
+    """A task nobody holds is handed back from the board's own read path, not by whatever died
+    holding it (hub_core.lease_sweep) -- in one background thread, never on the reader's
+    request. Throttled and single-flight inside; never breaks a read."""
     try:
         from . import lease_sweep
-        lease_sweep.sweep()
+        lease_sweep.sweep_async()
     except Exception:                                        # noqa: BLE001
         import logging
         logging.getLogger("hub.lease_sweep").warning("sweep pass failed", exc_info=True)
@@ -1402,12 +1521,7 @@ def _snapshot(served=None):
         # Realtime lease/telemetry refreshes must not repeatedly pay for a repository audit whose
         # inputs did not change. Structural audit truth changes with the ledger or build identity;
         # cache on exactly those inputs and keep the five-second live cockpit refresh lightweight.
-        audit_key = (cur["seq"], cur["hash"], served, git_head)
-        if _AUDIT_CACHE["key"] == audit_key:
-            audit = _AUDIT_CACHE["value"]
-        else:
-            audit = hub_app.run_audit(s, served=served)
-            _AUDIT_CACHE["key"], _AUDIT_CACHE["value"] = audit_key, audit
+        audit = board_audit((cur["seq"], cur["hash"], served, git_head), served)
         _tick("audit")
         build = hub_app.build_meta(served, state=state)
         _tick("build")
@@ -2328,6 +2442,23 @@ def _inbox_reader(request):
     return agent, machine.strip().lower()[:120], session.strip()[:64]
 
 
+class _ProblemStates:
+    """{problem id: state}, read only when a late message actually names a problem: the
+    inbox fold runs on every held wait, and the problem fold is not free."""
+
+    def __init__(self):
+        self._map = None
+
+    def get(self, pid, default=None):
+        if self._map is None:
+            try:
+                probs, _meta = problems_core.read(hub_app.HUB_DIR, include="all")
+                self._map = {p.get("id"): str(p.get("state") or "") for p in probs}
+            except Exception:                                # noqa: BLE001 - a hint, never a failure
+                self._map = {}
+        return self._map.get(pid, default)
+
+
 def _inbox_kwargs(request, machine, session):
     try:
         live = hub_app.live_sessions() if session else None
@@ -2335,7 +2466,7 @@ def _inbox_kwargs(request, machine, session):
         live = None
     return {"machine": machine, "session": session, "live": live,
             "human_gate": hub_app.human_gate(), "gate_satisfied": hub_app.gate_satisfied(),
-            "visible": _veil_visible(request),
+            "visible": _veil_visible(request), "problem_states": _ProblemStates(),
             # Self-test asks reach only a reader that asks for them (the responder).
             "synthetic": _inbox_kwargs_synthetic(request)}
 
@@ -2415,9 +2546,22 @@ def _addressed(state, snap, agent, **kwargs):
     # Fresh unclaimed PROBLEMS this agent owns (and, for the operator, anything unclaimed too
     # long) — the folded queue delivers itself like everything else.
     try:
-        extra += problems_core.items_for_agent(hub_app.HUB_DIR, state, agent, operator,
-                                               apps=hub_app.apps_config(),
-                                               live_rows=hub_app.live_sessions())
+        probs = problems_core.items_for_agent(hub_app.HUB_DIR, state, agent, operator,
+                                              apps=hub_app.apps_config(),
+                                              live_rows=hub_app.live_sessions())
+        # A CI failure's frame carries what the board already knows about THAT failure
+        # (event_knowledge: cached per subject, so a re-delivered frame does not re-rank).
+        try:
+            from .knowledge_api import event_knowledge
+            for it in probs:
+                if "ci" in str(it.get("title") or "").lower().split() or \
+                        "pipeline" in str(it.get("title") or "").lower():
+                    known = event_knowledge(str(it.get("title") or "")[:300])
+                    if known:
+                        it["knowledge"] = known
+        except Exception:                                    # noqa: BLE001 - never break delivery
+            pass
+        extra += probs
     except Exception:                                        # noqa: BLE001
         pass
     # Crossovers this side has not been told: with a named console, only that console's;
@@ -3097,6 +3241,18 @@ def doctor_json(request):
     data = app_health.doctor(hub_app.HUB_DIR, slug, state, apps=hub_app.apps_config(),
                              native=hub_app.native_slug(),
                              native_deploy=hub_app.native_deploy(state))
+    if data.get("verdict") not in ("unknown", "observed"):
+        # What the board already knows about why THIS service is not healthy.
+        try:
+            from .knowledge_api import event_knowledge
+            open_ = " ".join(str(p.get("title") or "") for p in (data.get("open") or [])
+                             if isinstance(p, dict))[:300]
+            known = event_knowledge("%s %s %s" % (slug, " ".join(data.get("lines") or [])[:200],
+                                                  open_))
+            if known:
+                data["knowledge"] = known
+        except Exception:                                    # noqa: BLE001
+            pass
     return JsonResponse({"data": data}, status=200 if data["verdict"] != "unknown" else 404)
 
 

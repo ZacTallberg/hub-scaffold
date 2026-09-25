@@ -21,11 +21,19 @@ from django.http import JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
+from . import commit as _commit
+
+_commit.prime(settings)          # the commit this process LOADED, read once at import
+
 
 @never_cache
 @require_GET
 def live(request):
-    return JsonResponse({"status": "live", "build": getattr(settings, "BUILD_ID", "")})
+    """``commit`` is what this process loaded; ``stamp_commit`` is what the deploy claims.
+    ``stamp_mismatch`` says a deploy claims one commit while the process runs another -- a
+    failed restart or a rollback -- which a deploy gate reading the stamp would pass."""
+    return JsonResponse({"status": "live", "build": getattr(settings, "BUILD_ID", ""),
+                         **_commit.identity(settings)})
 
 
 @never_cache
