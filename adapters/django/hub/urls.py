@@ -6,8 +6,8 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, held, histories_api, hub_api, hub_write, hubsite, knowledge_api,
-               knowledge_write, veil, mcp_server, read_auth, run_api)
+from . import (app_services, deploy_close, held, histories_api, hub_api, hub_write, hubsite,
+               knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -66,6 +66,8 @@ urlpatterns = [
     path("distribution.json", R(hub_api.distribution_json), name="distribution"),
     path("built.json", R(hub_api.built_json), name="built"),
     path("ci-events.json", R(hub_api.ci_events_json), name="ci-events"),
+    # The last deploy-close replay (state in a file: every hub process answers the same).
+    path("deploy-reconcile.json", R(deploy_close.reconcile_json), name="deploy-reconcile"),
     # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
     # or the adopter's HUB_HISTORY_VIEWER predicate (404 to everyone else).
     path("history.json", R(histories_api.history_json), name="history"),
@@ -105,6 +107,8 @@ urlpatterns = [
     # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
     path("api/retire", hub_write.retire),
     path("api/deploy", hub_write.deploy),
+    # Replay the newest deploy record through the close matcher and retry every refused close.
+    path("api/deploy/reconcile", deploy_close.reconcile_view),
     path("api/claim", hub_write.claim),
     path("api/take", hub_write.take),
     # Give a task to a named agent: `to` is the recipient, `agent` stays the writer.
@@ -198,6 +202,7 @@ VISIBILITY = {
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
     "capabilities.json": "veiled",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
+    "deploy-reconcile.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.

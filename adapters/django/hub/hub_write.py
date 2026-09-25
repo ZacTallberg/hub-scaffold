@@ -1105,11 +1105,27 @@ def close_deployed_tasks(deploy_id, deployed_sha):
     the UNATTENDED ones through the one done path (a lease the hub holds, the deploy record as
     evidence). A person's task is only stepped. Returns what happened for the record's answer."""
     from hub_core import task_completion
-    tasks = hub_app.current_state().get("by_type", {}).get("task", [])
-    matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor)
+
+    from . import deploy_close
+    state = hub_app.current_state()
+    tasks = state.get("by_type", {}).get("task", [])
+    # A sha a checkpoint's PROSE names counts only when a deploy record served exactly it.
+    served = [str(d.get("sha") or "") for d in state.get("by_type", {}).get("deploy", [])
+              if d.get("sha")]
+    matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor,
+                                                      served=served)
     closed, stepped, refused = [], [], {}
-    for task, commit in matches:
+    for task, commit, retry in matches:
         tid = task["id"]
+        if retry:
+            # Stepped already, and an earlier close was refused (a live lease, a version race):
+            # offered to the close again, never stepped twice.
+            res = deploy_close.close_one(task, commit, deployed_sha, deploy_id)
+            if res.get("closed"):
+                closed.append(tid)
+            elif res.get("why"):
+                refused[tid] = res["why"]
+            continue
         at = _utc_now()
         plan = [dict(x) for x in (task.get("plan") or []) if isinstance(x, dict)]
         plan.append(task_completion.deployed_step(commit, deployed_sha, deploy_id, at))
@@ -1122,12 +1138,12 @@ def close_deployed_tasks(deploy_id, deployed_sha):
         if not task_completion.is_unattended(task):
             stepped.append(tid)
             continue
-        why = _hub_finish(tid, commit, deployed_sha, deploy_id)
-        if why:
-            refused[tid] = why
-            _record_auto_close(tid, "refused", why, commit, deploy_id)
-        else:
+        fresh = (hub_app.current_state().get("entities") or {}).get(tid) or task
+        res = deploy_close.close_one(fresh, commit, deployed_sha, deploy_id)
+        if res.get("closed"):
             closed.append(tid)
+        elif res.get("why"):
+            refused[tid] = res["why"]
     out = {"closed": closed, "stepped": stepped, "refused": refused}
     if unchecked:
         out["unchecked"] = ("the repository could not answer whether %s %s contained in %s; only a "
@@ -1370,6 +1386,7 @@ def release(request, b):
     if agent and agent != lease.get("agent"):
         return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
     hub_app.release_lease(eid, token)
+    _kick_deploy_close()
     return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
 
 
@@ -1439,8 +1456,20 @@ def hand_back(request, b):
         if status != 200:
             return JsonResponse(resp, status=status)
         released = hub_app.release_lease(eid, token)
+    # A close the deploy record already proved and this lease refused can land now -- in the
+    # close sweep's own thread, never on this request (deploy_close.sweep_async).
+    _kick_deploy_close()
     return JsonResponse({"ok": True, "task": eid, "handed_back": times,
                          "lease_released": released, "version": resp["data"]["version"]})
+
+
+def _kick_deploy_close() -> None:
+    try:
+        from . import deploy_close
+        deploy_close.sweep_async(force=True)
+    except Exception:                                        # noqa: BLE001 - never break a write
+        logging.getLogger(__name__).warning("could not start the deploy-close sweep",
+                                            exc_info=True)
 
 
 def _bounded_setting(name, default, low, high):

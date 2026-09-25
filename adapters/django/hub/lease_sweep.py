@@ -82,4 +82,12 @@ def sweep(force: bool = False, now: float | None = None) -> dict:
             refused[task["id"]] = "%s %s" % (status, str(resp)[:160])
     if refused:
         log.warning("lease sweep: %d hand-back(s) refused: %s", len(refused), refused)
+    if done:
+        # A task the deploy record already proved live, refused only because this lease was
+        # still held, can close now -- in the close sweep's own thread, never on this read.
+        try:
+            from . import deploy_close
+            deploy_close.sweep_async(force=True)
+        except Exception:                                    # noqa: BLE001
+            log.warning("could not start the deploy-close sweep", exc_info=True)
     return {"handed_back": done, "refused": refused}

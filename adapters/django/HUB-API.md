@@ -248,12 +248,24 @@ A caller's empty `take` answers `409 no_ready_task` with `withheld` counts by re
   token), a claim from another agent is granted with `took_over_from`, and a renewal from another
   console of the same agent takes over the recorded holder. Inside the grace the claim is refused
   `409 leased` with `holder_state: "gone"` and `frees_in_s`. UNPROVABLE never releases anything; only the clock does.
+- **An ENDED console releases at once.** A console presence records as over -- its session state
+  `gone` (it said goodbye) or an unattended run stamped `ended` / reported `done` -- is GONE with
+  no grace: a task without an owner is taken over immediately. Ended sessions are never live.
+- **A fresh lease is held before its console is seen.** A lease claimed or renewed within
+  `FRESH_LEASE_S` (10 min) is refused `409 held_by_console` to another console of the same agent
+  even when the holder has not reached the roster yet. Past that, a same-agent takeover (holder
+  ended, gone, or stale and unprovable) makes the caller the holder, records `took_over_from`
+  and ROTATES the fencing token -- the old console can never complete over the new one.
+- **A console that lost its lease is told.** Its next claim/step/finish is refused with reason /
+  code `taken_over`, naming the new holder and when; and the takeover posts a message pinned to
+  its machine and console saying to hand its changes over rather than push.
 - **The hub hands back abandoned work.** On its own read paths (throttled) the Hub returns an
   `in_progress` task to `todo` when its lease expired more than `HUB_LEASE_SWEEP_GRACE_S`
   (default 1 h) ago, or when no lease holds it and nothing moved for `HUB_LEASE_SWEEP_UNHELD_S`
   (default 4 h), or when the console holding its live lease is GONE past `HUB_GONE_GRACE_S`. It
-  writes ONE self-counting `handed_back` lifecycle row naming who held it and how long ago it
-  lapsed (or went). Decision tasks are never handed back.
+  writes ONE self-counting `lease_released` lifecycle row naming who held it and how long ago it
+  lapsed (or went) -- its own kind, never the launcher's `handed_back`, so an expired lease never
+  counts against the unattended run cap. Decision tasks are never handed back.
 - **Lifecycle rows are not work.** A plan row with `lifecycle: true` or a lifecycle `kind`
   (`handed_back`, `lease_released`, `reaped`, `launcher_timeout`, `claim_expired`, `lifecycle`) is
   shown but never counted in "N of N done"; a recurring one counts itself in `times`.
@@ -265,7 +277,8 @@ A caller's empty `take` answers `409 no_ready_task` with `withheld` counts by re
 `POST /hub/api/item-claim` (`task:claim`, explicit `@writer`) `{item, machine, [release, session]}` claims
 a NON-task item — a question id or an error fingerprint — for ONE machine. A different machine
 gets `409 claimed_elsewhere` naming the holder and when the claim releases; the same machine
-re-claims idempotently (renewing the TTL, 30 minutes). The claim records its console (`session`,
+re-claims idempotently (renewing the TTL: 30 minutes, or 3 hours when the item is a board task,
+whose run is bounded longer; the granted `ttl_s` rides the row). The claim records its console (`session`,
 or the `X-Hub-Session` header): when that console is provably GONE past `HUB_GONE_GRACE_S` the
 claim is no longer in force and another machine is granted it with `took_over_from`; inside the
 grace the `409` says `holder_state: "gone"` and `frees_in_s`. A claimed question or error is
@@ -548,6 +561,19 @@ onto the task as `auto_close`. Ancestry is asked of the repository at `HUB_WORK_
 (`HUB_VCS_ANCESTRY=none` when the image carries none); a question it could not answer is reported
 as `unchecked`, never read as "no". The closure is fail-soft: the release record is already
 durable.
+
+A refused close is **retried, not final**. An unattended task already stepped `deployed` but not
+done is offered to the close again on every later deploy (never stepped twice), on the hand-back,
+release or lease sweep that frees its lease, and by a throttled sweep started from the board's
+read path -- always in ONE single-flight background thread, never on the request. A task whose own
+checkpoint says it is NOT finished ("NOT DONE", "active on purpose") is refused with the quote in
+`auto_close.why` and is not retried; the attention list takes it to a person. A sha written in a
+checkpoint's prose counts only when a deploy record served exactly that commit.
+`POST /hub/api/deploy/reconcile` (`deploy:write`) replays the newest deploy record and retries
+every stepped close in a thread (202; 200 with the running state if one is going); a `running`
+state that has not moved for 2 minutes belongs to a dead process and is restarted, and a replay
+stops at 10 minutes and says so. `GET /hub/deploy-reconcile.json` (member) reads its progress and
+result from `HUB_DIR/deploy-reconcile.json`, so every hub process answers the same.
 
 **Client telemetry.** Every `hub_core.client` call sends `X-Hub-Client-Version` (a digest of the
 client); write responses carry `X-Hub-Client-Current`, and the attention list names each seat

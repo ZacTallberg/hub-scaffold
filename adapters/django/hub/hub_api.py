@@ -1339,6 +1339,14 @@ def _sweep_leases():
     except Exception:                                        # noqa: BLE001
         import logging
         logging.getLogger("hub.lease_sweep").warning("sweep pass failed", exc_info=True)
+    # A deploy close refused while a lease was held is retried on the same kind of throttle --
+    # in ONE background thread, never on this read (deploy_close.sweep_async).
+    try:
+        from . import deploy_close
+        deploy_close.sweep_async()
+    except Exception:                                        # noqa: BLE001
+        import logging
+        logging.getLogger("hub.deploy_close").warning("close sweep did not start", exc_info=True)
 
 
 def _snapshot(served=None):
