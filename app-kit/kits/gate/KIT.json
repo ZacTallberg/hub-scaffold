@@ -1,1 +1,1 @@
-{"state": "active", "summary": "Deny-by-default identity gate: owners, per-app roster, role ladder, append-only gate log", "installs": ["app_gate"]}
+{"state": "active", "summary": "Deny-by-default identity gate: owners, per-app roster, role ladder, append-only gate log", "installs": ["app_gate"], "retarget_migrations": true}

@@ -13,6 +13,11 @@ step.
 ``build_all.skipped`` -- a family that silently registers nothing looks exactly like one that
 works and finds no results.
 
+**A per-user entity that declares no scope is LEFT OUT**, fail-closed: an entity with an owner
+column (``adapter.OWNER_FIELDS``) and no ``Entity.scope`` gets no generic tool at all and is named
+in ``skipped`` as ``entity:<key>``. An app that re-vendors the kit without declaring scopes loses
+those tools rather than showing every user's rows to every user.
+
 This copy ships the ``core`` family (reads, counts, breakdowns over declared entities). The rest
 of the canon's families are app-owned: write them against the same adapter, add a row here when
 one becomes generic, and the audit starts crediting it the same day.
@@ -37,14 +42,36 @@ def build_all(adapter, **sources):
     unreachable, and an unreachable tool is worse than a missing one -- the catalog advertises
     it and calling it gets the other thing.
     """
-    from ..adapter import check
+    import dataclasses
+
+    from django.apps import apps
+
+    from ..adapter import check, unscoped_owner
+
+    skipped: list[tuple[str, str]] = []
+    keep = []
+    for entity in adapter.entities:
+        try:
+            owner = unscoped_owner(entity, apps.get_model(entity.model))
+        except Exception:                                     # noqa: BLE001
+            owner = ""                                        # check() names a bad model below
+        if owner:
+            skipped.append((f"entity:{entity.key}",
+                            f"UNSCOPED: has an owner column ({owner!r}) and no scope, so no "
+                            "generic tool is built over it -- declare Entity(scope=...) or "
+                            "scope=SHARED"))
+            logger.error("assistant entity %s left out: owner column %r, no scope",
+                         entity.key, owner)
+        else:
+            keep.append(entity)
+    if len(keep) != len(adapter.entities):
+        adapter = dataclasses.replace(adapter, entities=tuple(keep))
 
     problems = check(adapter)
     if problems:
         raise ValueError("the assistant adapter is not usable:\n  - " + "\n  - ".join(problems))
     specs: dict = {}
     functions: dict = {}
-    skipped: list[tuple[str, str]] = []
     for name, needs, _serves in REGISTRAR:
         missing = [n for n in needs if not sources.get(n)]
         if missing:
