@@ -14,6 +14,7 @@ board loses the difference, so each has its own verb::
     python -m hub_core.client gap "Half the services report no errors" --severity P1 --note "..."
     python -m hub_core.client recall example:note:l-3f8a1c2b4d5e      # or a phrase
     python -m hub_core.client capabilities --q "retry"
+    python -m hub_core.client evals --suite retrieval-answered-asks  # the standing-eval trend
     python -m hub_core.client prompt-context --hook < hook.json         # from a prompt hook
     python -m hub_core.client knowledge-sync --out ~/.hub-client/knowledge.json
     python -m hub_core.client adjudicate                                 # needs HUB_JUDGE_URL
@@ -212,6 +213,37 @@ def _run_capabilities(base: str, arguments: argparse.Namespace) -> dict[str, Any
     return _c._get(base, "capabilities.json" + (("?" + urlencode(query)) if query else ""))
 
 
+def _run_evals(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """The standing-eval trend (GET /hub/eval.json), or --record a run measured elsewhere
+    (POST /hub/api/eval, eval:write). A recorded run is printed AS STORED."""
+    from urllib.parse import urlencode
+    if arguments.record:
+        try:
+            with open(os.path.expanduser(arguments.record), encoding="utf-8-sig") as fh:
+                run = json.load(fh)
+        except (OSError, ValueError) as error:
+            raise ValueError("--record needs a JSON run file: %s" % error)
+        if not isinstance(run, dict):
+            raise ValueError("--record: the file must hold one JSON object")
+        if arguments.suite:
+            run["suite"] = arguments.suite
+        run.setdefault("agent", _agent(arguments))
+        return _c._post(base, "eval", run, extra_headers=_c._presence_headers(arguments))
+    query = {"limit": arguments.limit}
+    if arguments.suite:
+        query["suite"] = arguments.suite
+    body = _c._get(base, "eval.json?" + urlencode(query))
+    rows = body.get("data") or []
+    lines = ["suites: %s" % (", ".join((body.get("metadata") or {}).get("suites") or []) or "none recorded")]
+    for row in rows:
+        cells = "; ".join("%s %s" % (name, " ".join("%s=%s" % (k, v) for k, v in sorted(fig.items())))
+                          for name, fig in sorted((row.get("paths") or {}).items()))
+        lines.append("%s %-28s pairs=%s excluded=%s  %s"
+                     % (row.get("at", "?"), row.get("suite", "?"), row.get("pairs", 0),
+                        row.get("excluded", 0), cells))
+    return {"lines": lines} if not arguments.json else body
+
+
 def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     """Print the knowledge block for THIS prompt — the verb a prompt hook calls.
 
@@ -236,8 +268,16 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     if event.lower().replace("-", "") in ("sessionstart", "start"):
         pc.reset_delivered(sid)
     focus = (arguments.focus or os.environ.get("HUB_FOCUS") or " ".join(prompt.split())[:400]).strip()
-    query: dict[str, Any] = {"agent": _agent(arguments), "memory_cap": arguments.memory_cap,
-                             "memory_full": arguments.memory_full}
+    # THE HAND-OFF: when this machine's own memory engine serves the board's knowledge (switch
+    # on, mirror fresh, local recall healthy -- knowledge_mirror.local_owner), printing the
+    # hub-ranked block too would deliver every record twice. Ask for a one-row index (the live
+    # block still rides) and print one line that says which side is serving. Any doubt keeps
+    # the hub block: the decision fails closed.
+    from . import knowledge_mirror
+    local = knowledge_mirror.local_owner()
+    query: dict[str, Any] = {"agent": _agent(arguments),
+                             "memory_cap": 1 if local else arguments.memory_cap,
+                             "memory_full": 0 if local else arguments.memory_full}
     if focus:
         query["focus"] = focus
     try:
@@ -249,6 +289,13 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     delivered = pc.load_delivered(sid) if sid else []
     out = pc.render(payload, delivered=delivered or None,
                     budget=min(pc.MEMORY_BUDGET, pc.OUTPUT_MAX - 600))
+    if out["live"] and not pc.live_due(sid, out["live"]):
+        out["live"] = ""               # unchanged but for its ages: said recently enough
+    if local:
+        print(pc.fit_output([out["live"], "<hub-knowledge>knowledge for this prompt is served by "
+                             "this machine's local memory (mirror fresh, recall healthy); the "
+                             "board's own search is `python -m hub_core.client search`</hub-knowledge>"]))
+        return None
     parts = [out["live"], out["memory"]]
     if out["spill"]:
         path = pc.write_spill(sid, out["spill"])
@@ -262,12 +309,45 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     return None
 
 
+def _run_knowledge_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """--feed: the append-only operation log a local memory engine indexes, plus its sidecar
+    (hub_core.knowledge_mirror). Rate-limited by --min-interval, so a daemon can call this on
+    every heartbeat and a person can call it by hand (--min-interval 0, the default)."""
+    from pathlib import Path
+    from . import knowledge_mirror as km
+
+    def get(route, headers):
+        try:
+            return _c._request(_c._bases_of(base), "GET", route, data=None,
+                               headers={**_c._common_headers(), **_c._optional_auth_headers(),
+                                        **_c._telemetry_headers(), **headers})
+        except _c.HubRefused as refusal:
+            if refusal.status == 304:
+                raise km.NotModified() from None
+            raise
+
+    feed = (Path(os.path.expanduser(arguments.feed)) if arguments.feed not in (None, "", "-")
+            else km.default_feed())
+    result = km.tick(get, feed, min_interval=arguments.min_interval,
+                     max_pages=arguments.max_pages)
+    result["local_owner"] = km.local_owner(feed)
+    result["health"] = km.health_line(feed)
+    if result.get("status") == "error":
+        result["_exit"] = 1
+    return result
+
+
 def _run_knowledge_sync(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """Mirror the board's knowledge into one local JSON file from /hub/knowledge/since.
 
     The first run bootstraps (pages until `more` is false); later runs ask only for what changed
     after the stored cursor and apply put / revoke / reset. A caught-up run costs one request
     and changes nothing. The file is rewritten atomically."""
+    if getattr(arguments, "feed", None) is not None:
+        return _run_knowledge_feed(base, arguments)
+    if not arguments.out:
+        raise ValueError("knowledge-sync needs --out <file.json> (a snapshot) or --feed [<file.jsonl>] "
+                         "(the operation log a local memory engine indexes)")
     from pathlib import Path
     from urllib.parse import quote
     path = Path(os.path.expanduser(arguments.out))
@@ -417,6 +497,16 @@ def register(commands) -> None:
     caps.add_argument("--q")
     caps.set_defaults(runner=_run_capabilities)
 
+    ev = commands.add_parser("evals", help="the standing-eval trend (runs scored on the board's own "
+                             "data), or --record one run measured elsewhere (eval:write)")
+    ev.add_argument("--suite", help="one suite (e.g. retrieval-answered-asks)")
+    ev.add_argument("--limit", type=int, default=20)
+    ev.add_argument("--record", metavar="RUN.json",
+                    help="POST this run: {suite, pairs, excluded, paths: {<path>: {n, @1, @5, ...}}}")
+    ev.add_argument("--json", action="store_true", help="the raw trend body")
+    ev.add_argument("--agent")
+    ev.set_defaults(runner=_run_evals)
+
     if "prompt-context" in commands.choices:
         # ONE prompt-context verb: the three-channel payload (doctrine / live / nudge) by
         # default; --hook (or --knowledge) prints the knowledge block a prompt hook injects.
@@ -452,8 +542,15 @@ def register(commands) -> None:
         pctx.add_argument("--memory-full", type=int, default=25, dest="memory_full")
         pctx.set_defaults(runner=_run_prompt_context)
 
-    ksync = commands.add_parser("knowledge-sync", help="mirror the board's knowledge into a local JSON file")
-    ksync.add_argument("--out", required=True)
+    ksync = commands.add_parser("knowledge-sync", help="mirror the board's knowledge locally: a JSON "
+                                "snapshot (--out) or an append-only op log a local memory engine indexes (--feed)")
+    ksync.add_argument("--out")
+    ksync.add_argument("--feed", nargs="?", const="-",
+                       help="append put/revoke/reset ops to this JSONL file (default HUB_KNOWLEDGE_FEED "
+                            "or <state dir>/feeds/knowledge.jsonl) and keep its <stem>.state.json sidecar")
+    ksync.add_argument("--min-interval", type=float, default=0, dest="min_interval",
+                       help="--feed: skip the poll when the last one was this recent (a daemon passes 300)")
+    ksync.add_argument("--max-pages", type=int, default=12, dest="max_pages")
     ksync.add_argument("--limit", type=int, default=500)
     ksync.set_defaults(runner=_run_knowledge_sync)
 

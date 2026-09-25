@@ -82,6 +82,40 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   enrolment is done when the distribution row says so. `register-responder.ps1 -Launcher
   unattended` schedules the lane launcher.
 
+### Round 2 (lane fh1): collaboration, local knowledge hand-off, hosted menu and table
+
+- **Questions and messages.** The asker can withdraw their own question, giving a reason
+  (`POST /hub/api/question/withdraw`, client `withdraw`, MCP `withdraw_question`). Messages now
+  expire: `expires_at` defaults to 24 h and is capped at a week. After that a message is kept
+  and listed (`inbox.json?expired=1`) but never delivered. Messages can also carry a
+  `structured` `{finding, evidence, split}` block. A new attention item, `answers_unread`, says
+  an unacked answer is an inbox chore, not a delivery fault.
+- **Shared evidence store.** `POST /hub/api/evidence` (scope `evidence:write`) and
+  `GET /hub/evidence.json` (members only) keep raw readings (probes, traces, timings) keyed by
+  subject and commit, in a capped side file rather than the ledger. Client `evidence put|find`;
+  MCP `post_evidence` / `find_evidence`.
+- **Local knowledge mirror and hand-off.** `knowledge-sync --feed` writes an append-only op log
+  plus a sidecar that a local memory engine indexes. `prompt-context` hands delivery to local
+  memory only when the switch is on, the mirror is fresh and local recall is healthy; otherwise
+  it keeps the hub block. `X-Hub-Memory-Health` is kept per machine and graded as
+  `local_memory` on the distribution view. The knowledge feed now honours `X-Hub-ETag`, and a
+  narrowed reader never receives a revoke for a record it could not see. The live block is
+  resent only when it changes (ages are masked), with at most one reminder per 30 minutes.
+- **Audit.** `veil:served-files` flags any hosted component or published artifact that names a
+  hidden facet.
+- **Hosted UI.** New context-menu component with a ranking route (`api/menu/rank`, scope
+  `menu:rank`, model behind `HUB_MENU_MODEL_*`, falling back to `HUB_JUDGE_*`). New table
+  component (column sizing, ghost pins, a Suggest contract that polls a background job). The
+  agent component gets its doors as configured, a quiet float button, and a `hub:agent-ask`
+  event.
+- **Measurement.** `tools/context_budget.py` measures, from real transcripts, what each
+  prompt's hooks inject. Standing evals get a trend store (`GET /hub/eval.json`,
+  `POST /hub/api/eval`, scope `eval:write`, client `evals`, MCP `eval_trend`), and
+  `retrieval_eval` now scores the path that is actually delivered, one row per ask.
+- **Patterns.** `agent-client-daemon.md` adds: read back what an update installed and exit
+  distinctly when it was refused; restart when any module changes; jittered back-off; keep
+  companion tools on a hub-published pin.
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and

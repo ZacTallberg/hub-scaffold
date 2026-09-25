@@ -338,7 +338,7 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
             app: str = "", state: str = "", runtime: str = "", files=None,
             retract_focus: str = "", extra: dict | None = None, client: str = "",
             client_digest: str = "", artifacts=None, project: str = "",
-            unattended=None) -> None:
+            unattended=None, memory_health: str = "") -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine),
     carrying its name, repo, app, state, focus and recently edited files. A heartbeat stamps
@@ -365,6 +365,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
         files = _clean_session_extra({"files": extra.get("files")}).get("files")
     client = str(client or "").strip()[:80]
     client_digest = str(client_digest or "").strip()[:64]
+    # X-Hub-Memory-Health: a fact about the MACHINE's local memory layer (knowledge_mirror).
+    memory_health = str(memory_health or "").strip()[:240]
     try:
         pdir = _dir(hub_dir)
         pdir.mkdir(parents=True, exist_ok=True)
@@ -389,6 +391,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                                               extra)))
             if (client and prior_row.get("client") != client) or (
                     client_digest and prior_row.get("client_digest") != client_digest) or artifacts:
+                unchanged = False
+            if memory_health and _health_moved(prior_row.get("memory_health"), memory_health):
                 unchanged = False
             if fresh and unchanged and (not sid or now - epoch(prior_session.get("at")) < QUIET_REWRITE_S):
                 return
@@ -442,6 +446,9 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                 payload["client_digest"] = client_digest
             if client or client_digest:
                 payload["client_at"] = now
+            if machine and memory_health:
+                payload["memory_health"] = memory_health
+                payload["memory_health_at"] = now
             # Atomic and durable, waiting out a Windows sharing window (hub_core.atomic).
             atomic.write_json(p, payload)
             # Self-cleaning under the same lock: the write that records a live seat retires
@@ -449,6 +456,14 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
             _prune_locked(hub_dir, now)
     except (OSError, TimeoutError):
         pass  # presence must never break a request
+
+
+def _health_moved(prior, line: str) -> bool:
+    """A memory-health line changed in substance -- its `age` part ticks every second and must
+    not by itself defeat the quiet path (a rewrite per request)."""
+    def core(text):
+        return ";".join(p for p in str(text or "").split(";") if not p.startswith("age="))
+    return core(prior) != core(line)
 
 
 _ROWS_MEMO = {"key": None, "rows": None, "at": 0.0}

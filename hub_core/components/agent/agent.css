@@ -143,11 +143,66 @@ html.hub-agent-docked body { margin-right: var(--hub-agent-dock); transition: ma
 /* Launchers */
 .hub-agent-launch { font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif; cursor: pointer; }
 .hub-agent-launch.is-hidden { display: none; }
+/* THE FLOAT IS QUIET UNTIL YOU GO TO IT: a small disc near the bottom-right corner, at .68
+   strength, clear of the edge and of the status strips apps keep at the foot. Pointing at it
+   (or keyboard focus) brings it to full strength with a little life -- it lifts, one ring
+   washes out from the rim, the mark tips and settles -- and "Ask <title>" slides out beside it.
+   Every motion plays ONCE per hover and never at rest: a ring pulsing on a page somebody is
+   reading is a notification, and this is not one. aria-label carries the whole invitation at
+   all times, so the pop-up is decoration over a name that is always there. */
 .hub-agent-launch.is-float {
-  position: fixed; right: 24px; bottom: 24px; z-index: 2147482999; width: 52px; height: 52px; border-radius: 50%;
-  border: 0; background: var(--hub-agent-accent); color: var(--hub-agent-on-accent); box-shadow: var(--hub-agent-shadow);
-  display: grid; place-items: center;
+  --hub-agent-float-right: 56px; --hub-agent-float-bottom: 76px;
+  position: fixed; z-index: 2147482999; width: 32px; height: 32px; border-radius: 50%;
+  right: calc(max(var(--hub-agent-float-right), env(safe-area-inset-right)) + var(--hub-agent-dock, 0px));
+  bottom: calc(var(--hub-agent-float-bottom) + env(safe-area-inset-bottom));
+  border: 0; background: var(--hub-agent-accent); color: var(--hub-agent-on-accent);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .13), var(--hub-agent-shadow);
+  display: grid; place-items: center; opacity: .68;
+  transition: opacity .18s ease, box-shadow .2s ease, right .2s ease, transform .26s cubic-bezier(.34, 1.56, .64, 1);
 }
+.hub-agent-launch.is-float .hub-agent-glyph { width: 16px; height: 16px; }
+.hub-agent-launch.is-float::after {
+  content: ""; position: absolute; inset: -1px; border-radius: 50%;
+  border: 2px solid var(--hub-agent-accent); opacity: 0; pointer-events: none;
+}
+.hub-agent-pop {
+  position: absolute; right: calc(100% + 12px); top: 50%; padding: 7px 12px; border-radius: 9px;
+  background: var(--hub-agent-accent); color: var(--hub-agent-on-accent); box-shadow: var(--hub-agent-shadow);
+  white-space: nowrap; opacity: 0; pointer-events: none;
+  transform: translate(10px, -50%) scale(.92); transform-origin: right center;
+  transition: opacity .16s ease, transform .26s cubic-bezier(.34, 1.56, .64, 1);
+}
+.hub-agent-pop::after {
+  content: ""; position: absolute; right: -4px; top: 50%; width: 9px; height: 9px; border-radius: 2px;
+  background: inherit; transform: translateY(-50%) rotate(45deg);
+}
+/* hover:hover keeps the reveal off touch screens, where a tap IS the click. */
+@media (hover: hover) {
+  .hub-agent-launch.is-float:hover, .hub-agent-launch.is-float:focus-visible {
+    opacity: 1; transform: translateY(-2px) scale(1.1);
+  }
+  .hub-agent-launch.is-float:hover::after, .hub-agent-launch.is-float:focus-visible::after {
+    animation: hub-agent-wash .9s cubic-bezier(.2, .6, .35, 1) 1;
+  }
+  .hub-agent-launch.is-float:hover .hub-agent-glyph, .hub-agent-launch.is-float:focus-visible .hub-agent-glyph {
+    animation: hub-agent-tip .9s cubic-bezier(.3, .7, .4, 1) 1;
+  }
+  .hub-agent-launch.is-float:hover .hub-agent-pop, .hub-agent-launch.is-float:focus-visible .hub-agent-pop {
+    opacity: 1; transform: translate(0, -50%) scale(1);
+  }
+}
+@media (hover: none) { .hub-agent-launch.is-float { opacity: .85; } }
+/* Open: full strength and still, no pop-up -- the panel beside it says the rest. */
+.hub-agent-launch.is-float[aria-expanded="true"] { opacity: 1; }
+.hub-agent-launch.is-float[aria-expanded="true"] .hub-agent-pop { opacity: 0; }
+.hub-agent-launch.is-float:active { transform: scale(.96); }
+@keyframes hub-agent-wash { 0% { opacity: .7; transform: scale(1); } 100% { opacity: 0; transform: scale(1.85); } }
+@keyframes hub-agent-tip {
+  0% { transform: rotate(0); } 25% { transform: rotate(-24deg); } 50% { transform: rotate(14deg); }
+  75% { transform: rotate(-5deg); } 100% { transform: rotate(0); }
+}
+/* A door that is off is gone, whatever display rule the launcher carries. */
+.hub-agent-launch[hidden] { display: none !important; }
 .hub-agent-launch.is-sidebar {
   position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 2147482999;
   writing-mode: vertical-rl; padding: 14px 8px; border-radius: 10px 0 0 10px; display: flex; gap: 8px; align-items: center;
@@ -171,4 +226,12 @@ html.hub-agent-docked body { margin-right: var(--hub-agent-dock); transition: ma
 @media (prefers-reduced-motion: reduce) {
   html.hub-agent-docked body { transition: none; }
   .hub-agent-typing i { animation: none; opacity: .7; }
+  /* The hover keeps its meaning -- full strength and the pop-up -- without the motion. */
+  .hub-agent-launch.is-float, .hub-agent-pop { transition: opacity .12s ease; }
+  .hub-agent-launch.is-float:hover, .hub-agent-launch.is-float:focus-visible,
+  .hub-agent-launch.is-float:active { transform: none; }
+  .hub-agent-launch.is-float:hover::after, .hub-agent-launch.is-float:focus-visible::after,
+  .hub-agent-launch.is-float:hover .hub-agent-glyph,
+  .hub-agent-launch.is-float:focus-visible .hub-agent-glyph { animation: none; }
+  .hub-agent-pop, .hub-agent-launch.is-float:hover .hub-agent-pop { transform: translate(0, -50%); }
 }

@@ -1238,6 +1238,19 @@ def hub_client_version():
 _CLIENT_VERSION = {}
 
 
+def _unread_answers(state):
+    """Answer directives their asker has not acknowledged yet (still `active`)."""
+    out = []
+    for ent in state.get("by_type", {}).get("directive", []):
+        if not ent.get("answers") or ent.get("status") != "active":
+            continue
+        prov = ent.get("provenance") or {}
+        out.append({"id": ent.get("id"), "asker": ((ent.get("targets") or [""])[0]),
+                    "at": prov.get("updated_at") or prov.get("created_at") or "",
+                    "revision": ent.get("delivery_revision") or 0})
+    return out
+
+
 def _attention_payload(state, consoles, activity, asks, error_unclaimed):
     """Gather the operational attention context and build the list (hub_core.attention)."""
     from hub_core import agent_auth
@@ -1245,6 +1258,7 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "tasks": state.get("by_type", {}).get("task", []), "activity": activity,
            "runs": state.get("by_type", {}).get("run", []), "sessions": consoles,
            "questions": asks, "errors_unclaimed": error_unclaimed,
+           "answers": _unread_answers(state),
            "hub_client": hub_client_version()}
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
                        ("credentials", lambda: agent_auth.CredentialRegistry(
@@ -2202,6 +2216,7 @@ def questions_json(request):
             "title": str(ent.get("title") or ""),
             "context": str(ent.get("body_md") or ""),
             "open": "open" in tags,
+            "withdrawn": "withdrawn" in tags,
             "answered": bool(reply),
             "answer_id": (reply or {}).get("id", ""),
             "answer": answer_body,
@@ -2339,6 +2354,14 @@ def inbox_json(request):
         return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
     state, snap = _snapshot()
     data = _addressed(state, snap, agent, **_inbox_kwargs(request, machine, session))
+    if request.GET.get("expired") in ("1", "true", "yes"):
+        # LISTED, NOT DELIVERED: expired mail rides beside the addressed set, outside anything
+        # a waiter fingerprints, so asking to see it can never push it into a console.
+        try:
+            data = dict(data) if isinstance(data, dict) else {"items": data}
+            data["expired"] = inbox_core.expired_message_items(state, agent, machine)
+        except Exception:                                    # noqa: BLE001 - never break the inbox
+            data["expired"] = []
     return JsonResponse({"data": data,
                          "metadata": {"agent": agent, "operator": _operator_agent(),
                                       "session": session, "machine": machine}})

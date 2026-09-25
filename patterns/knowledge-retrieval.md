@@ -82,6 +82,17 @@ data nobody wrote for an evaluation), fits alpha on one half and reports on the 
 five splits, and ranks ties pessimistically. Move `CONVEX_ALPHA` only to a value that run
 reported. It needs at least ten answered asks.
 
+The same run scores the **delivered** path — the answer's rank in the per-prompt memory index
+(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25. Its query is the ask's
+CONTEXT with the question removed: every answer restates its question verbatim, and a question
+scored against its own echo reads far better than any real prompt will. Sentences sharing 60% of
+the question's words go too, asks left with fewer than 60 characters are excluded and counted,
+and there is one row per ask. `--post` keeps the run on the board's **standing-eval trend**
+(`POST /hub/api/eval`, read at `/hub/eval.json`, `client evals`, MCP `eval_trend`), so a change
+to ranking or delivery is judged by a step in a series rather than one before/after pair. The
+trend is a sidecar, never the ledger; any tool that measures on real data can record a suite of
+its own (`client evals --record run.json`).
+
 When anything could not be seen, `metadata.partial` carries a `<memory-partial>` block and every
 surface shows it; when the answer is whole it is silent. A search that matched nothing says it
 is a fact about the words used — ask again in different words.
@@ -104,7 +115,35 @@ receipt keys. An unreachable board prints one marked line and exits 0.
 
 A machine that wants the whole corpus locally (to rank offline, or to feed another tool) mirrors
 it with `python -m hub_core.client knowledge-sync --out <file>`, which pages
-`/hub/knowledge/since` once and afterwards asks only for what changed.
+`/hub/knowledge/since` once and afterwards asks only for what changed. A caught-up mirror sends
+its ETag on every carrier (`If-None-Match`, `X-Hub-ETag`, `?etag=`) and gets a 304; a narrowed
+reader is never sent a revoke for a record it could not see (a revoke carries an id, and ids are
+often slugs of titles).
+
+### Handing delivery to a local memory engine
+
+When the machine runs its own memory engine (hybrid retrieval over local files), the board's
+knowledge can be ranked THERE, at zero network cost and with the hub down. Three pieces:
+
+1. **The mirror as an operation log.** `knowledge-sync --feed [<file.jsonl>] --min-interval 300`
+   (a daemon calls it every heartbeat; the rate limit is inside) appends the feed's own
+   `put`/`revoke`/`reset` ops to `HUB_KNOWLEDGE_FEED` (default
+   `<HUB_CLIENT_STATE_DIR>/feeds/knowledge.jsonl`). The page is fsynced BEFORE the cursor
+   moves, so a crash re-fetches a page rather than losing one; a vanished file re-bootstraps;
+   past 24 MB it is compacted to its live set and swapped in. Beside it, `<stem>.state.json`
+   (the sidecar: cursor, `ok_at`, `more`, `error`, `local_owns`) is rewritten on every pass.
+   The engine replays the log: a put is a record, a revoke deletes it, a reset drops a type.
+2. **One decision, two readers.** Local memory serves a prompt's knowledge only when ALL of:
+   the switch is on (`HUB_LOCAL_KNOWLEDGE=1`), the mirror is fresh (last pass caught up, no
+   error, within 600 s), and local recall is healthy (the engine's health file,
+   `HUB_LOCAL_MEMORY_HEALTH`, JSON `{retrieval_mode, ts, hw?}`, says its last recall ran a
+   mode in `HUB_LOCAL_MEMORY_MODES` within 900 s). The engine reads the same sidecar and
+   health file, so exactly one side emits. Then `prompt-context --hook` prints the live block
+   and one line saying local memory is serving, instead of the ranked block. Any doubt fails
+   CLOSED to the hub block.
+3. **Graded like any artifact.** The client reports `X-Hub-Memory-Health` on every request; the
+   distribution view grades it (`local_memory`: `stale` when recent recalls fell back to a
+   degraded mode). "Installed" alone reads current on a machine whose recall silently degraded.
 
 ## 4. Publish a capability catalog from another repository
 

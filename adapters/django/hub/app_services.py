@@ -26,6 +26,10 @@ TRUST, route by route:
 * /hub/api/agent/{ask,history,conversation}
                                   scopes agent:ask / agent:history. The hub holds the ONE agent
                                   key; an app's bridge holds only its hub credential.
+* /hub/api/menu/rank              scope menu:rank (GET and POST). An app's bridge asks the hub's
+                                  model to ORGANISE the context menu it declared; the answer is
+                                  validated against that catalog. GET reports the lane's state and
+                                  never the model's address.
 """
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ from django.http import Http404, HttpResponse, HttpResponseNotAllowed, JsonRespo
 from django.utils.module_loading import import_string
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import agent_broker, app_feed, components, profiles, reach
+from hub_core import agent_broker, app_feed, components, menu_rank, profiles, reach
 
 from . import hub_app, viewers
 from .hub_write import writer
@@ -356,6 +360,17 @@ def agent_conversation(request, b):
     """GET /hub/api/agent/conversation?person=&id=."""
     status, body = agent_broker.conversation(_lane(), request.GET.get("person"),
                                              request.GET.get("id"))
+    return _no_store(JsonResponse(body, status=status))
+
+
+@writer(scope="menu:rank", methods=("GET", "POST"), presence=False)
+def menu_rank_view(request, b):
+    """POST /hub/api/menu/rank -- organise one app's declared context menu for one kind of
+    thing (hub_core.menu_rank); GET -- the lane's state. Authenticates the APP's server, never
+    the person, exactly like /hub/api/agent/ask."""
+    if request.method == "GET":
+        return _no_store(JsonResponse(menu_rank.status()))
+    status, body = menu_rank.rank(b)
     return _no_store(JsonResponse(body, status=status))
 
 

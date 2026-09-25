@@ -63,6 +63,7 @@ JSONL, or SQLite mutation is an offline recovery operation only: drain live writ
 | `grants/decisions.jsonl` | Launch grant/consume/refusal audit trail | According to audit policy |
 | `profiles.json` | Per-person presentation state: theme, sizes, face, agent placement, stars, per-app overrides, and the person's mark (a small image) | Yes; mutable, not ledger history, and it holds a picture of each person who set one |
 | `component-props.json`, `component-adopters.json` | Per-app component settings (with a short change history) and the apps observed loading each component | Yes for the settings; the adopters list repopulates as pages load |
+| `evals.jsonl` | The standing-eval trend (`/hub/eval.json`): one row per scored run, newest 400 per suite; a reading, never ledger history | Optional; losing it loses the trend, not the board |
 | `histories/` (only when `HUB_HISTORIES_ENABLED`) | Console chat histories: what people typed to their assistants, redacted by pattern only; pruned after `HUB_HISTORY_RETENTION_DAYS` (default 45) | **No — excluded from routine backups.** Sensitive; keep it on the hub's own disk and let retention delete it |
 
 Exact launch sidecar names are implementation details and may grow; in practice, back up the whole
@@ -146,6 +147,22 @@ build/deploy coherence, focused Django settings safety, and explicit guards on H
 It does not prove backups, TLS, authorization in front of reads, the live front door, or alert
 delivery. When one of those is a critical boundary for the current task, perform the real operation
 or use one disposable probe and retain only its receipt.
+
+## Measuring what the board costs and delivers
+
+Two measurements run on real data, never on cases written for them:
+
+- **Retrieval, on the board's own answered asks.** `python manage.py retrieval_eval [--post]`
+  scores search configurations and the DELIVERED per-prompt block against every answered ask
+  (`patterns/knowledge-retrieval.md` §2). `--post` keeps the run on the trend
+  (`/hub/eval.json`, `client evals`), so a ranking or delivery change shows as a step.
+- **Context, per prompt.** `python tools/context_budget.py [--hours 24] [--json]` reads the
+  agent-session transcripts on a workstation and reports, per turn kind (person, peer message,
+  notification, session start), how many characters each hook injected and how many the harness
+  persisted instead of showing. Every hook on one prompt is counted against ONE budget; a session
+  start is its own row, kept out of the per-prompt figure. `--source NAME=REGEX` names a hook the
+  built-in classifier does not know. Record a reading with `client evals --record` if you want its
+  trend.
 
 ## Build coherence
 

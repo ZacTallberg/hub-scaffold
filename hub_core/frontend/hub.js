@@ -1574,6 +1574,7 @@
         gate: tags.indexOf("human-only") >= 0,
         hop: parseInt(n.hop, 10) || 0,
         open: tags.indexOf("open") >= 0,
+        withdrawn: tags.indexOf("withdrawn") >= 0,
         answered: !!reply,
         answer: answerText,
         answerBy: reply ? String((reply.provenance || {}).agent || "") : "",
@@ -1616,6 +1617,7 @@
     // (withdrawn, superseded, resolved in a note): finished business, never "answered".
     var stateLbl = t.open && t.claimedBy ? claimLabel(t.claimedBy)
                  : t.open ? (t.waitS != null ? "waiting " + fmtAge(t.waitS) : "waiting")
+                 : t.withdrawn && !t.answered ? "withdrawn by its asker"
                  : !t.answered ? "settled without a reply"
                  : !t.acked ? "answered — awaiting the asker's ack"
                  : "closed" + (t.replyS != null ? " · replied in " + fmtAge(t.replyS) : "");
