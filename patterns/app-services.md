@@ -66,6 +66,31 @@ empty **what's new** (a deploy record is not a change note; the app replaces tha
 own user-language notes). Matching is textual and every row says which field matched; the
 metadata carries shown and matched counts so a capped panel never reads as the whole list.
 
+**Every error an app forwards becomes a board task its users can watch get fixed.** An app
+error that reaches the board is folded into a PROBLEM (one per cause, one state); the hub also
+keeps one MIRROR TASK per app problem (`hub_core/fix_tasks.py`), created when the problem first
+appears and moved only by the problem: `todo` while unclaimed, `in_progress` once claimed,
+`blocked` on the escalation's ask or task, `done` when resolved — granted through the hub's one
+done path with the root cause as its proof, never written — and reopened with a "Came back" step
+on a recurrence. A fixer adds checkpoints with the ordinary `step <task>`; they are kept, in
+order, between "Picked up" and "Fixed". Three rules keep the mirror from lying: its "in
+progress" is the problem's claim, not a lease, so the lease sweep and the stale-task classifiers
+leave it alone; it is never unattended (the problem lane already sends a responder, and a second
+one at the same fault is waste); and a sync writes only the fields that changed, so a second
+pass writes nothing. `GET /hub/app-fixes.json?app=<slug>` is the app's feed of them — open fixes
+first, then those fixed in the last week, each with its state, who has it, the steps and the
+root cause — tagged so an unchanged poll is a 304 (the tag rides `ETag` and `X-Hub-ETag` and is
+read back from either, because a proxy in front of an adopter can drop `If-None-Match`). The
+banner's `data-fixes-url` (the app's own gated re-serve of that feed) turns on a Fixes panel
+with a notice when an error is reported and when it is fixed; the first read is a baseline, the
+poll is 8 s while a fix is open and 45 s otherwise, and it stops while the tab is hidden.
+
+The reconcile that catches what no verb announces (a new error, an auto-resolve, a recurrence)
+runs on the background tick AND is kicked, debounced onto a daemon thread, by an app-error
+ingest and by a feed poll: a single-process hub runs no background clock at all, and a job
+added only to the tick was measured never to run on a deployment like that. Neither caller
+waits on it.
+
 ## 4. A person's preferences, and the brokered agent
 
 Both follow one shape — **the hub authenticates the app, the app vouches for the person**:

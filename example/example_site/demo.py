@@ -147,6 +147,8 @@ def page(request, slug="budget-app"):
         "data-actor-sub": person, "data-role": _label(role), "data-nav-style": nav_style,
         "data-access-url": "/demo/access.json" if slug == "budget-app" else "",
         "data-signout": "/demo/signout/",
+        # The app's own gated re-serve of its Fixes feed (fixes_json below).
+        "data-fixes-url": "/demo/%s/fixes.json" % slug,
     }
     if legacy:
         attrs["data-replaces"] = ".legacy-head"
@@ -250,6 +252,47 @@ def suggest(request, slug):
                          "groups": [{"key": k.lower(), "title": k, "rows": v} for k, v in groups.items()],
                          "popular": ["monthly pack", "travel variance"],
                          "placeholder": "Search packs, variances and exports", "smart": False})
+
+
+def fixes_json(request, slug):
+    """The banner's data-fixes-url, the way an adopting app answers it: the app's SERVER asks
+    the hub for its own slice (/hub/app-fixes.json?app=<slug>) with its own credential and
+    re-serves it behind its own sign-in, passing the conditional tag through both ways, so the
+    browser never talks to the hub and a poll with nothing new is a 304 end to end."""
+    _debug_only()
+    if slug not in APPS:
+        raise Http404("no such demo app")
+    import os
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    base = os.environ.get("HUB_BASE_URL") or request.build_absolute_uri("/hub")
+    url = base.rstrip("/") + "/app-fixes.json?" + urllib.parse.urlencode({"app": slug})
+    headers = {"Accept": "application/json"}
+    token = os.environ.get("HUB_APP_AGENT_TOKEN", "")
+    if token:
+        headers["X-Agent-Token"] = token
+    elif os.environ.get("HUB_WRITE_TOKEN"):
+        headers["X-Write-Token"] = os.environ["HUB_WRITE_TOKEN"]
+    sent = request.headers.get("X-Hub-ETag") or request.headers.get("If-None-Match") or ""
+    if sent:
+        headers["If-None-Match"] = headers["X-Hub-ETag"] = sent
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as resp:
+            out = HttpResponse(resp.read(), content_type="application/json")
+            tag = resp.headers.get("X-Hub-ETag") or resp.headers.get("ETag") or ""
+    except urllib.error.HTTPError as exc:
+        tag = exc.headers.get("X-Hub-ETag") or exc.headers.get("ETag") or ""
+        if exc.code == 304:
+            out = HttpResponse(status=304)
+        else:
+            out = JsonResponse({"ok": False, "error": "the hub answered HTTP %d" % exc.code}, status=502)
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return JsonResponse({"ok": False, "error": "the hub could not be reached: %s" % exc}, status=502)
+    if tag:
+        out["ETag"] = out["X-Hub-ETag"] = tag
+    out["Cache-Control"] = "no-store"
+    return out
 
 
 def _now() -> str:

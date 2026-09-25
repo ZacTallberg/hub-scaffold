@@ -36,6 +36,10 @@ def classify(task, flags=None, lease=None):
         return result("leased", "held by " + str(lease.get("agent") or "another worker"))
     if status not in CLAIMABLE:
         return result("not_claimable", f"task status is {status}")
+    if status == "in_progress" and str(task.get("source") or "").startswith("problem:"):
+        # A problem mirror (hub_core.fix_tasks) is in progress because its PROBLEM is claimed;
+        # the missing lease is not an abandoned run, and there is nothing here to reclaim.
+        return result("problem_claimed", "its problem is claimed; this task mirrors that claim")
     if task.get("work_kind") in {"product", "verification"} and not str(
             task.get("acceptance") or "").strip():
         return result("needs_spec", "executable work requires concrete acceptance")

@@ -157,6 +157,8 @@ disposable `verification-closer` only for a rare critical boundary.
 - **Separate entity TYPES for Findings, Lessons, Decisions-log** — kept OUT of the minimal base.
   Lessons, findings, methods and reviews ride the base `note` type, distinguished by a kind tag,
   through their own verbs (`/hub/api/lesson|finding|method|review`, `patterns/knowledge-retrieval.md`).
+  `client consolidate` folds duplicates into one canonical lesson (`reinforced_by`) and derives
+  each rule's `applies_when` triggers — dry run first; an apply writes only what a dry run judged.
   Promote one to its own type via `campaigns/augment-hub.md` only if you need a distinct schema.
   The client's `review-gate` verb and the MCP `record` tool (kind `review`) raise a review as a
   DELIVERED human gate (an ask tagged `review`, never taken by an unattended responder).
