@@ -172,7 +172,19 @@ def client_version() -> str:
 def _telemetry_headers() -> dict[str, str]:
     # X-Hub-Client itself carries version+sha (_common_headers); this is the digest the
     # hub compares against the client it serves.
-    return {"X-Hub-Client-Version": client_version()}
+    headers = {"X-Hub-Client-Version": client_version()}
+    # Whether this machine's local memory WORKS, not only whether it is there: the mode of its
+    # last recall, how long ago, whether the knowledge mirror is fresh (and, when the engine
+    # records it, the hardware it runs on). Sent only by a machine that has a local memory
+    # layer at all; telemetry, so any failure sends nothing.
+    try:
+        from . import knowledge_mirror
+        line = knowledge_mirror.health_line()
+        if line:
+            headers["X-Hub-Memory-Health"] = line
+    except Exception:                                        # noqa: BLE001
+        pass
+    return headers
 
 
 def _note_hub_client(response) -> None:

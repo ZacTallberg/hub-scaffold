@@ -1152,6 +1152,7 @@ def observe_presence(agent, headers, *, heartbeat=False, extra=None):
             # stale-seat detector compares against the client this hub serves.
             client=headers.get("X-Hub-Client") or "",
             client_digest=headers.get("X-Hub-Client-Version") or "",
+            memory_health=headers.get("X-Hub-Memory-Health") or "",
             artifacts=_presence.parse_artifacts(headers.get("X-Hub-Artifacts") or ""),
             # Crossover facts a client may send directly: the project the console stands in
             # and whether it is an unattended process nobody is reading.

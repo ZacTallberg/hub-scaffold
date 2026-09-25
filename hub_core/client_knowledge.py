@@ -236,8 +236,16 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     if event.lower().replace("-", "") in ("sessionstart", "start"):
         pc.reset_delivered(sid)
     focus = (arguments.focus or os.environ.get("HUB_FOCUS") or " ".join(prompt.split())[:400]).strip()
-    query: dict[str, Any] = {"agent": _agent(arguments), "memory_cap": arguments.memory_cap,
-                             "memory_full": arguments.memory_full}
+    # THE HAND-OFF: when this machine's own memory engine serves the board's knowledge (switch
+    # on, mirror fresh, local recall healthy -- knowledge_mirror.local_owner), printing the
+    # hub-ranked block too would deliver every record twice. Ask for a one-row index (the live
+    # block still rides) and print one line that says which side is serving. Any doubt keeps
+    # the hub block: the decision fails closed.
+    from . import knowledge_mirror
+    local = knowledge_mirror.local_owner()
+    query: dict[str, Any] = {"agent": _agent(arguments),
+                             "memory_cap": 1 if local else arguments.memory_cap,
+                             "memory_full": 0 if local else arguments.memory_full}
     if focus:
         query["focus"] = focus
     try:
@@ -249,6 +257,13 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     delivered = pc.load_delivered(sid) if sid else []
     out = pc.render(payload, delivered=delivered or None,
                     budget=min(pc.MEMORY_BUDGET, pc.OUTPUT_MAX - 600))
+    if out["live"] and not pc.live_due(sid, out["live"]):
+        out["live"] = ""               # unchanged but for its ages: said recently enough
+    if local:
+        print(pc.fit_output([out["live"], "<hub-knowledge>knowledge for this prompt is served by "
+                             "this machine's local memory (mirror fresh, recall healthy); the "
+                             "board's own search is `python -m hub_core.client search`</hub-knowledge>"]))
+        return None
     parts = [out["live"], out["memory"]]
     if out["spill"]:
         path = pc.write_spill(sid, out["spill"])
@@ -262,12 +277,45 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     return None
 
 
+def _run_knowledge_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """--feed: the append-only operation log a local memory engine indexes, plus its sidecar
+    (hub_core.knowledge_mirror). Rate-limited by --min-interval, so a daemon can call this on
+    every heartbeat and a person can call it by hand (--min-interval 0, the default)."""
+    from pathlib import Path
+    from . import knowledge_mirror as km
+
+    def get(route, headers):
+        try:
+            return _c._request(_c._bases_of(base), "GET", route, data=None,
+                               headers={**_c._common_headers(), **_c._optional_auth_headers(),
+                                        **_c._telemetry_headers(), **headers})
+        except _c.HubRefused as refusal:
+            if refusal.status == 304:
+                raise km.NotModified() from None
+            raise
+
+    feed = (Path(os.path.expanduser(arguments.feed)) if arguments.feed not in (None, "", "-")
+            else km.default_feed())
+    result = km.tick(get, feed, min_interval=arguments.min_interval,
+                     max_pages=arguments.max_pages)
+    result["local_owner"] = km.local_owner(feed)
+    result["health"] = km.health_line(feed)
+    if result.get("status") == "error":
+        result["_exit"] = 1
+    return result
+
+
 def _run_knowledge_sync(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """Mirror the board's knowledge into one local JSON file from /hub/knowledge/since.
 
     The first run bootstraps (pages until `more` is false); later runs ask only for what changed
     after the stored cursor and apply put / revoke / reset. A caught-up run costs one request
     and changes nothing. The file is rewritten atomically."""
+    if getattr(arguments, "feed", None) is not None:
+        return _run_knowledge_feed(base, arguments)
+    if not arguments.out:
+        raise ValueError("knowledge-sync needs --out <file.json> (a snapshot) or --feed [<file.jsonl>] "
+                         "(the operation log a local memory engine indexes)")
     from pathlib import Path
     from urllib.parse import quote
     path = Path(os.path.expanduser(arguments.out))
@@ -452,8 +500,15 @@ def register(commands) -> None:
         pctx.add_argument("--memory-full", type=int, default=25, dest="memory_full")
         pctx.set_defaults(runner=_run_prompt_context)
 
-    ksync = commands.add_parser("knowledge-sync", help="mirror the board's knowledge into a local JSON file")
-    ksync.add_argument("--out", required=True)
+    ksync = commands.add_parser("knowledge-sync", help="mirror the board's knowledge locally: a JSON "
+                                "snapshot (--out) or an append-only op log a local memory engine indexes (--feed)")
+    ksync.add_argument("--out")
+    ksync.add_argument("--feed", nargs="?", const="-",
+                       help="append put/revoke/reset ops to this JSONL file (default HUB_KNOWLEDGE_FEED "
+                            "or <state dir>/feeds/knowledge.jsonl) and keep its <stem>.state.json sidecar")
+    ksync.add_argument("--min-interval", type=float, default=0, dest="min_interval",
+                       help="--feed: skip the poll when the last one was this recent (a daemon passes 300)")
+    ksync.add_argument("--max-pages", type=int, default=12, dest="max_pages")
     ksync.add_argument("--limit", type=int, default=500)
     ksync.set_defaults(runner=_run_knowledge_sync)
 
