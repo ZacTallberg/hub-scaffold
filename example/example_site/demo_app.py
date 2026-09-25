@@ -2,7 +2,7 @@
 
 It is deliberately the smallest honest shape of the pattern, not a product:
 
-* its page LINKS the hub-hosted agent component (never copies it);
+* its page LINKS the hub-hosted agent, context-menu and table components (never copies them);
 * its server-side BRIDGE forwards the component's calls to the hub with the APP's hub
   credential -- the browser holds nothing, and the agent key stays at the hub;
 * it shows its own slice of the board (/hub/app-feed.json) and the signed-in person's
@@ -10,7 +10,7 @@ It is deliberately the smallest honest shape of the pattern, not a product:
 
 THIS DEMO SIGNS IN NOBODY. It names one fixed demo person (DEMO_PERSON) where a real app names
 the person its own sign-in resolved. A real app also puts these pages behind that sign-in and
-gives its bridge a SCOPED credential (agent:ask, agent:history, profile:read) via
+gives its bridge a SCOPED credential (agent:ask, agent:history, profile:read, menu:rank) via
 HUB_APP_AGENT_TOKEN instead of the shared root token this example falls back to.
 """
 from __future__ import annotations
@@ -81,6 +81,19 @@ def agent_conversation(request):
         "person": DEMO_PERSON, "id": request.GET.get("id") or ""}))
 
 
+def menu_rank(request):
+    """The context menu's smart bridge: forward the component's request to the hub unchanged."""
+    if request.method == "GET":
+        return _json(_hub(request, "/api/menu/rank"))
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return JsonResponse({"ok": False, "reason": "failed", "error": "the body is not JSON"}, status=400)
+    body = body if isinstance(body, dict) else {}
+    body["app"] = SLUG                                  # the app names itself, never the browser
+    return _json(_hub(request, "/api/menu/rank", method="POST", body=body))
+
+
 def profile(request):
     return _json(_hub(request, "/api/profile", params={"person": DEMO_PERSON}))
 
@@ -94,6 +107,8 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Budget app</title>
 <link rel="stylesheet" href="/hub/components/agent/agent.css">
+<link rel="stylesheet" href="/hub/components/context-menu/context-menu.css">
+<link rel="stylesheet" href="/hub/components/table/table.css">
 <script src="/hub/components/agent/agent.js" defer></script>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --mute:#5d6677; --line:#d9dde5; }
@@ -109,13 +124,59 @@ PAGE = """<!doctype html>
   h1 { font-size:17px; margin:0; } h2 { font-size:14px; margin:0 0 8px; }
   ul { margin:0; padding-left:18px; } li { margin:4px 0; } .meta { color:var(--mute); font-size:12.5px; display:block; }
   .empty { color:var(--mute); }
+  .wide { grid-column:1 / -1; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+  .bar button, .bar summary { font:inherit; font-size:13px; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink); cursor:pointer; list-style:none; }
+  .table-scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:13.5px; }
+  th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mute); font-weight:600; background:var(--card); }
 </style></head>
 <body>
 <header><h1>Budget app</h1><div class="slot"><span data-hub-agent-header></span><span class="mark" id="mark" title="">?</span></div></header>
 <main>
   <section><h2>Being built for this app</h2><div id="checklist" class="empty">Loading&hellip;</div></section>
   <section><h2>Built because you asked</h2><div id="announcements" class="empty">Loading&hellip;</div></section>
+  <section class="wide" data-hub-table data-app="budget-app" data-table="#ledger">
+    <h2>Ledger</h2>
+    <div class="bar" data-ht-toolbar>
+      <button type="button" data-ht-overflow="20">Export</button>
+      <button type="button" data-ht-overflow="10">New line</button>
+      <details data-ht-more hidden><summary>&hellip; <span data-ht-more-n></span></summary><div data-ht-more-moved hidden></div></details>
+    </div>
+    <div class="table-scroll"><table id="ledger">
+      <thead><tr>
+        <th data-pin-field="line">Line</th>
+        <th data-field="supplier" draggable="true">Supplier</th>
+        <th data-field="owner" draggable="true">Owner</th>
+        <th data-field="due" draggable="true">Due</th>
+        <th data-field="amount" draggable="true" class="col-group">Amount</th>
+      </tr></thead>
+      <tbody>
+        <tr data-hcm="row" data-hcm-id="L-101" data-owner="alice" data-status="open"><td>L-101</td><td>Example Supplies</td><td>alice</td><td>2026-10-01</td><td class="col-group">1,200.00</td></tr>
+        <tr data-hcm="row" data-hcm-id="L-102" data-owner="bob" data-status="late"><td>L-102</td><td>Sample Freight</td><td>bob</td><td>2026-09-12</td><td class="col-group">860.50</td></tr>
+        <tr data-hcm="row" data-hcm-id="L-103" data-owner="" data-status="open"><td>L-103</td><td>Paper Co</td><td></td><td>2026-11-20</td><td class="col-group">74.99</td></tr>
+      </tbody>
+    </table></div>
+  </section>
 </main>
+<div id="hub-menu" hidden data-app="budget-app" data-app-name="Budget app" data-page="ledger"
+     data-role="member" data-smart-url="/demo-app/menu/rank" data-props="/hub/components/props/budget-app.json">
+  <script type="application/json" data-menu="catalog">{"kinds": {"row": {"label": "Line", "head": "{id}",
+    "facts": [{"key": "owner", "label": "Owner"}, {"key": "status", "label": "Status"}],
+    "items": [
+      {"id": "copy-id", "label": "Copy line ID", "icon": "hash", "do": {"type": "copy", "text": "{id}", "toast": "Copied {id}."}},
+      {"id": "status", "label": "Status", "icon": "flag", "sub": [
+        {"id": "status-open", "label": "Open", "on": {"status": "open"}, "do": {"type": "emit", "event": "budget:status", "detail": {"to": "open"}}},
+        {"id": "status-late", "label": "Late", "on": {"status": "late"}, "do": {"type": "emit", "event": "budget:status", "detail": {"to": "late"}}}]},
+      {"id": "claim", "label": "Assign to me", "icon": "user", "when": {"owner": ""}, "do": {"type": "emit", "event": "budget:claim"}},
+      {"sep": true},
+      {"id": "ask", "label": "Ask the assistant about this line", "icon": "chat", "maybe": true, "do": {"type": "ask", "question": "What should I know about ledger line {id}?"}},
+      {"id": "remove", "label": "Remove line", "icon": "trash", "danger": true, "confirm": "Remove {id}?", "do": {"type": "emit", "event": "budget:remove"}}
+    ]}}}</script>
+</div>
+<script src="/hub/components/context-menu/context-menu.js"></script>
+<script src="/hub/components/table/table.js"></script>
 <div data-hub-agent data-app="budget-app" data-title="Budget assistant"
      data-ask="/demo-app/agent/ask" data-history="/demo-app/agent/history"
      data-conversation="/demo-app/agent/conversation" data-profile="/demo-app/profile.json"

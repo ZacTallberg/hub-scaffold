@@ -1,0 +1,85 @@
+{
+  "name": "table",
+  "title": "Table",
+  "version": "1.3.0",
+  "what": "Table behaviours any app links: the heading is the drag handle (no grip glyphs), a pin appears on a column only while it is under the pointer, pinned columns stick as the table scrolls sideways, every column can be sized from its heading's right edge (drag, double-click to fit, arrow keys) without moving its neighbours and never narrower than its heading needs, a faint rule runs between every column with the seam where the subject changes a step more present, the toolbar stays one line and moves what does not fit into the '…' menu at its end, and -- only where the app declares its own lanes -- a Suggest panel turns what a person is trying to do into measured cuts of the table, and a Request button files what the table cannot do as work on the board.",
+  "link": [
+    "<link rel=\"stylesheet\" href=\"{hub}/components/table/table.css\">",
+    "<script src=\"{hub}/components/table/table.js\"></script>"
+  ],
+  "mount": {
+    "element": "<section data-hub-table ...> wrapping the toolbar and the <table>; any number per page. Link the script WITHOUT defer, after the mount and before the page's own deferred scripts.",
+    "attributes": {
+      "data-app": "the app slug: keys this viewer's remembered layout and draft, and names the app's CSRF cookie (<slug>_csrftoken)",
+      "data-table": "a selector for the <table>; default the first table inside the mount",
+      "data-ht-layout": "\"server\" when the APP persists column order, pins and widths (it takes the events). Without it, the component remembers this viewer's order, pins and widths in localStorage and re-applies them on load.",
+      "data-ht-widths": "optional JSON {field: px}: this viewer's column widths as the APP saved them (the row-heading column is keyed by its data-pin-field). A column not named is sized by its content.",
+      "data-ht-widths-style": "optional selector of the APP's own server-rendered <style> for widths (so the first paint is already right); the component rewrites that element's text. Without it the component makes its own <style>.",
+      "data-ht-off": "space-separated features the app keeps for itself: drag, pin, resize, overflow",
+      "data-shape-url": "optional: the APP's own gated POST endpoint for Suggest. Without it there is no Suggest button. It answers the lenses at once (200), or -- when its model lane is slower than a request should be held -- 202 {ok: true, pending: true, poll: \"<GET url>\", after_ms} and the component polls that URL (paused while the tab is hidden, stopped by Stop or after five minutes) until it answers without pending.",
+      "data-request-url": "optional: the APP's own gated POST endpoint that files a request on the board. Without it there is no Request button.",
+      "data-can-request": "\"1\" when this person may file a request (the shape answer's can_request overrides it)",
+      "data-agent-powered": "present only when the app's model lane is CONFIGURED: draws the outlined star. A shared component never claims a model an app does not have.",
+      "data-shape-examples": "a JSON list of up to four example goals, in the app's own words, drawn as 'Try' chips",
+      "data-shape-placeholder": "the Suggest box's pre-text",
+      "data-kind": "optional: sent as `kind` with every Suggest request (default: the page's ?kind=, else empty)"
+    },
+    "markup": {
+      "th[data-field][draggable=true]": "a movable column; the heading is the handle",
+      "th[data-pin-field]": "a pinnable column with no data-field (a row-heading column that never moves)",
+      "[data-col-pin] or [data-ht-pin]": "an app-drawn pin button; the component draws .ht-pin on any pinnable heading without one",
+      "th.is-pinned / td.is-pinned": "the pinned convention; the component writes each pinned column's left offset and marks the block's edge .is-pin-edge",
+      "[data-ht-toolbar]": "a band that must stay one line",
+      "[data-ht-overflow=\"<rank>\"]": "an item that may move into the '…' menu; lower rank moves first",
+      "[data-ht-overflow-tile]": "a view tile; tiles move from the right end, never the current one (.is-on / aria-current)",
+      "[data-ht-scope] and [data-ht-sep]": "the tiles' container and the hairlines between their groups (a hairline hides when its group has left)",
+      "details[data-ht-more] > [data-ht-more-moved], [data-ht-more-n], [data-ht-folded]": "the '…' menu at the END of the band, where moved items land, its count, and rows that live there permanently",
+      "[data-ht-shape]": "the Suggest button, drawn hidden by the app and shown by the component (created if absent)",
+      "[data-ht-shape-host]": "where the Suggest panel opens (default: straight after the toolbar)",
+      "[data-ht-scroll]": "the horizontal scroller around the table (default .table-scroll, then the parent)",
+      ".ht-resize": "the resize handle the component draws on the right edge of every th[data-field] / th[data-pin-field]: role=separator, focusable, 7px, above the pin",
+      "td.col-group / th.col-group / [data-ht-seam]": "a cell that starts a new subject: its left rule is drawn at --ht-col-seam (85%) instead of --ht-col-rule (38%)",
+      "th.ht-col-hot": "the heading of the column the pointer is in (set by the component; an app styling its own [data-col-pin] shows it on this class too)"
+    }
+  },
+  "events": {
+    "hub-table:reorder": "on the mount, cancelable: {field, target, place: before|after} -- a column was dropped. preventDefault() to persist it yourself; otherwise the columns move in the page.",
+    "hub-table:pin": "on the mount, cancelable: {field, pinned} -- a pin was pressed. preventDefault() to persist it yourself; otherwise the column is pinned in the page and moved to the end of the pinned block.",
+    "hub-table:resize": "on the mount, cancelable: {field, width} -- a column's width was set (px, 48..900) or reset to its content (null), on release or 400 ms after the last arrow key. preventDefault() to persist it yourself; otherwise it is remembered in localStorage (unless data-ht-layout=\"server\").",
+    "hub-table:layout": "on the mount, cancelable: {columns: {show, hide, pin}, url} -- 'Open with these columns' on a lens. preventDefault() to apply the layout and navigate yourself; otherwise the component navigates to url."
+  },
+  "contract": {
+    "shape": "POST <shape-url> {goal, kind, current:{...the page's query...}}  ->  {\"ok\": true, \"goal\", \"rows\": 179, \"ms\": 8400, \"lenses\": [{\"title\", \"why\", \"count\": 12, \"of\": 179, \"url\": \"?view=due&team=north\", \"chips\": [\"Due within 90 days\", \"Team north\"], \"columns\": {\"show\": [], \"hide\": [], \"pin\": []}, \"column_words\": [\"pin Owner\"]}], \"refused\": [\"…\"], \"gap\": \"…\", \"can_request\": true}",
+    "shape_pending": "202 {\"ok\": true, \"pending\": true, \"poll\": \"<GET url on the app's origin>\", \"after_ms\": 2000} -- the poll URL answers the same shape, or pending again with a new after_ms",
+    "shape_errors": "{\"ok\": false, \"reason\": \"<words for the person>\", \"code\": \"unconfigured\"|\"unreachable\"|\"timeout\"|…} with 503 / 502; unconfigured is drawn as OFF, anything else as FAILED -- never as an empty list. An HTML answer (a sign-in or error page) is a failure.",
+    "request": "POST <request-url> {goal, lenses, gap, current_query}  ->  {\"ok\": true, \"task\": \"<the board id the app filed>\", \"board\": \"<link to it>\"}  or  {\"ok\": false, \"reason\", \"code\"}. The app files it through the hub's own write API (POST /hub/api/task) with its own credential."
+  },
+  "rules": [
+    "THE COMPONENT OWNS THE INTERACTION; THE APP OWNS PERSISTENCE. Every change a person makes to the layout is announced as a cancelable event on the mount, and an app that saves layouts saves them its own way. The default (localStorage, per viewer, per device) is a convenience, never the record.",
+    "NOTHING IN THE BODY IS DRAGGABLE. The heading is the handle; draggable kills text selection, and the body is what people select to copy out. No grip glyphs: the heading's hover ground and title say it moves.",
+    "THE PIN IS A GHOST UNTIL ITS COLUMN IS UNDER THE POINTER: hovering the heading OR any body cell in that column shows it (.ht-col-hot on the heading); it has no ground, border or shadow until it is pointed at itself. A pinned column is said by the rule and shadow down the pinned block's edge, one mark for the block.",
+    "A PINNED COLUMN IS AT THE LEFT. Pinning moves it to the end of the pinned block; a column held in the middle would let the columns between it and the edge slide underneath it.",
+    "EVERY COLUMN CAN BE SIZED FROM ITS HEADING'S RIGHT EDGE: drag the handle, double-click it to fit the content, or focus it and use the arrow keys (Shift for bigger steps, Delete to reset). The width is the viewer's own, saved per column by FIELD (a moved column keeps its width), and a column never sized is sized by its content.",
+    "A RESIZE MOVES ONE THING. The first drag freezes every heading at its drawn width and fixes the table's layout, so each frame changes the dragged heading and the table's width only; neighbours never shift, and nothing else is restyled per frame. It never reloads the page, and the handle never starts a column move or a sort.",
+    "A COLUMN IS NEVER NARROWER THAN ITS HEADING NEEDS: the floor is measured from the heading -- padding, the label as drawn, the sort arrow and room for the pin -- and a saved width below it is raised on load.",
+    "TWO TIERS OF LINE, BOTH FAINT: a whisper between every column so the eye can follow one down, and the seam where the subject changes is the SAME line a step more present -- opacity, not a different mark. Tuned per app with --ht-col-rule / --ht-col-seam.",
+    "THE BAND NEVER WRAPS, and the '…' menu is at its END, because it is the band's overflow. Items MOVE into it (one set of controls), lowest rank first, tiles from the right end and never the current one, and come back in the order they left.",
+    "NO SHAPE-URL, NO SUGGEST; NO REQUEST-URL, NO REQUEST BUTTON. A page never shows a control that opens nothing.",
+    "THE COMPONENT NEVER CALLS A MODEL AND NEVER NAMES ONE. The model, the data profile and the vocabulary are the app's; the star is drawn only where the app declares data-agent-powered.",
+    "THE COUNT ON A LENS IS THE APP'S MEASUREMENT, NOT THE MODEL'S. The app counts each lens with the same filter function its table runs, so a lens cannot promise 12 rows and open 9. The component draws `count of of` and never computes one.",
+    "A SLOW LANE NEVER HOLDS A REQUEST OPEN: it answers 202 and the component polls, paused while the tab is hidden, with Stop and a five-minute ceiling. Unconfigured, failed, stopped and empty are drawn differently.",
+    "WHAT THE MODEL NAMED THAT THE TABLE DOES NOT HAVE IS SHOWN, folded (`refused`), and a `gap` puts Request it forward: the person's own words are filed by the APP with its own credential.",
+    "Failures reach window.reportProblem (the error-visibility kit), so a broken lane is on the hub's error stream, not only on one screen.",
+    "Link the script WITHOUT defer, after the mount: an app keeps a fallback per feature and asks HubTable.claims(node, feature) from its own deferred script, so a page whose hub link failed still behaves exactly as before."
+  ],
+  "api": {
+    "HubTable.version": "the semantic version",
+    "HubTable.claims(node, feature)": "true when the component owns drag|pin|resize|overflow for the mount containing node",
+    "HubTable.showAnswer(node, answer)": "draw a shape answer in that mount's panel",
+    "HubTable.relayout(node)": "recompute pinned offsets (the component calls it itself after a resize; call it after the app changes a width)"
+  },
+  "publishes": {
+    "html_attributes": ["data-ht-ready"],
+    "events_dispatched": ["hub-table:reorder", "hub-table:pin", "hub-table:resize", "hub-table:layout"]
+  }
+}
