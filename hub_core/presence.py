@@ -623,6 +623,9 @@ def session_row(agent: str, machine: str, s: dict, now: float) -> dict:
     return {
         "agent": agent, "machine": machine or "",
         "session": str(s.get("id") or "")[:8],
+        # The FULL id beside the 8-char display key: prefixes collide across a board's worth
+        # of consoles, so anything that MATCHES a console (delivery, self-filtering) uses this.
+        "session_id": str(s.get("id") or "")[:64],
         "name": str(s.get("name") or "")[:40],
         "runtime": str(s.get("runtime") or "")[:16],
         "cwd": preview(s.get("cwd"), 200),

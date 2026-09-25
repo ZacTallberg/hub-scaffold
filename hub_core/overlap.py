@@ -118,6 +118,69 @@ def _files(row: dict) -> list:
             and not _WORKTREE_SEG.search("/" + str(f).replace("\\", "/"))]
 
 
+def _wt_split(rel: str) -> tuple:
+    """(worktree root, repo-relative rest) for a path inside a worktree, else ('', rel).
+    ``_wt/fix-x/hub/x.py`` -> ('_wt/fix-x', 'hub/x.py'); ``wt-feature/x.py`` -> ('wt-feature', 'x.py')."""
+    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p]
+    for i, seg in enumerate(parts):
+        if re.fullmatch(r"(?i)_?wt[-_.].*|_tmp.*", seg):
+            return "/".join(parts[:i + 1]), "/".join(parts[i + 1:])
+        if re.fullmatch(r"(?i)_?wt|\.worktrees?|worktrees?", seg) and i + 1 < len(parts):
+            return "/".join(parts[:i + 2]), "/".join(parts[i + 2:])
+    return "", "/".join(parts)
+
+
+def _worktree_projects(rows: list) -> dict:
+    """{worktree root: project} from the consoles STANDING in a worktree: their cwd says which
+    worktree, their project (read from the git remote by the gate) says what it is a checkout of."""
+    out = {}
+    for r in rows or []:
+        cwd = str(r.get("cwd") or "").replace("\\", "/")
+        m = _WORKTREE_SEG.search("/" + cwd)
+        if not m:
+            continue
+        root, _rest = _wt_split(cwd[m.start():].lstrip("/") if m.start() else cwd)
+        proj = str(r.get("project") or "").strip().lower()
+        if root and proj:
+            out.setdefault(root.lower(), proj)
+    return out
+
+
+def _file_keys(row: dict, wt_projects: dict) -> dict:
+    """{(project, repo-relative path): the path as reported} for this console's shareable files.
+
+    THE SAME FILE IN A WORKTREE AND IN THE MAIN CHECKOUT IS ONE FILE. A path under a worktree
+    used to be dropped outright, so two consoles editing ``hub/x.py`` -- one in the main
+    checkout, one in a worktree of the same repository -- never collided. Both now normalise to
+    (project, path inside the repo): a worktree's project comes from any console standing in
+    that worktree, else from this console's own project; a main-checkout path's project is its
+    first segment (the gate reports ``<project>/<path>``). A worktree nothing resolves keeps a
+    key of its own, so two consoles in the same worktree still pair."""
+    out = {}
+    own = str(row.get("project") or "").strip().lower()
+    # The folders this console stands in: with the gate's default code root (the parent of the
+    # checkout), a worktree's files arrive as ``<worktree folder>/<path>`` -- the folder is
+    # this console's checkout, so it names this console's PROJECT, not a project of its own.
+    here = {seg.lower() for seg in str(row.get("cwd") or "").replace("\\", "/").split("/") if seg}
+    for f in row.get("files") or []:
+        raw = str(f or "").replace("\\", "/")
+        if not raw or _PRIVATE_PATH.search("/" + raw):
+            continue
+        root, rest = _wt_split(raw)
+        parts = [x for x in raw.split("/") if x]
+        if root:
+            key = (wt_projects.get(root.lower()) or own or "wt:" + root.lower(), rest)
+        elif len(parts) > 1 and own and parts[0].lower() in here:
+            key = (own, "/".join(parts[1:]))
+        elif len(parts) > 1:
+            key = (parts[0].lower(), "/".join(parts[1:]))
+        else:
+            key = ("", raw)
+        if key[1]:
+            out[key] = raw
+    return out
+
+
 def _norm_name(s: str) -> str:
     return str(s or "").strip().lower().replace("_", "-")
 
@@ -293,6 +356,8 @@ def signals(rows: list, tasks: list | None = None, *, titles: dict | None = None
     # two consoles share is exactly the pair signal, so it can never be ambient by itself —
     # with a floor of two, any small fleet silenced every topic pair it had.
     common = {t for t, n in freq.items() if len(rows) >= 4 and n >= max(3, len(rows) / 3.0)}
+    wt_projects = _worktree_projects(rows)
+    file_keys = {_sid(r): _file_keys(r, wt_projects) for r in rows}
     known = systems()
     out = []
     for i in range(len(rows)):
@@ -305,12 +370,12 @@ def signals(rows: list, tasks: list | None = None, *, titles: dict | None = None
             unattended = bool(a.get("unattended")) or bool(b.get("unattended"))
             if a.get("unattended") and b.get("unattended"):
                 continue
-            files = sorted(set(_files(a)) & set(_files(b)))
-            # A relative path is only the same FILE inside the same project: `hub/views.py` in
-            # two repositories is two files (a project-qualified path already says which).
-            if files and (_same_project(a, b) or not (a.get("project") or b.get("project"))
-                          or all("/" in f and f.split("/", 1)[0] in (a.get("project"), b.get("project"))
-                                 for f in files)):
+            # ONE FILE IS (project, path inside the repo), wherever it is checked out: a
+            # worktree and the main checkout of one repository share their files.
+            ka, kb = file_keys.get(_sid(a)) or {}, file_keys.get(_sid(b)) or {}
+            shared = sorted(k for k in set(ka) & set(kb) if k[0])
+            files = ["%s/%s" % k for k in shared]
+            if files:
                 out.append(_signal("file", a, b, ",".join(files[:3]),
                                    "both edited %s in the last 10 min" % ", ".join(files[:3])))
                 continue
@@ -487,8 +552,11 @@ def items(sigs: list, *, agent: str = "", session: str = "", titles: dict | None
                 "body": ("%s - %s\n%s is on: %s\nReach them: %s\nNext: %s"
                          % (_LABELS.get(s["kind"], ""), s["detail"], _who(other),
                             doing(other, titles_s), how["hint"], _ACTIONS.get(s["kind"], ""))),
+                "session_id": str(me.get("session_id") or _sid(me))[:64],
                 "with": {"agent": other.get("agent"), "machine": other.get("machine"),
                          "name": other.get("name"), "session": _sid(other),
+                         "session_id": str(other.get("session_id") or _sid(other))[:64],
+                         "unattended": bool(other.get("unattended")),
                          "project": other.get("project"), "focus": doing(other, titles_s),
                          "files": _files(other)[:3], "task_id": other.get("task_id") or ""},
                 "reach": how, "action": _ACTIONS.get(s["kind"], ""),
