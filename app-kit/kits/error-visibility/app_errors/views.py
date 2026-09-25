@@ -45,13 +45,21 @@ def report(request):
     if not message.strip():
         return HttpResponse(status=204)
     status = payload.get("status")
+    status = int(status) if isinstance(status, int) or (
+        isinstance(status, str) and status.isdigit()) else None
+    if kind == "http" and status is not None and 100 <= status < 400:
+        # An HTTP answer below 400 is the request WORKING, never a failure: a 304 is a
+        # conditional poll finding nothing new, a 3xx is a redirect the page asked for.
+        # report_errors.js no longer sends these, but a tab opened before the app picked up
+        # that fix keeps running the old wrapper until it is reloaded. The floor belongs
+        # server-side too, so no browser build can put a 3xx on the board.
+        return HttpResponse(status=204)
     capture.record(
         kind, message,
         stack=capture.fit_stack(payload.get("stack")),
         source=str(payload.get("source") or "")[:500],
         page_url=str(payload.get("page_url") or request.META.get("HTTP_REFERER", ""))[:500],
-        status=int(status) if isinstance(status, int) or (
-            isinstance(status, str) and status.isdigit()) else None,
+        status=status,
         actor=capture._actor(request),
         user_agent=request.META.get("HTTP_USER_AGENT", ""),
     )

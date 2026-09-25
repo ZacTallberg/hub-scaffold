@@ -554,7 +554,12 @@
         if (!url || url.indexOf(URL_) === 0 || !p || typeof p.then !== 'function') return p;
         return p.then(function (r) {
           try {
-            if (r && !r.ok && r.status !== 401 && !handledResponse(r)) {
+            // `ok` is only 2xx, so it is the wrong test: a 304 the page exposed on purpose
+            // (a poll that sends its ETag by hand with cache no-store) and a 302 fetched with
+            // redirect:'manual' (type 'opaqueredirect', status 0) both answer ok:false and
+            // are the request WORKING. A failure is a status of 400 or more, the same floor
+            // the XHR wrapper already uses.
+            if (r && r.status >= 400 && r.status !== 401 && !handledResponse(r)) {
               if (isGateway(r.status) && isIdempotent(method)) {
                 // A background poll that caught our own deploy mid-restart looks
                 // exactly like this. Ask the surface again before recording it.
