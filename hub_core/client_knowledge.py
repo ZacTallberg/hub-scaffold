@@ -235,30 +235,51 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
             prompt = str(hook.get("prompt") or "")
     if event.lower().replace("-", "") in ("sessionstart", "start"):
         pc.reset_delivered(sid)
+        # A fresh or compacted context holds nothing: the tool-time trigger receipt resets too.
+        from . import lesson_triggers
+        lesson_triggers.reset_session(sid)
     focus = (arguments.focus or os.environ.get("HUB_FOCUS") or " ".join(prompt.split())[:400]).strip()
     query: dict[str, Any] = {"agent": _agent(arguments), "memory_cap": arguments.memory_cap,
                              "memory_full": arguments.memory_full}
     if focus:
         query["focus"] = focus
+    # WHERE THE TIME WENT. A per-prompt hook that is slow, or that the harness kills, otherwise
+    # leaves nothing but "exceeded its deadline"; each phase is timed and kept in the session
+    # receipt (`last`), and a board that could not answer says how long it was waited on.
+    import time as _time
+    t0 = _time.perf_counter()
+    phases: dict[str, Any] = {"at": round(_time.time(), 1)}
     try:
         payload = _c._get(base, "guidance.json?" + urlencode(query), timeout=15)
     except RuntimeError as error:
-        print("<hub-knowledge>(the board could not be reached for this prompt: %s)</hub-knowledge>"
-              % str(error)[:200])
+        phases.update(fetch_ms=round((_time.perf_counter() - t0) * 1000), outcome="unreachable")
+        print("<hub-knowledge>(the board could not be reached for this prompt after %d ms: %s)"
+              "</hub-knowledge>" % (phases["fetch_ms"], str(error)[:200]))
+        if sid:
+            pc.save_delivered(sid, pc.load_delivered(sid), phases=phases)
         return None
+    phases["fetch_ms"] = round((_time.perf_counter() - t0) * 1000)
+    t1 = _time.perf_counter()
     delivered = pc.load_delivered(sid) if sid else []
     out = pc.render(payload, delivered=delivered or None,
                     budget=min(pc.MEMORY_BUDGET, pc.OUTPUT_MAX - 600))
+    phases["render_ms"] = round((_time.perf_counter() - t1) * 1000)
     parts = [out["live"], out["memory"]]
     if out["spill"]:
+        t2 = _time.perf_counter()
         path = pc.write_spill(sid, out["spill"])
+        phases["pack_ms"] = round((_time.perf_counter() - t2) * 1000)
         parts.append("(%d more ranked records are in %s)" % (len(out["spill"]), path or
                      "no file — the overflow could not be written; use `search`"))
     text = pc.fit_output(parts)
     if text:
         print(text)
-    if sid and out["keys"]:
-        pc.save_delivered(sid, delivered + out["keys"])
+    phases.update(total_ms=round((_time.perf_counter() - t0) * 1000), delivered=len(out["keys"]),
+                  held=len(delivered), chars=len(text or ""), outcome="delivered" if text else "silent",
+                  rank=(payload.get("memory_rank") or {}).get("by") or
+                  ("ranked" if (payload.get("memory_rank") or {}).get("ranked") else "standing"))
+    if sid:
+        pc.save_delivered(sid, delivered + out["keys"], phases=phases)
     return None
 
 
