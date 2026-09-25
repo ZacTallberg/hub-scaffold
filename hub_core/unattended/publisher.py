@@ -91,8 +91,11 @@ def hosts() -> list[str]:
             if h.strip()]
 
 
-def branch() -> str:
-    value = (os.environ.get("HUB_PUBLISH_BRANCH") or "main").strip()
+def branch(rec: dict | None = None) -> str:
+    """The branch to push: HUB_PUBLISH_BRANCH when this machine pins one, else the branch the
+    hand-off names (the author's origin/<branch>), else main. Always a plain ref name."""
+    value = (os.environ.get("HUB_PUBLISH_BRANCH") or str((rec or {}).get("branch") or "")
+             or "main").strip()
     return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}", value) else "main"
 
 
@@ -270,8 +273,10 @@ def waiting() -> list[dict]:
 
 
 def _bundle(rec: dict) -> tuple[int, bytes | str]:
-    """Download the bundle under the lease: (status, bytes | error text). Binary, so it goes
-    straight through urllib with the client's own headers rather than the JSON transport."""
+    """Download the bundle under the lease: (status, bytes | error text). The route answers JSON
+    (``{data: {bundle_b64, bytes, sha256}}``, so the CLI and the MCP seam read it the same way);
+    a raw binary answer is accepted too. The decoded bytes must match the sha256 the route states
+    -- a truncated transfer is never handed to git."""
     body = json.dumps({"id": rec["id"], "token": rec["token"],
                        "fence": rec["fence"]}).encode("utf-8")
     headers = {"Content-Type": "application/json", **client._common_headers(),
@@ -282,7 +287,18 @@ def _bundle(rec: dict) -> tuple[int, bytes | str]:
             request = urllib.request.Request(base.rstrip("/") + "/api/handoff/bundle", data=body,
                                              method="POST", headers=headers)
             with urllib.request.urlopen(request, timeout=180) as response:
-                return response.status, response.read()
+                raw = response.read()
+                if not raw.lstrip().startswith(b"{"):
+                    return response.status, raw
+                try:
+                    import base64
+                    data = (json.loads(raw.decode("utf-8")).get("data") or {})
+                    blob = base64.b64decode(data.get("bundle_b64") or "", validate=True)
+                except (ValueError, TypeError) as exc:
+                    return 0, "the bundle answer did not decode: %s" % type(exc).__name__
+                if data.get("sha256") and hashlib.sha256(blob).hexdigest() != data["sha256"]:
+                    return 0, "the downloaded bundle does not match the sha256 the hub stated"
+                return response.status, blob
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read()[:500].decode("utf-8", "replace")
         except Exception as exc:  # noqa: BLE001
@@ -310,7 +326,7 @@ def _result(rec: dict, outcome: str, **fields) -> tuple[int, dict]:
 def publish_one(rec: dict, url: str, deadline: float) -> str:
     """Replay one leased hand-off onto the branch. Returns the outcome it reported."""
     work = _root() / ("%s-%d" % (rec["id"], os.getpid()))
-    target = branch()
+    target = branch(rec)
 
     def left() -> int:
         return max(10, int(deadline - time.time()))

@@ -148,10 +148,14 @@ def _corpus(state, key, cat_items):
         # twice and make the declared field weights a fiction.
         body = knowledge.body_of(ent)
         kind = knowledge.knowledge_kind(ent)
-        rows[ent["id"]] = {"id": ent["id"], "type": ent.get("type"), "title": title[:200],
+        # The DISPLAYED text is redacted (hub_core.secretscan, the same pass the mirror feed
+        # applies): a record written before redaction existed must not print a pasted secret
+        # on every search that ranks it. The index below still reads the stored text.
+        rows[ent["id"]] = {"id": ent["id"], "type": ent.get("type"),
+                           "title": knowledge.redact_text(title)[:200],
                            "kind": kind or ent.get("type"),
                            "status": ent.get("status") or ent.get("maturity") or "",
-                           "excerpt": body[:400]}
+                           "excerpt": knowledge.redact_text(body)[:400]}
         if kind:
             rows[ent["id"]]["_label"] = knowledge.label_inputs(ent, kind)
         docs[ent["id"]] = {"title": title, "body": body,

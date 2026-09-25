@@ -226,16 +226,20 @@ def memory_rows(state) -> list:
         if kind is None or is_dead(ent, superseded):
             continue
         rule, why = rule_and_why(ent, kind)
+        # Served text is redacted here, once per corpus build: the per-prompt index is a second
+        # delivery channel exactly like the mirror feed, and an old record may carry a pasted
+        # credential. Redacted BEFORE clipping, so a cut never keeps a secret's head.
+        rule, why = _redact(rule), _redact(why)
         prov = ent.get("provenance") or {}
         rows.append({"id": ent["id"], "type": kind,
-                     "title": clip(headline(ent, kind), TITLE_PREVIEW),
+                     "title": clip(_redact(headline(ent, kind)), TITLE_PREVIEW),
                      "tier": ent.get("tier") or "normal",
                      # A STATE claim decays from the day it is written. The row carries the
                      # day it was last checked and the command that re-checks it, so the
                      # injected index can say so instead of presenting a stale measurement
                      # as standing law.
                      "verified_as_of": ent.get("verified_as_of") or "",
-                     "verify": str(ent.get("verify") or "")[:200],
+                     "verify": _redact(ent.get("verify"))[:200],
                      # The label's inputs, computed once per corpus build; the served row
                      # carries the RENDERED label (age applied at read time), never these.
                      "_label": label_inputs(ent, kind),
@@ -296,6 +300,10 @@ def _sha(*parts) -> str:
 def _redact(text) -> str:
     from . import secretscan
     return secretscan.redact(str(text or ""))[0]
+
+
+#: The one redaction every served knowledge text goes through (feed, prompt index, search).
+redact_text = _redact
 
 
 def put_op(ent, kind) -> dict:
