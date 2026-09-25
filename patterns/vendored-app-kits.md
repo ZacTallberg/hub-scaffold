@@ -17,6 +17,13 @@ prints nothing alarming, and the first request that touches the kit fails.
 names — the `dependencies` of the next migration, and anything else that names a migration file —
 before any other textual rewrite runs, so a name can never be half-rewritten.
 
+In this repository `app-kit/tools/kits.py add` does it for every kit whose `KIT.json` declares
+`"retarget_migrations": true` (the gate kit): the slug is `--slug`, else the one the app recorded
+before, else the app directory's name; the renames and the rewritten bytes are recorded in the
+app's `.app-kit.json`, so `status` judges the copy against what was actually written. Declare it
+only for a kit whose TABLES are already per-app: renaming the migrations of a kit that keeps one
+shared table makes the second app's `migrate` try to create a table that exists.
+
 ## Trap 2 — explicit index names collide
 
 Django derives most index names, but an explicitly named `models.Index(name=...)` is a literal,
@@ -30,6 +37,8 @@ An app that was vendored BEFORE the rename holds the old files; if the new files
 them, two migrations share each number. That state is not the tool's to resolve by deleting
 somebody's migration history. Report it for a person, and point at the `django_migrations` rows
 so they can see whether the app already migrated under the old names.
+`kits.py add` keeps a re-vendored copy under the names it was first vendored with and refuses
+a different `--slug` for it, rather than renaming migrations a database may already record.
 
 ## Proof
 

@@ -30,7 +30,7 @@ truth, which is that the session ended.
 | `app_gate.E001` | an owner list that is a string (iterating it iterates characters) |
 | `app_gate.E003` | a public prefix of `/` or `""` (one character would publish the app) |
 | `app_gate.E006` | gate tables on the shared default names — the tables are named from `APP_GATE_TABLE_PREFIX` so two apps on one database never share a roster |
-| `app_gate.E007` | every gate migration already recorded (by another app on a shared database) while this app's table is absent — `migrate` would do nothing and the first sign-in would fail |
+| `app_gate.E007` | every gate migration already recorded (by another app on a shared database) while this app's table is absent — `migrate` would do nothing and the first sign-in would fail. `kits.py add` prevents it: this kit's migrations are renamed from the app's slug (`0001_<slug>_initial`) when it is vendored |
 
 ## Rungs
 

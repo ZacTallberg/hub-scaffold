@@ -60,8 +60,9 @@ def gate_ledger_collision(ours, recorded, tables, table):
         "django_migrations already records every app_gate migration this app ships "
         f"({', '.join(sorted(ours))}), but this app's gate table {table!r} does not exist.",
         hint="Another app built from this kit has already migrated app_gate on this database. "
-             "Give this app its own database, or rename its app_gate migrations to names that "
-             "are its own (and update their dependencies) before migrating.",
+             "Give this app its own database, or vendor the kit with `kits.py add gate <app> "
+             "--slug <this app>` (it names the migrations and their dependencies from the slug) "
+             "before migrating.",
         id="app_gate.E007")]
 
 
