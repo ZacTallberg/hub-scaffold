@@ -39,6 +39,15 @@ from .process_lock import ProcessFileLock
 #: Twice a bounded responder run: long enough to outlive a slow run, short enough that a dead
 #: claimant's item is back on offer the same hour.
 TTL_S = 1800
+#: A TASK run is bounded far longer (build, push, wait for the deploy: hub_core.responder
+#: TASK_BOUND_S), so its claim lives twice THAT, by the same rule -- at the error/ask TTL a second
+#: machine could take a task a live run was still working. The TTL rides the row.
+TASK_TTL_S = 10800
+
+
+def ttl_for(item: str, default: float = TTL_S) -> int:
+    """The claim's lifetime by the kind of item: a board task, or anything else."""
+    return int(TASK_TTL_S if ":task:" in str(item or "") else default)
 MAX_CLAIMS = 500
 FILE = "item-claims.json"
 
@@ -55,9 +64,18 @@ def _read(hub_dir) -> dict:
         return {}
 
 
+def _row_ttl(v: dict, default: float) -> float:
+    try:
+        return float(v.get("ttl_s") or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _live(claims: dict, now: float, ttl_s: float) -> dict:
+    """Claims still in force. Each row carries the TTL it was granted with (a task's is longer);
+    a row written before that field existed uses `ttl_s`."""
     return {k: v for k, v in claims.items()
-            if isinstance(v, dict) and now - float(v.get("at") or 0) < ttl_s}
+            if isinstance(v, dict) and now - float(v.get("at") or 0) < _row_ttl(v, ttl_s)}
 
 
 def _judge(row: dict, roster, now: float, grace_s: float) -> dict:
@@ -87,7 +105,8 @@ def live(hub_dir, now: float | None = None, ttl_s: float = TTL_S, roster=None,
         age = int(now - float(row.get("at") or now))
         out[item] = {"machine": row.get("machine"), "session": row.get("session") or None,
                      "agent": row.get("agent"), "at": row.get("at"), "age_s": age,
-                     "releases_in_s": max(0, int(ttl_s - age)),
+                     "ttl_s": int(_row_ttl(row, ttl_s)),
+                     "releases_in_s": max(0, int(_row_ttl(row, ttl_s) - age)),
                      "holder_state": v["state"], "gone_s": v["gone_s"],
                      "frees_in_s": v["frees_in_s"]}
     return out
@@ -121,7 +140,7 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
             if not v["released"]:
                 return False, {"machine": held.get("machine"), "session": held.get("session"),
                                "agent": held.get("agent"), "age_s": age,
-                               "releases_in_s": max(0, int(ttl_s - age)),
+                               "releases_in_s": max(0, int(_row_ttl(held, ttl_s) - age)),
                                "holder_state": v["state"], "gone_s": v["gone_s"],
                                "frees_in_s": v["frees_in_s"]}
             took_over = {"machine": held.get("machine"), "session": held.get("session"),
@@ -133,14 +152,15 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
         else:
             # A re-claim by the same machine renews the TTL from now (and records the console
             # that renewed it, so liveness judges the console actually doing the work).
-            entry = {"machine": machine, "agent": agent, "at": now}
+            granted_ttl = ttl_for(item, ttl_s)
+            entry = {"machine": machine, "agent": agent, "at": now, "ttl_s": granted_ttl}
             if session:
                 entry["session"] = session
             elif held and held.get("session"):
                 entry["session"] = held["session"]
             claims[item] = entry
             row = {"item": item, "machine": machine, "agent": agent,
-                   "session": entry.get("session"), "renewed": bool(held), "ttl_s": int(ttl_s)}
+                   "session": entry.get("session"), "renewed": bool(held), "ttl_s": granted_ttl}
             if took_over:
                 row["took_over_from"] = took_over
         if len(claims) > MAX_CLAIMS:
