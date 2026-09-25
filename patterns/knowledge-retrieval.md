@@ -93,7 +93,10 @@ receipt keys. An unreachable board prints one marked line and exits 0.
 
 A machine that wants the whole corpus locally (to rank offline, or to feed another tool) mirrors
 it with `python -m hub_core.client knowledge-sync --out <file>`, which pages
-`/hub/knowledge/since` once and afterwards asks only for what changed.
+`/hub/knowledge/since` once and afterwards asks only for what changed. The feed serves record text
+redacted (a mirror is a second copy on somebody's disk). How a local memory engine consumes that
+mirror — who delivers before each prompt (one decider), what it indexes, how it renders, and the
+tool-time lesson triggers that fire on a command, a path or an error — is `patterns/agent-memory.md`.
 
 ## 4. Publish a capability catalog from another repository
 

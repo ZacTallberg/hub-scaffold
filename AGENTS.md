@@ -139,9 +139,13 @@ disposable `verification-closer` only for a rare critical boundary.
   `docs/ARCHITECTURE.md` lists shipped guarantees.
 
 ## What is deliberately NOT here (design, not omission)
-- **The memory layer** — session-recall/persistence tooling is home-environment-specific and excluded
-  on purpose. If you want cross-session memory, wire your own; the plane + hub are the durable record
-  this system relies on, not a memory tool.
+- **The memory ENGINE** — session-recall/persistence tooling (transcript indexing, embeddings, a
+  local reranker) is excluded on purpose; the plane + hub are the durable record this system relies
+  on, not a memory tool. What IS here is the seam an engine plugs into (`patterns/agent-memory.md`,
+  reference engine: claude-memory, mirrored separately): the knowledge feed served redacted, the
+  consumer contract and the one-decider hand-off (`hub_core/memory_feed.py`), tool-time lesson
+  triggers (`client lesson-trigger --hook`, `GET /hub/triggers.json`), and a hook installer that
+  cannot drop another tool's hooks (`client install-hooks`).
 - **A runnable conformance scanner and a runnable resume-anchor script** — shipped as *specs/patterns*
   (`patterns/conformance-scan.md`, `campaigns/maintain-audit-reconcile.md` Prompt B), not scripts,
   because both are inherently org-specific (your live-URL shape, your project list, your alert hook).
