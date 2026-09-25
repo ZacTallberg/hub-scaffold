@@ -97,6 +97,60 @@ def is_unattended(data: dict) -> bool:
     return UNATTENDED_CAPABILITY in [str(c).lower() for c in required]
 
 
+#: A handed-back task whose run pushed a commit is not re-offered while that commit's pipeline
+#: is still running: the next run could only re-read a pipeline that has not answered yet (on the
+#: origin system a quarter of unattended tasks were launched twice, seconds after the hand-back,
+#: against pipelines of 6-25 minutes). Never forever -- each unknown waits a bounded window.
+HANDBACK_PUSH_WINDOW_S = 5400        # a push older than one task run is not this run's
+HANDBACK_NO_PIPELINE_WAIT_S = 600    # pushed, and no pipeline delivery has arrived for it yet
+HANDBACK_UNKNOWN_WAIT_S = 1500       # the hub's CI status could not be read
+
+
+def _iso_epoch(value) -> float:
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pipeline_wait(data: dict, now: float | None = None) -> str:
+    """Non-empty (the reason) while a handed-back task's pushed commit still has a pipeline
+    running, so the resume waits until there is something new to read: green (the next run
+    verifies and finishes) or red (it fixes). '' when the run pushed nothing."""
+    from hub_core import task_rows
+    now = time.time() if now is None else now
+    back = task_rows.handed_back(data) or {}
+    back_at = _iso_epoch(back.get("at"))
+    push = task_rows.pushed(data) or {}
+    sha = str(push.get("sha") or "")
+    if not back_at or not sha or _iso_epoch(push.get("at")) < back_at - HANDBACK_PUSH_WINDOW_S:
+        return ""
+    age = now - back_at
+    try:
+        seen = _read("ci-status.json?sha=%s" % quote(sha)).get("data") or {}
+    except RuntimeError:
+        return "the hub's CI status is unreadable" if age < HANDBACK_UNKNOWN_WAIT_S else ""
+    if not seen.get("found"):
+        return ("no pipeline has reported for %s yet" % sha[:12]
+                if age < HANDBACK_NO_PIPELINE_WAIT_S else "")
+    return ("the pipeline for %s is %s" % (sha[:12], seen.get("status"))
+            if seen.get("active") else "")
+
+
+def _handed_back_times(data: dict) -> int:
+    """How many runs handed this task back. The task read carries ``handed_back`` as the task
+    row's ``{"times", "at", ...}`` block (hub_core.task_rows.handed_back); an older hub sent a bare
+    count. Both are read; ``int()`` over the block crashed every scan that met a handed-back task."""
+    value = data.get("handed_back")
+    if isinstance(value, dict):
+        value = value.get("times")
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def resolve(item_id: str) -> dict | None:
     """The item, live — never trusted from the spawn argument. None when it is no longer offered
     here (somebody else took it, it closed, it was un-marked); ``{"kind": "unavailable"}`` when
@@ -121,7 +175,8 @@ def resolve(item_id: str) -> dict | None:
         return {"kind": "task", "id": item_id, "title": data.get("title") or "",
                 "acceptance": data.get("acceptance") or "", "priority": data.get("priority"),
                 "plan_text": "\n".join(lines), "resume": bool(readiness.get("stale_reclaim")),
-                "handed_back": int(data.get("handed_back") or 0),
+                "handed_back": _handed_back_times(data),
+                "pipeline_wait": pipeline_wait(data) if _handed_back_times(data) else "",
                 "from": str((data.get("provenance") or {}).get("agent") or "")}
     try:
         inbox = _read("inbox.json?agent=%s" % quote(agent())).get("data") or {}
@@ -165,6 +220,10 @@ def scan() -> dict:
                 out["waiting"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
                                        "why": "handed back %d times across machines: a person's"
                                               % item["handed_back"]})
+                continue
+            if item.get("pipeline_wait"):
+                out["waiting"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
+                                       "why": "handed back; " + item["pipeline_wait"]})
                 continue
             out["workable"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
                                     "resume": item["resume"], "handed_back": item["handed_back"],

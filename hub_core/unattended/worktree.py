@@ -101,6 +101,66 @@ def repo_url_for(slug: str, workspace: Path) -> tuple[str, str]:
     return "", "no checkout under %s names %r and no HUB_REPO_URL_TEMPLATE is set" % (workspace, slug)
 
 
+def _redact_url(url: str) -> str:
+    """A clone URL as it may appear in a log line or a board fault: any userinfo is dropped, so
+    a credential embedded in a remote never propagates."""
+    return re.sub(r"^([a-z][a-z0-9+.-]*://)[^/@]*@", r"\1", str(url or ""), flags=re.I)
+
+
+def telling_line(text: str, rc) -> str:
+    """The line of git's output that names the failure. git ends every SSH failure with the same
+    "Please make sure you have the correct access rights / and the repository exists." trailer,
+    which reads as an answer and names nothing."""
+    lines = [ln.strip() for ln in str(text or "").strip().splitlines() if ln.strip()]
+    for ln in lines:
+        low = ln.lower()
+        if low.startswith(("ssh:", "permission denied", "host key", "fatal: unable", "timed out",
+                           "error:")) or "could not resolve" in low:
+            return ln[:200]
+    generic = ("please make sure", "and the repository exists", "fatal: could not read")
+    rest = [ln for ln in lines if not ln.lower().startswith(generic)]
+    return (rest or lines or ["rc %s" % rc])[0][:200]
+
+
+def clone_failure(text: str, rc) -> tuple[str, str]:
+    """(kind, what a person should do) for a failed clone. The kinds have OPPOSITE fixes -- a
+    refused key is a setting on the code host, an unreachable port is the network, a prompt is
+    one interactive connection -- so the report names which one it was instead of guessing."""
+    low = str(text or "").lower()
+    if "permission denied" in low or "publickey" in low or "authentication failed" in low:
+        return "auth", "the code host refused this machine's credential: register its key"
+    if ("host key verification failed" in low or "passphrase" in low or "batchmode" in low
+            or "terminal prompts disabled" in low or "could not read username" in low):
+        return "prompt", ("git needed an interactive answer (a host key, a key passphrase or a "
+                          "username): connect once from a terminal on this machine")
+    if (rc == 124 or "timed out" in low or "could not resolve" in low
+            or "connection refused" in low or "no route to host" in low
+            or "network is unreachable" in low or "connection closed" in low):
+        return "network", "the code host is not reachable from this machine: not a key problem"
+    return "other", "see the git output"
+
+
+def _usable_clone(repo: Path) -> bool:
+    """A .git whose HEAD resolves to a commit. A clone that died (a timeout, a dropped network)
+    leaves a .git with no commit; read as a checkout it would be kept forever and every later run
+    would fail after it, never cloning again."""
+    return git(["-C", repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+               timeout=15).returncode == 0
+
+
+def _clear_target(repo: Path) -> str:
+    """Make room for a clone of the launcher's OWN repository copy. An empty target is removed;
+    anything else is ARCHIVED beside it (renamed, never deleted). Returns what it did."""
+    if not repo.exists():
+        return ""
+    if repo.is_dir() and not any(repo.iterdir()):
+        repo.rmdir()
+        return "removed an empty %s" % repo.name
+    dest = repo.with_name("%s.partial-%s" % (repo.name, time.strftime("%Y%m%d-%H%M%S")))
+    repo.rename(dest)
+    return "archived an unusable %s to %s" % (repo.name, dest.name)
+
+
 def default_branch(repo: Path) -> str:
     result = git(["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout=15)
     ref = (result.stdout or "").strip() if result.returncode == 0 else ""
@@ -163,14 +223,29 @@ def prepare(item_id: str, title: str, workspace: str, repo_url: str = ""):
     tree = root / ROOT / ("responder-%s-%s" % (slug, number))
     branch = "responder/%s" % number
     try:
+        if (repo / ".git").exists() and not _usable_clone(repo):
+            # An interrupted clone: repaired by cloning again, never trusted as a checkout. Only
+            # ever the launcher's own copy under _repos, so nobody's work is in it.
+            if not url:
+                url = (git(["-C", repo, "config", "--get", "remote.origin.url"], timeout=15).stdout
+                       or "").strip()
+            log("worktree: %s" % _clear_target(repo))
         if not (repo / ".git").exists():
             if not url:
                 return _fallback(item_id, slug, how or "no reachable repository", workspace)
             repo.parent.mkdir(parents=True, exist_ok=True)
+            _clear_target(repo)
             result = git(["clone", "--no-checkout", url, repo], timeout=1800)
             if result.returncode != 0:
-                return _fallback(item_id, slug, "clone of %s failed: %s"
-                                 % (url, (result.stderr or "").strip()[-300:]), workspace)
+                out = (result.stderr or "") + (result.stdout or "")
+                kind, fix = clone_failure(out, result.returncode)
+                try:
+                    _clear_target(repo)          # a failed clone leaves an empty or partial target
+                except OSError:
+                    pass
+                return _fallback(item_id, slug, "clone of %s failed (%s: %s): %s"
+                                 % (_redact_url(url), kind, telling_line(out, result.returncode),
+                                    fix), workspace)
         else:
             url = (git(["-C", repo, "config", "--get", "remote.origin.url"], timeout=15).stdout
                    or "").strip()
