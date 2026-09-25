@@ -85,13 +85,19 @@ def load_delivered(sid) -> list:
         return []
 
 
-def save_delivered(sid, keys) -> None:
+def save_delivered(sid, keys, phases=None) -> None:
+    """Write the receipt. ``phases`` is WHERE THE TIME WENT on this prompt (fetch, render, the
+    pack write, the total, and the outcome) — kept beside the keys so a slow or timed-out prompt
+    is diagnosable afterwards instead of reading only "exceeded its deadline"."""
     path = _receipt_path(sid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         keys = list(dict.fromkeys(keys))[-DELIVERED_KEYS_MAX:]
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"keys": keys, "at": time.time()}), encoding="utf-8")
+        doc = {"keys": keys, "at": time.time()}
+        if phases:
+            doc["last"] = phases
+        tmp.write_text(json.dumps(doc), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         pass                     # a lost receipt costs one duplicate block, never the prompt
