@@ -68,8 +68,18 @@ def handed_back(task: dict) -> dict | None:
     rows = [s for s in task.get("plan") or [] if isinstance(s, dict) and s.get("kind") == "handed_back"]
     if not rows:
         return None
-    return {"times": sum(int(s.get("times") or 1) for s in rows),
+    return {"times": sum(checkpoints.total_runs(s) for s in rows),
+            "idle": sum(checkpoints.idle_runs(s) for s in rows),
+            "charged": sum(checkpoints.charged_runs(s) for s in rows),
             "at": max(str(s.get("note_at") or "") for s in rows)}
+
+
+def charged_runs(step) -> int:
+    return checkpoints.charged_runs(step)
+
+
+def idle_runs(step) -> int:
+    return checkpoints.idle_runs(step)
 
 
 def deployed(task: dict) -> dict | None:

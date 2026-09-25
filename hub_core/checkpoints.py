@@ -36,6 +36,39 @@ _LIFECYCLE_TEXT = re.compile(
     r"refused)|stood down\b)")
 
 
+_IDLE_MARK = re.compile(r"\[handed back \d+ times?, (\d+) idle\]")
+
+
+def total_runs(step) -> int:
+    """Every run a self-counting lifecycle row records: its ``times`` (at least one). A row
+    written before ``times`` existed is one run."""
+    if not isinstance(step, dict):
+        return 0
+    raw = step.get("times")
+    if raw is None:
+        return 1
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def charged_runs(step) -> int:
+    """The runs a hand-back row CHARGES against the task's run cap: every run it records minus
+    the idle ones. Zero is a real answer here (a row that so far recorded only idle runs)."""
+    return max(0, total_runs(step) - idle_runs(step))
+
+
+def idle_runs(step) -> int:
+    """Runs a hand-back row records as IDLE -- runs that ended with no new checkpoint or push.
+    Carried in the row's NOTE (``[handed back N times, M idle]``), never as a field of its own:
+    the plan item schema is closed, and an extra field turns every hand-back into a refusal."""
+    if not isinstance(step, dict):
+        return 0
+    m = _IDLE_MARK.search(str(step.get("note") or ""))
+    return int(m.group(1)) if m else 0
+
+
 def is_placeholder(step) -> bool:
     """A grown, never-reported row: not done, no note, and marked `auto` (or, for rows written
     before the flag, titled exactly 'step N')."""

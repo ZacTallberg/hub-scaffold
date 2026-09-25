@@ -317,7 +317,14 @@ answer they got.
 hub proves the lease (token, subject, agent), requires the task to be `in_progress`
 (`409 not_in_progress` otherwise), returns it to `todo`, and replaces any earlier hand-back row
 with ONE plan row `{kind: "handed_back", lifecycle: true, times: N}` re-appended at the end; then
-it releases the lease. Response: `{ok, task, handed_back: N, lease_released, version}`.
+it releases the lease. Response: `{ok, task, handed_back: N, idle, handed_back_total,
+lease_released, version}`. An optional `idle: true` says the run recorded NO new checkpoint or
+push since it started (it re-read a pipeline still running, or waited on a push it could not make):
+the row still counts it in `times`, carries the idle count in its note (`[handed back N times, M
+idle]` -- the plan item schema is closed), and `handed_back` in the answer and on every task row is
+the CHARGED count (`times` minus the idle runs). A launcher caps a task on the charged count and
+backstops every run at twice that cap, so an idle loop still ends with a person. Client `--idle`;
+MCP `idle`.
 `lifecycle` rows are shown on the task and never counted as done steps by any progress surface.
 `release` alone returns the lease and leaves the task `in_progress` (a resumable
 `stale_reclaim`); hand-back is the whole transition a launcher performs at teardown. Client:

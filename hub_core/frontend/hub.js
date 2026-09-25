@@ -2992,13 +2992,34 @@
       var back = handBack(r);
       if (back) {
         var times = back.times || 1;
-        liveRows.push(row("Handed back", el("div", { class: "callout" + (times > 1 ? " warn" : "") }, [
-          el("span", { class: "b-glyph", "aria-hidden": "true", text: times > 1 ? GLYPH.warn : GLYPH.info }),
+        // Runs that recorded no new checkpoint or push ride the row's note ("[handed back N
+        // times, M idle]"); they did not lose to the task, so only the rest reads as a pattern.
+        var idleMatch = /\[handed back \d+ times?, (\d+) idle\]/.exec(back.note || "");
+        var idle = idleMatch ? parseInt(idleMatch[1], 10) : 0;
+        var charged = Math.max(0, times - idle);
+        liveRows.push(row("Handed back", el("div", { class: "callout" + (charged > 1 ? " warn" : "") }, [
+          el("span", { class: "b-glyph", "aria-hidden": "true", text: charged > 1 ? GLYPH.warn : GLYPH.info }),
           el("div", null, [
-            el("div", { text: times === 1 ? "A run ended with this task unfinished; it went back to the queue."
-                                         : times + " runs ended with this task unfinished — a pattern about the task, not one bad run." }),
+            el("div", { text: (times === 1 ? "A run ended with this task unfinished; it went back to the queue."
+                                          : times + " runs ended with this task unfinished" +
+                                            (charged > 1 ? " — a pattern about the task, not one bad run." : ".")) +
+                              (idle ? " " + (idle === times ? (idle === 1 ? "It" : "All of them") : idle + " of them") +
+                                      " recorded no new work, so " + (idle === 1 ? "it does" : "they do") +
+                                      " not count toward the run cap." : "") }),
             back.note ? el("div", { class: "cell-sub", text: back.note }) : null,
             back.note_at ? el("div", { class: "cell-sub mono", text: back.note_at }) : null
+          ].filter(Boolean))])));
+      }
+      var needs = r.needs_person;
+      if (needs && typeof needs === "object" && r.status !== "done") {
+        // Set by an unattended launcher at its run cap: the queue alone shows this as ordinary
+        // work, so the task itself says a person has to take it from here, and why.
+        liveRows.push(row("Needs a person", el("div", { class: "callout warn" }, [
+          el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
+          el("div", null, [
+            el("div", { text: needs.reason || "The unattended lane gave up on this task." }),
+            needs.sha ? el("div", { class: "cell-sub mono", text: "last pushed " + String(needs.sha).slice(0, 12) }) : null,
+            (needs.by || needs.at) ? el("div", { class: "cell-sub mono", text: [needs.by, needs.at].filter(Boolean).join(" · ") }) : null
           ].filter(Boolean))])));
       }
       if (proof.declared) liveRows.push(rowMono("Declared critical probe", proof.command));

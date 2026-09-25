@@ -1334,7 +1334,15 @@ def handed_back_count(plan) -> int:
     """How many runs ended with this task unfinished, from its own plan. One self-counting row
     carries `times`; a row written without it counts once. Every reader that caps attempts reads
     this number, so it means the same thing on every machine."""
-    return sum(int(step.get("times") or 1) for step in (plan or [])
+    from hub_core import checkpoints
+    return sum(checkpoints.charged_runs(step) for step in (plan or [])
+               if isinstance(step, dict) and step.get("kind") == HAND_BACK_KIND)
+
+
+def handed_back_total(plan) -> int:
+    """Every hand-back the task's row records, charged or idle (the row's own ``times``)."""
+    from hub_core import checkpoints
+    return sum(checkpoints.total_runs(step) for step in (plan or [])
                if isinstance(step, dict) and step.get("kind") == HAND_BACK_KIND)
 
 
@@ -1352,7 +1360,14 @@ def hand_back(request, b):
     one sentence are how a pattern goes unread. The row is re-appended at the END, so "the newest
     checkpoint is a hand-back" still means nobody has picked the task up since. `lifecycle: true`
     keeps it out of every "N of M steps done" counter while it stays visible — a hand-back
-    recorded as a done step made a task look MORE finished each time a run died on it."""
+    recorded as a done step made a task look MORE finished each time a run died on it.
+
+    ``idle: true`` says the run that ended did NO new work (no checkpoint, no push since it
+    started): it re-read a pipeline still running, or waited on a push it could not make. That
+    run did not lose to the task, so it is counted apart: ``times`` counts every hand-back and
+    the idle ones ride the row's note (``[handed back N times, M idle]``), because the plan item
+    schema is closed. The CHARGED count (``handed_back`` in the answer) is ``times`` minus the
+    idle runs; launchers cap on it and backstop every run at twice the cap."""
     eid, token = b.get("id"), b.get("token")
     agent = str(b.get("agent") or "agent")
     note = str(b.get("note") or "").strip()
@@ -1380,10 +1395,18 @@ def hand_back(request, b):
             return JsonResponse({"errors": [{"code": "not_in_progress",
                 "msg": "only held, unfinished work is handed back",
                 "status": ent.get("status")}]}, status=409)
+        from hub_core import checkpoints
         plan = [dict(step) for step in (ent.get("plan") or []) if isinstance(step, dict)]
-        times = handed_back_count(plan) + 1
+        prior = [step for step in plan if step.get("kind") == HAND_BACK_KIND]
+        idle = sum(checkpoints.idle_runs(step) for step in prior)
+        times = handed_back_total(plan) + 1
+        if b.get("idle") is True:
+            idle += 1
         plan = [step for step in plan if step.get("kind") != HAND_BACK_KIND]
-        line = note if times == 1 else ("[handed back %d times] %s" % (times, note))[:600]
+        if idle:
+            line = ("[handed back %d times, %d idle] %s" % (times, idle, note))[:600]
+        else:
+            line = note if times == 1 else ("[handed back %d times] %s" % (times, note))[:600]
         plan.append({"step": note[:80], "done": True, "note": line, "kind": HAND_BACK_KIND,
                      "lifecycle": True, "times": times,
                      "note_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
@@ -1393,7 +1416,8 @@ def hand_back(request, b):
         if status != 200:
             return JsonResponse(resp, status=status)
         released = hub_app.release_lease(eid, token)
-    return JsonResponse({"ok": True, "task": eid, "handed_back": times,
+    return JsonResponse({"ok": True, "task": eid, "handed_back": times - idle, "idle": idle,
+                         "handed_back_total": times,
                          "lease_released": released, "version": resp["data"]["version"]})
 
 

@@ -200,7 +200,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "agent": {"type": "string"},
          "lease_token": {"type": "string"},
-         "note": {"type": "string", "description": "why the run ended unfinished; what is left"}},
+         "note": {"type": "string", "description": "why the run ended unfinished; what is left"},
+         "idle": {"type": "boolean", "description": "the run recorded no new checkpoint or push: "
+                                                    "counted apart from the task's run cap"}},
          "required": ["id", "agent", "lease_token", "note"]}},
     {"name": "fail_task",
      "description": "Atomically record a real failure, return the lease, and create or reuse routed repair work.",
@@ -897,7 +899,7 @@ def _call_tool(name, args, auth_headers):
     elif name == "hand_back_task":
         status, body = _seam("/hub/api/hand-back", {
             "id": args["id"], "agent": args["agent"], "token": args["lease_token"],
-            "note": args["note"],
+            "note": args["note"], **({"idle": True} if args.get("idle") is True else {}),
         }, auth_headers)
     elif name == "fail_task":
         payload = {"id": args["id"], "agent": args["agent"],
