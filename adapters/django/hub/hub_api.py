@@ -2554,8 +2554,9 @@ def _addressed(state, snap, agent, **kwargs):
         try:
             from .knowledge_api import event_knowledge
             for it in probs:
-                if "ci" in str(it.get("title") or "").lower().split() or \
-                        "pipeline" in str(it.get("title") or "").lower():
+                # Selected by the problem's OWN kind, never title words (a title match missed
+                # every job-level CI problem).
+                if it.get("problem_kind") == "ci":
                     known = event_knowledge(str(it.get("title") or "")[:300])
                     if known:
                         it["knowledge"] = known

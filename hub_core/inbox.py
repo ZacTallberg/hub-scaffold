@@ -872,6 +872,44 @@ def gate_pattern_classifier(pattern: str):
     return lambda text: bool(rx.search(str(text or "")))
 
 
+_REPLACES = re.compile(r"\((?:replaces|supersedes|instead of)[^)]*\)", re.I)
+
+
+def all_requested_present(text, name_pattern, present) -> str:
+    """A HUB_GATE_RESOLVER building block: the evidence that EVERY item an approval ask
+    requests now exists, or "" (still a gate).
+
+    The shape that goes wrong: a resolver that returns the FIRST existing name anywhere in the
+    ask. An ask for a NEW worker whose context explains it runs beside an EXISTING service was
+    labelled granted on the existing name and broadcast to every console as closable while the
+    requested one did not exist. So:
+
+      * the requested names are the ones in the ask's FIRST line (the question); the rest of
+        the text is explanation. Only when the first line names none is the whole text read;
+      * a name the ask REPLACES ("(replaces the old-name ...)") is not requested;
+      * every requested name must be positively present — one unseen name keeps it a gate
+        (fail closed); no requested name at all is never a grant.
+
+    `name_pattern` is a regex (or compiled pattern) matching one item name; `present(name)`
+    answers from a CACHE only — this runs inside every inbox fold. A presence cache should
+    remember a name that has EVER been seen present, so a grant does not flip back to a gate
+    whenever the cache's freshness window lapses."""
+    rx = re.compile(name_pattern) if isinstance(name_pattern, str) else name_pattern
+    body = str(text or "")
+    head = _REPLACES.sub("", body.split(chr(10), 1)[0])
+    wanted = sorted(set(rx.findall(head))) or sorted(set(rx.findall(_REPLACES.sub("", body))))
+    wanted = [w if isinstance(w, str) else w[0] for w in wanted]
+    if not wanted:
+        return ""
+    for name in wanted:
+        try:
+            if not present(name):
+                return ""
+        except Exception:                                    # noqa: BLE001 - doubt keeps the gate
+            return ""
+    return ", ".join(wanted)
+
+
 def render_line(item) -> str:
     """One-line human form, shared by notifications and CLI consumers."""
     kind = item.get("kind")

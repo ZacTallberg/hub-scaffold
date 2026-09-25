@@ -148,6 +148,11 @@ def classify(task, activity=None, now: float | None = None) -> dict:
     if age is None:
         prov = task.get("provenance") or {}
         age = age_s(prov.get("updated_at") or prov.get("created_at"), now)
+    if str(task.get("source") or "").startswith("problem:"):
+        # A problem mirror (hub_core.fix_tasks): "in progress" means the PROBLEM is claimed,
+        # which the problem lane already watches -- no lease, and never abandoned for lacking one.
+        return {"state": "problem", "age_s": age, "done": done, "total": total,
+                "reason": "mirrors a claimed problem; its state is the problem's"}
     if is_decision(task):
         return {"state": "moving", "age_s": age, "done": done, "total": total,
                 "reason": "a decision waits on a person, not on work", "decision": True}

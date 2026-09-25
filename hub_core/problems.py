@@ -838,8 +838,12 @@ def as_item(p: dict, item_id: str = "", *, owners=None, escalated: bool = False,
         "occurrences: %d (%d row%s) - first %s ago - last %s ago" % (
             p["count"], len(p["rows"]), "" if len(p["rows"]) == 1 else "s",
             age_phrase(age), age_phrase(p.get("since_last_s"))),
-        "owners: %s%s" % (who, ("  (escalated to you as operator: unclaimed %s)" % age_phrase(age))
-                          if escalated else ""),
+        # "reaches first", never "owned by": the declared owners are who HEARS first, not a
+        # permission — any agent may take any problem, and a name read as ownership is how a
+        # fix waits days for someone who is offline.
+        "reaches first: %s (anyone may take it)%s" % (
+            who, ("  (escalated to you as operator: unclaimed %s)" % age_phrase(age))
+            if escalated else ""),
     ]
     if p.get("reopened"):
         res = p.get("resolved") or {}
@@ -853,6 +857,10 @@ def as_item(p: dict, item_id: str = "", *, owners=None, escalated: bool = False,
     lines.append("resolve it (acks every row behind it): python -m hub_core.client resolve %s "
                  "--note \"<root cause>\" --evidence <sha|url>" % p["id"])
     return {"kind": "error", "id": item_id or ("problem:" + p["id"]), "problem": p["id"],
+            # The problem's OWN kind (app | ci | machine | hub): a consumer that treats CI
+            # problems differently selects on this, never on title words — a title match
+            # missed every job-level CI problem ("<project>: <job> failing on main").
+            "problem_kind": p.get("kind") or "",
             "from": "the hub", "severity": p["severity"], "where": p["where"],
             "title": "[%s] %s - %s%s" % (
                 p["severity"], p["title"][:150],

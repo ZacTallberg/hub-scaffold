@@ -54,6 +54,9 @@ launcher only:
   waits for a lane — and stands down the moment somebody else took or cleared it. An unreadable
   board is "cannot tell", never a reason to act;
 - **caps attempts** per item on this machine (two), refunding an attempt whose launcher died;
+- **re-offers a "cleared" item the board still offers** once ten minutes have passed
+  (`REOFFER_S`): the recorded clear may have been false (the run read a queue a restart had
+  emptied) or the condition came back. The attempt cap still bounds it; spent, it is a person's;
 - **runs one session per lane**: a short lane (questions, errors — 25 minutes) and a long lane
   (tasks — 90 minutes), so a one-minute answer never waits behind a build;
 - **states the clock**: the session's charter names its kill minute and a ship-by minute eight
