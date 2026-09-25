@@ -42,6 +42,30 @@ class Command(BaseCommand):
     def handle(self, *a, limit=0, no_hub_terms=False, probe=False, coverage=False, **o):
         if probe:
             return self._probe()
+        if coverage:
+            return self._run(limit, no_hub_terms, coverage)
+        # ONE INDEX PASS PER BOARD AT A TIME. A scheduled run that overlaps a manual one (or the
+        # next tick of a slow one) doubles the embedder's load, which slows both, which makes
+        # the next overlap likelier. A second pass returns at once instead: the running pass
+        # already covers what this one would have read. The lock names its holder's pid, so a
+        # crashed indexer's lock is reclaimed by the next run rather than wedging indexing.
+        from hub_core.process_lock import LockBusy, ProcessFileLock
+        # A one-second budget, not zero: reclaiming a DEAD holder's lock file takes one more
+        # create attempt after the unlink, and a zero budget gives up before making it.
+        lock = ProcessFileLock(hub_app.HUB_DIR, name="semantic_index.lock", timeout=1.0)
+        try:
+            lock.__enter__()
+        except LockBusy as busy:
+            # Only the acquisition is judged here: a runtime lock timing out INSIDE the pass is a
+            # real failure and must not be reported as "another pass is running".
+            self._say({"skipped": "another semantic_index pass holds the lock", "detail": busy.public})
+            return None
+        try:
+            return self._run(limit, no_hub_terms, coverage)
+        finally:
+            lock.__exit__(None, None, None)
+
+    def _run(self, limit, no_hub_terms, coverage):
         state = hub_app.current_state()
         # [] when no catalog is configured (nothing is missing), None when configured and
         # unreadable — so coverage never reports a denominator it could not count.

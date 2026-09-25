@@ -4370,6 +4370,10 @@ def _parser() -> argparse.ArgumentParser:
     # Registered LAST: it extends `recall` and `prompt-context` rather than shadowing them.
     from . import client_knowledge
     client_knowledge.register(commands)
+    # The hand-off to this machine's memory engine and tool-time lesson triggers
+    # (hub_core/client_memory.py; patterns/agent-memory.md).
+    from . import client_memory
+    client_memory.register(commands)
     for sub in commands.choices.values():
         sub.allow_abbrev = False
     return parser

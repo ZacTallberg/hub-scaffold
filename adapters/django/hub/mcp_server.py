@@ -633,6 +633,14 @@ TOOLS = [
                     "each basis says when it could not run.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "text": {"type": "string"}}}},
+    {"name": "match_lesson_triggers",
+     "description": "Which live lesson names this moment: give the failing tool's error text, the "
+                    "command about to run, or the path about to be edited, and get the records whose "
+                    "applies_when triggers match it literally (the same rules the workstation hook "
+                    "applies). Cite the id if it changes what you do.",
+     "inputSchema": {"type": "object", "properties": {
+         "error": {"type": "string"}, "command": {"type": "string"}, "path": {"type": "string"},
+         "context": {"type": "string"}}}},
     {"name": "list_capabilities",
      "description": "What an agent can already do here: ledger capabilities merged with the "
                     "published catalog, with the publication commit and state.",
@@ -1255,6 +1263,9 @@ def _call_tool(name, args, auth_headers):
     elif name == "find_related":
         query = {k: args[k] for k in ("id", "text") if args.get(k)}
         status, body = _seam("/hub/related.json", query, auth_headers, method="get")
+    elif name == "match_lesson_triggers":
+        query = {k: str(args[k]) for k in ("error", "command", "path", "context") if args.get(k)}
+        status, body = _seam("/hub/triggers.json", query, auth_headers, method="get")
     elif name == "list_capabilities":
         query = {k: args[k] for k in ("kind", "q") if args.get(k)}
         status, body = _seam("/hub/capabilities.json", query, auth_headers, method="get")

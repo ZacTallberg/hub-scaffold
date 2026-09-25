@@ -273,9 +273,13 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
             prompt = str(hook.get("prompt") or "")
     if event.lower().replace("-", "") in ("sessionstart", "start"):
         pc.reset_delivered(sid)
+        # A fresh or compacted context holds nothing: the tool-time trigger receipt resets too.
+        from . import lesson_triggers
+        lesson_triggers.reset_session(sid)
     focus = (arguments.focus or os.environ.get("HUB_FOCUS") or " ".join(prompt.split())[:400]).strip()
-    # THE HAND-OFF: when this machine's own memory engine serves the board's knowledge (switch
-    # on, mirror fresh, local recall healthy -- knowledge_mirror.local_owner), printing the
+    # THE HAND-OFF: when this machine's own memory engine serves the board's knowledge (the ONE
+    # decider -- the feed writer -- wrote `owns` into the sidecar; knowledge_mirror.local_owner
+    # obeys it through memory_feed.sidecar_owns, exactly as the engine does), printing the
     # hub-ranked block too would deliver every record twice. Ask for a one-row index (the live
     # block still rides) and print one line that says which side is serving. Any doubt keeps
     # the hub block: the decision fails closed.
@@ -286,12 +290,23 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
                              "memory_full": 0 if local else arguments.memory_full}
     if focus:
         query["focus"] = focus
+    # WHERE THE TIME WENT. A per-prompt hook that is slow, or that the harness kills, otherwise
+    # leaves nothing but "exceeded its deadline"; each phase is timed and kept in the session
+    # receipt (`last`), and a board that could not answer says how long it was waited on.
+    import time as _time
+    t0 = _time.perf_counter()
+    phases: dict[str, Any] = {"at": round(_time.time(), 1)}
     try:
         payload = _c._get(base, "guidance.json?" + urlencode(query), timeout=15)
     except RuntimeError as error:
-        print("<hub-knowledge>(the board could not be reached for this prompt: %s)</hub-knowledge>"
-              % str(error)[:200])
+        phases.update(fetch_ms=round((_time.perf_counter() - t0) * 1000), outcome="unreachable")
+        print("<hub-knowledge>(the board could not be reached for this prompt after %d ms: %s)"
+              "</hub-knowledge>" % (phases["fetch_ms"], str(error)[:200]))
+        if sid:
+            pc.save_delivered(sid, pc.load_delivered(sid), phases=phases)
         return None
+    phases["fetch_ms"] = round((_time.perf_counter() - t0) * 1000)
+    t1 = _time.perf_counter()
     delivered = pc.load_delivered(sid) if sid else []
     if sid and delivered and focus and pc.load_focus(sid) == focus:
         # THE SAME QUESTION GETS NO NEW ANSWERS: this focus is the one the last memory block
@@ -303,20 +318,29 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
         out["live"] = ""               # unchanged but for its ages: said recently enough
     if local:
         print(pc.fit_output([out["live"], "<hub-knowledge>knowledge for this prompt is served by "
-                             "this machine's local memory (mirror fresh, recall healthy); the "
+                             "this machine's local memory (the feed writer decided it owns delivery); the "
                              "board's own search is `python -m hub_core.client search`</hub-knowledge>"]))
         return None
+    phases["render_ms"] = round((_time.perf_counter() - t1) * 1000)
     parts = [out["live"], out["memory"]]
     if out["spill"]:
+        t2 = _time.perf_counter()
         path = pc.write_spill(sid, out["spill"])
+        phases["pack_ms"] = round((_time.perf_counter() - t2) * 1000)
         parts.append("(%d more ranked records are in %s)" % (len(out["spill"]), path or
                      "no file — the overflow could not be written; use `search`"))
     text = pc.fit_output(parts)
     if text:
         print(text)
-    if sid and (out["keys"] or not payload.get("memory_repeat")):
+    phases.update(total_ms=round((_time.perf_counter() - t0) * 1000), delivered=len(out["keys"]),
+                  held=len(delivered), chars=len(text or ""), outcome="delivered" if text else "silent",
+                  rank=(payload.get("memory_rank") or {}).get("by") or
+                  ("ranked" if (payload.get("memory_rank") or {}).get("ranked") else "standing"))
+    if sid:
+        # The focus is saved only when this block was ranked for a NEW focus (a repeat re-ranks
+        # the same query and must not move the anchor); the phases always.
         pc.save_delivered(sid, delivered + out["keys"],
-                          focus=None if payload.get("memory_repeat") else focus)
+                          focus=None if payload.get("memory_repeat") else focus, phases=phases)
     return None
 
 
@@ -958,7 +982,8 @@ def register(commands) -> None:
     ksync.add_argument("--out")
     ksync.add_argument("--feed", nargs="?", const="-",
                        help="append put/revoke/reset ops to this JSONL file (default HUB_KNOWLEDGE_FEED "
-                            "or <state dir>/feeds/knowledge.jsonl) and keep its <stem>.state.json sidecar")
+                            "or knowledge.jsonl in HUB_MEMORY_FEEDS_DIR / ~/.agent-memory/feeds) and keep its "
+                            "<stem>.state.json sidecar, where this writer records the one delivery decision")
     ksync.add_argument("--min-interval", type=float, default=0, dest="min_interval",
                        help="--feed: skip the poll when the last one was this recent (a daemon passes 300)")
     ksync.add_argument("--max-pages", type=int, default=12, dest="max_pages")

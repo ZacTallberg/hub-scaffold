@@ -292,14 +292,20 @@ instead of paying the timeout once per lesson.
 (its own recall ranks the mirrored corpus), exactly ONE process decides — switch on, mirror
 caught up, local recall healthy — and writes the bit with its decision time into a sidecar both
 sides read back. Two deciders with different freshness rules duplicate some prompts and starve
-others; a decision older than a few heartbeats (the decider died) means the hub block.
+others; a decision older than a few heartbeats (the decider died) means the hub block. In this
+scaffold the decider is the feed writer (`knowledge_mirror`, calling `memory_feed.decide()`) and
+both readers obey it through `memory_feed.owner()` — see "Handing delivery to a local memory
+engine" below.
 
 A machine that wants the whole corpus locally (to rank offline, or to feed another tool) mirrors
 it with `python -m hub_core.client knowledge-sync --out <file>`, which pages
 `/hub/knowledge/since` once and afterwards asks only for what changed. A caught-up mirror sends
 its ETag on every carrier (`If-None-Match`, `X-Hub-ETag`, `?etag=`) and gets a 304; a narrowed
 reader is never sent a revoke for a record it could not see (a revoke carries an id, and ids are
-often slugs of titles).
+often slugs of titles). The feed serves record text redacted (a mirror is a second copy on
+somebody's disk). How a local memory engine consumes that mirror — what it indexes, how it
+renders, and the tool-time lesson triggers that fire on a command, a path or an error — is
+`patterns/agent-memory.md`.
 
 ### Handing delivery to a local memory engine
 
@@ -308,20 +314,26 @@ knowledge can be ranked THERE, at zero network cost and with the hub down. Three
 
 1. **The mirror as an operation log.** `knowledge-sync --feed [<file.jsonl>] --min-interval 300`
    (a daemon calls it every heartbeat; the rate limit is inside) appends the feed's own
-   `put`/`revoke`/`reset` ops to `HUB_KNOWLEDGE_FEED` (default
-   `<HUB_CLIENT_STATE_DIR>/feeds/knowledge.jsonl`). The page is fsynced BEFORE the cursor
-   moves, so a crash re-fetches a page rather than losing one; a vanished file re-bootstraps;
-   past 24 MB it is compacted to its live set and swapped in. Beside it, `<stem>.state.json`
-   (the sidecar: cursor, `ok_at`, `more`, `error`, `local_owns`) is rewritten on every pass.
-   The engine replays the log: a put is a record, a revoke deletes it, a reset drops a type.
-2. **One decision, two readers.** Local memory serves a prompt's knowledge only when ALL of:
-   the switch is on (`HUB_LOCAL_KNOWLEDGE=1`), the mirror is fresh (last pass caught up, no
-   error, within 600 s), and local recall is healthy (the engine's health file,
-   `HUB_LOCAL_MEMORY_HEALTH`, JSON `{retrieval_mode, ts, hw?}`, says its last recall ran a
-   mode in `HUB_LOCAL_MEMORY_MODES` within 900 s). The engine reads the same sidecar and
-   health file, so exactly one side emits. Then `prompt-context --hook` prints the live block
-   and one line saying local memory is serving, instead of the ranked block. Any doubt fails
-   CLOSED to the hub block.
+   `put`/`revoke`/`reset` ops to `HUB_KNOWLEDGE_FEED` (default `knowledge.jsonl` in the
+   agent-neutral feeds directory, `HUB_MEMORY_FEEDS_DIR` or `~/.agent-memory/feeds`, where an
+   engine looks). The page is fsynced BEFORE the cursor moves, so a crash re-fetches a page
+   rather than losing one; a vanished file re-bootstraps; past 24 MB it is compacted to its live
+   set and swapped in. Beside it, `<stem>.state.json` (the sidecar: cursor, `ok_at`, `more`,
+   `error`, `local_owns`, `owns`, `decided_at`) is rewritten on every pass. A failed poll
+   records its `error` but never sets `more` false or moves `ok_at`. The engine replays the log:
+   a put is a record, a revoke deletes it, a reset drops a type.
+2. **One decider, two readers.** The feed writer is the ONLY side that decides: on every pass it
+   computes `memory_feed.decide()` — the switch is on (`HUB_LOCAL_KNOWLEDGE=1`), the mirror is
+   current (`mirror_fresh`: caught up at `ok_at` within 6 h; knowledge is not live state, so a
+   slow board does not hand delivery back), and local recall is healthy (the engine's health
+   file, `HUB_LOCAL_MEMORY_HEALTH`, JSON `{retrieval_mode, ts, hw?}`, shows a full-pipeline
+   recall — a mode in `HUB_LOCAL_MEMORY_MODES`, default `hybrid` — within 15 min) — and writes
+   `owns` + `decided_at` into the sidecar. `prompt-context --hook` and the engine both obey that
+   bit through `memory_feed.owner()` / `sidecar_owns()` and run no test of their own, so exactly
+   one side emits. When local memory owns delivery, the hook prints the live block and one line
+   saying local memory is serving, instead of the ranked block. A decision older than 15 min
+   means the decider stopped: both sides fall back to the hub block. Any doubt fails CLOSED to
+   the hub block.
 3. **Graded like any artifact.** The client reports `X-Hub-Memory-Health` on every request; the
    distribution view grades it (`local_memory`: `stale` when recent recalls fell back to a
    degraded mode). "Installed" alone reads current on a machine whose recall silently degraded.

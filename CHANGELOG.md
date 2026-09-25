@@ -202,6 +202,36 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   rules for queued deploys (ship the head, no-op when already served), jobs that run deployed
   code, and which project a CI signal speaks for.
 
+### Round 2
+
+#### Agent memory: the hand-off to a machine's own memory engine, and lessons at the moment they apply
+
+- **`patterns/agent-memory.md`** — the seam a local memory engine plugs into (reference engine:
+  claude-memory, mirrored separately): the feed file contract, what a consumer must do with it,
+  ONE decider for per-prompt delivery (`owns` + `decided_at`; the mirror is current by its AGE,
+  6 h; a decision older than 15 min falls back to the board's block), rule-only rendering, the
+  recall contract, observer distillation off by default, and engine lessons.
+- **`hub_core/memory_feed.py`** + `client memory-feed status|records` — the consumer half both
+  sides must compute identically: the live fold (a revoke deletes; a torn tail waits), `owner()`,
+  `decide()`, `mirror_fresh()`, `recall_healthy()`, redacted index text, text vs label hashes,
+  and the rule form.
+- **The feed serves redacted text** (`knowledge.put_op`), and the write seam now refuses a
+  password inside a URL, a password stated in prose (value must carry a digit), and model-provider
+  API keys; a placeholder that names the thing (`https://user:token@host`) stays allowed.
+- **Tool-time lesson triggers** — `applies_when` rides the feed; `client lesson-trigger --hook`
+  (PreToolUse / PostToolUseFailure) matches errors, commands and paths literally, at most two per
+  event and once per session; a corpus guard drops a trigger matching more than 1% of this
+  machine's own recent calls of its kind (`triggers --refresh`, `--replay`); cites are the
+  precision signal (`triggers --stats`). The board answers the same question:
+  `GET /hub/triggers.json`, `client trigger-match`, MCP `match_lesson_triggers`.
+- **`client install-hooks`** (`hub_core/settings_io.py`) — utf-8-sig, refuse an unparseable file,
+  backup + atomic replace, re-read and restore unless every foreign hook and untouched key
+  survived; `--uninstall` removes only its own entries. `patterns/presence-gate.py` keeps the same
+  rules for its one env key.
+- **Recall receipts say where the time went** (`prompt-context --hook` keeps `last` phases; an
+  unreachable board says how long it was waited on), a session start also resets the trigger
+  receipt, and **`manage.py semantic_index` is single-flight** (a second pass prints `skipped`).
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and
