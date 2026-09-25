@@ -34,6 +34,13 @@ move. One hash over all three re-bills the unchanged doctrine on every prompt, b
 half moves every prompt. Stamp the durable managed block with a FORMAT fingerprint as well as a
 content version, so a renderer change is detectable; give the per-prompt copy its own budget.
 
+The same daemon is the natural carrier for the OTHER direction: a local session observer that
+distils "worth remembering" candidates appends them to an outbox file, and the daemon's heartbeat
+ships it (`python -m hub_core.client ship-outbox --outbox <file>`) at most every few minutes and
+only when the file grew. The offset moves only after the hub accepted the batch, so a dropped
+connection resends; the hub's candidate queue is review-first and idempotent by id
+(`patterns/knowledge-retrieval.md`), so a resend never duplicates or reopens anything.
+
 ## 3. A second agent runtime is an adapter, not a fork
 
 Supporting another runtime means an adapter that: reconciles the daemon's hook entries in that
