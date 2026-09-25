@@ -2200,6 +2200,7 @@ def questions_json(request):
             "title": str(ent.get("title") or ""),
             "context": str(ent.get("body_md") or ""),
             "open": "open" in tags,
+            "withdrawn": "withdrawn" in tags,
             "answered": bool(reply),
             "answer_id": (reply or {}).get("id", ""),
             "answer": answer_body,
@@ -2329,6 +2330,14 @@ def inbox_json(request):
         return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
     state, snap = _snapshot()
     data = _addressed(state, snap, agent, **_inbox_kwargs(request, machine, session))
+    if request.GET.get("expired") in ("1", "true", "yes"):
+        # LISTED, NOT DELIVERED: expired mail rides beside the addressed set, outside anything
+        # a waiter fingerprints, so asking to see it can never push it into a console.
+        try:
+            data = dict(data) if isinstance(data, dict) else {"items": data}
+            data["expired"] = inbox_core.expired_message_items(state, agent, machine)
+        except Exception:                                    # noqa: BLE001 - never break the inbox
+            data["expired"] = []
     return JsonResponse({"data": data,
                          "metadata": {"agent": agent, "operator": _operator_agent(),
                                       "session": session, "machine": machine}})

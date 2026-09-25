@@ -2255,6 +2255,70 @@ def answer(request, b):
     return JsonResponse(resp, status=status)
 
 
+@writer(scope="ask:write")
+def withdraw_question(request, b):
+    """The ASKER closes their own question, with the reason it is no longer live.
+
+    Without this only `answer` closes an ask, so a question whose blocker cleared, or which a
+    newer ask superseded, stays open until somebody happens to answer it -- and the stuck count
+    it inflates is exactly what the operator reads to decide what is urgent. Several asks for
+    one blocker that has since been fixed look like several people still stuck.
+
+    Only the asker may withdraw (read from the question's stable `asker` field, never from
+    provenance, which answering rewrites): it issues no directive, so nobody else's queue is
+    written to, and a question somebody ELSE wants closed still needs its answer. A reason is
+    required and is appended to the body, so the board shows WHY it closed, never just that it
+    did. The question keeps its history: `open` is dropped and `withdrawn` added."""
+    question_id = str(b.get("question") or "").strip()
+    reason = str(b.get("reason") or "").strip()
+    agent = str(b.get("agent") or "").strip().lower()
+    if not question_id or not reason:
+        return JsonResponse({"errors": [{"code": "need_question_and_reason",
+            "msg": "withdraw names the question and WHY it is no longer live"}]}, status=400)
+    if not _valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent",
+            "msg": "withdraw requires the asker's agent name in the payload"}]}, status=422)
+    if ":" not in question_id:
+        question_id = ids.make_id(hub_app.PROJECT_KEY, "note", question_id)
+    state = hub_app.current_state()
+    note_ent = (state.get("entities") or {}).get(question_id)
+    tags = [str(t) for t in ((note_ent or {}).get("tags") or [])]
+    if (not note_ent or note_ent.get("type") != "note"
+            or "question" not in [t.lower() for t in tags]):
+        return JsonResponse({"errors": [{"code": "no_such_question", "msg": question_id}]},
+                            status=404)
+    asker = str(note_ent.get("asker")
+                or (note_ent.get("provenance") or {}).get("agent") or "").strip().lower()
+    if not asker or agent != asker:
+        return JsonResponse({"errors": [{"code": "not_the_asker",
+            "msg": "only %s can withdraw this question; anyone else closes it with an answer"
+                   % (asker or "its asker")}]}, status=403)
+    if "open" not in [t.lower() for t in tags]:
+        return JsonResponse({"data": {"id": question_id, "unchanged": True,
+                                      "msg": "already closed"}}, status=200)
+
+    def _withdrawn(current):
+        # Rebuilt from the entity as it stands at EACH attempt, like answer's retire: a
+        # concurrent edit to the question survives the close.
+        base = current or note_ent
+        kept = [t for t in (base.get("tags") or []) if str(t).lower() != "open"]
+        if "withdrawn" not in [str(t).lower() for t in kept]:
+            kept.append("withdrawn")
+        closed = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+        closed["tags"] = kept
+        closed["body_md"] = (str(base.get("body_md") or "")
+                             + "\n\n---\nWithdrawn by %s: %s" % (asker, reason[:2000]))
+        return closed
+
+    resp, status = _append_fresh("note", question_id, _withdrawn, agent=agent,
+                                 idem=b.get("idem_key"), etype="note.created",
+                                 operation="question:withdraw")
+    if status in (200, 201):
+        hub_app.receipt("question", question_id, "resolved", agent=asker,
+                        detail="withdrawn by its asker: %s" % reason[:200])
+    return JsonResponse(resp, status=status)
+
+
 @writer(scope="directive:write")
 def directive(request, b):
     """An operator instruction addressed to named agents (or 'all'). `directive:write` is an
@@ -2361,6 +2425,67 @@ def ack(request, b):
     return JsonResponse(resp, status=status)
 
 
+#: A message's life, in hours. A message between consoles is about work in flight; anything
+#: that must outlive a week is a task, a finding or a lesson, not mail.
+MESSAGE_EXPIRES_MIN_H = 0.25
+MESSAGE_EXPIRES_MAX_H = 168.0
+_STRUCTURED_KEYS = ("finding", "evidence", "split")
+
+
+def _message_expires_default_h() -> float:
+    try:
+        h = float(os.environ.get("HUB_MESSAGE_EXPIRES_H") or 24)
+    except ValueError:
+        h = 24.0
+    return min(max(h, MESSAGE_EXPIRES_MIN_H), MESSAGE_EXPIRES_MAX_H)
+
+
+def _message_expires_at(b):
+    """(expires_at ISO, None) or (None, refusal). The HUB's clock decides: `expires_hours` is
+    counted from now; a sent `expires_at` (the client fixes it at intent time, so a send queued
+    offline is not replayed with a fresh life) must parse and is capped at the ceiling; neither
+    means the default life. A skewed sender clock can shorten a message, never make it immortal."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    ceiling = now + _dt.timedelta(hours=MESSAGE_EXPIRES_MAX_H)
+    hours, raw = b.get("expires_hours"), b.get("expires_at")
+    if hours is not None:
+        try:
+            h = float(hours)
+        except (TypeError, ValueError):
+            h = -1.0
+        if not (MESSAGE_EXPIRES_MIN_H <= h <= MESSAGE_EXPIRES_MAX_H):
+            return None, JsonResponse({"errors": [{"code": "bad_expires",
+                "msg": "expires_hours must be a number between %s and %s"
+                       % (MESSAGE_EXPIRES_MIN_H, MESSAGE_EXPIRES_MAX_H)}]}, status=422)
+        at = now + _dt.timedelta(hours=h)
+    elif raw not in (None, ""):
+        try:
+            at = _dt.datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=_dt.timezone.utc)
+        except (TypeError, ValueError):
+            return None, JsonResponse({"errors": [{"code": "bad_expires",
+                "msg": "expires_at must be an ISO-8601 instant"}]}, status=422)
+        at = min(at, ceiling)
+    else:
+        at = now + _dt.timedelta(hours=_message_expires_default_h())
+    return at.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None
+
+
+def _message_structured(b):
+    """({finding, evidence, split} as capped strings, None) or (None, refusal)."""
+    block = b.get("structured")
+    if block in (None, {}):
+        return {}, None
+    if not isinstance(block, dict) or set(block) - set(_STRUCTURED_KEYS):
+        return None, JsonResponse({"errors": [{"code": "bad_structured",
+            "msg": "structured takes only %s, as strings" % ", ".join(_STRUCTURED_KEYS)}]},
+            status=422)
+    return {k: str(block[k]).strip()[:2000] for k in _STRUCTURED_KEYS
+            if isinstance(block.get(k), (str, int, float)) and str(block[k]).strip()}, None
+
+
 @writer(scope="message:write")
 def message(request, b):
     """Agent-to-agent mail: `{to, note, title?, session?, machine?}` — no operator in the loop.
@@ -2369,7 +2494,14 @@ def message(request, b):
     sender's console in `from_session` (from X-Hub-Session), so a reply can be addressed back to
     exactly that console. `session` addresses one of the recipient's consoles; `machine` pins
     delivery to one of their computers. It is delivered by the recipient's inbox/wait like any
-    other item and retired by /hub/api/message/ack. Idempotent on (sender, recipient, text)."""
+    other item and retired by /hub/api/message/ack. Idempotent on (sender, recipient, text).
+
+    A MESSAGE HAS AN END: `expires_at` is stamped (from `expires_hours`, a client-fixed
+    `expires_at`, or HUB_MESSAGE_EXPIRES_H, default 24 h). Past it the note is kept and listed
+    (inbox.json?expired=1) but never delivered into a console. A console that reopens after days
+    is otherwise handed every stale message as if it were current. `structured`
+    {finding, evidence, split} is the shape a peer can act on without re-parsing prose; it is
+    also appended to the body, so a reader that knows nothing of it still sees every word."""
     agent = b.get("agent") or request.hub_auth.subject or ""
     to = str(b.get("to") or "").strip().lower()
     note_text = str(b.get("note") or b.get("body") or "").strip()
@@ -2381,6 +2513,12 @@ def message(request, b):
     target_session = str(b.get("session") or "").strip()
     if target_session and not _SESSION_ID.fullmatch(target_session):
         return JsonResponse({"errors": [{"code": "bad_session"}]}, status=422)
+    expires_at, refusal = _message_expires_at(b)
+    if refusal is not None:
+        return refusal
+    structured, refusal = _message_structured(b)
+    if refusal is not None:
+        return refusal
     title = str(b.get("title") or note_text.splitlines()[0])[:300]
     local = "m-%s-%s" % (_slug(agent, "agent"), hashlib.sha256(
         ("%s|%s|%s" % (to, target_session, note_text)).encode("utf-8")).hexdigest()[:8])
@@ -2389,9 +2527,15 @@ def message(request, b):
     existing = state["entities"].get(eid)
     if existing and "open" in [str(t).lower() for t in (existing.get("tags") or [])]:
         return JsonResponse({"data": {"id": eid, "already": True}})
+    body_md = note_text
+    if structured:
+        body_md += "\n\n" + "\n".join("%s: %s" % (k.capitalize(), structured[k])
+                                      for k in _STRUCTURED_KEYS if k in structured)
     payload = {"type": "note", "category": "context", "title": title, "status": "standing",
                "tags": ["message", "open"], "to": to, "from_agent": str(agent),
-               "body_md": note_text}
+               "body_md": body_md, "expires_at": expires_at}
+    if structured:
+        payload["structured"] = structured
     sender_session = _session_header(request)
     if sender_session:
         payload["from_session"] = sender_session
@@ -2405,6 +2549,7 @@ def message(request, b):
                            agent=str(agent), idem=b.get("idem_key"), etype="note.created")
     if status in (200, 201):
         resp.setdefault("data", {})["to"] = to
+        resp["data"]["expires_at"] = expires_at
         if target_session:
             resp["data"]["session"] = target_session
     return JsonResponse(resp, status=status)

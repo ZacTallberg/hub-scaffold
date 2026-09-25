@@ -261,6 +261,13 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "question": {"type": "string"}, "text": {"type": "string"},
          "crystallize": {"type": "boolean"}}, "required": ["question", "text"]}},
+    {"name": "withdraw_question",
+     "description": "Close YOUR OWN open question with the reason it is no longer live (the "
+                    "blocker cleared, a newer ask supersedes it, the answer is already on the "
+                    "board). Only the asker may; anyone else closes a question by answering it.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "question": {"type": "string"},
+         "reason": {"type": "string"}}, "required": ["agent", "question", "reason"]}},
     {"name": "check_inbox",
      "description": "What is addressed to this agent right now — messages to it, questions it "
                     "should answer (stuck asks reach everyone), directives aimed at it and the "
@@ -349,7 +356,14 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "to": {"type": "string"}, "note": {"type": "string"},
          "title": {"type": "string"}, "session": {"type": "string"},
-         "machine": {"type": "string"}}, "required": ["agent", "to", "note"]}},
+         "machine": {"type": "string"},
+         "expires_hours": {"type": "number", "minimum": 0.25, "maximum": 168,
+                           "description": "hours until it stops being delivered (default 24)"},
+         "structured": {"type": "object", "additionalProperties": False, "properties": {
+             "finding": {"type": "string"}, "evidence": {"type": "string"},
+             "split": {"type": "string"}},
+             "description": "the shape a peer can act on: finding, evidence, proposed split"}},
+         "required": ["agent", "to", "note"]}},
     {"name": "ack_message",
      "description": "Retire a message that reached you (only its recipient may).",
      "inputSchema": {"type": "object", "properties": {
@@ -574,6 +588,24 @@ TOOLS = [
          "severity": {"enum": ["P0", "P1", "P2", "P3"], "description": "gap only"},
          "relates_to": {"type": "array", "items": {"type": "string"}}},
          "required": ["kind", "agent", "title", "text"]}},
+    {"name": "post_evidence",
+     "description": "Put one raw READING (a probe's output, a trace excerpt, a measurement, a "
+                    "timing) in the shared evidence store, keyed by subject and commit, so the next "
+                    "console on the same subject reads it instead of re-running it. Not the ledger: "
+                    "a capped side store. Needs evidence:write.",
+     "inputSchema": {"type": "object", "properties": {
+         "agent": {"type": "string"}, "subject": {"type": "string"},
+         "kind": {"enum": ["probe", "trace", "measurement", "timing"]},
+         "summary": {"type": "string", "description": "one line: what was measured, what it showed"},
+         "body": {"type": "string", "description": "the printed output that shows it (16 KB max)"},
+         "repo": {"type": "string"}, "commit": {"type": "string"}},
+         "required": ["agent", "subject", "summary"]}},
+    {"name": "find_evidence",
+     "description": "What the team already measured on a subject: readings ranked by subject and "
+                    "summary, narrowed by repo and commit (a sha prefix matches either way).",
+     "inputSchema": {"type": "object", "properties": {
+         "q": {"type": "string"}, "repo": {"type": "string"}, "commit": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
     {"name": "read_doctrine",
      "description": "Read a standing document (doctrine, charter, agents) exactly as this "
                     "credential may see it; audience-scoped sections are applied server-side.",
@@ -950,6 +982,10 @@ def _call_tool(name, args, auth_headers):
         if args.get("crystallize"):
             payload["crystallize"] = True
         status, body = _seam("/hub/api/answer", payload, auth_headers)
+    elif name == "withdraw_question":
+        status, body = _seam("/hub/api/question/withdraw",
+                             {"agent": args["agent"], "question": args["question"],
+                              "reason": args["reason"]}, auth_headers)
     elif name == "check_inbox":
         query = {"agent": args["agent"]}
         for key in ("session", "machine"):
@@ -982,9 +1018,11 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/api/ack", payload, auth_headers)
     elif name == "send_message":
         payload = {"agent": args["agent"], "to": args["to"], "note": args["note"]}
-        for key in ("title", "session", "machine"):
+        for key in ("title", "session", "machine", "structured"):
             if args.get(key):
                 payload[key] = args[key]
+        if args.get("expires_hours") is not None:
+            payload["expires_hours"] = args["expires_hours"]
         status, body = _seam("/hub/api/message", payload, auth_headers)
     elif name == "ack_message":
         payload = {"agent": args["agent"], "id": args["id"]}
@@ -1125,6 +1163,13 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/history.json", query, auth_headers, method="get")
     elif name == "record":
         status, body = _record(args, auth_headers)
+    elif name == "post_evidence":
+        payload = {key: args[key] for key in ("agent", "subject", "kind", "summary", "body",
+                                              "repo", "commit") if args.get(key)}
+        status, body = _seam("/hub/api/evidence", payload, auth_headers)
+    elif name == "find_evidence":
+        query = {key: args[key] for key in ("q", "repo", "commit", "limit") if args.get(key)}
+        status, body = _seam("/hub/evidence.json", query, auth_headers, method="get")
     elif name == "read_doctrine":
         status, body = _seam("/hub/doctrine.json", {"doc": args.get("doc") or "doctrine"},
                              auth_headers, method="get")
