@@ -28,7 +28,7 @@ a gap. "We didn't get to it" is not a reason.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -64,13 +64,24 @@ FAMILIES: tuple[Family, ...] = (
         "Every first-class object listable, searchable and inspectable. Search "
         "returns the total for the WHOLE match beside the rows shown. Rows are "
         "evidence, NEVER a total — the totals tool owns totals, or the model sums "
-        "a sampled page and is confidently wrong.",
+        "a sampled page and is confidently wrong. "
+        "WHOSE rows: a per-user noun is read through the ACTOR's scope on every read, and one "
+        "with an owner column but no declared scope gets no generic tool at all (fail closed, "
+        "named as skipped) rather than every user's rows; work fanned out to threads carries "
+        "the actor's context, and a scoped total says 'you can see', never 'this app holds'. "
+        "One record means ONE: matches are counted in the database and several sharing a "
+        "label are refused with each one's id, never answered with the first.",
         ("list", "search", "detail", "recent"), learned_from="observed", lanes=("retrieve",)),
     Family(
         "primitives", "Generic count, breakdown and find",
         "How many? Break that down. I don't know which thing it is.",
         "A DB-side count for any filter, a group-by tally whose groups sum to its "
-        "total, and one search box across EVERY entity type.",
+        "total, and one search box across EVERY entity type. "
+        "A tally never counts a SOFT-DELETED row the app's own pages hide unless the filter "
+        "names the flag, and says how many it left out. The breakdown takes the count's "
+        "filter, so 'open X by Y' is one call whose groups are counts OF the filtered set; a "
+        "choice filter takes a list for 'any of these'; a relation groups by the related "
+        "record's name, never its pk.",
         ("count", "breakdown", "find"), learned_from="observed", lanes=("retrieve", "analyse")),
     Family(
         "self_description", "The app explaining itself — the front door",
@@ -168,7 +179,9 @@ FAMILIES: tuple[Family, ...] = (
         "reference", "Reference and dictionary",
         "What does this field actually mean?",
         "Read from the CODE — the real registry, the real token set, the real "
-        "choices — so the answer cannot drift from what the app does.",
+        "choices — so the answer cannot drift from what the app does. "
+        "A profile's related rows go through the RELATED entity's own scope -- a shared "
+        "parent must never list another person's children.",
         ("data_dictionary", "metric_definition", "profile", "catalog"), lanes=("explain", "retrieve")),
     Family(
         "provenance", "Provenance, audit and people",
@@ -298,7 +311,10 @@ FAMILIES: tuple[Family, ...] = (
         "Profile first, then ONE CLOSED operation at a time, computed in code. "
         "Typed joins return the unmatched KEYS. Real statistics. Exports carry a "
         "citation on EVERY ROW. THE MODEL CHOOSES THE OPERATION AND NEVER PRODUCES "
-        "THE NUMBER. Identifier columns are not summed.",
+        "THE NUMBER. Identifier columns are not summed. "
+        "The call's own filter is pushed down to the row source so it narrows BEFORE the "
+        "source's row cap (and applied again here, so a looser source stays exact); a filter "
+        "applied after the cap only ever searched the first N rows.",
         ("sheet_schema", "sheet_query", "sheet_join", "statistical_analysis",
          "render_chart", "export_table", "file_schema", "file_query", "file_join",
          "file_stats", "export_rows", "compare_files", "workbook_sheet"),
@@ -383,7 +399,8 @@ FAMILIES: tuple[Family, ...] = (
         "the cap, a record the rule excludes). A simulation that reports only "
         "winners reads as a smaller change than it is. The answer names which rules "
         "it ran and which it could not, because a partial simulation presented "
-        "whole is the confidently-wrong number an app can ship.",
+        "whole is the confidently-wrong number an app can ship. "
+        "The app's rules are evaluated against the NAMED record, never a blank one.",
         ("simulate", "what_if", "model_change", "recalculate_preview"),
         skippable_when="the app computes nothing from its records — it only stores "
                        "and shows them, so there is no rule to run over a guess",
@@ -449,7 +466,9 @@ FAMILIES: tuple[Family, ...] = (
         "a measurement once it is in a person's notes, so every figure here is "
         "labelled projected and is never summed with a measured one. Too few "
         "points is a refusal naming how many it had, never a line through two "
-        "dots.",
+        "dots. "
+        "A flow series totals COMPLETE days only, and a weekly or monthly figure extrapolated "
+        "from fewer days is labelled projected, never shown as measured.",
         ("forecast", "run_rate", "projected_completion", "trend_to"),
         skippable_when="nothing here accumulates over time, so there is no rate to "
                        "carry forward",
@@ -498,7 +517,9 @@ FAMILIES: tuple[Family, ...] = (
         "100% populated with values last touched in 2019 reads perfect to a "
         "coverage check. Tri-state throughout: good, bad and NOT MEASURED, because "
         "folding unmeasured into either side is how a quality score becomes the "
-        "least trustworthy number in the app.",
+        "least trustworthy number in the app. "
+        "A record with nothing publishable says '0 fields published', never 'empty' -- an "
+        "absence of data and an absence of permission are different findings.",
         ("data_quality", "staleness", "field_confidence", "conflicting_values", "data_freshness", "parity_checks", "import_exceptions", "import_intake"),
         skippable_when="every field here is entered once by one system and cannot "
                        "age or conflict",
@@ -628,7 +649,9 @@ FAMILIES: tuple[Family, ...] = (
         "confidence and the ORIGINAL span beside each, landing nothing. `files_in` "
         "takes a file with a shape; a paste has none and is the commonest way real "
         "data arrives. Rows it could not parse are RETURNED as unparsed, never "
-        "dropped — a silent drop is the one error nobody can see.",
+        "dropped — a silent drop is the one error nobody can see. "
+        "A pasted table is read as LOGICAL records: a quoted multi-line cell is one value, "
+        "and a row with an unbalanced quote is never reported as clean.",
         ("parse_paste", "table_from_text", "structure_this", "unparsed_rows"),
         skippable_when="nothing here is ever typed or pasted by a person",
         learned_from="derived", lanes=("intake",)),
@@ -717,7 +740,10 @@ FAMILIES: tuple[Family, ...] = (
         "every time. A converted figure that does not carry its rate is a number "
         "that will be wrong later and cannot be checked now. Where a rate is "
         "unavailable it refuses rather than using a stale one — a quietly stale "
-        "rate is a wrong number shown to a human with full confidence.",
+        "rate is a wrong number shown to a human with full confidence. "
+        "A time with no zone is read in the app's own zone and reported in UTC, and a local "
+        "time a daylight-saving change makes ambiguous or nonexistent is flagged, never "
+        "silently resolved.",
         ("in_timezone", "in_currency", "convert_units"),
         skippable_when="one zone, one currency, one unit system, everywhere",
         learned_from="derived", lanes=("retrieve", "analyse")),

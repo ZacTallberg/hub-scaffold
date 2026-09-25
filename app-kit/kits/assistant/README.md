@@ -13,7 +13,7 @@ finished, and no test could have said so. **A count could.**
 | `canon.py` | the 64 families as data: 32 read out of shipped assistants, 32 DERIVED from the question grid (record · rule · person · time · organisation × what is · was · will be · what if · why this one · …), each with the guarantee it owes and the lanes that answer it |
 | `audit.py` | `python -m assistant.audit` — counts the app's LIVE registry against the canon; exits non-zero on an undeclared gap; prints the remedy beside each gap and which routing lanes the app staffs |
 | `adapter.py` | the contract an app writes once (entities, surfaces, toggles, rules) to get the generic families; fields are published by **inclusion** |
-| `families/` | the generic families this copy ships (`core`: list, search, detail, recent, count, breakdown — rows always carry `shown` and `total`) and the registrar the audit reads |
+| `families/` | the generic families this copy ships (`core`: list, search, detail, recent, count, breakdown — rows always carry `shown` and `total`; tallies take a closed `filter` vocabulary derived from the model, leave soft-deleted rows out and say how many; a relation groups by name; `detail` refuses an ambiguous label with each candidate's id) and the registrar the audit reads |
 | `routing.py` | the orchestrator/specialist split: one cheap JSON call picks the LANES, each lane runs as a bounded loop over its slice of the registry; fails open to one loop |
 | `plan.py` | `plan_turn` (the model reads the person's words and names the ONE tool, from an enum of real tools) and `check_answer` (what the answer claims, against what ran) — no regex front door |
 | `belt.py` | pure detectors that correct an answer claiming work the turn did not do: performed / fabricated / misreported / unfiled |
@@ -24,7 +24,12 @@ Stdlib + Django only. The model calls (`ask`, `loop_fn`) are passed in, never im
 
 ## Adopting it
 
-1. **Write an adapter** (`assistant.adapter.Adapter`) naming the app's nouns.
+1. **Write an adapter** (`assistant.adapter.Adapter`) naming the app's nouns. **Say whose rows
+   each one is:** `Entity(scope=lambda qs: qs.filter(owner=current_actor()))` for a per-user noun
+   (it must return `qs.none()` when there is no actor), `scope=SHARED` for a deliberately app-wide
+   one. An entity with an owner column (`adapter.OWNER_FIELDS`) and no scope gets NO generic tool
+   — it is named in `build_all.skipped` and `adapter.check()` reports it as UNSCOPED — so a
+   forgotten scope costs tools, never another person's rows.
 2. **Build and register the families** beside your own tools:
    `SPECS, FUNCTIONS = families.build_all(ADAPTER)` then
    `families.register_all(SPECS, FUNCTIONS, register)`.
