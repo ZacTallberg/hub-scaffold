@@ -275,19 +275,38 @@ def _sha(*parts) -> str:
     return hashlib.sha1("\x1f".join(str(p or "") for p in parts).encode("utf-8")).hexdigest()[:16]
 
 
+def _redact(text) -> str:
+    from . import secretscan
+    return secretscan.redact(str(text or ""))[0]
+
+
 def put_op(ent, kind) -> dict:
     prov = ent.get("provenance") or {}
     rule, why = rule_and_why(ent, kind)
-    title = clip(headline(ent, kind), TITLE_PREVIEW)
-    rule, why = clip(rule, FEED_TEXT_CHARS), clip(why, FEED_TEXT_CHARS)
+    # EVERY MIRROR IS A SECOND COPY ON SOMEBODY'S DISK, indexed by an engine the board does not
+    # control and backed up by tools whose secret scan will refuse the whole store. The write
+    # seam refuses credential shapes, but a record written before a shape was known (or through
+    # a path that stored it) still carries one — so the feed, the ONE place every mirror reads,
+    # serves it redacted. Redacted BEFORE clipping (a cut must never keep a secret's head), and
+    # the typed marker stays so a reader still sees that something was there.
+    title = clip(_redact(headline(ent, kind)), TITLE_PREVIEW)
+    rule, why = clip(_redact(rule), FEED_TEXT_CHARS), clip(_redact(why), FEED_TEXT_CHARS)
     item = {"op": "put", "id": ent["id"], "type": kind, "title": title, "rule": rule, "why": why,
             "status": ent.get("status") or "", "tier": ent.get("tier") or "normal",
             "tags": list(ent.get("tags") or [])[:24],
             "written_at": prov.get("created_at") or "", "updated_at": prov.get("updated_at") or "",
             "author": prov.get("agent") or "", "verified_as_of": ent.get("verified_as_of") or "",
-            "verify": str(ent.get("verify") or "")[:400], "version": ent.get("version") or 0,
+            "verify": _redact(ent.get("verify"))[:400], "version": ent.get("version") or 0,
             "seq": int(prov.get("seq") or 0), "kind_rank": KIND_RANK.get(kind, 9),
             "text_sha": _sha(title, rule, why)}
+    # A projection that rebuilds a record field by field drops every field it does not name,
+    # silently: WHEN a rule applies (the literal error text, commands, paths and systems a
+    # tool-time hook matches on) and how many agents independently learned it must ride the
+    # feed, or no mirror can deliver a rule at the moment it applies or weigh it by agreement.
+    if isinstance(ent.get("applies_when"), dict):
+        item["applies_when"] = ent["applies_when"]
+    if isinstance(ent.get("reinforced_by"), list) and ent["reinforced_by"]:
+        item["reinforced"] = len(ent["reinforced_by"])
     for key in ("answers", "supersedes", "superseded_by"):
         if ent.get(key):
             item[key] = ent[key]
