@@ -463,6 +463,13 @@ TOOLS = [
          "query": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
          "required": ["query"]}},
+    {"name": "eval_trend",
+     "description": "The standing-eval trend: runs scored on the board's OWN data (e.g. retrieval "
+                    "on answered asks, suite retrieval-answered-asks), newest last. Read it "
+                    "before and after a change to ranking or delivery; a regression is a step.",
+     "inputSchema": {"type": "object", "properties": {
+         "suite": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 400}}}},
     {"name": "seat_distribution",
      "description": "Is every seat running what this hub publishes? Per-seat artifact grades; "
                     "offline seats are named and never graded as drift; the verdict states what "
@@ -1056,6 +1063,11 @@ def _call_tool(name, args, auth_headers):
         status, body = _seam("/hub/search.json",
                              {"q": args["query"], "limit": int(args.get("limit", 10))},
                              auth_headers, method="get")
+    elif name == "eval_trend":
+        query = {"limit": int(args.get("limit", 20))}
+        if args.get("suite"):
+            query["suite"] = args["suite"]
+        status, body = _seam("/hub/eval.json", query, auth_headers, method="get")
     elif name == "seat_distribution":
         status, body = _seam("/hub/distribution.json", {}, auth_headers, method="get")
     elif name == "built_by_person":

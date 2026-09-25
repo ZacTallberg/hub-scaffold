@@ -71,6 +71,17 @@ data nobody wrote for an evaluation), fits alpha on one half and reports on the 
 five splits, and ranks ties pessimistically. Move `CONVEX_ALPHA` only to a value that run
 reported. It needs at least ten answered asks.
 
+The same run scores the **delivered** path — the answer's rank in the per-prompt memory index
+(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25. Its query is the ask's
+CONTEXT with the question removed: every answer restates its question verbatim, and a question
+scored against its own echo reads far better than any real prompt will. Sentences sharing 60% of
+the question's words go too, asks left with fewer than 60 characters are excluded and counted,
+and there is one row per ask. `--post` keeps the run on the board's **standing-eval trend**
+(`POST /hub/api/eval`, read at `/hub/eval.json`, `client evals`, MCP `eval_trend`), so a change
+to ranking or delivery is judged by a step in a series rather than one before/after pair. The
+trend is a sidecar, never the ledger; any tool that measures on real data can record a suite of
+its own (`client evals --record run.json`).
+
 When anything could not be seen, `metadata.partial` carries a `<memory-partial>` block and every
 surface shows it; when the answer is whole it is silent. A search that matched nothing says it
 is a fact about the words used — ask again in different words.

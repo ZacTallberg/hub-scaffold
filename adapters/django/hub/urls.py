@@ -6,8 +6,8 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, evidence_api, held, histories_api, hub_api, hub_write, hubsite,
-               knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
+from . import (app_services, evals_api, evidence_api, held, histories_api, hub_api, hub_write,
+               hubsite, knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -46,6 +46,8 @@ urlpatterns = [
     # The shared evidence store (hub_core.evidence): readings keyed by subject and commit, so a
     # console reads the probe a peer already ran instead of re-running it.
     path("evidence.json", R(evidence_api.evidence_json), name="evidence"),
+    # The standing-eval trend (hub_core.evals): runs scored on the board's own data.
+    path("eval.json", R(evals_api.eval_json), name="eval"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
     # Standing documents rendered through their facet fences for the presenting credential.
     path("doctrine.json", R(hub_api.doctrine_json), name="doctrine"),
@@ -104,6 +106,7 @@ urlpatterns = [
     path("api/finding", knowledge_write.finding),
     path("api/method", knowledge_write.method),
     path("api/review", knowledge_write.review),
+    path("api/eval", evals_api.post),
     # Retire (or re-open) any knowledge record — gap, note, directive, ADR, finding — through the
     # lifecycle rules in hub_core.record_state: a reason is required and appended, never lost.
     path("api/retire", hub_write.retire),
@@ -202,7 +205,7 @@ VISIBILITY = {
     "components/<str:name>/<str:filename>": "open",
     "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
-    "capabilities.json": "veiled",
+    "capabilities.json": "veiled", "eval.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
