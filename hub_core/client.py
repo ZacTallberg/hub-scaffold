@@ -1012,7 +1012,7 @@ def _artifact_headers() -> dict[str, str]:
     """X-Hub-Artifacts: `name=sha16,...` for every artifact this seat is running, so the board's
     distribution view can grade it against what the hub publishes: always the client itself and
     the charter core (when present), plus adopter-declared files named in HUB_ARTIFACTS as
-    `name=path,...`. Hashes are over LF-normalized bytes, the same form the hub publishes, so a
+    `name=path,...` (or `name=@<version>` for an artifact released by a pin). Hashes are over LF-normalized bytes, the same form the hub publishes, so a
     checkout with CRLF line endings is not reported as drift. Never raises."""
     import hashlib
     pairs = {"client": _client_id().rsplit("+", 1)[-1]}
@@ -1023,6 +1023,13 @@ def _artifact_headers() -> dict[str, str]:
         name, _, path = spec.partition("=")
         name, path = name.strip(), path.strip()
         if not name or not path:
+            continue
+        if path.startswith("@"):
+            # A PINNED artifact reports a VERSION, not a file hash: `name=@<running version>`,
+            # `name.pin=@<pin received>`, `name.inst=@<install result>` (HUB_DISTRIBUTION_PINS).
+            value = re.sub(r"[^0-9A-Za-z._+-]", "", path[1:])[:40]
+            if value:
+                pairs[name] = value
             continue
         try:
             with open(os.path.expanduser(path), "rb") as fh:
@@ -1236,6 +1243,9 @@ def _journal_lease(task_id: str, result: Any) -> None:
 
 def _payload_answer(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     payload: dict[str, Any] = {"question": arguments.question_id, "text": arguments.text}
+    if os.environ.get("HUB_AGENT_ID"):
+        # WHO answers: an ask's own asker answering from an unattended run only PROPOSES.
+        payload["agent"] = os.environ["HUB_AGENT_ID"].strip().lower()
     if arguments.crystallize:
         payload["crystallize"] = True
     if getattr(arguments, "disclose", False):
@@ -3988,9 +3998,40 @@ def main() -> int:
     if isinstance(result, dict) and set(result) == {"text"}:
         print(result["text"])
         return 0
+    for line in event_knowledge_lines(result):
+        print(line, file=sys.stderr)       # for the person; stdout stays one JSON document
     code = int(result.pop("_exit", 0) or 0) if isinstance(result, dict) else 0
     print(json.dumps(result, indent=2, sort_keys=True))
     return code
+
+
+#: The hub attaches records to an EVENT (a task start, a problem claim, doctor) only above its
+#: relevance cut; the client prints at most this many, and only rows the hub SCORED.
+EVENT_KNOWLEDGE_MAX = 3
+
+
+def event_knowledge_lines(result) -> list:
+    """The board records attached to THIS event (`knowledge: [{id, title, score, rule?}]` on the
+    response or its data), as lines a person reads. Knowledge lands when it arrives with the
+    thing being done, not in a block on every prompt; an unscored row is unranked, not
+    relevant, and is not printed."""
+    rows = []
+    nested = [result.get(k) for k in ("data", "claim")] if isinstance(result, dict) else []
+    for src in [result] + nested:
+        if isinstance(src, dict) and isinstance(src.get("knowledge"), list):
+            rows = src["knowledge"]
+            break
+    good = [r for r in rows if isinstance(r, dict)
+            and isinstance(r.get("score"), (int, float))][:EVENT_KNOWLEDGE_MAX]
+    if not good:
+        return []
+    out = ["board knowledge for this (python -m hub_core.client recall <id> for the full record):"]
+    for r in good:
+        out.append("  [%s] %s  (%.2f)" % (r.get("id") or "?", str(r.get("title") or "")[:140],
+                                          float(r["score"])))
+        if r.get("rule") and str(r["rule"]).strip() != str(r.get("title") or "").strip():
+            out.append("      RULE: %s" % str(r["rule"])[:300])
+    return out
 
 
 if __name__ == "__main__":

@@ -359,6 +359,30 @@ def git_is_ancestor(sha, deployed):
         return True
     if r.returncode == 1:
         return False
+    # A commit this COMPLETE repository has never heard of, asked about a build it does have,
+    # is an answer -- it is not an ancestor (typically a task sha from ANOTHER repository) --
+    # not a failure to ask. On the instance this was lifted from, the forge's equivalent
+    # refusal was the only error behind every "unchecked" line, and read as the hub being
+    # unable to reach its VCS at all. A shallow clone cannot say, so it stays unchecked.
+    try:
+        known = lambda ref: subprocess.run(                          # noqa: E731
+            ["git", "-C", str(WORK_ROOT), "cat-file", "-e", "%s^{commit}" % ref],
+            capture_output=True, timeout=10).returncode == 0
+        shallow = subprocess.run(["git", "-C", str(WORK_ROOT), "rev-parse",
+                                  "--is-shallow-repository"], capture_output=True, text=True,
+                                 timeout=10).stdout.strip() == "true"
+        if not shallow and known(deployed) and not known(sha):
+            return False
+    except Exception:                                        # noqa: BLE001
+        pass
+    # THE REQUEST AND THE ANSWER, never only the verdict: the command asked and git's own
+    # words, so the next "unchecked" line can be read instead of guessed at. No credential is
+    # ever part of this command line.
+    import logging as _logging
+    _logging.getLogger("hub.deploy-close").warning(
+        "ancestry of %s in %s could not be answered: git merge-base exited %s: %s",
+        str(sha)[:12], str(deployed)[:12], r.returncode,
+        (r.stderr or b"").decode("utf-8", "replace").strip()[:200])
     return None
 
 
@@ -807,6 +831,11 @@ def gone_grace_s():
         return liveness.GONE_GRACE_S
 
 
+#: A lease younger than this is held even when its console is not yet on the roster: a claim
+#: can land seconds before the claiming console's first presence row does.
+FRESH_CLAIM_S = 300
+
+
 def lease_verdict(lease, roster_=None, now=None) -> dict:
     """``{state, gone_s, frees_in_s, released}`` for one lease's holder (hub_core.liveness):
     released is True only when its console is provably GONE past ``gone_grace_s()``. Fails
@@ -882,10 +911,16 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
             # really is gone -- but it never rewrites the recorded holder, because every
             # surface that says who is on this task keys on it.
             holder = str(cur.get("session") or "")
-            if session and holder and session != holder:
+            # A caller that names NO console is not the holder either. On the instance this was
+            # lifted from, a claim sent without a session header was granted on a lease a LIVE
+            # console held, and a sessionless finish then completed that console's task. It is
+            # held to the rule another console is: refused while the holder is live or its
+            # claim is fresh (a console can hold work before it first reaches the roster).
+            if holder and session != holder:
                 from hub_core import liveness
                 state, _seen = roster().state(holder, cur.get("machine") or "")
-                if state == liveness.LIVE:
+                fresh = now - float(cur.get("claimed") or 0) < FRESH_CLAIM_S
+                if state == liveness.LIVE or (not session and fresh and state != liveness.GONE):
                     return {"ok": False, "reason": "held_by_console",
                             "held_by": cur.get("agent"), "held_by_session": holder,
                             "held_by_machine": cur.get("machine") or None,
@@ -897,6 +932,10 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                     cur["took_over_from"] = {"session": holder,
                                              "machine": cur.get("machine") or None, "at": now}
                     cur["session"] = session
+                    if not session:
+                        # An unnamed taker holds it now, not the gone console: every surface
+                        # that says who is on this task keys on the recorded session.
+                        cur.pop("session", None)
                     if machine:
                         cur["machine"] = machine
                     holder = session
@@ -1204,6 +1243,20 @@ def distribution_files():
     return files
 
 
+def distribution_pins():
+    """{artifact: pinned version} for artifacts released by moving a pin rather than by
+    publishing bytes (HUB_DISTRIBUTION_PINS, {name: sha-or-version}). A seat reports
+    ``<name>=<running version>``, ``<name>.pin=<pin it received>`` and ``<name>.inst=<install
+    result>`` through HUB_ARTIFACTS."""
+    pins = _dj_setting("HUB_DISTRIBUTION_PINS") or os.environ.get("HUB_DISTRIBUTION_PINS") or {}
+    if isinstance(pins, str):
+        try:
+            pins = json.loads(pins)
+        except ValueError:
+            pins = {}
+    return {str(k).lower(): str(v) for k, v in pins.items() if v} if isinstance(pins, dict) else {}
+
+
 def distribution_report(now=None):
     """(report, published) — the grade of every seat, fail-soft: a broken read is an empty
     report that SAYS it could not grade, never a 500 on the board."""
@@ -1211,7 +1264,8 @@ def distribution_report(now=None):
         pub = _distribution.published(distribution_files())
         report = _distribution.assess(read_presence_rows(), pub, now=now,
                                       is_kit=_presence.is_kit_machine,
-                                      is_service=_presence.is_service_identity)
+                                      is_service=_presence.is_service_identity,
+                                      pins=distribution_pins())
         return report, pub
     except Exception as exc:                                 # noqa: BLE001
         return {"machines": [], "converged": False, "graded": 0,

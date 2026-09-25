@@ -182,7 +182,51 @@ def _prov_at(ent) -> str:
     return _text(prov.get("created_at") or prov.get("updated_at") or "", 40)
 
 
+def sid_match(a, b) -> bool:
+    """Do two session ids name the same console? FULL ids compare exactly; an 8-character
+    prefix is accepted only when one side is all the other sent (an older row, a lease that
+    recorded eight) — prefixes collide across a board's worth of consoles."""
+    a, b = str(a or "").strip(), str(b or "").strip()
+    if not a or not b:
+        return False
+    if len(a) > 8 and len(b) > 8:
+        return a == b
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 8 and long_.startswith(short)
+
+
 # ── questions ────────────────────────────────────────────────────────────────────────────────
+
+_REPLACES = re.compile(r"(?i)\b(?:replaces|supersedes|instead of)\b[^\n]{0,120}?"
+                       r"(?<![\w-])((?:[a-z0-9_-]+:note:)?q-[a-z0-9._-]+-[0-9a-f]{8})\b")
+
+
+def superseded_asks(state) -> dict:
+    """{superseded question id: the OPEN ask that replaces it}.
+
+    An ask that says it replaces another ("... (replaces the old name in q-alice-1a2b3c4d)")
+    used to leave BOTH on the answerer's list, so the person at the keyboard was asked to do
+    the superseded thing too. Read-time and reversible: the older note is never rewritten, only
+    kept off every delivered list while the replacing ask is open; it comes back the moment
+    that ask is answered or withdrawn."""
+    out = {}
+    ents = state.get("entities") or {}
+    for eid, ent in ents.items():
+        if not isinstance(ent, dict) or ent.get("type") != "note":
+            continue
+        tags = [_norm(t) for t in (ent.get("tags") or [])]
+        if "question" not in tags or "open" not in tags:
+            continue
+        text = "%s\n%s" % (ent.get("title") or "", ent.get("body_md") or "")
+        for m in _REPLACES.finditer(text):
+            ref = m.group(1)
+            target = ref if ":note:" in ref else next(
+                (k for k in ents if str(k).endswith(":note:" + ref)), "")
+            if target and target != eid and target in ents:
+                out[target] = eid
+    return out
+
+
 
 def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> list:
     """EVERY open question from a person — the whole queue, unfiltered, LONGEST WAIT FIRST.
@@ -199,6 +243,7 @@ def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> 
     close, carrying the evidence so whoever picks it up closes it instead of re-deriving it."""
     now = time.time() if now is None else now
     out = []
+    superseded = superseded_asks(state)
     for eid, ent in (state.get("entities") or {}).items():
         if not isinstance(ent, dict) or ent.get("type") != "note":
             continue
@@ -207,6 +252,8 @@ def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> 
             continue
         if AUTOMATION_TAGS.intersection(tags):
             continue
+        if eid in superseded:
+            continue                      # a later open ask says it replaces this one
         prov = ent.get("provenance") or {}
         asker = _text(ent.get("asker") or ent.get("from_agent") or prov.get("agent") or "", 60)
         title = _text(ent.get("title"), 300)
@@ -250,6 +297,11 @@ def question_items(state, *, human_gate=None, gate_satisfied=None, now=None) -> 
             # waited: an unattended responder takes a hop-1 escalation only after a cooldown.
             "hop": _hop(ent.get("hop")),
             "age_s": _age_s(at),
+            # Answers the asker's OWN unattended pass offered to a question meant for a person:
+            # kept for that person to confirm, while the question stays open.
+            **({"proposed_answers": [dict(x) for x in ent["proposed_answers"][-3:]
+                                     if isinstance(x, dict)]}
+               if isinstance(ent.get("proposed_answers"), list) and ent["proposed_answers"] else {}),
             **({"unstuck": True} if unstuck else {}),
             **({"human_only": True} if human_only else {}),
             **({"granted": granted,
@@ -308,24 +360,63 @@ def _route(item, agent: str, session: str, live) -> dict | None:
     * The item's console has ENDED: it falls through to the agent's most recently active live
       console, with `rerouted_from` naming the original — mail for a closed window must reach
       the box, not nobody."""
-    target = _sid(item.get("session"))
-    me = _sid(session)
-    if not target or not me or target == me:
+    target = str(item.get("session") or "").strip()
+    me = str(session or "").strip()
+    if not target or not me or sid_match(target, me):
         return item
     mine = [row for row in (live or []) if _norm(row.get("agent")) == _norm(agent)]
-    if any(_sid(row.get("session")) == target for row in mine):
+    if any(sid_match(row.get("session_id") or row.get("session"), target) for row in mine):
         return None
-    freshest = min(mine, key=lambda row: row.get("age_s") if row.get("age_s") is not None
+    # The mail's own MACHINE first: a message for a console is a message for that computer,
+    # so when the console ends, another console on the same machine is the natural reader;
+    # only with none live there does it fall to the agent's freshest console anywhere.
+    pinned = _norm(item.get("machine"))
+    pool = [row for row in mine if pinned and _norm(row.get("machine")) == pinned] or mine
+    freshest = min(pool, key=lambda row: row.get("age_s") if row.get("age_s") is not None
                    else 10 ** 9, default=None)
-    if freshest is not None and _sid(freshest.get("session")) == me:
-        return dict(item, rerouted_from=target,
-                    reroute_note="addressed to console %s, which is no longer live" % target)
+    if freshest is not None and sid_match(freshest.get("session_id") or freshest.get("session"), me):
+        return dict(item, rerouted_from=target[:8],
+                    reroute_note="addressed to console %s, which is no longer live" % target[:8])
     return None
 
 
 # ── messages and directives ─────────────────────────────────────────────────────────────────
 
-def message_items(state, agent: str, machine: str = "", now=None) -> list:
+#: A message older than this, delivered now, says what became of what it is ABOUT: a stale
+#: "resolve p-X" after p-X closed, or "hold your pushes" after the push landed, is how a late
+#: payload does damage while looking actionable.
+LATE_NOTICE_S = _env_int("HUB_LATE_MESSAGE_S", 6 * 3600, 600, 30 * 86400)
+_LATE_PROBLEM = re.compile(r"\bp-[0-9a-f]{8,16}\b")
+_LATE_TASK = re.compile(r"(?<![\w-])((?:[a-z0-9_-]+:)?task:[A-Za-z0-9._-]+)")
+_LATE_SHA = re.compile(r"(?<![-\w:/.])[0-9a-f]{7,40}(?![-\w])")
+
+
+def late_subject_state(text: str, state, problem_states=None) -> str:
+    """What has become of what a LATE message is about — problems by id (``problem_states``:
+    {id: state} from the adapter), tasks by id from the board. A commit cannot be checked from
+    the delivery path, so it says so; with nothing checkable, it says to check. Never raises."""
+    text = str(text or "")
+    bits = []
+    try:
+        if problem_states is not None:
+            for pid in sorted(set(_LATE_PROBLEM.findall(text)))[:3]:
+                st = problem_states.get(pid)
+                bits.append("%s is %s" % (pid, ("now " + st) if st else "no longer on the board"))
+        ents = (state or {}).get("entities") or {}
+        for ref in sorted(set(_LATE_TASK.findall(text)))[:3]:
+            local = ref.rsplit(":", 1)[-1]
+            task = ents.get(ref) if ref.count(":") >= 2 else next(
+                (e for k, e in ents.items() if str(k).endswith(":task:" + local)), None)
+            if isinstance(task, dict):
+                bits.append("task %s is now %s" % (local, task.get("status") or "unknown"))
+        if not bits and _LATE_SHA.search(text.lower()):
+            bits.append("it names a commit: check whether it has landed before acting")
+    except Exception:                                        # noqa: BLE001 - a hint, never a failure
+        pass
+    return "; ".join(bits) if bits else "check current state before acting"
+
+
+def message_items(state, agent: str, machine: str = "", now=None, problem_states=None) -> list:
     """Open messages ADDRESSED to this agent (agent -> agent, no operator in the loop). A
     message pinned to a DIFFERENT machine of the same agent is not this machine's to deliver
     or retire; a reader that names no machine sees it."""
@@ -349,10 +440,17 @@ def message_items(state, agent: str, machine: str = "", now=None) -> list:
         sender = _text(ent.get("from_agent") or prov.get("agent") or "", 60)
         sender_session = _text(ent.get("from_session"), 64)
         at = _prov_at(ent)
+        waited = waited_since(at, now)
+        late = waited is not None and waited >= LATE_NOTICE_S
+        title = _text(ent.get("title"), 300)
+        if late:
+            title = "[late, written %s ago; %s] %s" % (
+                age_phrase(waited), late_subject_state(
+                    "%s\n%s" % (title, ent.get("body_md") or ""), state, problem_states), title)
         out.append({
             "kind": "message", "id": eid, "from": sender or "a board member",
             "from_session": sender_session, "to": agent,
-            "title": _text(ent.get("title"), 300),
+            "title": title, **({"late": True} if late else {}),
             "body": body_text(ent.get("body_md")),
             "body_complete": len(str(ent.get("body_md") or "")) <= INBOX_BODY_LIMIT,
             "session": _text(ent.get("session"), 64), "machine": pinned, "at": at,
@@ -511,9 +609,34 @@ def decision_items(state) -> list:
 
 # ── the addressed set ───────────────────────────────────────────────────────────────────────
 
+def fold_gates(items: list) -> list:
+    """Every human-gate chore the OPERATOR is handed, as ONE line with the count and the oldest
+    wait (the ids ride `folded` and the body). Twenty near-identical "approve X on the host"
+    rows are one chore for one person at one keyboard; as twenty rows they bury the decisions
+    on the same list. One gate or none is returned unchanged."""
+    gates = [i for i in items if i.get("kind") == "gate"]
+    if len(gates) <= 1:
+        return list(items)
+    rest = [i for i in items if i.get("kind") != "gate"]
+    waits = [g.get("waited_s") for g in gates if isinstance(g.get("waited_s"), (int, float))]
+    oldest = max(waits) if waits else None
+    lines = ["- %s%s" % (str(g.get("title") or g.get("id"))[:160],
+                         " (%s)" % g["age"] if g.get("age") else "") for g in gates]
+    folded = {"kind": "gate", "id": "gates:%s" % hashlib.sha256(
+                  "|".join(sorted(str(g.get("id")) for g in gates)).encode()).hexdigest()[:12],
+              "from": "the hub",
+              "title": "%d chores wait on a person%s" % (
+                  len(gates), (", the oldest for %s" % age_phrase(oldest)) if oldest is not None else ""),
+              "body": "\n".join(lines), "at": "", "age": age_phrase(oldest),
+              "waited_s": int(oldest) if oldest is not None else None,
+              "folded": [str(g.get("id") or "") for g in gates],
+              "reply_cmd": "python -m hub_core.client inbox --agent <you>"}
+    return [folded] + rest
+
+
 def items_for(state, agent: str, operator: str, operator_extra=None, *, machine: str = "",
               session: str = "", live=None, human_gate=None, gate_satisfied=None, visible=None,
-              now=None) -> list:
+              now=None, problem_states=None) -> list:
     """Everything currently addressed to `agent` (and, when `session` is named, to that console).
 
     Order: a message from a teammate leads (somebody reached out to THIS agent directly), then
@@ -527,7 +650,9 @@ def items_for(state, agent: str, operator: str, operator_extra=None, *, machine:
     questions = questions_for(question_items(state, human_gate=human_gate,
                                              gate_satisfied=gate_satisfied, now=now),
                               agent, operator)
-    items = (message_items(state, agent, machine, now) + questions
+    if agent and agent == _norm(operator):
+        questions = fold_gates(questions)
+    items = (message_items(state, agent, machine, now, problem_states) + questions
              + directive_items(state, agent, now, machine=machine, session=session)
              + assignment_items(state, agent))
     if agent and agent == _norm(operator):
@@ -682,6 +807,8 @@ def render_line(item) -> str:
     """One-line human form, shared by notifications and CLI consumers."""
     kind = item.get("kind")
     if kind == "gate":
+        if item.get("folded"):
+            return str(item.get("title") or "")
         return "Needs a person (%s): %s" % (item.get("age") or "new", item.get("title") or "")
     if kind == "question":
         return "%s asks%s: %s" % (item.get("from") or "someone",

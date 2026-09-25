@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 
 from hub_core import lease_sweep as _core
@@ -82,4 +83,50 @@ def sweep(force: bool = False, now: float | None = None) -> dict:
             refused[task["id"]] = "%s %s" % (status, str(resp)[:160])
     if refused:
         log.warning("lease sweep: %d hand-back(s) refused: %s", len(refused), refused)
+        # A refused hand-back leaves a task reading "in progress" with nobody on it -- the lie
+        # this module exists to end -- so it reaches the operational stream, not only the
+        # service log. One row per task, folded by the problem queue and throttled by the
+        # error log itself. A lease that merely changed hands is not a failure.
+        for tid, err in list(refused.items())[:5]:
+            if str(err).startswith("lease changed hands"):
+                continue
+            try:
+                hub_app.record_error(
+                    "hub.lease_sweep", "lease sweep could not hand %s back to the queue: %s"
+                    % (tid, str(err)[:160]), severity="error", code="lease_handback_refused",
+                    details="the task stays in progress with no holder until this is cleared",
+                    context={"component": "hub", "task": tid})
+            except Exception:                                # noqa: BLE001 - never break a sweep
+                pass
     return {"handed_back": done, "refused": refused}
+
+
+_ASYNC_LOCK = threading.Lock()
+
+
+def sweep_async() -> bool:
+    """The board read's entry point: the pass runs in ONE daemon thread, never on the request.
+
+    sweep() reads a lease file per in-progress task and appends a hand-back per abandoned one;
+    on a read path that was the reader's latency, and on a cold process it measured seconds on
+    the instance this was lifted from while clients with an 8 s budget timed out on the board.
+    The throttle is checked here (cheap) and the pass is single-flight: a second reader while
+    one runs returns at once. Returns whether a pass was started."""
+    if time.time() - _LAST["at"] < SWEEP_INTERVAL_S:
+        return False
+    if not _ASYNC_LOCK.acquire(blocking=False):
+        return False
+
+    def _run():
+        try:
+            sweep()
+        except Exception:                                    # noqa: BLE001
+            log.warning("lease sweep: background pass failed", exc_info=True)
+        finally:
+            _ASYNC_LOCK.release()
+    try:
+        threading.Thread(target=_run, name="hub-lease-sweep", daemon=True).start()
+    except Exception:                                        # noqa: BLE001
+        _ASYNC_LOCK.release()
+        return False
+    return True

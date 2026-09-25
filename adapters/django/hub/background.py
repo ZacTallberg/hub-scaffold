@@ -35,6 +35,9 @@ def tick() -> dict:
                 report["delivery"] = "current"
         for lease in hub_app.leases():
             hub_app._schedule_lease_truth(lease)
+        # The board's audit for this head, so no reader ever pays for it.
+        hub_api.audit_warm()
+        report["audit"] = "current"
     except Exception as exc:                                  # noqa: BLE001 - keep ticking
         report["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
     report["took_ms"] = round((time.perf_counter() - t0) * 1000, 1)
