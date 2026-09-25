@@ -22,8 +22,9 @@ FOUR RULES, each paid for on the instance this was lifted from:
     OUTPUT_MAX, rows that did not fit are written to a pack file the agent can read, and only
     rows that actually rendered become receipt keys. A cut is never silent.
   * A STATE CLAIM CARRIES ITS DATE AND ITS CHECK. A rule that says "port 8001 serves X" decays
-    from the day it is written; rows print "(as of <date>)" and "check: <command>" when the
-    record carries them.
+    from the day it is written; rows print the hub's one label for the record (STATE as of ...
+    · verify before acting / UNVERIFIED / CHECK FAILED — NEEDS REVIEW, hub_core.staleness), or
+    "(as of <date>)" and "check: <command>" from a hub too old to send one.
 
 Stdlib only.
 """
@@ -107,6 +108,16 @@ def reset_delivered(sid) -> None:
 # ── rendering ──
 
 def currency(m) -> str:
+    """The row's standing: the hub's ONE label when it sends one (hub_core.staleness -- STATE /
+    UNVERIFIED / CHECK FAILED, identical on search and the feed), else the older date/check form
+    for a hub that does not."""
+    label = " ".join(str((m or {}).get("label") or "").split())
+    if label:
+        if len(label) > 260:
+            # A cut must never drop the one word that changes what the reader does.
+            tail = " — NEEDS REVIEW" if label.endswith("NEEDS REVIEW") else ""
+            label = label[:257 - len(tail)] + "..." + tail
+        return "  (%s)" % label
     asof = str((m or {}).get("verified_as_of") or "")[:10]
     verify = " ".join(str((m or {}).get("verify") or "").split())
     out = ""
@@ -163,8 +174,10 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
                 "BOARD KNOWLEDGE (%s records; %s; the top ones carry their RULE and WHY, the rest "
                 "are titles — pull any in full:" % (payload.get("memory_total") or len(memory), order),
                 "  %s recall <id>   ·   ranked search: %s search \"<symptom>\")" % (client_hint, client_hint)]
-        tail = ['  ("*" = foundational. "as of" is the day a claim was last verified; "check:" names '
-                'what answers it NOW — run it before acting on a state claim.)']
+        tail = ['  ("*" = foundational. "as of" is the day a claim was last verified; STATE marks a '
+                'claim that decays (its "verify before acting" check answers it NOW; UNVERIFIED '
+                'means it has none); CHECK FAILED means the re-check of that check failed — '
+                'NEEDS REVIEW.)']
         if already:
             tail.append("  Also relevant to THIS prompt and already in your context from earlier in "
                         "this session (not repeated): %s" % ", ".join(str(m.get("id")) for m in already[:20])
