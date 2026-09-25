@@ -54,6 +54,15 @@ laws; write the mechanism for your CI.
    also command every agent, run the publish on the host against the deployed store instead,
    under the same trust boundary as that host's own deploy.
 
+9. **Check what a published file IS, never how big it is.** A channel that ships files to every
+   seat (packaged skills, a worker launcher, a standing prompt) names its members explicitly, so
+   no stray payload can ride it; what it must then verify is the property the seats depend on:
+   UTF-8 text, and for code that every seat will run unattended, that it COMPILES (a truncated or
+   wrong launcher is what a size cap was only ever standing in for). On the instance this was
+   lifted from, a 256 KiB per-file cap stopped a legitimate launcher that had grown past it, the
+   whole publish job failed, and nothing from that push -- doctrine, skills or launcher -- reached
+   any seat until the cap was removed. A size limit says nothing about whether a file is right.
+
 ## Shape (GitLab CI, abbreviated)
 
 ```yaml

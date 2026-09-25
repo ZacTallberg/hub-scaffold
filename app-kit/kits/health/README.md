@@ -1,6 +1,10 @@
 # health — two probes that are allowed to disagree
 
-- `/health/live/` — is the process serving? Touches nothing else.
+- `/health/live/` — is the process serving? Touches nothing else. It reports `commit`: the
+  checkout HEAD this PROCESS loaded (read from `.git` once, at import), with the deploy's own
+  stamp beside it (`stamp_commit`) and `stamp_mismatch: true` when they disagree. A deploy whose
+  restart failed, or whose rollback restored the old commit, leaves a new stamp beside a process
+  serving old code; a gate that reads the stamp calls that live. Point the gate at `commit`.
 - `/health/ready/` — can it do its job? Reads a table `migrate` creates and refuses (`503`) while any
   migration is unapplied.
 

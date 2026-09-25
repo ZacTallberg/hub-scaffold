@@ -30,6 +30,46 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
 
+def _loaded_head_sha(base) -> str:
+    """The commit the checkout HEAD named when this module was imported ('' without one).
+    Read from .git directly (worktree gitdir, loose and packed refs), never a subprocess. The
+    same reader as app_health/commit.py; this file stays a single drop-in."""
+    from pathlib import Path
+    try:
+        base = Path(base)
+        git = base / ".git"
+        if git.is_file():
+            ref = git.read_text(encoding="utf-8").strip()
+            if ref.startswith("gitdir:"):
+                git = Path(ref.split(":", 1)[1].strip())
+                if not git.is_absolute():
+                    git = (base / git).resolve()
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:40]
+        name = head.split(":", 1)[1].strip()
+        common = git
+        if (git / "commondir").is_file():
+            common = (git / (git / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        for root in (git, common):
+            if (root / name).is_file():
+                return (root / name).read_text(encoding="utf-8").strip()[:40]
+        if (common / "packed-refs").is_file():
+            for line in (common / "packed-refs").read_text(encoding="utf-8").splitlines():
+                if line.endswith(" " + name):
+                    return line.split(" ", 1)[0][:40]
+    except OSError:
+        pass
+    return ""
+
+
+#: What THIS process loaded, read once at import: a deploy stamp is the deploy's claim, and a
+#: failed restart or a rollback leaves the new stamp beside a process serving the old code.
+LOADED_SHA = (getattr(settings, "LOADED_SHA", None)
+              if getattr(settings, "LOADED_SHA", None) is not None
+              else _loaded_head_sha(getattr(settings, "BASE_DIR", ".")))
+
+
 def _app() -> str:
     return getattr(settings, "APP_SLUG", "") or "app"
 
@@ -77,8 +117,19 @@ CHECKS = [check_database, check_error_forwarder]
 @never_cache
 @require_GET
 def health_live(request):
-    return JsonResponse({"status": "ok", "application": _app(),
-                         "time": timezone.now().isoformat()})
+    """``commit`` is the checkout HEAD this process loaded (the deploy stamp only when there is
+    no checkout); ``stamp_commit`` is what the deploy wrote; ``stamp_mismatch`` says the deploy
+    claims one commit while the process runs another."""
+    import os
+    stamp = str(getattr(settings, "BUILD_ID", "") or getattr(settings, "DEPLOY_SHA", "")
+                or os.environ.get("BUILD_ID", "") or "").strip()
+    body = {"status": "ok", "application": _app(), "time": timezone.now().isoformat(),
+            "commit": LOADED_SHA or stamp or "unknown",
+            "commit_source": "checkout" if LOADED_SHA else ("stamp" if stamp else "none"),
+            "stamp_commit": stamp or None}
+    if LOADED_SHA and stamp and not (LOADED_SHA.startswith(stamp) or stamp.startswith(LOADED_SHA)):
+        body["stamp_mismatch"] = True
+    return JsonResponse(body)
 
 
 @never_cache
