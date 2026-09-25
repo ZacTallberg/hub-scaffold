@@ -14,6 +14,33 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Round 2
+
+#### Knowledge that learns, app errors users watch get fixed, honest service health
+
+- **Every app error is a board task the app can watch get fixed** (`hub_core/fix_tasks.py`):
+  one mirror task per on-board app problem, moved only by the problem (claim, escalate,
+  resolve granted through the one done path, recurrence reopens it); a fixer's `step` on the
+  mirror is admitted without a lease (plan only). `GET /hub/app-fixes.json` (304 on three tag
+  carriers), `client app-fixes`, MCP `app_fixes`, and the banner's `data-fixes-url` Fixes panel
+  with reported/fixed notices. The reconcile is kicked from ingest and polls, not only the tick.
+- **Knowledge consolidation** (`client consolidate`): folds duplicate lessons into one canonical
+  with `reinforced_by`, supersedes corrections, derives `applies_when` triggers; dry-run by
+  default, reviewed apply of the cached plan only, hold-backs, per-record revert, fail-closed
+  trigger parsing and `--require-commit`. The knowledge feed carries `applies_when` and the
+  reinforced count.
+- **Ranking without an embedder**: a down embedder is asked once a minute (circuit), focus ids
+  are stripped, `lexical_score` is absolute against the query's own ceiling, and the prompt
+  block shows only strong word matches or says it delivered nothing. Adjudication probes the
+  embedder once per pass and names an outage in one line.
+- **Service health**: a URL-less host takes liveness from the services it serves, a retired
+  service is withheld, non-defects ride as `notes`; problems "reach first" instead of being
+  "owned"; problem items carry `problem_kind`.
+- **Also**: `inbox.all_requested_present` for gate resolvers (every requested name must
+  exist); responders re-offer a cleared item the board still offers after 10 min; CI pattern
+  rules for queued deploys (ship the head, no-op when already served), jobs that run deployed
+  code, and which project a CI signal speaks for.
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and
