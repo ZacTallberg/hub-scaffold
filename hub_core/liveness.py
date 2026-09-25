@@ -25,7 +25,14 @@ GONE, once it has lasted ``GONE_GRACE_S`` from the console's last-seen stamp, RE
 holder held: the lease sweep hands its task back, an item claim is free to take, and a renewal
 from another console takes over the record. Inside the grace it releases nothing, and every
 refusal says when it will. UNPROVABLE is never a reason to free, refuse or rewrite anything; the lease's own expiry is the
-only thing allowed to act on an unprovable holder. The window ordering is load-bearing:
+only thing allowed to act on an unprovable holder.
+
+ENDED IS GONE AT ONCE. A console presence records as over -- its session state ``gone`` (it said
+goodbye), or an unattended run its launcher stamped ``ended`` (or reported ``done``) -- is not inferred
+from absence: it is a positive observation, whatever its machine is doing. A task held by a
+console that is over has no owner, and a task without an owner is taken over immediately; the
+grace exists only to protect a console that might merely have stepped away, which an ended one
+cannot have. Ended sessions are never LIVE, even inside the live window. The window ordering is load-bearing:
 REPORTING_WINDOW_S < presence.SESSION_ACTIVE_S, so by the time a console drops out of the live
 set because its machine went quiet, that machine has been silent for several reporting windows
 and the holder reads UNPROVABLE, not GONE.
@@ -50,6 +57,10 @@ REPORTING_WINDOW_S = 300
 #: that stepped away briefly is never robbed, and far shorter than a lease or claim TTL, so a
 #: closed console's work is back on offer within the half hour instead of hours later.
 GONE_GRACE_S = 1800
+#: A lease claimed or renewed this recently is HELD even when its console is not on the roster
+#: yet: a new console's first presence row can land minutes after its first claim, and a second
+#: console of the same agent renewing in that gap would take the token of work that just began.
+FRESH_LEASE_S = 600
 
 
 def _norm_session(value) -> str:
@@ -63,11 +74,13 @@ def _norm_machine(value) -> str:
 class Roster:
     """A resolved answer to "who is on this board right now", with its own completeness."""
 
-    __slots__ = ("live", "last_seen", "machine_of", "reporting", "silent", "readable", "at")
+    __slots__ = ("live", "last_seen", "machine_of", "reporting", "silent", "readable", "at",
+                 "ended")
 
     def __init__(self, live=None, last_seen=None, machine_of=None, reporting=None,
-                 silent=None, readable=True, at=None):
-        self.live = {_norm_session(s) for s in (live or ()) if _norm_session(s)}
+                 silent=None, readable=True, at=None, ended=None):
+        self.ended = {_norm_session(s) for s in (ended or ()) if _norm_session(s)}
+        self.live = {_norm_session(s) for s in (live or ()) if _norm_session(s)} - self.ended
         self.last_seen = dict(last_seen or {})
         self.machine_of = dict(machine_of or {})
         self.reporting = {_norm_machine(m) for m in (reporting or ()) if _norm_machine(m)}
@@ -94,6 +107,8 @@ class Roster:
             return UNPROVABLE, None          # a board click or a bare script names no console
         if not self.readable:
             return UNPROVABLE, seen          # presence could not be read at all
+        if sid in self.ended:
+            return GONE, seen                # it said it is over: positive, not inferred
         if sid in self.live:
             return LIVE, seen
         mach = _norm_machine(machine) or self.machine_of.get(sid, "")
@@ -115,8 +130,13 @@ class Roster:
         since = max(float(seen or 0), float(floor or 0))
         return GONE, (max(0.0, now - since) if since else None)
 
+    def is_ended(self, session: str) -> bool:
+        """True when presence recorded this console as over (said goodbye, or a finished run)."""
+        sid = _norm_session(session)
+        return bool(sid) and sid in self.ended
+
     def as_dict(self) -> dict:
-        return {"live": len(self.live), "reporting": sorted(self.reporting),
+        return {"live": len(self.live), "ended": len(self.ended), "reporting": sorted(self.reporting),
                 "silent": sorted(self.silent), "partial": self.partial,
                 "readable": self.readable}
 
@@ -130,7 +150,7 @@ def resolve(hub_dir, now: float | None = None) -> Roster:
     would make every session-bearing lease look gone at once."""
     now = time.time() if now is None else now
     try:
-        live, last_seen, machine_of, reporting, silent = set(), {}, {}, set(), set()
+        live, last_seen, machine_of, reporting, silent, ended = set(), {}, {}, set(), set(), set()
         for row in _presence.rows(hub_dir):
             machine = _norm_machine(row.get("machine"))
             stamp = max(_presence.epoch(row.get("heartbeat_at")),
@@ -148,13 +168,18 @@ def resolve(hub_dir, now: float | None = None) -> Roster:
                     last_seen[sid] = at
                     if machine:
                         machine_of[sid] = machine
+                unattended = str(data.get("kind") or "attended") != "attended"
+                if (str(data.get("state") or "") == "gone"
+                        or (unattended and (str(data.get("state") or "") == "done"
+                                            or _presence.epoch(data.get("ended"))))):
+                    ended.add(sid)
                 if at and now - at <= _presence.SESSION_ACTIVE_S:
                     live.add(sid)
         silent -= reporting        # a machine with one fresh row is reporting, whatever else
     except Exception:                                        # noqa: BLE001 - never break a read
         return Roster(readable=False, at=now)
     return Roster(live=live, last_seen=last_seen, machine_of=machine_of,
-                  reporting=reporting, silent=silent, readable=True, at=now)
+                  reporting=reporting, silent=silent, readable=True, at=now, ended=ended)
 
 
 def verdict(roster, session: str, machine: str = "", floor: float = 0.0,
@@ -165,6 +190,11 @@ def verdict(roster, session: str, machine: str = "", floor: float = 0.0,
     grace has run out. LIVE and UNPROVABLE never release (a missing roster is UNPROVABLE)."""
     if roster is None:
         return {"state": UNPROVABLE, "gone_s": None, "frees_in_s": None, "released": False}
+    if roster.is_ended(session):
+        # Over, not stepped away: released at once, with no grace (module docstring).
+        _state, gone_s = roster.gone_for(session, machine, floor=floor, now=now)
+        return {"state": GONE, "gone_s": int(gone_s) if gone_s is not None else None,
+                "frees_in_s": 0, "released": True, "ended": True}
     state, gone_s = roster.gone_for(session, machine, floor=floor, now=now)
     if state != GONE or gone_s is None:
         return {"state": state, "gone_s": None, "frees_in_s": None, "released": False}

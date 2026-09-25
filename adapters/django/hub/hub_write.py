@@ -5,6 +5,7 @@ these. NOT session/login gated (the agent uses a header token). Fail-closed if n
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import subprocess
@@ -1255,6 +1256,12 @@ def claim(request, b):
                                                           frees)
                                  if v["state"] == "gone" else
                                  "; the lease frees itself in %ds unless renewed" % frees)
+                lost = hub_app.taken_over_notice(existing, agent, _claim_session(request, b))
+                if lost:
+                    # This caller HELD the task and it was taken over while it was away: say so
+                    # by name, so it hands its changes over instead of pushing over the holder.
+                    error.update({"code": "taken_over", "msg": lost["msg"],
+                                  "held_by": lost["held_by"], "taken_at": lost["taken_at"]})
             return JsonResponse({"errors": [error]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
@@ -1264,6 +1271,8 @@ def claim(request, b):
                             machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
+        if res.get("took_over") and res.get("took_over_from"):
+            _notify_taken_over(eid, ent, agent, res)
         if status != "in_progress":
             transition, transition_status = _append(
                 "task", eid, {"type": "task", "status": "in_progress"},
@@ -1289,6 +1298,43 @@ def claim(request, b):
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+def _notify_taken_over(eid, ent, agent, lease) -> None:
+    """Tell the console whose lease was just taken over that it lost the task.
+
+    Its own step/finish is refused with reason ``taken_over``; this message reaches it even if
+    it never tries either -- a console whose machine only dropped off the network may still be
+    editing, and must learn the task is someone else's before it pushes. Pinned to the previous
+    holder's machine and console. Never raises: a missed notice must not undo a granted claim."""
+    try:
+        prev = lease.get("took_over_from") or {}
+        old = str(prev.get("agent") or "").strip().lower()
+        if not old or not _valid_agent_name(old):
+            return
+        why = ("the console holding it (%s) had ended" % prev.get("session") if prev.get("ended")
+               else "its console (%s) was %s" % (prev.get("session") or "?",
+                                                 prev.get("state") or "gone"))
+        body = ("%s (%s) was taken over by %s%s because %s. Stop work on it: hand anything you "
+                "changed for it to %s (a message naming your branch, sha or patch) rather than "
+                "pushing -- they are working the same outcome now.\n\n%s"
+                % (eid, ent.get("title") or "", agent,
+                   (" on " + lease["machine"]) if lease.get("machine") else "", why, agent,
+                   board_link(eid)))
+        local = "m-takeover-%s" % hashlib.sha256(
+            ("%s|%s|%s" % (eid, prev.get("claimed"), agent)).encode("utf-8")).hexdigest()[:12]
+        note = {"type": "note", "category": "context", "status": "standing",
+                "title": "%s was taken over by %s" % (eid, agent), "tags": ["message", "open"],
+                "to": old, "from_agent": "hub", "body_md": body}
+        if prev.get("machine"):
+            note["machine"] = str(prev["machine"])[:60]
+        if prev.get("session") and _SESSION_ID.fullmatch(str(prev["session"])):
+            note["session"] = str(prev["session"])
+        _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), note,
+                expected_version=None, agent=agent, idem="takeover:" + local,
+                etype="note.created")
+    except Exception:                                        # noqa: BLE001
+        logging.getLogger(__name__).exception("could not notify the previous holder of %s", eid)
 
 
 def keep_lease_on_raced_transition(res, transition_status) -> bool:
