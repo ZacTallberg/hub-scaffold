@@ -14,6 +14,27 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Round 2: completeness gaps
+
+- **Component settings are editable from the banner.** The shared banner reads each app's
+  component properties on every page and hands them on (`window.HubComponentProps` plus the
+  `hub:component-props` event the agent, search bar and header takeover already follow). When
+  the hub says the reader `can_edit`, it offers a **Component settings** box with one tab per
+  component, drawn from the served schema. Each change is previewed on the page, and nothing
+  is stored until **Save for everyone**. Refused values are named. `POST /hub/api/component-props`
+  now has a second caller: the same-origin, CSRF-checked browser of a person the adopter's
+  `HUB_COMPONENT_EDITOR(request, slug)` admits for that app, with the save attributed to them.
+  Unset, failing or raising means nobody in a browser can save. Who changed what is shown to
+  editors only.
+- **The responder canary tags itself `synthetic`.** A synthetic ask stays on the record
+  (`questions.json`) but reaches only a reader that sends `inbox.json?include=synthetic`, which
+  is the responder. A person's inbox, the `inbox/wait` notifier and its fingerprint, the
+  attention detector and the board's ask rail all leave it out. A broken loop is still reported
+  through the canary's own verdict.
+- **The idle-timer jiggler is deliberately not shipped.** `adapters/windows/README.md` explains
+  why: only the wake lock (`keep_awake.py`) is included, because a jiggler exists to get around
+  a screen-lock policy.
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and

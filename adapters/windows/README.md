@@ -134,3 +134,18 @@ overlap itself, and gives each poll a ten-minute limit (the sessions it starts a
 bounded by their own clocks). The sessions get a hidden console of their own, so nothing below
 them pops a window either. Kill switch: create `<HomeDir>\DISABLED`. `-Remove` deletes only the
 scheduled task; the ledger (`runs.json`) and `responder.log` stay for you to read.
+
+## Keeping a long run alive: a wake lock, and deliberately nothing more
+
+`keep_awake.py` holds a Windows wake lock (`SetThreadExecutionState`) for a whole unattended
+window, so the machine does not sleep under a job and fire every wall-clock deadline at once on
+wake. It keeps the SYSTEM awake; it does not keep a session unlocked, and a locked screen leaves
+a running job running.
+
+**An idle-timer "jiggler" is intentionally not shipped.** A companion that moves the pointer by
+a net-zero amount to reset the idle timer (so an interactive session never auto-locks or drops
+an idle VPN) exists in some working setups, and it is left out of this template on purpose: its
+whole effect is to defeat a screen-lock policy, which is a security control an adopter's
+organisation sets, not something a public template should help route around. If a long job
+needs an interactive session, fix that dependency (run it as a service or scheduled task, which
+needs no unlocked desktop) rather than keep the screen awake.
