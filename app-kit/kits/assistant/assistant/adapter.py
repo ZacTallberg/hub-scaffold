@@ -25,6 +25,97 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 
+# -- WHOSE rows ---------------------------------------------------------------------------------
+# Every generic family reads ``model.objects``. Without a per-actor scope, a per-user app's
+# conversations, uploads, saved prompts and feedback were listed, counted, searched and opened
+# for ANY signed-in person -- measured on a shipped app, across ~40 generic tools, the day the
+# scope below was added. A scope is declared ONCE, on the Entity, and every family that resolves
+# the model through the adapter inherits it.
+class _ScopedManager:
+    """``model.objects`` for a scoped entity: every read starts from the SCOPED queryset. A scope
+    that raises, or returns None, reads as NO rows -- a scope failure must never widen to the
+    whole table."""
+
+    def __init__(self, model, scope):
+        self._model, self._scope = model, scope
+
+    def get_queryset(self):
+        base = self._model._default_manager.all()
+        try:
+            scoped_qs = self._scope(base)
+        except Exception:                                     # noqa: BLE001
+            return base.none()
+        return base.none() if scoped_qs is None else scoped_qs
+
+    def all(self):
+        return self.get_queryset()
+
+    def __getattr__(self, name):
+        return getattr(self.get_queryset(), name)
+
+
+class ScopedModel:
+    """A model seen through its entity's ``scope``: ``.objects`` / ``._default_manager`` are the
+    scoped rows; everything else (``_meta``, ``DoesNotExist``, field access) is the real model's."""
+
+    def __init__(self, model, scope):
+        self._model, self._scope = model, scope
+
+    @property
+    def objects(self):
+        return _ScopedManager(self._model, self._scope)
+
+    @property
+    def _default_manager(self):
+        return _ScopedManager(self._model, self._scope)
+
+    @property
+    def unscoped(self):
+        return self._model
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def __eq__(self, other):
+        return real_model(other) is self._model
+
+    def __hash__(self):
+        return hash(self._model)
+
+    def __repr__(self):
+        return f"<scoped {self._model._meta.label}>"
+
+
+def real_model(model):
+    """The Django model behind a possibly-scoped one (for identity comparisons)."""
+    return model.unscoped if isinstance(model, ScopedModel) else model
+
+
+def SHARED(qs):
+    """``Entity(scope=SHARED)``: this noun is deliberately app-wide -- every signed-in person may
+    see every row (a shared queue, a catalogue). Saying so is REQUIRED for an entity that has an
+    owner column; see :func:`unscoped_owner`."""
+    return qs
+
+
+def scoped(model, scope):
+    return model if (model is None or scope is None or scope is SHARED) else ScopedModel(model, scope)
+
+
+#: Column names that mean "this row belongs to someone". An entity carrying one and declaring no
+#: ``scope`` would let every generic family show other people's rows.
+OWNER_FIELDS = ("owner", "user", "username", "principal", "created_by", "requested_by", "actor",
+                "author", "user_label")
+
+
+def unscoped_owner(entity, model) -> str:
+    """The owner column of a per-user entity that declares no scope, or ""."""
+    if getattr(entity, "scope", None) is not None:
+        return ""
+    names = {f.name for f in model._meta.get_fields()}
+    return next((f for f in OWNER_FIELDS if f in names), "")
+
+
 @dataclass(frozen=True)
 class Entity:
     """One first-class noun this app holds."""
@@ -60,6 +151,10 @@ class Entity:
     label_is_handle: bool = False
     detail_url_arg: str = "label"
     ranges: tuple[str, ...] = ()
+    #: WHOSE rows: ``(queryset) -> queryset`` narrowing to what the current actor may see,
+    #: evaluated on every read. REQUIRED for a per-user noun; it must fail CLOSED
+    #: (``qs.none()``) when there is no actor. ``SHARED`` declares a deliberately app-wide noun.
+    scope: Callable | None = None
 
     def shows(self, field_name: str) -> bool:
         """Whether a tool may publish this flat field. Inclusion, then the veto. With no
@@ -97,6 +192,9 @@ class Adapter:
     #: Bounded self-checks, ``{name: callable -> {"ok": bool, "detail": str}}``.
     reachability: dict[str, Callable[[], dict]] = field(default_factory=dict)
     audit_model: str = ""
+    #: ``(queryset) -> queryset`` narrowing the audit log to what the actor may see: the audit
+    #: log of a per-user app holds everyone's activity.
+    audit_scope: Callable | None = None
     audit_fields: dict = field(default_factory=lambda: {
         "at": "at", "actor": "actor", "action": "action", "detail": "detail"})
     #: The app's own rules, ``{topic: {"question": ..., "rule": ...}}`` -- cited, never recited.
@@ -106,9 +204,17 @@ class Adapter:
     public_keys: tuple[str, ...] = ()
 
     def model_for(self, key: str):
+        """The entity's model, SCOPED when the entity declares a ``scope``."""
         from django.apps import apps
         entity = self.entity(key)
-        return apps.get_model(entity.model) if entity else None
+        return scoped(apps.get_model(entity.model), entity.scope) if entity else None
+
+    def audit_model_class(self):
+        """The audit model, scoped by ``audit_scope``; None when not declared."""
+        if not self.audit_model:
+            return None
+        from django.apps import apps
+        return scoped(apps.get_model(self.audit_model), self.audit_scope)
 
     def entity(self, key: str) -> Entity | None:
         return next((e for e in self.entities if e.key == key), None)
@@ -142,6 +248,12 @@ def check(adapter: Adapter) -> list[str]:
                             f"{entity.model} -- it identifies one to a person, so it must exist")
         if entity.detail_url_arg not in ("label", "pk"):
             problems.append(f"{entity.key}: detail_url_arg must be 'label' or 'pk'")
+        owner = unscoped_owner(entity, model)
+        if owner:
+            problems.append(
+                f"UNSCOPED: {entity.key} has an owner column ({owner!r}) and declares no `scope`, "
+                "so every generic family would show every user's rows. Declare "
+                "scope=<(queryset) -> the actor's rows>, or scope=SHARED if it really is app-wide.")
         for extra in (*entity.search, *entity.dimensions, *entity.public_fields,
                       *entity.sensitive, *entity.columns, *entity.ranges,
                       *((entity.date_field,) if entity.date_field else ())):

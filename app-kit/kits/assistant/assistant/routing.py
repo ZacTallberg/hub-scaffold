@@ -285,7 +285,9 @@ def scope_for(lane_key: str, schemas: list, *, inner=None, core=(), cap: int = L
     ride every lane so routing cannot make a tool disappear, but they are what the canon knows
     least about and can be numerous enough to eat the budget. ``inner`` (the app's scorer)
     re-ranks WITHIN the lane; its answer is filtered to the lane and anything it omits is
-    appended. ALWAYS_SHOWN tools present in the schema take their slots out of the cap.
+    appended. The cap is the lane's WHOLE budget: every core tool present in the schema --
+    the caller's own (a turn's planned tools, a pinned tool, a discovery tool) as well as
+    ALWAYS_SHOWN -- takes its slot out of the ranked ``k`` rather than riding over it.
     """
     placed, unplaced = _split(lane_key, schemas)
     if not placed:
@@ -311,7 +313,9 @@ def scope_for(lane_key: str, schemas: list, *, inner=None, core=(), cap: int = L
     present = set(_names(schemas))
     always = tuple(n for n in ALWAYS_SHOWN if n in present)
     core = tuple(dict.fromkeys(tuple(core) + always))
-    k = max(1, min(len(names), int(cap)) - len(always))
+    # Subtracting only ALWAYS_SHOWN let a caller's core push a lane past the cap it promised
+    # (measured: 25 tools shown under a cap of 24).
+    k = max(1, min(len(names), int(cap)) - sum(1 for n in core if n in present))
     return _scope, core, k
 
 
