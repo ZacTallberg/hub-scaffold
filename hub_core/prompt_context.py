@@ -24,6 +24,16 @@ FOUR RULES, each paid for on the instance this was lifted from:
   * A STATE CLAIM CARRIES ITS DATE AND ITS CHECK. A rule that says "port 8001 serves X" decays
     from the day it is written; rows print "(as of <date>)" and "check: <command>" when the
     record carries them.
+  * RELEVANCE, NOT A BUDGET. When the hub ranked by MEANING it sends each row's cosine
+    (`score`); then only rows at or above RELEVANCE_CUT are delivered, at most RELEVANCE_MAX,
+    never padded to fill the room -- on the instance this was lifted from, a few thousand
+    records delivered by budget were referred to a handful of times, and the rows past the
+    first few added almost nothing to the answers people actually got. A row without a score
+    is unranked, not relevant.
+  * THE SAME QUESTION GETS NO NEW ANSWERS. A prompt whose focus is the one the session's last
+    memory block was ranked for re-ranks the SAME query, so all it could add sits BELOW rows
+    the session already holds (most prompts that repeat a focus are notifications and relayed
+    messages). It renders no memory rows; a new focus, a session start or a compaction does.
 
 Stdlib only.
 """
@@ -47,6 +57,18 @@ DELTA_RANK_WINDOW = 60
 DELTA_FULL_WINDOW = 15
 #: Per session, how many delivered keys are remembered (oldest dropped first).
 DELIVERED_KEYS_MAX = 4000
+#: The relevance floor for a meaning-ranked row, and how many such rows one prompt carries.
+#: Measured on real answered questions on the instance this was lifted from; set per board
+#: with HUB_PROMPT_RELEVANCE_CUT / HUB_PROMPT_RELEVANCE_MAX.
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+RELEVANCE_CUT = _env_float("HUB_PROMPT_RELEVANCE_CUT", 0.48)
+RELEVANCE_MAX = int(_env_float("HUB_PROMPT_RELEVANCE_MAX", 6))
 SPILL_MARK = ("  (%d more records ranked for this prompt did not fit inline and were NOT delivered; "
               "they are in full, in rank order, in the file named below — read it when the task "
               "touches them)")
@@ -76,22 +98,35 @@ def _receipt_path(sid) -> Path:
     return state_dir() / "receipts" / (_safe(sid) + ".json")
 
 
-def load_delivered(sid) -> list:
+def _load_receipt(sid) -> dict:
     try:
         data = json.loads(_receipt_path(sid).read_text(encoding="utf-8"))
-        keys = data.get("keys") if isinstance(data, dict) else None
-        return [str(k) for k in keys] if isinstance(keys, list) else []
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        return []
+        return {}
 
 
-def save_delivered(sid, keys) -> None:
+def load_delivered(sid) -> list:
+    keys = _load_receipt(sid).get("keys")
+    return [str(k) for k in keys] if isinstance(keys, list) else []
+
+
+def load_focus(sid) -> str:
+    """The focus this session's last memory block was ranked for ('' when none)."""
+    return str(_load_receipt(sid).get("memory_focus") or "")
+
+
+def save_delivered(sid, keys, focus=None) -> None:
     path = _receipt_path(sid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         keys = list(dict.fromkeys(keys))[-DELIVERED_KEYS_MAX:]
+        body = {"keys": keys, "at": time.time()}
+        prior = _load_receipt(sid).get("memory_focus")
+        if focus is not None or prior:
+            body["memory_focus"] = focus if focus is not None else prior
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"keys": keys, "at": time.time()}), encoding="utf-8")
+        tmp.write_text(json.dumps(body), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         pass                     # a lost receipt costs one duplicate block, never the prompt
@@ -128,10 +163,26 @@ def _row(m) -> str:
     return row
 
 
+def relevance_filter(memory, rank, *, cut=None, most=None) -> tuple:
+    """``(rows, applied)``: when the ranking is by MEANING and rows carry scores, only rows
+    scored at least ``cut``, at most ``most`` of them, in rank order -- never padded. Any other
+    ranking is returned unchanged (applied False): a keyword or standing order has no score."""
+    cut = RELEVANCE_CUT if cut is None else cut
+    most = RELEVANCE_MAX if most is None else most
+    rank = rank or {}
+    if not rank.get("ranked") or rank.get("by") == "wording":
+        return list(memory), False
+    if not any(isinstance(m.get("score"), (int, float)) for m in memory):
+        return list(memory), False
+    kept = [m for m in memory if isinstance(m.get("score"), (int, float)) and m["score"] >= cut]
+    return kept[:max(0, int(most))], True
+
+
 def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
     """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
     the receipt keys of rows that actually rendered, and the rendered rows that did not fit."""
-    memory = list(payload.get("memory") or [])
+    memory, cut_applied = relevance_filter(list(payload.get("memory") or []),
+                                           payload.get("memory_rank"))
     already, fresh = [], []
     if delivered:
         memory = memory[:DELTA_RANK_WINDOW]
@@ -155,6 +206,9 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
         if rank.get("ranked") and rank.get("by") == "wording":
             order = ("ranked by the WORDS of what this console is doing, not their meaning — "
                      "a record phrased differently sits lower")
+        elif rank.get("ranked") and cut_applied:
+            order = ("ranked for what this console is doing; only rows scored %.2f or higher, "
+                     "at most %d" % (RELEVANCE_CUT, RELEVANCE_MAX))
         elif rank.get("ranked"):
             order = "ranked for what this console is doing"
         else:

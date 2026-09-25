@@ -247,6 +247,10 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
               % str(error)[:200])
         return None
     delivered = pc.load_delivered(sid) if sid else []
+    if sid and delivered and focus and pc.load_focus(sid) == focus:
+        # THE SAME QUESTION GETS NO NEW ANSWERS: this focus is the one the last memory block
+        # was ranked for, so only the live block is worth printing.
+        payload = dict(payload, memory=[], memory_repeat=True)
     out = pc.render(payload, delivered=delivered or None,
                     budget=min(pc.MEMORY_BUDGET, pc.OUTPUT_MAX - 600))
     parts = [out["live"], out["memory"]]
@@ -257,8 +261,9 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     text = pc.fit_output(parts)
     if text:
         print(text)
-    if sid and out["keys"]:
-        pc.save_delivered(sid, delivered + out["keys"])
+    if sid and (out["keys"] or not payload.get("memory_repeat")):
+        pc.save_delivered(sid, delivered + out["keys"],
+                          focus=None if payload.get("memory_repeat") else focus)
     return None
 
 
@@ -342,6 +347,75 @@ def _run_adjudicate(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
         result["msg"] = ("%d overlap(s) need a reader and no judge model is configured here "
                          "(set HUB_JUDGE_URL and HUB_JUDGE_MODEL)" % result["needs_model"])
     return result
+
+
+def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Fold what the board knows twice, record contradictions, and derive each lesson's
+    `applies_when` (hub_core.consolidate). A DRY RUN unless --apply: every proposal is printed
+    with both texts first. Writes go through the served note API; the prior value of every
+    field a run changes is logged locally so --revert <run> restores it."""
+    import time as _time
+    from urllib.parse import quote
+    from . import consolidate, prompt_context as pc
+    home = pc.state_dir() / "consolidate"
+    home.mkdir(parents=True, exist_ok=True)
+    notes = [n for n in (_c._get(base, "note.json").get("data") or []) if isinstance(n, dict)]
+    by_id = {n.get("id"): n for n in notes}
+    lines: list[str] = []
+
+    def get_entity(eid):
+        parts = str(eid or "").split(":")
+        if len(parts) != 3:
+            return by_id.get(eid)
+        try:
+            return _c._get(base, f"{quote(parts[1])}/{quote(parts[2])}.json").get("data")
+        except RuntimeError:
+            return None
+
+    def write(eid, fields, version):
+        try:
+            _c._post(base, "note", {"id": eid, "agent": _agent(arguments),
+                                    "expected_version": version, **fields},
+                     extra_headers=_c._presence_headers(arguments))
+            return True, "written"
+        except (RuntimeError, ValueError) as error:
+            return False, str(error)[:300]
+
+    if arguments.revert:
+        run_id = re.sub(r"[^0-9A-Za-z]", "", arguments.revert)
+        log_path = home / ("%s.jsonl" % run_id)
+        if not log_path.exists():
+            raise ValueError("no such consolidation run on this machine: %s" % log_path)
+        result = consolidate.revert(log_path, get_entity=get_entity, write=write, out=lines.append)
+        return {"lines": lines, "reverted": run_id, **result}
+
+    def lookup_related(eid):
+        body = _c._get(base, f"related.json?id={quote(eid)}")
+        return body.get("data") or {}, body.get("metadata") or {}
+
+    cache_path = home / "cache.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    run_id = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+    result = consolidate.run(notes, lookup_related=lookup_related, write=write, cache=cache,
+                             run_id=run_id, log_path=home / ("%s.jsonl" % run_id),
+                             apply_writes=arguments.apply, judge_limit=arguments.limit or consolidate.MAX_JUDGE,
+                             trigger_limit=arguments.triggers if arguments.triggers is not None
+                             else consolidate.MAX_TRIGGERS,
+                             lookup_limit=arguments.lookups or 0, out=lines.append)
+    tmp = cache_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache), encoding="utf-8")
+    os.replace(tmp, cache_path)
+    if result.get("needs_model"):
+        result["_exit"] = 2
+        lines.append("%d judgement(s) need a reader and no judge model answered here (set "
+                     "HUB_JUDGE_URL and HUB_JUDGE_MODEL)" % result["needs_model"])
+    if not arguments.apply:
+        lines.append("DRY RUN: nothing was written. Read the proposals above, then run again "
+                     "with --apply (undo a run with --revert %s)." % run_id)
+    return {"lines": lines, **result}
 
 
 # ── registration ──
@@ -462,3 +536,13 @@ def register(commands) -> None:
     adj.add_argument("--dry-run", action="store_true", dest="dry_run")
     adj.add_argument("--agent")
     adj.set_defaults(runner=_run_adjudicate)
+    cons = commands.add_parser("consolidate", help="fold duplicate lessons/findings into one record "
+                               "(reinforced_by), supersede corrected rules, record contradictions "
+                               "and derive each lesson's applies_when -- a DRY RUN unless --apply")
+    cons.add_argument("--apply", action="store_true", help="write the plan (default: print it)")
+    cons.add_argument("--revert", help="restore every field a previous run (its id) changed")
+    cons.add_argument("--limit", type=int, default=0, help="max verdict judgements this run")
+    cons.add_argument("--triggers", type=int, default=None, help="max applies_when derivations this run")
+    cons.add_argument("--lookups", type=int, default=0, help="max related.json lookups this run")
+    cons.add_argument("--agent")
+    cons.set_defaults(runner=_run_consolidate)

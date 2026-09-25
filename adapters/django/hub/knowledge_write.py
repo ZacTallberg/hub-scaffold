@@ -16,8 +16,16 @@ with `related_partial` declaring any basis that did not run, because "nothing si
 "the half that reads meaning did not run" are different facts.
 
 EXACT TEXT IS THE ONE CASE THAT NEEDS NO LATER READER: a rule identical (whitespace collapsed)
-to a live one returns that record as `duplicate_of` and writes nothing.
+to a live one returns that record as `duplicate_of` and MERGES the new filing into it -- its
+author, time and story appended to `reinforced_by` -- instead of minting a second record or
+dropping the story. A finding re-filed under the same title (or a live finding's normalised
+title) merges the same way, evidence kept. A board re-learns what it already knows (about one
+new lesson in eight restated an existing record on the instance this was lifted from); a
+restatement filed as a new record splits the evidence and the ranking, a merged one becomes the
+rule's weight. Near-duplicates are never merged here -- a correction is near-identical text --
+they are the consolidation pass's (hub_core.consolidate).
 """
+import datetime as _dt
 import hashlib
 import re
 
@@ -33,6 +41,10 @@ _LESSON_TAGS = ("lesson", "memory")
 
 def _norm(text) -> str:
     return " ".join(str(text or "").split())
+
+
+def _norm_title(text) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())
 
 
 def _resolve(ref) -> str:
@@ -72,6 +84,23 @@ def _identical_live_rule(state, rule, this_id=""):
     except Exception:                                          # noqa: BLE001 - never block a write
         return None
     return None
+
+
+#: How many restatements one record keeps (oldest dropped past it).
+REINFORCED_MAX = 200
+
+
+def _reinforce(ent, agent, why, as_kind):
+    """Append one restatement to a record's `reinforced_by` (never a second record).
+    Returns (resp, status) of the append."""
+    rows = [dict(r) for r in (ent.get("reinforced_by") or []) if isinstance(r, dict)]
+    rows.append({"agent": str(agent or "agent")[:80], "as": as_kind,
+                 "at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "why": str(why or "")[:600]})
+    kept = {k: v for k, v in ent.items() if k not in ("id", "version", "provenance")}
+    kept["reinforced_by"] = rows[-REINFORCED_MAX:]
+    return _append("note", ent["id"], kept, expected_version=ent.get("version"), agent=agent,
+                   idem=None, etype="note.created")
 
 
 def _report(where, exc):
@@ -169,11 +198,18 @@ def lesson(request, b):
     if not old and not in_place:
         dup = _identical_live_rule(state, rule)
         if dup is not None:
+            # MERGED, not dropped: the restatement's story joins the canonical rule.
+            rresp, rstatus = _reinforce(dup, agent, b.get("why") or "", "lesson")
+            merged = rstatus in (200, 201)
             return JsonResponse({"data": {
-                "id": dup.get("id"), "version": dup.get("version"), "duplicate_of": dup.get("id"),
-                "written": False,
-                "msg": "this exact rule is already on the board as %s; nothing was written. To "
-                       "change its story, write it again with supersedes=%s." % (dup["id"], dup["id"])}},
+                "id": dup.get("id"), "duplicate_of": dup.get("id"), "written": False,
+                "version": ((rresp.get("data") or {}).get("version") if merged else None)
+                or dup.get("version"),
+                "reinforced": merged,
+                "reinforced_count": len(dup.get("reinforced_by") or []) + (1 if merged else 0),
+                "msg": "this exact rule is already on the board as %s; your story was added to "
+                       "it (reinforced_by) instead of a second copy. To change the rule, write it "
+                       "with supersedes=%s." % (dup["id"], dup["id"])}},
                 status=200)
     if old and old not in (state.get("entities") or {}):
         return JsonResponse({"errors": [{"code": "no_such_record", "msg": old}]}, status=404)
@@ -257,6 +293,27 @@ def _record_writer(verb):
         state = hub_app.current_state()
         existing = (state.get("entities") or {}).get(eid)
         expected = b.get("expected_version")
+        if verb == "finding" and expected is None:
+            # A RESTATED FINDING JOINS THE ONE ON THE BOARD: the same title (so the same id),
+            # or a live finding whose normalised title is this one. Its evidence is kept.
+            target = existing
+            if target is None:
+                want = _norm_title(title)
+                target = next((e for e in (state.get("entities") or {}).values()
+                               if isinstance(e, dict) and e.get("type") == "note"
+                               and tag in [str(t).lower() for t in (e.get("tags") or [])]
+                               and not knowledge.is_dead(e, knowledge.superseded_ids(state))
+                               and _norm_title(e.get("title")) == want), None)
+            if target is not None:
+                rresp, rstatus = _reinforce(target, agent, body, "finding")
+                if rstatus not in (200, 201):
+                    return JsonResponse(rresp, status=rstatus)
+                return JsonResponse({"data": {
+                    "id": target["id"], "reinforced": True, "written": False,
+                    "version": (rresp.get("data") or {}).get("version"),
+                    "reinforced_count": len(target.get("reinforced_by") or []) + 1,
+                    "msg": "this finding is already on the board as %s; your evidence was added "
+                           "to it (reinforced_by) instead of a second record" % target["id"]}})
         if existing and expected is None:
             # Re-filing the same titled record is an UPDATE of it; a caller that did not read
             # first gets the precondition answer with the current version, never a silent twin.
