@@ -534,9 +534,12 @@ TOOLS = [
          "kind": {"type": "string"}, "q": {"type": "string"}}}},
     {"name": "board_guidance",
      "description": "The knowledge index ranked for what this agent is doing (focus), with the "
-                    "live block (inbox, unclaimed errors). memory_rank says how it was ordered.",
+                    "live block (inbox, unclaimed errors). memory_rank says how it was ordered; "
+                    "a meaning-ranked row carries its cosine (score) and restatement count "
+                    "(reinforced). peer: a peer message's text, answered as "
+                    "memory_rank.peer_similarity (its cosine to focus).",
      "inputSchema": {"type": "object", "properties": {
-         "agent": {"type": "string"}, "focus": {"type": "string"},
+         "agent": {"type": "string"}, "focus": {"type": "string"}, "peer": {"type": "string"},
          "memory_cap": {"type": "integer", "minimum": 1, "maximum": 200},
          "memory_full": {"type": "integer", "minimum": 0, "maximum": 40}}}},
     {"name": "retire_record",
@@ -1084,7 +1087,8 @@ def _call_tool(name, args, auth_headers):
         query = {k: args[k] for k in ("kind", "q") if args.get(k)}
         status, body = _seam("/hub/capabilities.json", query, auth_headers, method="get")
     elif name == "board_guidance":
-        query = {k: args[k] for k in ("agent", "focus", "memory_cap", "memory_full") if args.get(k) is not None}
+        query = {k: args[k] for k in ("agent", "focus", "peer", "memory_cap", "memory_full")
+                 if args.get(k) is not None}
         status, body = _seam("/hub/guidance.json", query, auth_headers, method="get")
     elif name == "app_feed":
         query = {"app": args["app"]}

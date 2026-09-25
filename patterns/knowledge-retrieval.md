@@ -24,7 +24,10 @@ similarity gate at the door is the wrong shape: a correction is near-identical t
 definition, so the gate is optimally shaped to reject exactly the writes that fix a wrong rule.
 The write lands with `related` (what it may duplicate or correct, with the shared terms that
 drove the match) and `related_partial` (which basis did not run). An identical live rule is the
-one case needing no reader: it returns `duplicate_of` and writes nothing.
+one case needing no reader: it returns `duplicate_of` and is MERGED into that record — the new
+filing's author, time and story go onto its `reinforced_by` (a finding re-filed under a live
+finding's title merges the same way, evidence kept). A restatement filed as a new record splits
+the evidence and the ranking; a merged one becomes the rule's weight.
 
 `python -m hub_core.client adjudicate` settles the tags where a model is reachable: rules first
 (identical text → duplicate, a non-rule match → other-kind, a retired target → target-retired),
@@ -32,6 +35,25 @@ then an OpenAI-compatible chat model (`HUB_JUDGE_URL`, `HUB_JUDGE_MODEL`, `HUB_J
 duplicate / correction / contradiction / unrelated with one sentence of reason. It never guesses
 (an unparseable reply leaves the entry open) and exits 2 when there is judging to do and no
 model, so a scheduled pass that settles nothing is loud. It writes back through the served API.
+
+`python -m hub_core.client consolidate` is the half that ACTS on overlaps. For every live lesson
+and finding it asks the hub's `related.json` for neighbours that stand out for this corpus, has
+the judge model read each pair (duplicate / correction / contradiction / related / unrelated,
+and which record a reader should be given; cached by the hash of both texts), and plans: a
+duplicate cluster folds into ONE canonical lesson (foundational first, then the oldest) that
+carries every other filing in `reinforced_by`, the folded records superseded with a pointer; a
+correction supersedes the rule it corrects; a contradiction is recorded on the lesson for a
+person; a cluster over five is reported, never folded. It also derives each lesson's
+`applies_when` — the literal error text, command fragments, paths and systems whose appearance
+means THAT rule applies now, for a tool-time hook to match on — and prints a per-week re-learn
+reading (lessons that restated an older record). It is a DRY RUN unless `--apply`; every write
+goes through the served API and logs the prior value of every field it changes, so
+`--revert <run>` restores them.
+
+`python tools/knowledge_use.py [--hours 24]` measures whether delivered knowledge is USED: of
+the records a `<hub-knowledge>` block delivered in a session, how many the agent later named in
+its own replies or tool calls (a floor, stated as one), and how many prompts carried rows, an
+empty block, or none.
 
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
@@ -89,7 +111,16 @@ the first 400 characters of the prompt), prints the rows the session does not al
 (a per-session receipt in `HUB_CLIENT_STATE_DIR`, reset on session start), names the relevant
 rows it already holds in one line, and keeps the whole output under 9,500 characters — rows that
 did not fit are written to a pack file whose path is printed, and only rows that rendered become
-receipt keys. An unreachable board prints one marked line and exits 0.
+receipt keys. When the ranking is by MEANING, each row carries its cosine (`score`) and only
+rows at or above `HUB_PROMPT_RELEVANCE_CUT` (0.48) are delivered, at most
+`HUB_PROMPT_RELEVANCE_MAX` (6), never padded: a budget filled with whatever ranked next is read
+by nobody. A prompt whose focus is the one the session's last memory block was ranked for gets
+no memory rows (it would re-rank the same query); a new focus, a session start or a compaction
+does. `guidance.json?peer=<text>` answers `memory_rank.peer_similarity` (the cosine between a
+peer message and the focus) for a client deciding whether a relayed message is a new subject.
+Records attached to an EVENT — a task start, a problem claim, `doctor`, a CI problem in the
+inbox — ride those responses as `knowledge` (at most three, above `HUB_EVENT_KNOWLEDGE_CUT`), and
+the client prints them. An unreachable board prints one marked line and exits 0.
 
 A machine that wants the whole corpus locally (to rank offline, or to feed another tool) mirrors
 it with `python -m hub_core.client knowledge-sync --out <file>`, which pages

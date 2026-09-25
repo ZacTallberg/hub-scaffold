@@ -224,9 +224,11 @@ def memory_rows(state) -> list:
                      "verified_as_of": ent.get("verified_as_of") or "",
                      "verify": str(ent.get("verify") or "")[:200],
                      "rule": rule, "why": why,
+                     # How many later filings restated it (merge-on-write): a relevance boost.
+                     "reinforced": len(ent.get("reinforced_by") or []),
                      "updated": prov.get("updated_at") or ""})
     rows.sort(key=lambda r: r["updated"], reverse=True)
-    rows.sort(key=lambda r: r["tier"] != "foundational")
+    rows.sort(key=lambda r: (r["tier"] != "foundational", -min(int(r.get("reinforced") or 0), 5)))
     return rows
 
 
