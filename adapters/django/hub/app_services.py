@@ -10,8 +10,11 @@ TRUST, route by route:
                                   open them) -- no board record, no identity.
 * /hub/app-feed.json              an ordinary board READ, under the same boundary as every other
                                   /hub read (public unless the adopter puts reads behind auth).
-* /hub/api/component-props        WRITE, scope component:configure. Changes what EVERY person on
-                                  one app sees, so it is an operator credential, not a browser.
+* /hub/api/component-props        WRITE. Changes what EVERY person on one app sees, so it is named
+                                  exactly two ways: a credential with scope component:configure,
+                                  or the same-origin, CSRF-checked browser of a person the
+                                  adopter's HUB_COMPONENT_EDITOR predicate admits for THAT app
+                                  (the banner's Component settings box). Everyone else: 404.
 * /hub/api/profile                Per-person state, named exactly two ways. (1) An app's SERVER
                                   with its credential (GET profile:read, POST profile:write) and
                                   ?person= for someone it has signed in: the hub authenticates the
@@ -96,20 +99,41 @@ def component_props(request, slug):
     if caller:
         components.note_adopter(hub_app.HUB_DIR, caller, slug)
     record = components.get_record(hub_app.HUB_DIR, slug)
-    response = JsonResponse({"ok": True, "app": slug, "props": record["props"],
-                             "schema": components.schema(),
-                             "updated_at": record["updated_at"]})
+    editable = _may_configure(request, slug)
+    body = {"ok": True, "app": slug, "props": record["props"], "schema": components.schema(),
+            "updated_at": record["updated_at"],
+            # Drives whether the banner OFFERS its editor. Offering is courtesy; the POST
+            # re-decides, so a page that lies about this gains nothing.
+            "can_edit": editable}
+    if editable:
+        # WHO changed it is shown only to someone who may change it: the open answer is
+        # presentation, and a name is not.
+        body.update(updated_by=record["updated_by"], history=record["history"][-5:])
+    response = JsonResponse(body)
     # Revalidated on every page load: a change must reach the app's next page.
     response["Cache-Control"] = "no-cache"
     return response
 
 
-@writer(scope="component:configure")
-def set_component_props(request, b):
-    """POST /hub/api/component-props {app, props: {component: {key: value}}} -- REPLACE one
-    app's component properties (a key left out returns to its default). Refused keys are
-    reported, never silently dropped."""
-    slug = str(b.get("app") or "").strip().lower()
+def _may_configure(request, slug: str) -> bool:
+    """May THIS BROWSER change `slug`'s component properties? The adopter answers, through
+    ``HUB_COMPONENT_EDITOR = "myproject.auth.may_configure_components"`` -- a callable
+    ``(request, slug) -> bool`` behind its own sign-in (typically: the person is a super admin
+    of that app). Unset, failing to import, raising, or answering anything but True: NO. A
+    property changes what EVERY person on the app sees, so the failure direction that matters
+    is granting too much, and an unanswered question is a refusal."""
+    path = getattr(settings, "HUB_COMPONENT_EDITOR", None)
+    if not path or not viewers.person(request):
+        return False
+    try:
+        check = import_string(path) if isinstance(path, str) else path
+        return check(request, slug) is True
+    except Exception:                                        # noqa: BLE001 -- fail closed
+        return False
+
+
+def _props_answer(slug, b, actor):
+    """The one write both paths make: validate, replace, report what was refused."""
     if not components.SLUG_RE.fullmatch(slug):
         return JsonResponse({"errors": [{"code": "need_app",
             "msg": "name the app by its slug ([a-z0-9-], starting with a letter or digit)"}]},
@@ -118,13 +142,69 @@ def set_component_props(request, b):
         return JsonResponse({"errors": [{"code": "need_props",
             "msg": "send props as {component: {key: value}}; GET /hub/components/props/<slug>.json "
                    "shows the schema"}]}, status=400)
-    actor = request.hub_auth.subject if request.hub_auth.mode == "scoped-agent" else \
-        str(b.get("agent") or request.hub_auth.subject)
     record, refused = components.set_props(hub_app.HUB_DIR, slug, b["props"], actor)
-    return JsonResponse({"data": {"app": slug, "props": record["props"],
-                                  "updated_at": record["updated_at"],
-                                  "updated_by": record["updated_by"],
-                                  "history": record["history"][-5:], "refused": refused}})
+    return _no_store(JsonResponse({"data": {"app": slug, "props": record["props"],
+                                            "updated_at": record["updated_at"],
+                                            "updated_by": record["updated_by"],
+                                            "history": record["history"][-5:],
+                                            "refused": refused}}))
+
+
+#: The largest properties body the browser path reads: every field at its cap, with room.
+_PROPS_MAX_BODY = 65_536
+
+
+@writer(scope="component:configure")
+def _component_props_for_agent(request, b):
+    """The token path: an operator's agent, a script, the MCP tool."""
+    slug = str(b.get("app") or "").strip().lower()
+    actor = request.hub_auth.subject if request.hub_auth.mode == "scoped-agent" else (
+        str(b.get("agent") or request.hub_auth.subject))
+    return _props_answer(slug, b, actor)
+
+
+@csrf_protect
+def _component_props_for_browser(request, who):
+    """The browser path: the banner's Component settings box, same origin, CSRF-checked, for
+    a person the adopter's HUB_COMPONENT_EDITOR admits for THIS app. Attributed to them."""
+    if len(request.body or b"") > _PROPS_MAX_BODY:
+        return JsonResponse({"errors": [{"code": "too_large", "max": _PROPS_MAX_BODY}]},
+                            status=413)
+    try:
+        b = json.loads((request.body or b"").decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError):
+        b = None
+    if not isinstance(b, dict):
+        return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+    slug = str(b.get("app") or "").strip().lower()
+    if not _may_configure(request, slug):
+        # Said plainly, never a save that silently does nothing.
+        return _no_store(JsonResponse({"errors": [{"code": "not_an_editor",
+            "msg": "only someone this hub's HUB_COMPONENT_EDITOR admits for %s may change "
+                   "its component properties" % (slug or "this app")}]}, status=403))
+    return _props_answer(slug, b, who)
+
+
+@csrf_exempt            # the browser half re-applies CSRF itself; the agent half is token-gated
+def set_component_props(request):
+    """POST /hub/api/component-props {app, props: {component: {key: value}}} -- REPLACE one
+    app's component properties (a key left out returns to its default). Refused keys are
+    reported, never silently dropped. Two callers only: a credential with
+    component:configure, or the signed-in browser of a person HUB_COMPONENT_EDITOR admits
+    for that app. Everyone else gets the plain 404 of an unknown route."""
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if request.headers.get("X-Agent-Token") or request.headers.get("X-Write-Token"):
+        return _component_props_for_agent(request)
+    who = viewers.person(request)
+    if not who:
+        return HttpResponse("Not Found", status=404, content_type="text/plain")
+    return _component_props_for_browser(request, who)
+
+
+set_component_props._hub_token_gated = True
+set_component_props._hub_origin_gated = True      # the browser half is @csrf_protect
+set_component_props._hub_required_scope = "component:configure"
 
 
 # ---------------------------------------------------------------- one app's slice

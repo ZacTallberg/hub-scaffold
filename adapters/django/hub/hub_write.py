@@ -2017,8 +2017,12 @@ def ask(request, b):
     eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
     # `review: true` marks a HUMAN GATE: delivered like any question, but tagged so no
     # unattended session may take it (the responder skips `review`; its charter forbids it).
+    # `synthetic: true` marks a SELF-TEST (the responder canary): the responder, which reads
+    # with ?include=synthetic, sees it; no person's inbox or notifier ever does.
     tags = (["question", "open"] + (["human-only"] if b.get("human_only") else [])
-            + (["review"] if b.get("review") is True else []))
+            + (["review"] if b.get("review") is True else [])
+            + (["synthetic"] if b.get("synthetic") is True and not b.get("human_only")
+               and b.get("review") is not True else []))
     # The question is stored WHOLE. It used to be cut at 300 characters with no marker, so
     # the operator answered the first half of a question and the asker never learned why.
     payload = {"type": "note", "category": "context", "title": text,

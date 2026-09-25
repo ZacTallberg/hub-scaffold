@@ -147,3 +147,8 @@ HUB_APPS = [
     {"slug": "timesheets", "name": "Timesheets", "url": ""},
 ]
 HUB_REACH = "example_site.demo.reach"
+# Who may change an app's component properties from the banner's Component settings box: an
+# adopter callable (request, slug) -> bool. Unset means nobody in a browser (a credential with
+# component:configure still can). The example admits the demo roster's super admins.
+HUB_COMPONENT_EDITOR = os.environ.get("HUB_COMPONENT_EDITOR") or (
+    "example_site.demo.may_configure_components" if DEBUG else None)

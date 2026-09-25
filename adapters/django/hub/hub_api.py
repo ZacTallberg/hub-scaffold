@@ -431,6 +431,8 @@ def _attention(state, audit, inflight, adher=None, deliv=None, asks=None, error_
     # A question a machine has CLAIMED is waiting, not unclaimed: it drops down the rail and names
     # who holds it, instead of reading as "nobody has looked" (hub_core.item_claims).
     for q in (asks or []):
+        if q.get("synthetic"):
+            continue            # the responder canary: judged by its own verdict, not a person
         held = q.get("claimed_by")
         if held:
             add(4, "question-in-flight",
@@ -2207,6 +2209,8 @@ def questions_json(request):
             "answer_at": answered_at,
             "acked": acked,
             "asked_epoch": asked_epoch,
+            # A self-test ask (the responder canary): on the record, never delivered to people.
+            "synthetic": inbox_core.SYNTHETIC_TAG in tags,
         }
         if reply:
             replied = _epoch(answered_at)
@@ -2302,7 +2306,13 @@ def _inbox_kwargs(request, machine, session):
         live = None
     return {"machine": machine, "session": session, "live": live,
             "human_gate": hub_app.human_gate(), "gate_satisfied": hub_app.gate_satisfied(),
-            "visible": _veil_visible(request)}
+            "visible": _veil_visible(request),
+            # Self-test asks reach only a reader that asks for them (the responder).
+            "synthetic": _inbox_kwargs_synthetic(request)}
+
+
+def _inbox_kwargs_synthetic(request) -> bool:
+    return "synthetic" in {p.strip().lower() for p in (request.GET.get("include") or "").split(",")}
 
 
 def _veil_visible(request):
@@ -2481,7 +2491,10 @@ def inbox_wait(request):
                                         int(time.time() // 60))
 
     payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn,
-                              signal_fn=signal_fn, key=(agent, machine, session, tier))
+                              signal_fn=signal_fn,
+                              # A synthetic-including reader folds a different set: never share it.
+                              key=(agent, machine, session, tier,
+                                   _inbox_kwargs_synthetic(request)))
     return JsonResponse({"data": payload,
                          "metadata": {"agent": agent, "operator": _operator_agent(),
                                       "session": session, "machine": machine,
