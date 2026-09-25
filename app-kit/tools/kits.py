@@ -3,7 +3,8 @@
 
     python app-kit/tools/kits.py record                  # re-derive app-kit/kits.json (fails closed)
     python app-kit/tools/kits.py list                    # every kit, its state and sha
-    python app-kit/tools/kits.py add <kit> <app-dir>     # vendor a kit, with provenance
+    python app-kit/tools/kits.py add <kit> <app-dir> [--slug budget_app]
+                                                         # vendor a kit, with provenance
     python app-kit/tools/kits.py status <app-dir>        # current / stale / edited / retired
 
 PROVENANCE IS A RECORD, NOT A MEMORY. Each kit is recorded in ``kits.json`` with a sha per file
@@ -25,6 +26,19 @@ fixed bug comes back), a manifest that no longer matches the files (run ``record
 kit (it names the replacement), and an app copy with local edits (they would be overwritten --
 ``--force`` keeps a backup). The swap is staged: the new copy is assembled beside the app, old
 entries are moved aside, and if anything fails the old copy is put back.
+
+SHARED-DATABASE MIGRATIONS ARE NAMED FROM THE APP'S SLUG. Django keys an applied migration by
+(app label, migration name), and every app built from a kit shares the kit's app label. Two apps
+on one database that ship the same ``0001_initial`` for that label look like ONE app to
+``migrate``: the second migrates cleanly and creates none of its tables -- a green deploy with a
+dead feature. A kit whose tables are already per-app (``"retarget_migrations": true`` in its
+``KIT.json``) therefore has its migration files renamed on ``add`` from ``NNNN_<name>`` to
+``NNNN_<slug>_<name>``, and every reference to them (``dependencies``, ``run_before``) rewritten
+in the same staged copy, so the graph can never point at a half-renamed name. The slug is
+``--slug``, else the one this app recorded before, else the app directory's name. The choice is
+RECORDED per kit and kept on every later ``add``: renaming migrations an app has already applied
+would make ``migrate`` create tables that exist, so a different ``--slug`` on a copy that was
+vendored under other names is refused, never applied.
 
 Stdlib only.
 """
@@ -53,6 +67,7 @@ DOCS = ("README.md", "REQUIRES.md", META)
 TEXT = {".py", ".html", ".css", ".js", ".md", ".json", ".txt"}
 ALLOWED_TOP = {"django", "__future__"}
 STATES = ("active", "retired")
+_MIGRATION = re.compile(r"^(?P<pkg>[^/]+(?:/[^/]+)*)/migrations/(?P<num>\d{4})_(?P<tail>\w+)\.py$")
 
 
 def file_sha(path: Path) -> str:
@@ -224,6 +239,7 @@ def record() -> int:
         files = kit_files(kit_dir)
         kits[kit] = {"state": meta.get("state"), "replaced_by": meta.get("replaced_by", ""),
                      "summary": meta.get("summary", ""), "installs": installs,
+                     "retarget_migrations": bool(meta.get("retarget_migrations")),
                      "kit_sha": kit_sha(files), "files": files}
     if not kits:
         print(f"RECORD_REFUSED: no kits found under {KITS_DIR} -- a record of nothing is not a "
@@ -279,17 +295,65 @@ def read_provenance(app: Path) -> dict:
 
 
 def installed_files(app: Path, entry: dict) -> dict:
-    """The app's copy of each recorded file, hashed the same way (missing -> None)."""
+    """``{kit path: (sha of the app's copy or None, the sha that copy was written with)}``.
+
+    A retargeted file lives at its RENAMED path and was written with rewritten references, so
+    both come from the entry's own ``renamed`` / ``installed`` record, never re-derived."""
+    renamed, written = entry.get("renamed") or {}, entry.get("installed") or {}
     out = {}
-    for rel in entry["files"]:
+    for rel, sha in entry["files"].items():
         if rel in DOCS:
             continue
-        p = app / rel
-        out[rel] = file_sha(p) if p.is_file() else None
+        where = renamed.get(rel, rel)
+        p = app / where
+        out[rel] = (file_sha(p) if p.is_file() else None, written.get(where, sha))
     return out
 
 
-def add(kit: str, app: Path, *, anyway: bool, force: bool) -> int:
+def slug_of(text: str) -> str:
+    """A migration-name-safe slug: lower case, [a-z0-9_], never empty, never digit-first."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_")
+    return slug if slug and not slug[0].isdigit() else f"app_{slug}".rstrip("_")
+
+
+def retarget_plan(files: list, slug: str) -> dict:
+    """``{kit path: renamed path}`` for every migration module in ``files``. Idempotent: a name
+    already carrying the slug is left as it is, so a re-add never renames anything twice."""
+    out = {}
+    for rel in files:
+        m = _MIGRATION.match(rel)
+        if not m:
+            continue
+        tail = m["tail"] if m["tail"].startswith(slug + "_") else f"{slug}_{m['tail']}"
+        if tail != m["tail"]:
+            out[rel] = f"{m['pkg']}/migrations/{m['num']}_{tail}.py"
+    return out
+
+
+def retarget_stage(stage: Path, plan: dict) -> list:
+    """Rename the planned migration files inside ``stage`` and rewrite every quoted reference
+    to their module names in the staged ``.py`` files. Returns one line per change."""
+    names = {Path(old).stem: Path(new).stem for old, new in plan.items()}
+    log = []
+    for old, new in sorted(plan.items()):
+        (stage / old).rename(stage / new)
+        log.append(f"{old} -> {Path(new).name}")
+    if not names:
+        return log
+    # Whole quoted names only, longest first: '0001_initial' never matches inside
+    # '0001_initial_extra', and nothing outside a string literal is touched.
+    pattern = re.compile(r"""(["'])(%s)\1""" % "|".join(
+        re.escape(n) for n in sorted(names, key=len, reverse=True)))
+    for path in sorted(stage.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        new_text, n = pattern.subn(lambda m: m[1] + names[m[2]] + m[1], text)
+        if n:
+            path.write_text(new_text, encoding="utf-8", newline="")
+            log.append(f"{path.relative_to(stage).as_posix()}: {n} reference(s) rewritten")
+    return log
+
+
+def add(kit: str, app: Path, *, anyway: bool, force: bool, slug: str = "") -> int:
     try:
         lag = refuse_if_behind(KIT_ROOT, anyway=anyway)
     except StaleCheckout as exc:
@@ -315,8 +379,8 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool) -> int:
     prov = read_provenance(app)
     previous = prov["kits"].get(kit)
     if previous:
-        edited = [rel for rel, sha in installed_files(app, previous).items()
-                  if sha is not None and sha != previous["files"].get(rel)]
+        edited = [rel for rel, (sha, wrote) in installed_files(app, previous).items()
+                  if sha is not None and sha != wrote]
         if edited and not force:
             print(f"ADD_REFUSED: this app has edited {len(edited)} file(s) of its {kit} copy -- an "
                   "update would overwrite them:")
@@ -325,6 +389,28 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool) -> int:
             print("Move the change into the kit (so every app gets it), or pass --force to "
                   "replace the copy and keep a backup of the edited one.")
             return 1
+
+    # The migration names this copy gets. A copy vendored before keeps the names it was
+    # vendored with (its database may already record them); only a first add chooses.
+    plan: dict = {}
+    chosen = ""
+    if rec.get("retarget_migrations"):
+        wanted = slug_of(slug) if slug else ""
+        if previous is not None:
+            chosen = previous.get("migration_slug", "")
+            if wanted and wanted != chosen:
+                print(f"ADD_REFUSED: this app's {kit} migrations were vendored under "
+                      + (f"the slug {chosen!r}" if chosen else "their original names")
+                      + f", not {wanted!r}. If its database has applied them, renaming them makes "
+                      "`migrate` create tables that already exist. Re-add without --slug to keep "
+                      "the recorded names; changing them is a hand migration of the "
+                      "django_migrations rows, done by a person.")
+                return 1
+        else:
+            chosen = wanted or prov.get("slug") or slug_of(app.resolve().name)
+        if chosen:
+            plan = retarget_plan([r for r in rec["files"] if r not in DOCS
+                                  and r.split("/", 1)[0] in rec["installs"]], chosen)
 
     stage = app / ".app-kit-staging"
     backup = app / ".app-kit-backup" / f"{kit}-{dt.datetime.now():%Y%m%d%H%M%S}"
@@ -343,6 +429,7 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool) -> int:
                 shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             else:
                 shutil.copy2(src, dst)
+        retargeted = retarget_stage(stage, plan)
         for entry in rec["installs"]:
             target = app / entry
             if target.exists():
@@ -370,6 +457,16 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool) -> int:
     files = {rel: sha for rel, sha in rec["files"].items() if rel not in DOCS}
     prov["kits"][kit] = {"kit_sha": rec["kit_sha"], "source_commit": source_commit(),
                          "added_at": dt.date.today().isoformat(), "files": files}
+    if rec.get("retarget_migrations"):
+        # What was written where, and with which bytes, so `status` compares the app's copy
+        # with what add actually put there rather than with the kit's un-renamed file.
+        rewritten = [r for r in files if (app / plan.get(r, r)).is_file()
+                     and file_sha(app / plan.get(r, r)) != files[r]]
+        prov["kits"][kit].update(
+            migration_slug=chosen, renamed=plan,
+            installed={plan.get(r, r): file_sha(app / plan.get(r, r)) for r in sorted(rewritten)})
+        if chosen:
+            prov["slug"] = chosen
     (app / PROVENANCE).write_text(json.dumps(prov, indent=1, sort_keys=True) + "\n",
                                   encoding="utf-8")
     kept = ""
@@ -382,6 +479,13 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool) -> int:
             shutil.rmtree(backup, ignore_errors=True)
     print(f"ADDED {kit} {rec['kit_sha'][:12]} -> {app} ({', '.join(rec['installs'])}){kept}"
           + (f"  [app-kit is {lag} behind its upstream; --anyway]" if lag else ""))
+    if retargeted:
+        print(f"Migrations named from the slug {chosen!r}, so a shared database keeps them apart:")
+        for line in retargeted:
+            print(f"  {line}")
+    elif rec.get("retarget_migrations") and not chosen:
+        print("Migrations keep their original names: this copy was vendored under them before, "
+              "and its database may already record them.")
     req = kit_dir / "REQUIRES.md"
     if req.is_file():
         print(f"\nWhat this app must now supply ({kit}/REQUIRES.md):\n")
@@ -398,8 +502,8 @@ def status(app: Path) -> int:
     bad = 0
     for kit, entry in sorted(prov["kits"].items()):
         rec = manifest.get(kit)
-        edited = [rel for rel, sha in installed_files(app, entry).items()
-                  if sha is None or sha != entry["files"].get(rel)]
+        edited = [rel for rel, (sha, wrote) in installed_files(app, entry).items()
+                  if sha is None or sha != wrote]
         if rec is None:
             state = "missing (the app-kit no longer ships this kit)"
         elif rec["state"] == "retired":
@@ -412,6 +516,8 @@ def status(app: Path) -> int:
             changed = [r for r in changed if r not in DOCS]
             state = f"stale ({len(changed)} kit file(s) changed since {entry.get('added_at', '?')})"
         bad += state != "current" or bool(edited)
+        where = entry.get("renamed") or {}
+        edited = [where.get(rel, rel) for rel in edited]      # the app's own path
         print(f"  {kit:<16} {state}" + (f"; EDITED here: {', '.join(edited)}" if edited else ""))
     if note:
         print(" " + note)
@@ -428,6 +534,9 @@ def main(argv=None) -> int:
     a_add.add_argument("app", type=Path)
     a_add.add_argument("--anyway", action="store_true", help="vendor from a checkout that is behind")
     a_add.add_argument("--force", action="store_true", help="replace an edited copy (kept as a backup)")
+    a_add.add_argument("--slug", default="",
+                       help="the app's slug, for kits whose migrations are named per app "
+                            "(default: the slug recorded before, else the directory name)")
     a_status = sub.add_parser("status")
     a_status.add_argument("app", type=Path)
     a = ap.parse_args(argv)
@@ -439,7 +548,7 @@ def main(argv=None) -> int:
             print(f"  {name:<16} {k['state']:<8}{extra:<14} {k['kit_sha'][:12]}  {k['summary']}")
         return 0
     if a.cmd == "add":
-        return add(a.kit, a.app, anyway=a.anyway, force=a.force)
+        return add(a.kit, a.app, anyway=a.anyway, force=a.force, slug=a.slug)
     return status(a.app)
 
 

@@ -40,7 +40,10 @@ produce the receipts.
    ```
 
    Each `add` prints the kit's `REQUIRES.md` — the seams your app must supply — and records the
-   kit's sha in the app's `.app-kit.json`.
+   kit's sha in the app's `.app-kit.json`. A kit whose migrations must not collide with another
+   app's on a shared database (the gate) has them named from the app's slug on the way in —
+   `--slug budget_app`, defaulting to the directory name — and the choice is kept on every later
+   `add` (see `patterns/vendored-app-kits.md`).
 2. **Configure** with `appkit_settings.configure(globals(), BASE_DIR, app_module=...,
    root_urlconf=..., gate_table_prefix="your_app")`, and mount `app_gate.urls`, `app_health.urls`
    and `*appkit_settings.static_urlpatterns()`.
