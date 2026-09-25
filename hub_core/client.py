@@ -2009,78 +2009,24 @@ def _run_handoff(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
-def _publish_one(base: Any, arguments: argparse.Namespace, lease: dict[str, Any],
-                 work: str) -> dict[str, Any]:
-    """Fetch the bundle under the lease, rebase onto the current branch, push (never forced),
-    and report. A clone or push this machine is refused RELEASES the hand-off ("not me") so a
-    publisher that can push takes it; a conflict FAILS it with the conflicting paths."""
-    import base64
-    hid, token, fence = lease["id"], lease["token"], lease["fence"]
-    branch = lease.get("branch") or "main"
-    machine = arguments.machine or os.environ.get("HUB_MACHINE", "")
-    agent = _agent(arguments)
-
-    def report(outcome: str, **fields: Any) -> dict[str, Any]:
-        payload = {"agent": agent, "id": hid, "token": token, "fence": fence,
-                   "outcome": outcome, "machine": machine}
-        payload.update({k: v for k, v in fields.items() if v})
-        return _post(base, "handoff/result", payload)
-
-    got = (_post(base, "handoff/bundle", {"agent": agent, "id": hid, "token": token,
-                                          "fence": fence}).get("data") or {})
-    data = base64.b64decode(got.get("bundle_b64") or "")
-    bundle = os.path.join(work, "%s.bundle" % hid)
-    with open(bundle, "wb") as fh:
-        fh.write(data)
-    repo = os.path.join(work, "repo")
-    remote = lease.get("remote") or ""
-    code, _o, err = _git(["clone", "-q", "--no-tags", "--branch", branch, remote, repo], work, 900)
-    if code:
-        return report("released", reason="this publisher could not clone %s: %s"
-                      % (lease.get("project"), _git_refusal(err, "rc %s" % code)))
-    ident: list[str] = []
-    _c, email, _e = _git(["config", "user.email"], repo, 15)
-    if not email:
-        ident = ["-c", "user.name=%s" % agent, "-c", "user.email=%s@users.noreply.invalid" % agent]
-    code, _o, err = _git(["fetch", "-q", bundle, "HEAD"], repo, 300)
-    if code:
-        return report("failed", reason="the bundle would not fetch: %s"
-                      % _git_refusal(err, "rc %s" % code))
-    _c, fetched, _e = _git(["rev-parse", "FETCH_HEAD"], repo, 15)
-    if fetched.lower() != str(lease.get("head") or "").lower():
-        return report("failed", reason="the bundle carries %s, not the recorded head %s"
-                      % (fetched[:12], str(lease.get("head"))[:12]))
-    _git(["checkout", "-q", "-B", "handoff", "FETCH_HEAD"], repo, 60)
-    for attempt in (1, 2):
-        code, _o, err = _git([*ident, "rebase", "-q", "origin/" + branch], repo, 300)
-        if code:
-            _c, names, _e = _git(["diff", "--name-only", "--diff-filter=U"], repo, 30)
-            _git(["rebase", "--abort"], repo, 60)
-            return report("failed", reason="the commits do not rebase cleanly onto the current %s"
-                          % branch, conflicts=[n for n in names.splitlines() if n][:50])
-        code, _o, err = _git(["push", "-q", "origin", "HEAD:refs/heads/" + branch], repo, 600)
-        if not code:
-            break
-        refusal = _git_refusal(err, "rc %s" % code)
-        raced = (re.search(r"(?i)non-fast-forward|fetch first|rejected", err)
-                 and not re.search(r"(?i)denied|permission|authenticat", err))
-        if attempt == 1 and raced:
-            _git(["fetch", "-q", "origin", branch], repo, 300)   # raced another push: once more
-            continue
-        return report("released", reason="this publisher's push was refused: %s" % refusal)
-    _c, sha, _e = _git(["rev-parse", "HEAD"], repo, 15)
-    return report("published", pushed_sha=sha.lower(),
-                  note="rebased onto %s and pushed by %s" % (branch, agent))
-
-
 def _run_publish_handoff(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     """Take the oldest open hand-off (or --id), publish it with THIS machine's rights, report.
-    One per call; run it again (or on a schedule) to drain the queue."""
-    import shutil
-    import tempfile
+    One per call by hand; the unattended launcher's scheduled tick runs the SAME publisher
+    (`hub_core.unattended.publisher`) on every armed machine that proved it can push, so the queue
+    drains without anyone calling this.
+
+    ONE implementation: when this machine names the hosts it may push to (HUB_PUBLISH_HOSTS), the
+    push URL is BUILT here from the record's project and a transport this machine already uses,
+    never taken from the record, and the publisher's rebase / never-forced push / read-back runs
+    (publisher.publish_one). Without HUB_PUBLISH_HOSTS the record's own remote is used -- the hub
+    already refused any remote outside HUB_HANDOFF_GIT_HOSTS at upload -- by the same code path
+    with that URL."""
+    import time as _time
+    from .unattended import publisher
     machine = arguments.machine or os.environ.get("HUB_MACHINE", "")
     if not machine:
         raise ValueError("publish-handoff needs --machine (or HUB_MACHINE): a lease is per machine")
+    os.environ.setdefault("HUB_MACHINE", machine)
     payload: dict[str, Any] = {"agent": _agent(arguments), "machine": machine}
     if arguments.id:
         payload["id"] = arguments.id
@@ -2089,18 +2035,23 @@ def _run_publish_handoff(base: Any, arguments: argparse.Namespace) -> dict[str, 
     lease = _post(base, "handoff/claim", payload).get("data")
     if not lease:
         return {"data": None, "msg": "no hand-off is waiting"}
-    work = tempfile.mkdtemp(prefix="hub-handoff-")
+    if publisher.hosts():
+        ok, url, why = publisher.can_push(str(lease.get("project") or ""),
+                                          arguments.workspace or os.getcwd())
+        if not ok:
+            publisher._result(lease, "released", reason="this machine cannot push %s: %s"
+                              % (lease.get("project"), why))
+            return {"data": {"id": lease["id"], "outcome": "released", "why": why}}
+    else:
+        url = lease.get("remote") or ""
+    deadline = _time.time() + publisher.PUBLISH_MAX_RUN_S - 30
     try:
-        return _publish_one(base, arguments, lease, work)
-    except HubRefused:
-        raise
+        outcome = publisher.publish_one(lease, url, deadline)
     except Exception as error:                               # noqa: BLE001 - report, never strand
-        return _post(base, "handoff/result", {
-            "agent": _agent(arguments), "id": lease["id"], "token": lease["token"],
-            "fence": lease["fence"], "outcome": "released", "machine": machine,
-            "reason": "the publisher crashed: %s: %s" % (type(error).__name__, str(error)[:300])})
-    finally:
-        shutil.rmtree(work, ignore_errors=True)            # only the scratch directory WE made
+        publisher._result(lease, "released", reason="the publisher crashed: %s: %s"
+                          % (type(error).__name__, str(error)[:300]))
+        outcome = "released"
+    return {"data": {"id": lease["id"], "task": lease.get("task"), "outcome": outcome}}
 
 
 def _run_handoffs(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -3650,6 +3601,8 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--id", help="one hand-off (h-<12 hex>) instead of the oldest")
     publish.add_argument("--machine", help="this publisher's machine (default HUB_MACHINE)")
     publish.add_argument("--ttl-s", dest="ttl_s", type=int, help="lease length (60-1800 s)")
+    publish.add_argument("--workspace", help="with HUB_PUBLISH_HOSTS: the directory whose checkouts "
+                         "name the transport to push over (default: the current directory)")
     publish.add_argument("--agent")
     publish.set_defaults(runner=_run_publish_handoff)
 

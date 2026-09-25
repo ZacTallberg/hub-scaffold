@@ -66,9 +66,29 @@ python -m hub_core.client handoffs [--status all]                               
   `GCM_INTERACTIVE=never` and ssh in batch mode, and decode git's output with replacement so a
   server banner in another encoding cannot swallow the line that names the refusal.
 
+## Who publishes, and how the queue drains
+
+There is ONE publisher implementation (`hub_core/unattended/publisher.py`) and two ways it runs:
+
+* **Scheduled (the loop).** Every armed unattended launcher runs the publisher on its scan tick
+  (`python -m hub_core.unattended scan`; `publish` runs one pass by hand). It acts only when the
+  machine names hosts it may push to (`HUB_PUBLISH_HOSTS`) and has PROVED it can push there -- a
+  `git push --dry-run` of a throwaway ref over SSH keys only, never a password, cached six hours
+  either way -- and then publishes at most one hand-off per tick as its own bounded process whose
+  tree is reaped. So a waiting hand-off is taken on the next tick of any machine that can push;
+  nobody has to call a verb.
+* **By hand.** `publish-handoff --machine <m>` runs the same `publish_one` once. With
+  `HUB_PUBLISH_HOSTS` set it builds the push URL itself (from the record's project and a transport
+  this machine already uses under `--workspace`); without it, it pushes to the record's remote,
+  which the hub already checked against `HUB_HANDOFF_GIT_HOSTS` at upload.
+
+Either way: rebase onto the branch (`HUB_PUBLISH_BRANCH` when the machine pins one, else the
+record's branch), push never forced (three rounds when the branch moves), READ the branch back
+before reporting `published`, release on an auth refusal, fail on a conflict with the paths.
+
 ## What the adopter wires
 
-Who publishes (a build machine, the operator's workstation, a scheduled `publish-handoff`
-loop), which credential carries `handoff:publish`, and the forge-side commit resolver
+Which machines publish (`HUB_PUBLISH_HOSTS` on an armed launcher, or a person running the verb),
+which credential carries `handoff:publish`, and the forge-side commit resolver
 (`HUB_COMMIT_RESOLVER`) that lets the hub verify a pushed sha. None of it runs until you set the
-hosts and start a publisher.
+hosts (`HUB_HANDOFF_GIT_HOSTS` on the hub) and a publisher exists.

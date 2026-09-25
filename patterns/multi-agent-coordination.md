@@ -68,6 +68,14 @@ was one push anybody could make.
 - Coordinate only with what is LIVE: a console editing the same files right now (a crossover names
   it) or a live claim on the same item. Tell them, split the work, keep going. A lease held by an
   ended or silent session is free.
+- "Silent" has one exact meaning, and it is the only case where quiet counts as evidence: a
+  machine that HEARTBEATS (its presence row carries a heartbeat stamp, so a daemon beats about
+  once a minute) and has made no request at all for `MACHINE_SILENT_S` (10 min) is GONE, and what
+  it holds is released at once. A machine with no heartbeat stamp never qualifies -- its quiet
+  proves nothing, and its holders stay unprovable until their clock runs out. The takeover is safe
+  because it never trusts the old holder again: the fencing token ROTATES, so a machine that wakes
+  up cannot complete over the new holder, and its next claim, step or finish is told `taken_over`
+  (`hub_core/liveness.py`; `HUB-API.md`, leases).
 - When you change an application somebody else was working on, leave a note on its task or message
   them with what you changed and why. That is courtesy, not permission.
 - What waits on a person is decided by BUSINESS IMPACT, never by authorship: the one approval the
