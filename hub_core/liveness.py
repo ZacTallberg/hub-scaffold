@@ -37,6 +37,18 @@ REPORTING_WINDOW_S < presence.SESSION_ACTIVE_S, so by the time a console drops o
 set because its machine went quiet, that machine has been silent for several reporting windows
 and the holder reads UNPROVABLE, not GONE.
 
+A BEATING MACHINE THAT WENT SILENT IS THE ONE EXCEPTION. A machine whose row carries a heartbeat
+stamp runs a daemon that beats every minute or so; when THAT machine has made no request at all
+for ``MACHINE_SILENT_S``, its silence is no longer "maybe a dropped beat" but positive evidence
+the machine is off, asleep or cut off -- and a lease it holds would otherwise lock the task until
+its own clock ran out (on the origin system a responder's machine went quiet a minute after its
+claim and the task stayed locked for more than three hours while the board already called the
+lease abandoned). Such a holder is GONE with ``machine_silent`` and released at once. It is safe
+because releasing never trusts the old holder again: the takeover rotates the fencing token, so
+a machine that wakes up cannot complete over the new holder, and its next claim/step/finish is
+told ``taken_over``. A machine with no heartbeat stamp (no daemon, only requests) never qualifies:
+its quiet is not evidence of anything.
+
 Framework-free and read-only: it reads the presence sidecar and never writes.
 """
 from __future__ import annotations
@@ -61,6 +73,10 @@ GONE_GRACE_S = 1800
 #: yet: a new console's first presence row can land minutes after its first claim, and a second
 #: console of the same agent renewing in that gap would take the token of work that just began.
 FRESH_LEASE_S = 600
+#: A machine that HEARTBEATS (its row carries heartbeat_at) and has made no request of any kind
+#: for this long is positively silent: what it holds is released (module docstring). Ten missed
+#: beats at the default one-minute interval.
+MACHINE_SILENT_S = 600
 
 
 def _norm_session(value) -> str:
@@ -75,10 +91,11 @@ class Roster:
     """A resolved answer to "who is on this board right now", with its own completeness."""
 
     __slots__ = ("live", "last_seen", "machine_of", "reporting", "silent", "readable", "at",
-                 "ended")
+                 "ended", "machine_last", "beating")
 
     def __init__(self, live=None, last_seen=None, machine_of=None, reporting=None,
-                 silent=None, readable=True, at=None, ended=None):
+                 silent=None, readable=True, at=None, ended=None, machine_last=None,
+                 beating=None):
         self.ended = {_norm_session(s) for s in (ended or ()) if _norm_session(s)}
         self.live = {_norm_session(s) for s in (live or ()) if _norm_session(s)} - self.ended
         self.last_seen = dict(last_seen or {})
@@ -87,6 +104,21 @@ class Roster:
         self.silent = {_norm_machine(m) for m in (silent or ()) if _norm_machine(m)}
         self.readable = bool(readable)
         self.at = float(at or time.time())
+        self.machine_last = {_norm_machine(m): float(v or 0) for m, v in (machine_last or {}).items()
+                             if _norm_machine(m)}
+        self.beating = {_norm_machine(m) for m in (beating or ()) if _norm_machine(m)}
+
+    def machine_silent_s(self, machine: str, now: float | None = None):
+        """Seconds since a HEARTBEATING machine made any request, or None when that cannot be
+        established (unreadable roster, unknown machine, or a machine that never heartbeats).
+        None never releases anything: only positive evidence of a silent beacon does."""
+        mach = _norm_machine(machine)
+        if not self.readable or not mach or mach not in self.beating:
+            return None
+        last = self.machine_last.get(mach)
+        if not last:
+            return None
+        return max(0.0, (time.time() if now is None else now) - last)
 
     @property
     def partial(self) -> bool:
@@ -136,7 +168,8 @@ class Roster:
         return bool(sid) and sid in self.ended
 
     def as_dict(self) -> dict:
-        return {"live": len(self.live), "ended": len(self.ended), "reporting": sorted(self.reporting),
+        return {"live": len(self.live), "ended": len(self.ended), "beating": sorted(self.beating),
+                "reporting": sorted(self.reporting),
                 "silent": sorted(self.silent), "partial": self.partial,
                 "readable": self.readable}
 
@@ -151,6 +184,7 @@ def resolve(hub_dir, now: float | None = None) -> Roster:
     now = time.time() if now is None else now
     try:
         live, last_seen, machine_of, reporting, silent, ended = set(), {}, {}, set(), set(), set()
+        machine_last, beating = {}, set()
         for row in _presence.rows(hub_dir):
             machine = _norm_machine(row.get("machine"))
             stamp = max(_presence.epoch(row.get("heartbeat_at")),
@@ -158,6 +192,9 @@ def resolve(hub_dir, now: float | None = None) -> Roster:
                         _presence.epoch(row.get("last_seen")))
             if machine:
                 (reporting if stamp and now - stamp <= REPORTING_WINDOW_S else silent).add(machine)
+                machine_last[machine] = max(machine_last.get(machine, 0.0), stamp)
+                if _presence.epoch(row.get("heartbeat_at")):
+                    beating.add(machine)
             sessions = row.get("sessions") if isinstance(row.get("sessions"), dict) else {}
             for sid, data in sessions.items():
                 sid = _norm_session(sid)
@@ -179,7 +216,8 @@ def resolve(hub_dir, now: float | None = None) -> Roster:
     except Exception:                                        # noqa: BLE001 - never break a read
         return Roster(readable=False, at=now)
     return Roster(live=live, last_seen=last_seen, machine_of=machine_of,
-                  reporting=reporting, silent=silent, readable=True, at=now, ended=ended)
+                  reporting=reporting, silent=silent, readable=True, at=now, ended=ended,
+                  machine_last=machine_last, beating=beating)
 
 
 def verdict(roster, session: str, machine: str = "", floor: float = 0.0,
@@ -196,6 +234,14 @@ def verdict(roster, session: str, machine: str = "", floor: float = 0.0,
         return {"state": GONE, "gone_s": int(gone_s) if gone_s is not None else None,
                 "frees_in_s": 0, "released": True, "ended": True}
     state, gone_s = roster.gone_for(session, machine, floor=floor, now=now)
+    if state == UNPROVABLE:
+        # A beating machine silent past MACHINE_SILENT_S: positive evidence, released at once
+        # (module docstring). The console itself cannot be seen, so its machine speaks for it.
+        mach = _norm_machine(machine) or roster.machine_of.get(_norm_session(session), "")
+        quiet = roster.machine_silent_s(mach, now)
+        if quiet is not None and quiet >= MACHINE_SILENT_S:
+            return {"state": GONE, "gone_s": int(quiet), "frees_in_s": 0, "released": True,
+                    "machine_silent": True}
     if state != GONE or gone_s is None:
         return {"state": state, "gone_s": None, "frees_in_s": None, "released": False}
     left = max(0, int(grace_s - gone_s))

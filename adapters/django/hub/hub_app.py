@@ -847,15 +847,17 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
         now = _time.time()
         cur = _read_lease(task_id)
         took_over = None
-        if (cur and cur.get("expires", 0) > now and cur.get("session")
-                and str(cur.get("session")) != session):
-            # A lease whose console is provably GONE past its grace is released here exactly as
+        if (cur and cur.get("expires", 0) > now and (cur.get("session") or cur.get("machine"))
+                and (str(cur.get("session") or "") != session or cur.get("agent") != agent)):
+            # A lease whose console is provably GONE past its grace -- or whose heartbeating
+            # machine has gone silent (liveness.MACHINE_SILENT_S) -- is released here exactly as
             # the sweep would release it, so a claim never waits on a sweep that has not run yet.
             v = lease_verdict(cur, now=now)
             if v["released"]:
                 took_over = {"session": cur.get("session"), "machine": cur.get("machine"),
                              "agent": cur.get("agent"), "claimed": cur.get("claimed"),
                              "gone_s": v.get("gone_s"), "ended": bool(v.get("ended")),
+                             "machine_silent": bool(v.get("machine_silent")),
                              "at": now}
                 cur = None
         if cur and cur.get("expires", 0) > now:
@@ -980,6 +982,8 @@ def taken_over_notice(lease, agent, session="") -> dict:
     if not (same_console or same_agent):
         return {}
     why = ("the console holding it had ended" if prev.get("ended") else
+           "its machine had been silent %s s" % (prev.get("gone_s") or "?")
+           if prev.get("machine_silent") else
            "its console was %s" % (prev.get("state") or "gone"))
     return {"reason": "taken_over", "held_by": lease.get("agent"),
             "held_by_session": lease.get("session") or None,
