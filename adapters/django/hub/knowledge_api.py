@@ -346,6 +346,24 @@ _PROMPT_CORPUS_LOCK = threading.Lock()
 _PROMPT_LEX: dict = {}
 
 
+#: Identifiers a console's focus carries that are never shared vocabulary: board ids
+#: (<project>:<type>:<local>), problem ids, shas and uuids, run counts, long numbers. Left in,
+#: each is a query term no record contains, and a record answering a board TEMPLATE's words
+#: ("holds p-...: <service>: <job> failing on main (N runs)") outranked the relevant ones.
+_FOCUS_IDS = re.compile(
+    r"\b[a-z0-9][a-z0-9_-]*:[a-z]+:[a-z0-9][a-z0-9._-]*\b"
+    r"|\bp-[0-9a-f]{8,}\b"
+    r"|\b[0-9a-f]{8,}(?:-[0-9a-f]{4,})*\b"
+    r"|\(\s*\d+\s+runs?\s*\)"
+    r"|\b\d{3,}\b", re.I)
+
+
+def lexical_query(focus) -> str:
+    """The focus with identifiers removed, for WORD ranking only (meaning-based ranking reads
+    the whole focus and is not fooled by an id)."""
+    return " ".join(_FOCUS_IDS.sub(" ", str(focus or "")).split())
+
+
 def _rank_by_wording(rows, focus, key, why_not):
     """The focus ranked by its WORDS when its meaning could not be read.
 
@@ -354,9 +372,17 @@ def _rank_by_wording(rows, focus, key, why_not):
     out of the box. BM25F over each row's rule and story puts the rows that share the focus's
     vocabulary first — then the rest in standing order, so nothing drops out — and says it
     ranked by wording, so a keyword ranking is never mistaken for a semantic one. Its own
-    memo, never the search index's single slot: a prompt must not evict a search corpus."""
+    memo, never the search index's single slot: a prompt must not evict a search corpus.
+
+    The index is keyed on WHICH records it holds, not on the ledger head (which moves on every
+    write and rebuilt the index on almost every prompt). Each matching row carries
+    `lexical_score` in 0..1: its BM25F against THIS query's own ceiling — the score a record
+    matching every query term fully would reach, counting terms no record contains (they are
+    exactly the part of the question the corpus does not answer). Scores relative to the best
+    hit came back flat (1.0 / 0.99 / 0.94 ...) and a cut on them cut nothing."""
+    ids_key = hashlib.sha256(chr(31).join(sorted(r["id"] for r in rows)).encode("utf-8")).hexdigest()
     with _PROMPT_CORPUS_LOCK:
-        idx = _PROMPT_LEX.get(key)
+        idx = _PROMPT_LEX.get(ids_key)
     if idx is None:
         idx = bm25.Bm25F({r["id"]: {"title": r.get("title") or "",
                                     "body": "%s %s" % (r.get("rule") or "", r.get("why") or "")}
@@ -364,15 +390,20 @@ def _rank_by_wording(rows, focus, key, why_not):
         with _PROMPT_CORPUS_LOCK:
             if len(_PROMPT_LEX) >= 16:
                 _PROMPT_LEX.clear()
-            _PROMPT_LEX[key] = idx
-    hits = [eid for _score, eid in idx.score(focus)]
+            _PROMPT_LEX[ids_key] = idx
+    query = lexical_query(focus)
+    scored = idx.score(query)
     reason = why_not.get("reason") or "meaning-based ranking unavailable"
-    if not hits:
+    if not scored:
         return rows, {"ranked": False, "reason": "%s; and no record shares a word with the focus" % reason}
-    first = set(hits)
+    qterms = list(dict.fromkeys(bm25.tokens(query)))
+    ceiling = sum(idx.idf(t) * (bm25.K1 + 1) for t in qterms) or 1.0
+    lex = {eid: round(min(1.0, sc / ceiling), 4) for sc, eid in scored}
     at = {r["id"]: r for r in rows}
-    ordered = [at[i] for i in hits if i in at] + [r for r in rows if r["id"] not in first]
-    return ordered, {"ranked": True, "by": "wording", "matched": len(hits),
+    ordered = ([dict(at[eid], _lex=lex[eid]) for _sc, eid in scored if eid in at]
+               + [r for r in rows if r["id"] not in lex])
+    return ordered, {"ranked": True, "by": "wording", "matched": len(scored),
+                     "top_lexical_score": lex[scored[0][1]], "semantic_reason": reason,
                      "reason": "ranked by the focus's WORDS, not its meaning (%s)" % reason}
 
 
@@ -453,6 +484,8 @@ def memory_index(state, key, *, cap=40, focus="", full=0, peer=""):
             row["label"] = label
         if r.get("_score") is not None:
             row["score"] = r["_score"]
+        if r.get("_lex") is not None:
+            row["lexical_score"] = r["_lex"]
         if i < full:
             rule = knowledge.clip(r.get("rule"), MEMORY_RULE_CHARS)
             why = knowledge.clip(r.get("why"), MEMORY_WHY_CHARS)

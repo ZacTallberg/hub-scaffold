@@ -94,6 +94,9 @@ urlpatterns = [
     path("components/<str:name>/<str:filename>", app_services.component_file,
          name="component-file"),
     path("app-feed.json", R(app_services.app_feed_json), name="app-feed"),
+    # The Fixes panel of every app's banner: its errors and how their fixes are going
+    # (hub_core/fix_tasks.py). Conditional on the same three ETag carriers as hub.json.
+    path("app-fixes.json", R(app_services.app_fixes_json), name="app-fixes"),
     path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
     path("<str:type>.json", R(hub_api.type_json)),
     path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
@@ -223,7 +226,7 @@ VISIBILITY = {
     "item-claims.json": "veiled", "components.json": "veiled", "handoffs.json": "member",
     "problems.json": "veiled", "app_health.json": "veiled", "doctor.json": "veiled",
     "overlap.json": "veiled", "enroll/status.json": "veiled",
-    "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
+    "app-feed.json": "veiled", "app-fixes.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
     "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",

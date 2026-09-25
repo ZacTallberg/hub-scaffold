@@ -86,6 +86,7 @@ Services to the apps around the hub::
     python -m hub_core.client components                         # hosted UI components
     python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
     python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
+    python -m hub_core.client app-fixes --app budget-app         # its errors and their fixes, live
     python -m hub_core.client profile --person alice --set theme=dark
     python -m hub_core.client profile --person alice --app budget-app --set ui=110   # one app only
     python -m hub_core.client profile --person alice --star budget-app
@@ -2610,7 +2611,7 @@ def _problem_line(p: dict[str, Any]) -> str:
 
 
 def _run_errors(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
-    """The QUEUE, folded into problems (never raw rows): --mine (owned by or held by me),
+    """The QUEUE, folded into problems (never raw rows): --mine (reach me first or held by me; anyone may take any),
     --app <slug>, --all (include what the bar holds back), --resolved; --trace <p-id> prints
     one problem with its full stored trace (head AND tail). --include deferred|all reads the
     raw error stream instead, with the queue's own counts first."""
@@ -2838,6 +2839,11 @@ def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     if arguments.name:
         query["name"] = arguments.name
     return _get(base, "app-feed.json?" + urlencode(query))
+
+
+def _run_app_fixes(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    return _get(base, "app-fixes.json?" + urlencode({"app": arguments.app}))
 
 
 def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -4051,7 +4057,9 @@ def _parser() -> argparse.ArgumentParser:
 
     errors = commands.add_parser("errors", help="the operational queue, folded into PROBLEMS")
     errors.add_argument("--agent")
-    errors.add_argument("--mine", action="store_true", help="problems I own or hold")
+    errors.add_argument("--mine", action="store_true",
+                        help="problems that reach me first (declared owner) or that I hold; "
+                             "any agent may take any problem")
     errors.add_argument("--app", help="one service's problems")
     errors.add_argument("--all", action="store_true",
                         help="include what the read-time bar holds back (with the reason)")
@@ -4194,6 +4202,11 @@ def _parser() -> argparse.ArgumentParser:
     feed.add_argument("--app", required=True)
     feed.add_argument("--name", help="the app's display name, matched as well as the slug")
     feed.set_defaults(runner=_run_app_feed)
+
+    fixes = commands.add_parser("app-fixes", help="one app's errors on the board and how each fix "
+                                                  "is going (state, holder, steps, root cause)")
+    fixes.add_argument("--app", required=True)
+    fixes.set_defaults(runner=_run_app_fixes)
 
     prof = commands.add_parser("profile",
                                help="a person's cross-app preferences; --set key=value merges (profile:write)")

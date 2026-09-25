@@ -21,6 +21,8 @@
                    an Admins-only section, How this works, Sign out.
      HELP          info bubbles on anything marked data-ab-info; a guided tour and an "About
                    this app" read-me derived from what is on screen when opened.
+     FIXES         with data-fixes-url: every error this app forwarded to the hub, as the board
+                   task it became, with the fixer's steps live and a notice when one is fixed.
      PEOPLE        a People and Permissions box speaking the data-access-url contract.
      COMPONENTS    this app's settings for the hosted components, handed on to them as
                    window.HubComponentProps + a `hub:component-props` event, and a Component
@@ -118,6 +120,7 @@
     shield: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"],
     sliders: ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M1 14h6", "M9 8h6", "M17 16h6"],
     check: ["M20 6 9 17l-5-5"],
+    wrench: ["M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z"],
     plus: ["M12 5v14", "M5 12h14"],
     image: ["M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
             "M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z", "M21 15l-5-5L5 21"],
@@ -325,6 +328,7 @@
   function redrawOpen() {
     if (!openThing) return;
     if (openThing.kind === "drawer") fillDrawer();
+    else if (openThing.kind === "fixes") fillFixes();
     else if (openThing.kind === "apps") fillApps();
   }
   scrim.addEventListener("click", closeOpen);
@@ -525,6 +529,17 @@
                               "aria-expanded": "false",
                               "aria-label": "Your settings" + (D.actor ? " — " + D.actor : ""),
                               "data-ab-tip": D.actor || "Your settings" });
+  /* The Fixes button exists only for an app that declared data-fixes-url: a control that can
+     never show anything is one more thing to learn for nothing. */
+  var FIXES_URL = String(D.fixesUrl || "").trim();
+  var fixesBtn = FIXES_URL ? bandBtn("wrench", "Fixes") : null;
+  var fixesBadge = el("span", { class: "ab-fix-badge", "aria-hidden": "true", hidden: true });
+  if (fixesBtn) {
+    fixesBtn.setAttribute("aria-haspopup", "dialog"); fixesBtn.setAttribute("aria-expanded", "false");
+    fixesBtn.classList.add("ab-fixes-btn");
+    fixesBtn.appendChild(fixesBadge);
+    controls.appendChild(fixesBtn);
+  }
   controls.appendChild(tourBtn);
   controls.appendChild(appsBtn);
   controls.appendChild(avatar);
@@ -826,6 +841,187 @@
     appsPop.style.top = Math.round(r.bottom + 6) + "px";
     appsPop.style.right = Math.round(Math.max(6, vw() - r.right)) + "px";
   });
+
+  /* ---------------------------------------------------------------- fixes ----
+     data-fixes-url names the APP's own gated re-serve of the hub's /hub/app-fixes.json. Every
+     row is one error this app forwarded that reached the board: the PROBLEM's state (the only
+     state there is -- hub_core/fix_tasks.py), the board task that mirrors it, who has it, and
+     the fixer's steps between Reported and Fixed.
+
+     LIVE, CHEAPLY. Polled while the tab is visible -- every FIX_FAST_MS while any fix is open,
+     FIX_SLOW_MS otherwise -- and stopped while it is hidden. The last tag rides back in BOTH
+     If-None-Match and X-Hub-ETag, because a proxy in front of an app may drop the standard
+     header, so an unchanged answer is a 304. A failed background poll keeps the last good list
+     and warns only on the second failure in a row.
+
+     THE NOTICES. The first answer is a BASELINE and raises nothing -- a person opening the app
+     is not told about fixes that were already there. After that, an error that appears raises
+     "Reported, being fixed"; one that turns fixed raises "Fixed" with its root cause, once,
+     remembered per app in this browser so a reload does not repeat it. */
+  var FIX_FAST_MS = 8000, FIX_SLOW_MS = 45000;
+  var FIX_KEY = "ab:fixes:" + APP;
+  var FIXES = { rows: null, error: "", etag: "", timer: 0, fails: 0, baseline: false };
+  var fixesPop = el("div", { class: "ab-apps ab-fixes ab-surface", role: "dialog", "aria-label": "Fixes", hidden: true });
+  var fixToasts = el("div", { class: "ab-fix-toasts ab-surface", "aria-live": "polite", role: "status" });
+  function fixOpen(f) { return f.state !== "resolved"; }
+  function fixAgo(iso) {
+    var t = Date.parse(iso || "");
+    if (isNaN(t)) return "";
+    var sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (sec < 60) return "just now";
+    if (sec < 3600) return Math.round(sec / 60) + " min ago";
+    if (sec < 86400) return Math.round(sec / 3600) + " h ago";
+    return Math.round(sec / 86400) + " d ago";
+  }
+  function fixRow(f) {
+    var open = fixOpen(f);
+    var pr = f.progress || { done: 0, total: 0 };
+    var pct = pr.total ? Math.round(100 * pr.done / pr.total) : 0;
+    var current = null;
+    list(f.steps).forEach(function (st) { if (!current && !st.done) current = st; });
+    var steps = el("ol", { class: "ab-fix-steps" });
+    list(f.steps).forEach(function (st) {
+      var live = open && st === current;
+      steps.appendChild(el("li", { class: "ab-fix-step" + (st.done ? " ab-done" : "") + (live ? " ab-live" : "") }, [
+        el("span", { class: "ab-fix-tick", "aria-hidden": "true" }),
+        el("span", { class: "ab-fix-step-text" }, [
+          el("span", { class: "ab-fix-step-name", text: st.step }),
+          st.note ? el("span", { class: "ab-fix-step-note", text: st.note }) : null,
+          st.at ? el("span", { class: "ab-fix-step-at", text: fixAgo(st.at) }) : null])]));
+    });
+    var meta = [f.who ? f.who : (open ? "Waiting for someone to pick it up" : ""),
+                f.count > 1 ? f.count + " times" : "",
+                open ? (f.last_seen ? "last seen " + fixAgo(f.last_seen) : "")
+                     : (f.fixed && f.fixed.at ? "fixed " + fixAgo(f.fixed.at) : ""),
+                f.task ? "task " + String(f.task).split(":").pop() : ""].filter(Boolean).join(" · ");
+    return el("div", { class: "ab-fix ab-fix--" + (f.state || "unclaimed"), "data-fix": f.id, title: f.detail || f.title }, [
+      el("div", { class: "ab-fix-head" }, [
+        el("span", { class: "ab-fix-chip", text: f.label || "Reported" }),
+        el("strong", { class: "ab-fix-title", text: f.title || "(an error)" })]),
+      meta ? el("div", { class: "ab-fix-meta", text: meta }) : null,
+      el("div", { class: "ab-fix-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(pr.total),
+                  "aria-valuenow": String(pr.done), "aria-label": pr.done + " of " + pr.total + " steps" },
+         [el("span", { style: "width:" + pct + "%" })]),
+      steps]);
+  }
+  function fillFixes() {
+    fixesPop.textContent = "";
+    var rows = FIXES.rows || [];
+    var openN = rows.filter(fixOpen).length;
+    fixesPop.appendChild(el("div", { class: "ab-pop-head" }, [el("strong", { text: "Fixes" }),
+      el("small", { text: FIXES.rows === null ? "" : (openN ? openN + " being fixed, " : "") + (rows.length - openN) + " fixed lately" })]));
+    if (FIXES.rows === null) {
+      fixesPop.appendChild(el("p", { class: "ab-empty", text: FIXES.error ? "Could not read the fixes: " + FIXES.error : "Reading the fixes…" }));
+      return;
+    }
+    if (!rows.length) {
+      fixesPop.appendChild(el("p", { class: "ab-empty", text: "Nothing is being fixed. When something in " + APP_NAME + " breaks, the fix shows up here as it happens." }));
+    }
+    rows.forEach(function (f) { fixesPop.appendChild(fixRow(f)); });
+    if (FIXES.error) fixesPop.appendChild(el("p", { class: "ab-note ab-warn", text: "The last check failed (" + FIXES.error + "); showing what was last read." }));
+  }
+  function paintFixesBadge() {
+    if (!fixesBtn) return;
+    var openN = (FIXES.rows || []).filter(fixOpen).length;
+    fixesBadge.textContent = openN ? String(openN) : "";
+    fixesBadge.hidden = !openN;
+    var label = openN ? "Fixes — " + openN + " being fixed" : "Fixes";
+    fixesBtn.setAttribute("aria-label", label); fixesBtn.setAttribute("data-ab-tip", label);
+  }
+  function fixMemory() {
+    try { var m = JSON.parse(localStorage.getItem(FIX_KEY) || "null"); if (m && m.open && m.fixed) return m; } catch (e) {}
+    return { open: [], fixed: [] };
+  }
+  function fixRemember(m) {
+    m.open = m.open.slice(-200); m.fixed = m.fixed.slice(-200);
+    try { localStorage.setItem(FIX_KEY, JSON.stringify(m)); } catch (e) {}
+  }
+  function fixToast(kind, f, body) {
+    var close = el("button", { class: "ab-fix-toast-x", type: "button", "aria-label": "Dismiss", text: "×" });
+    var go = el("button", { class: "ab-primary ab-fix-toast-go", type: "button", text: kind === "fixed" ? "See the fix" : "Follow the fix" });
+    var t = el("div", { class: "ab-fix-toast ab-fix-toast--" + kind }, [
+      el("div", { class: "ab-fix-toast-title", text: kind === "fixed" ? "Fixed: " + (f.title || "an error") : "Reported, being fixed" }),
+      el("div", { class: "ab-fix-toast-body", text: body }),
+      el("div", { class: "ab-fix-toast-actions" }, [go, close])]);
+    function drop() { if (t.parentNode) t.parentNode.removeChild(t); }
+    close.addEventListener("click", function (e) { e.stopPropagation(); drop(); });
+    go.addEventListener("click", function (e) {
+      e.stopPropagation(); drop();
+      if (!(openThing && openThing.kind === "fixes")) fixesBtn.click();
+      var row = fixesPop.querySelector('[data-fix="' + f.id + '"]');
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+    });
+    fixToasts.appendChild(t);
+    setTimeout(drop, kind === "fixed" ? 20000 : 12000);
+  }
+  function fixNotices(rows) {
+    var mem = fixMemory();
+    var openNow = rows.filter(fixOpen), fixedNow = rows.filter(function (f) { return !fixOpen(f); });
+    if (!FIXES.baseline) {
+      FIXES.baseline = true;
+      openNow.forEach(function (f) { if (mem.open.indexOf(f.id) < 0) mem.open.push(f.id); });
+      fixedNow.forEach(function (f) { if (mem.fixed.indexOf(f.id) < 0) mem.fixed.push(f.id); });
+      fixRemember(mem);
+      return;
+    }
+    openNow.forEach(function (f) {
+      if (mem.open.indexOf(f.id) >= 0 && mem.fixed.indexOf(f.id) < 0) return;
+      if (mem.open.indexOf(f.id) < 0) mem.open.push(f.id);
+      mem.fixed = mem.fixed.filter(function (id) { return id !== f.id; });      // it came back
+      fixToast("reported", f, (f.title || "An error") + " — it is on the board, and you can watch it being fixed.");
+    });
+    fixedNow.forEach(function (f) {
+      if (mem.fixed.indexOf(f.id) >= 0) return;
+      mem.fixed.push(f.id);
+      fixToast("fixed", f, (f.fixed && f.fixed.note) || "Resolved.");
+    });
+    fixRemember(mem);
+  }
+  function fixSchedule() {
+    clearTimeout(FIXES.timer);
+    if (doc.visibilityState === "hidden") return;              // resumes on visibilitychange
+    FIXES.timer = setTimeout(fixesPoll, (FIXES.rows || []).some(fixOpen) ? FIX_FAST_MS : FIX_SLOW_MS);
+  }
+  function fixesPoll() {
+    if (!FIXES_URL) return;
+    clearTimeout(FIXES.timer);
+    var headers = { Accept: "application/json" };
+    if (FIXES.etag) { headers["If-None-Match"] = FIXES.etag; headers["X-Hub-ETag"] = FIXES.etag; }
+    fetch(FIXES_URL, { credentials: "same-origin", cache: "no-store", headers: headers })
+      .then(function (r) {
+        if (r.status === 304 || r.status === 204) return null;
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        FIXES.etag = r.headers.get("X-Hub-ETag") || r.headers.get("ETag") || "";
+        return r.json();
+      })
+      .then(function (body) {
+        FIXES.fails = 0; FIXES.error = "";
+        if (body && Array.isArray(body.fixes)) {
+          FIXES.rows = body.fixes;
+          fixNotices(body.fixes);
+        }
+        paintFixesBadge();
+        if (openThing && openThing.kind === "fixes") fillFixes();
+      })
+      .catch(function (err) {
+        FIXES.fails += 1;
+        FIXES.error = String((err && err.message) || err);
+        if (FIXES.fails >= 2) console.warn(LOG + "fixes: " + FIXES.error);
+        if (openThing && openThing.kind === "fixes") fillFixes();
+      })
+      .then(fixSchedule);
+  }
+  if (fixesBtn) {
+    fixesBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (openThing && openThing.kind === "fixes") { closeOpen(); return; }
+      openAs("fixes", fixesBtn, function () { fixesPop.hidden = true; fixesBtn.setAttribute("aria-expanded", "false"); }, false);
+      fillFixes(); fixesPop.hidden = false; fixesBtn.setAttribute("aria-expanded", "true");
+      var r = box(fixesBtn);
+      fixesPop.style.top = Math.round(r.bottom + 6) + "px";
+      fixesPop.style.right = Math.round(Math.max(6, vw() - r.right)) + "px";
+    });
+  }
 
   /* ---------------------------------------------------------- the drawer ----
      ONE sidebar from the avatar, under the band (it covers the strip, not the band), in the
@@ -1905,7 +2101,7 @@
      Every body-appended surface is created ABOVE this line and appended HERE, once: appending
      a surface before its declaration runs against `undefined` (var hoists the name, not the
      value), throws, and silently kills every line after it at load. */
-  [scrim, chip, info, appsPop, drawer, markMenu, fileInput, crop, ppBox, cpBox, tourScrim, tourRing, tourCard, readBox]
+  [scrim, chip, info, appsPop, fixesPop, fixToasts, drawer, markMenu, fileInput, crop, ppBox, cpBox, tourScrim, tourRing, tourCard, readBox]
     .forEach(function (n) { doc.body.appendChild(n); });
   applyPrefs();
   slotSync();
@@ -1915,6 +2111,12 @@
   cpLoad(function () { if (openThing && openThing.kind === "drawer") fillDrawer(); });
   if (accessUrl() && isAdmin(realRole())) accessLoad(function () { if (openThing && openThing.kind === "drawer") fillDrawer(); });
   win.addEventListener("load", function () { slotSync(); publishChrome(); });
+  if (FIXES_URL) {
+    doc.addEventListener("visibilitychange", function () {
+      if (doc.visibilityState === "visible") fixesPoll(); else clearTimeout(FIXES.timer);
+    });
+    fixesPoll();
+  }
   mount.setAttribute("data-ab-ready", "1");
   try { doc.dispatchEvent(new CustomEvent("app-banner:ready", { detail: { app: APP } })); } catch (e) {}
 })();

@@ -94,7 +94,10 @@ HUB_OPERATOR_AGENT = "operator"       # who questions are addressed to and answe
 # HUB_HUMAN_GATE_PATTERN = r"approv"   # regex over an ask's title+body: a gate only a person
 #                                      # can satisfy (never widened; also the `human-only` tag)
 # HUB_GATE_RESOLVER = "your_project.gates.satisfied"  # text -> evidence the approval landed;
-#                                      # CACHE-ONLY: it runs inside every inbox fold
+#                                      # CACHE-ONLY: it runs inside every inbox fold. Build it on
+#                                      # hub_core.inbox.all_requested_present(text, name_regex,
+#                                      # present): EVERY name the ask's first line requests must
+#                                      # exist, never the first name the text happens to mention
 # HUB_INBOX_WAITERS_MAX = 4            # held long-polls per process (env var)
 # HUB_SLOW_ROUTE_MS = 8000             # worst-window p95 that puts a route on the rail (env var)
 # HUB_VEIL_ANONYMOUS_TIER = "contributor"  # tier of an unauthenticated reader once facets exist
@@ -170,7 +173,13 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 #     "budget-app": {"url": "https://app.example/budget/",
 #                    "health_url": "https://app.example/budget/health/",
 #                    "owners": ["alice"], "project": "budget"},   # project = its CI project
+#     "reports": {"hosted_in": "budget-app"},  # served by budget-app: a host with no health_url
+#                                               # takes its liveness from its tenants' probes
+#     "old-tool": {"status": "retired"},       # withheld from the observed table (not "partial"
+#                                               # forever); its errors still fold into problems
 # }
+# `owners` routes a problem to who hears first; it is never a permission — anyone may fix any
+# service.
 # HUB_APP_SLUG = "hub"                 # the hub's own row in that table
 # Environment: HUB_DEPLOY_REFS=main,master   CI refs a push deploys from; other refs' failures
 #              are recorded but held below the bar (their author's, not the queue's)

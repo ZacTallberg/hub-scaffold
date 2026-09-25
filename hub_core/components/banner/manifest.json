@@ -26,7 +26,8 @@
       "data-access-url": "the People and Permissions contract endpoint",
       "data-tour-url": "an authored tour: {steps:[{selector,title,text}]}",
       "data-readme-url": "an authored read-me: {lead, sections:[{head, lines}], note}",
-      "data-theme-external": "present when the app owns <html data-theme> itself"
+      "data-theme-external": "present when the app owns <html data-theme> itself",
+      "data-fixes-url": "the app's own gated re-serve of /hub/app-fixes.json?app=<slug> ({fixes, metadata, etag}), passing If-None-Match / X-Hub-ETag through and 304 back. Turns on the Fixes button: every error this app forwarded that reached the board, the board task it became, the fixer's steps live, and a notice when one is reported and when it is fixed (the first read is a baseline and raises none). Polled every 8 s while a fix is open, 45 s otherwise, never while the tab is hidden."
     },
     "islands": {
       "nav": "[{label, href, icon, hint, sep, current, count, countId, children:[...]}]",
@@ -38,6 +39,7 @@
   },
   "publishes": {
     "css": ["--ab-h", "--ab-band-h", "--ab-zoom", "--ab-sidebar-w"],
+    "storage": ["localStorage ab:prefs (a cache of the person's record)", "localStorage ab:fixes:<app> (which fix notices this browser has already shown)"],
     "html_attributes": ["data-theme", "data-ab-font", "data-ab-motion", "data-ab-tips", "data-ab-help"],
     "events": ["app-banner:ready", "app-banner:prefs", "app-banner:action"],
     "page_attributes_read": ["data-ab-info", "data-ab-info-title", "data-ab-tip", "data-ab-help"]

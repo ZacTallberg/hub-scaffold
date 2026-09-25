@@ -311,6 +311,14 @@ def put_op(ent, kind) -> dict:
             "label": label_of(ent, kind)}
     if isinstance(ent.get("recheck"), dict):
         item["recheck"] = ent["recheck"]
+    # A projection that rebuilds a record field by field drops every field it does not name,
+    # silently: WHEN a rule applies (the literal error text, commands, paths and systems a
+    # tool-time hook matches on) and how many agents independently learned it must ride the
+    # feed, or no mirror can deliver a rule at the moment it applies or weigh it by agreement.
+    if isinstance(ent.get("applies_when"), dict):
+        item["applies_when"] = ent["applies_when"]
+    if isinstance(ent.get("reinforced_by"), list) and ent["reinforced_by"]:
+        item["reinforced"] = len(ent["reinforced_by"])
     for key in ("answers", "supersedes", "superseded_by"):
         if ent.get(key):
             item[key] = ent[key]

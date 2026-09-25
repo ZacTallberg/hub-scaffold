@@ -35,5 +35,6 @@ urlpatterns = [
     path("demo/access.json", demo.access_json),
     path("demo/signout/", demo.signout),
     path("demo/<slug:slug>/suggest.json", demo.suggest),
+    path("demo/<slug:slug>/fixes.json", demo.fixes_json),
     path("demo/<slug:slug>/", demo.page),
 ]

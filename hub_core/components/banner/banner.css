@@ -358,6 +358,51 @@ html[data-ab-motion="reduce"] *, html[data-ab-motion="reduce"] *::before, html[d
   .ab-root *, .ab-surface, .ab-surface * { transition: none !important; animation: none !important; }
 }
 
+/* ---- fixes: this app's errors on the board and how each fix is going (data-fixes-url) ----
+   Tokens only, so both themes follow; the chip grounds reuse the tier tints. */
+.ab-fixes-btn { position: relative; }
+.ab-fix-badge { position: absolute; top: 3px; right: 2px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 999px; background: var(--ab-warn); color: #fff; font: 700 10px/16px var(--ab-font); text-align: center; }
+.ab-fixes { width: min(400px, calc(100vw - 16px)); }
+.ab-fix { padding: 10px; border: 1px solid var(--ab-line); border-radius: 9px; margin: 0 0 8px; }
+.ab-fix-head { display: flex; gap: 8px; align-items: flex-start; }
+.ab-fix-title { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.ab-fix-chip { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  background: var(--ab-surface-2); color: var(--ab-ink); }
+.ab-fix--unclaimed .ab-fix-chip { background: var(--ab-tier-admin); color: var(--ab-warn); }
+.ab-fix--in_flight .ab-fix-chip { background: var(--ab-tier-hub); color: var(--ab-accent); }
+.ab-fix--escalated .ab-fix-chip { background: var(--ab-tier-admin); color: var(--ab-ink); }
+.ab-fix--resolved .ab-fix-chip { background: var(--ab-tier-help); color: var(--ab-ok); }
+.ab-fix-meta { margin-top: 4px; color: var(--ab-muted); font-size: 12px; }
+.ab-fix-bar { height: 4px; border-radius: 4px; background: var(--ab-surface-2); margin: 8px 0 6px; overflow: hidden; }
+.ab-fix-bar > span { display: block; height: 100%; border-radius: 4px; background: var(--ab-accent); transition: width .5s ease; }
+.ab-fix--resolved .ab-fix-bar > span { background: var(--ab-ok); }
+.ab-fix-steps { list-style: none; margin: 0; padding: 0; }
+.ab-fix-step { display: flex; gap: 7px; align-items: flex-start; padding: 2px 0; font-size: 12px; color: var(--ab-muted); }
+.ab-fix-step.ab-done { color: var(--ab-ink); }
+.ab-fix-tick { flex: none; width: 10px; height: 10px; margin-top: 3px; border-radius: 50%; box-sizing: border-box;
+  border: 1.5px solid var(--ab-line); }
+.ab-fix-step.ab-done .ab-fix-tick { background: var(--ab-ok); border-color: var(--ab-ok); }
+.ab-fix-step.ab-live .ab-fix-tick { border-color: var(--ab-accent); border-top-color: transparent; animation: ab-fix-spin .9s linear infinite; }
+.ab-fix-step-text { display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0; }
+.ab-fix-step-name { font-weight: 600; }
+.ab-fix-step-note { overflow-wrap: anywhere; }
+.ab-fix-step-at { color: var(--ab-muted); font-size: 11px; }
+@keyframes ab-fix-spin { to { transform: rotate(360deg); } }
+.ab-fix-toasts { position: fixed; right: 16px; bottom: 16px; z-index: 1500; display: flex; flex-direction: column; gap: 8px;
+  max-width: min(380px, calc(100vw - 32px)); font-family: var(--ab-font); }
+.ab-fix-toasts:empty { display: none; }
+.ab-fix-toast { background: var(--ab-surface-1); color: var(--ab-ink); border: 1px solid var(--ab-line); border-left: 4px solid var(--ab-accent);
+  border-radius: var(--ab-radius); box-shadow: var(--ab-shadow); padding: 10px 12px; font-size: 13px; animation: ab-fix-in .25s ease-out; }
+.ab-fix-toast--fixed { border-left-color: var(--ab-ok); }
+.ab-fix-toast-title { font-weight: 700; margin-bottom: 3px; overflow-wrap: anywhere; }
+.ab-fix-toast-body { color: var(--ab-muted); overflow-wrap: anywhere; }
+.ab-fix-toast-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.ab-fix-toast-go { padding: 4px 10px; font-size: 12px; }
+.ab-fix-toast-x { border: 1px solid var(--ab-line); background: transparent; color: var(--ab-ink); border-radius: 8px;
+  font: inherit; padding: 2px 9px; cursor: pointer; }
+@keyframes ab-fix-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
 /* ---- narrow screens: the band gives way in order -- the subtitle, then the app name ---- */
 @media (max-width: 640px) {
   .ab-sub { display: none; }
