@@ -86,6 +86,7 @@ Services to the apps around the hub::
     python -m hub_core.client components                         # hosted UI components
     python -m hub_core.client component-props --app budget-app --set agent.greeting="Ask about budgets"
     python -m hub_core.client app-feed --app budget-app          # one app's slice of the board
+    python -m hub_core.client app-fixes --app budget-app         # its errors and their fixes, live
     python -m hub_core.client profile --person alice --set theme=dark
     python -m hub_core.client profile --person alice --app budget-app --set ui=110   # one app only
     python -m hub_core.client profile --person alice --star budget-app
@@ -2472,6 +2473,11 @@ def _run_app_feed(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "app-feed.json?" + urlencode(query))
 
 
+def _run_app_fixes(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    return _get(base, "app-fixes.json?" + urlencode({"app": arguments.app}))
+
+
 def _run_profile(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """Read or change one person's preferences, as the app that signed them in.
 
@@ -3738,6 +3744,11 @@ def _parser() -> argparse.ArgumentParser:
     feed.add_argument("--app", required=True)
     feed.add_argument("--name", help="the app's display name, matched as well as the slug")
     feed.set_defaults(runner=_run_app_feed)
+
+    fixes = commands.add_parser("app-fixes", help="one app's errors on the board and how each fix "
+                                                  "is going (state, holder, steps, root cause)")
+    fixes.add_argument("--app", required=True)
+    fixes.set_defaults(runner=_run_app_fixes)
 
     prof = commands.add_parser("profile",
                                help="a person's cross-app preferences; --set key=value merges (profile:write)")

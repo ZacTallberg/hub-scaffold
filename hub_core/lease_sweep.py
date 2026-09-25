@@ -89,6 +89,8 @@ def handback_reason(task: dict, lease: dict | None, now: float | None = None, *,
         return ""
     if task.get("work_kind") == "decision":
         return ""
+    if str(task.get("source") or "").startswith("problem:"):
+        return ""                             # held by a PROBLEM claim, not a lease (fix_tasks)
     if lease:
         try:
             expires = float(lease.get("expires") or 0)

@@ -9,7 +9,7 @@ TRUST, route by route:
                                   properties an app's pages are about to draw for anyone who can
                                   open them) -- no board record, no identity.
 * /hub/app-feed.json              an ordinary board READ, under the same boundary as every other
-                                  /hub read (public unless the adopter puts reads behind auth).
+  /hub/app-fixes.json             /hub read (public unless the adopter puts reads behind auth).
 * /hub/api/component-props        WRITE, scope component:configure. Changes what EVERY person on
                                   one app sees, so it is an operator credential, not a browser.
 * /hub/api/profile                Per-person state, named exactly two ways. (1) An app's SERVER
@@ -138,6 +138,40 @@ def app_feed_json(request):
                             status=400)
     state = hub_app.current_state()
     return _no_store(JsonResponse(app_feed.build(state, slug, request.GET.get("name") or "")))
+
+
+def app_fixes_json(request):
+    """GET /hub/app-fixes.json?app=<slug> -- the errors this app forwarded that reached the
+    board and how their fixes are going (hub_core/fix_tasks.py): one row per problem with its
+    state, the mirror task, the fixer's steps and, once fixed, the root cause. The banner's
+    Fixes panel polls this through the app's own gated re-serve.
+
+    It holds only THIS app's own problems (kind ``app``, ``where == slug``) -- rows the app
+    itself forwarded -- and the board's claim and resolve notes about them.
+
+    CONDITIONAL, on the same three carriers as hub.json (``hub_api._sent_etag``): a proxy in
+    front of an adopting host may drop If-None-Match, so the tag is also read from X-Hub-ETag
+    and ?etag=, and it rides back in both ETag and X-Hub-ETag. A banner polling every few
+    seconds costs a hash when nothing moved. The read also kicks one throttled reconcile, so a
+    new error, an auto-resolve or a recurrence reaches the feed while somebody is watching even
+    on a hub with no background clock."""
+    from . import fix_tasks
+    from .hub_api import _sent_etag
+
+    slug = (request.GET.get("app") or "").strip().lower()
+    if not app_feed.SLUG_RE.fullmatch(slug):
+        return JsonResponse({"errors": [{"code": "need_app", "msg": "name the app: ?app=<slug>"}]},
+                            status=400)
+    fix_tasks.kick(throttled=True)
+    body = fix_tasks.app_fixes(slug)
+    etag = '"%s"' % body["etag"]
+    if _sent_etag(request) == body["etag"]:
+        response = HttpResponse(status=304)
+    else:
+        response = JsonResponse(body)
+    response["ETag"] = etag
+    response["X-Hub-ETag"] = etag
+    return _no_store(response)
 
 
 # ---------------------------------------------------------------- a person's preferences
