@@ -125,6 +125,19 @@
       var q = e.detail && e.detail.question;
       if (q) { self.input.value = q; self.send(); }
     });
+    /* ASK FROM ANYWHERE ON THE PAGE. Another component (the context menu's "Ask the agent")
+       dispatches hub:agent-ask {question} on document; the panel opens and asks it exactly
+       as if the person had typed it, and CANCELS the event so the sender knows it was taken
+       (an older agent leaves it uncancelled and the sender falls back). A question already in
+       flight is not interrupted: the new one waits in the box for the person to send. */
+    doc.addEventListener("hub:agent-ask", function (e) {
+      var q = e && e.detail && String(e.detail.question || "").trim();
+      if (!q) return;
+      e.preventDefault();
+      if (!self.isOpen) self.open(true);
+      self.input.value = q;
+      if (!self.busy) self.send(); else self.input.focus();
+    });
     win.addEventListener("hub:component-props", function (e) {
       var det = e.detail || {};
       if (det.app && det.app !== self.app) return;
@@ -167,38 +180,48 @@
     if (this.launchersDrawn) this.drawLaunchers();
   };
 
-  /* One launcher, where the person asked for it when the app allows that place, otherwise the
-     app's first allowed place. No allowed place = only the app's own [data-hub-agent-open]. */
+  /* THE DOORS DO WHAT THE SETTINGS SAY. Every entry point the app ticked is drawn -- float,
+     right-edge tab, header button -- one launcher per door, re-drawn whenever the properties
+     change so an operator's preview is live. A person's own placement preference narrows that
+     to their one door when the app allows it. None ticked = only the app's own
+     [data-hub-agent-open]. (Choosing ONE launcher from the list drew the header button for
+     "floating" and silently ignored the other ticks.) */
   Agent.prototype.drawLaunchers = function () {
     var self = this;
     this.launchersDrawn = true;
     (this.launchers || []).forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
     this.launchers = [];
-    var allowed = Array.isArray(this.props.entry) ? this.props.entry : [];
-    var where = allowed.indexOf(this.placement) >= 0 ? this.placement : allowed[0];
+    var allowed = (Array.isArray(this.props.entry) ? this.props.entry : [])
+      .filter(function (w) { return w === "float" || w === "sidebar" || w === "header"; });
     var slot = doc.querySelector("[data-hub-agent-header]");
-    if (where === "header" && !slot) where = allowed.filter(function (w) { return w !== "header"; })[0];
-    if (!where) return;
+    var doors = allowed.indexOf(this.placement) >= 0 ? [this.placement] : allowed.slice();
+    if (!slot) doors = doors.filter(function (w) { return w !== "header"; });
+    // The slot says whether its door is on, so an app can hide the hairline around it.
+    if (slot) slot.setAttribute("data-hub-agent-door", doors.indexOf("header") >= 0 ? "on" : "off");
     var label = "Open " + this.title;
-    var btn;
-    if (where === "header") {
-      btn = el("button", { class: "hub-agent-launch is-header", type: "button", "aria-label": label, text: this.title });
-      slot.appendChild(btn);
-    } else {
-      btn = el("button", { class: "hub-agent-launch is-" + where, type: "button", "aria-label": label,
-        title: label }, [el("span", { class: "hub-agent-glyph", "aria-hidden": "true" }),
-        where === "sidebar" ? el("span", { class: "hub-agent-tab-text", text: this.title }) : null]);
-      doc.body.appendChild(btn);
-    }
-    btn.addEventListener("click", function () { self.isOpen ? self.close() : self.open(); });
-    this.launchers.push(btn);
+    doors.forEach(function (where) {
+      var btn;
+      if (where === "header") {
+        btn = el("button", { class: "hub-agent-launch is-header", type: "button", "aria-label": label, text: self.title });
+        slot.appendChild(btn);
+      } else {
+        btn = el("button", { class: "hub-agent-launch is-" + where, type: "button", "aria-label": label,
+          title: where === "float" ? null : label }, [el("span", { class: "hub-agent-glyph", "aria-hidden": "true" }),
+          where === "sidebar" ? el("span", { class: "hub-agent-tab-text", text: self.title })
+                              : el("span", { class: "hub-agent-pop", "aria-hidden": "true", text: "Ask " + self.title })]);
+        doc.body.appendChild(btn);
+      }
+      btn.addEventListener("click", function () { self.isOpen ? self.close() : self.open(); });
+      self.launchers.push(btn);
+    });
     this.syncLaunchers();
   };
   Agent.prototype.syncLaunchers = function () {
     var open = !!this.isOpen;
     (this.launchers || []).forEach(function (b) {
       b.setAttribute("aria-expanded", open ? "true" : "false");
-      b.classList.toggle("is-hidden", open && !b.classList.contains("is-header"));
+      // The edge tab steps aside for the open panel; the float stays, stepped left of it.
+      b.classList.toggle("is-hidden", open && b.classList.contains("is-sidebar"));
     });
   };
 
