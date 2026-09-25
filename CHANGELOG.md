@@ -14,6 +14,26 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Round 2 — app-kit: whose rows, honest tallies, slug-named migrations
+
+- **Assistant kit: every read is the actor's.** `Entity.scope` narrows every generic family's
+  reads (a scope that raises reads as no rows); `scope=SHARED` declares an app-wide noun; an
+  entity with an owner column and no scope gets no generic tool (named in `build_all.skipped`,
+  reported UNSCOPED by `adapter.check()`), and a scoped total says "you can see".
+- **Assistant kit: tallies a person can quote.** `count`, `breakdown`, `list`, `search` and
+  `recent` leave soft-deleted rows out and report `excluded_deleted`; a closed `filter`
+  vocabulary is derived from the model (a choice takes a list); `breakdown` takes count's filter;
+  a relation groups and displays by the related record's name; `detail` counts matches and
+  refuses an ambiguous label with each candidate's id, and accepts an id.
+- **Assistant routing:** `scope_for` counts the caller's whole core against `LANE_TOOL_CAP`.
+- **Canon:** guarantees for logical CSV records in pastes, complete-day flow totals, zoneless and
+  DST-ambiguous times, filter push-down past a row cap, related rows through their own scope.
+- **Error-visibility kit:** a fetch is a failure at status >= 400 (a 304 poll is the request
+  working), and the report endpoint drops `http` reports below 400 from older browser copies.
+- **`kits.py add` names shared-database migrations from the app's slug** for kits that declare
+  `retarget_migrations` (the gate), rewriting their dependencies; the choice is recorded and a
+  different `--slug` on an already-vendored copy is refused.
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and
