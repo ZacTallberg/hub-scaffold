@@ -534,6 +534,7 @@ def task(request, b):
     if refusal is not None:
         return refusal
     twins = []
+    fixer_step = False
     if is_create:
         state = hub_app.current_state()
         # MINT-TIME TWIN DETECTION. Two seats bitten by the same incident file the same unit
@@ -550,8 +551,17 @@ def task(request, b):
         lease = hub_app._read_lease(eid)
         claimed = bool(lease and lease.get("expires", 0) > time.time())
         if existing and (existing.get("status") == "in_progress" or claimed):
-            if not hub_app.lease_authorized(eid, b.get("token"), request.hub_auth.subject,
-                                            request.hub_auth.credential_id):
+            # A PROBLEM MIRROR (hub_core/fix_tasks.py) is in progress because its problem is
+            # claimed, and nobody holds a lease on it by design. A fixer's `step` -- a change to
+            # the PLAN only, nothing else -- is how the app's Fixes panel shows the work, so it
+            # is admitted without a lease; every other field stays the problem's (the next sync
+            # rewrites it) and still needs the lease no one holds.
+            from hub_core import fix_tasks as _fix_core
+            fixer_step = (not claimed and _fix_core.is_mirror(existing)
+                          and set(b) - {"id", "agent", "expected_version", "idem_key", "token",
+                                        "type"} == {"plan"})
+            if not fixer_step and not hub_app.lease_authorized(
+                    eid, b.get("token"), request.hub_auth.subject, request.hub_auth.credential_id):
                 return JsonResponse({"errors": [{"code": "lease",
                     "msg": "mutating claimed work requires its current fenced lease and subject"}]},
                     status=409)
@@ -580,6 +590,11 @@ def task(request, b):
     else:
         resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"),
                                agent=agent, idem=b.get("idem_key"), etype="task.updated")
+    if fixer_step and status < 400:
+        # Put the fixer's checkpoint in its place (between "Picked up" and "Fixed") now, so the
+        # app's Fixes panel never shows a default `step` that landed on "Fixed" as fixed.
+        from . import fix_tasks as _fix_tasks
+        _fix_tasks.sync_pid(str(existing.get("source") or "")[len(_fix_core.SOURCE_PREFIX):])
     if (resp.get("data") or {}).get("replayed"):
         twins = []                  # the retry IS the first record; it is not its own twin
     if twins and status < 400:
@@ -1140,8 +1155,22 @@ def _hub_finish(tid, commit, deployed_sha, deploy_id):
     """Finish one unattended task as the hub: claim a short lease (refused when anyone else
     holds it — the hub never finishes work another agent holds), then the shared done path.
     Returns '' on success, else the reason."""
+    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
+            % (commit[:12], deployed_sha[:12], deploy_id))
+    payload = {"type": "task", "status": "done", "verified_by": [note],
+               "evidence_uri": [deploy_id, commit], "auto_close": {
+                   "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
+    return hub_grant_done(tid, payload, credential_id="hub-deploy-close",
+                          idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+
+
+def hub_grant_done(tid, payload, *, credential_id, idem):
+    """The HUB finishing a task through the one done path: claim a short lease (refused when
+    anyone else holds it -- the hub never finishes work another agent holds), then the shared
+    terminal write (``_commit_done``). For proof the hub already holds as its own record -- a
+    verified deploy, a resolved problem. Returns '' on success, else the reason."""
     from hub_core import agent_auth
-    auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id="hub-deploy-close",
+    auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id=credential_id,
                                   scopes=("task:complete",), actor_kind="hub",
                                   mode="hub-internal")
     res = hub_app.claim(tid, DEPLOY_ACTOR, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
@@ -1153,14 +1182,8 @@ def _hub_finish(tid, commit, deployed_sha, deploy_id):
         if res.get("created"):
             hub_app.release_lease(tid, res["token"])
         return "gone or already done"
-    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
-            % (commit[:12], deployed_sha[:12], deploy_id))
-    payload = {"type": "task", "status": "done", "verified_by": [note],
-               "evidence_uri": [deploy_id, commit], "auto_close": {
-                   "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
     resp, status = _commit_done(tid, res["token"], DEPLOY_ACTOR, payload,
-                                verified_version=ent.get("version"), auth=auth,
-                                idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+                                verified_version=ent.get("version"), auth=auth, idem=idem)
     if status != 200:
         if res.get("created"):
             hub_app.release_lease(tid, res["token"])
@@ -2608,6 +2631,10 @@ def app_error(request, b):
             "project": str(b.get("project") or "")[:120],
         },
     )
+    # A real app error is also a board task the app's banner shows being fixed
+    # (hub/fix_tasks.py). KICKED, never run here: this endpoint sits on the app's error path.
+    from . import fix_tasks as _fix_tasks
+    _fix_tasks.kick()
     return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
 
 
@@ -3060,8 +3087,16 @@ def problem_claim(request, b):
     if refusal:
         return JsonResponse({"errors": [refusal]}, status=409)
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "claim": entry, "title": found.get("title"),
-                                  "rows": len(found.get("rows") or [])}}, status=201)
+    data = {"problem": pid, "claim": entry, "title": found.get("title"),
+            "rows": len(found.get("rows") or [])}
+    # An app problem is also a board task its app's banner shows moving (hub/fix_tasks.py).
+    from . import fix_tasks as _fix_tasks
+    fix_task = _fix_tasks.sync_pid(pid)
+    if fix_task:
+        data["task"] = fix_task
+        data["task_hint"] = ("this problem is mirrored as %s; `step %s --note \"...\"` shows each "
+                             "checkpoint live in the app's Fixes panel" % (fix_task, fix_task))
+    return JsonResponse({"data": data}, status=201)
 
 
 @writer(scope="problem:resolve")
@@ -3083,7 +3118,9 @@ def problem_resolve(request, b):
                               note=note, evidence=str(b.get("evidence") or ""),
                               session=session, name=name)
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "resolved": entry}})
+    from . import fix_tasks as _fix_tasks
+    return JsonResponse({"data": {"problem": pid, "resolved": entry,
+                                  "task": _fix_tasks.sync_pid(pid)}})
 
 
 @writer(scope="problem:claim")
@@ -3101,6 +3138,8 @@ def problem_release(request, b):
         return JsonResponse({"errors": [{"code": "not_held",
             "msg": "no claim (or presumed reopen) by %s to release" % agent}]}, status=409)
     hub_app.errors_changed()
+    from . import fix_tasks as _fix_tasks
+    _fix_tasks.sync_pid(pid)
     return JsonResponse({"data": {"problem": pid, "released": True}})
 
 
@@ -3145,7 +3184,10 @@ def problem_escalate(request, b):
     except Exception:                                        # noqa: BLE001
         pass
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "escalation": entry}}, status=201)
+    from . import fix_tasks as _fix_tasks
+    fix_task = _fix_tasks.sync_pid(pid)
+    return JsonResponse({"data": {"problem": pid, "escalation": entry, "task": fix_task}},
+                        status=201)
 
 
 @writer(scope="presence:write")

@@ -414,6 +414,12 @@ TOOLS = [
                     "the app, each row saying which field matched.",
      "inputSchema": {"type": "object", "properties": {
          "app": {"type": "string"}, "name": {"type": "string"}}, "required": ["app"]}},
+    {"name": "app_fixes",
+     "description": "The errors one app forwarded that reached the board, each as its problem and "
+                    "mirror task: state (reported, being fixed, waiting on a person, fixed), who "
+                    "has it, the fixer's steps and, once fixed, the root cause.",
+     "inputSchema": {"type": "object", "properties": {"app": {"type": "string"}},
+                     "required": ["app"]}},
     {"name": "list_hosted_components",
      "description": "The UI components this hub hosts for its apps: measured versions, files, how "
                     "to link them, and the apps observed loading them.",
@@ -1091,6 +1097,8 @@ def _call_tool(name, args, auth_headers):
         if args.get("name"):
             query["name"] = args["name"]
         status, body = _seam("/hub/app-feed.json", query, auth_headers, method="get")
+    elif name == "app_fixes":
+        status, body = _seam("/hub/app-fixes.json", {"app": args["app"]}, auth_headers, method="get")
     elif name == "list_hosted_components":
         status, body = _seam("/hub/components/", {}, auth_headers, method="get")
     elif name == "get_component_props":
