@@ -6,8 +6,8 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, deploy_close, held, histories_api, hub_api, hub_write, hubsite,
-               knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
+from . import (app_services, deploy_close, handoff_api, held, histories_api, hub_api, hub_write,
+               hubsite, knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -61,6 +61,8 @@ urlpatterns = [
     # Both sit ABOVE the generic <type>.json catch-all.
     path("held.json", R(held.held_json), name="held"),
     path("item-claims.json", R(hub_api.item_claims_json), name="item-claims"),
+    # The publish hand-off queue: commits a machine that cannot push handed to one that can.
+    path("handoffs.json", R(handoff_api.handoffs_json), name="handoffs"),
     path("components.json", R(hub_api.components_json), name="components"),
     # Seat convergence and derived per-person output (same catch-all rule as above).
     path("distribution.json", R(hub_api.distribution_json), name="distribution"),
@@ -120,6 +122,11 @@ urlpatterns = [
     path("api/held", held.hold),
     path("api/held/promote", held.promote),
     path("api/held/abandon", held.abandon),
+    # The publish hand-off lane: upload a bundle, lease one, fetch it, report the push.
+    path("api/handoff", handoff_api.submit),
+    path("api/handoff/claim", handoff_api.claim),
+    path("api/handoff/bundle", handoff_api.bundle),
+    path("api/handoff/result", handoff_api.result),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
     # Letting go of a task: back to the queue for an unattended worker (hand) or just released
@@ -194,7 +201,7 @@ VISIBILITY = {
     "agent-updates.json": "veiled", "activity.json": "veiled",
     "attention.json": "veiled", "consoles.json": "veiled",
     "project/<str:slug>/tasks.json": "veiled", "held.json": "veiled",
-    "item-claims.json": "veiled", "components.json": "veiled",
+    "item-claims.json": "veiled", "components.json": "veiled", "handoffs.json": "member",
     "problems.json": "veiled", "app_health.json": "veiled", "doctor.json": "veiled",
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
