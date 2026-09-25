@@ -142,13 +142,21 @@ def _read_json(path: Path, default):
 
 
 def _write_json(path: Path, value) -> None:
+    """Atomic replace, RETRIED against a clock (a reader, an indexer or a scanner holding the
+    destination makes a Windows replace fail for a moment) and logged when it is still lost --
+    never silently dropped, which made a queued or running run vanish from the ledger."""
+    from .atomic import replace
+    temp = path.with_suffix(".tmp.%d" % os.getpid())
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(".tmp.%d" % os.getpid())
         temp.write_text(json.dumps(value, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(temp, path)
-    except OSError:
-        pass
+        replace(temp, path, timeout_s=5.0)
+    except OSError as error:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        _log("ledger write LOST for %s (%s: %s)" % (path.name, type(error).__name__, error))
 
 
 def _log(message: str) -> None:
@@ -298,6 +306,31 @@ def _post_update(base: str, run_id: str, item_id: str, outcome: str, summary: st
         hub._post(base, "note", payload)
     except (RuntimeError, ValueError) as error:
         _log("update note for %s not recorded: %s" % (run_id, str(error)[:200]))
+
+
+def _claim_item(base: str, item_id: str, release: bool = False) -> str:
+    """ONE MACHINE PER ITEM, fleet-wide: ``granted`` | ``held:<machine>`` | ``unreachable``.
+
+    The lane lock serialises THIS machine; a question or an unclaimed error is visible to every
+    machine's poll at once, so without a hub claim two computers each spend a session fixing the
+    same thing. Taken with the lane held and the item confirmed live -- the last moment before a
+    session is spent -- and given back when the run ends. A task is not claimed here: its fenced
+    lease (the session's `start`) already is the claim."""
+    try:
+        hub._post(base, "item-claim", {"agent": _agent(), "item": item_id, "machine": _machine(),
+                                       **({"release": True} if release else {})})
+        return "released" if release else "granted"
+    except RuntimeError as error:
+        text = str(error)
+        if '"status": 409' in text or "claimed_elsewhere" in text:
+            try:
+                holder = ((json.loads(text).get("response") or {}).get("data") or {}).get("holder")
+            except (ValueError, AttributeError):
+                holder = None
+            return "held:%s" % (holder or "another machine")
+        return "unreachable"
+    except ValueError:
+        return "unreachable"
 
 
 def _adhoc_run_id(item_id: str) -> str:
@@ -547,6 +580,11 @@ report, not a fix. When the fix is code:
      lane somebody else is queued for: `step` the task with "sha=<sha> pipeline=<id>" and what is
      left, leave it in progress, and exit.
 
+A PUSH REFUSED FOR AUTH IS NOT AN ENDING. If `git push` is refused for authentication, commit on
+top of the current branch and run `{CLIENT} handoff <task>`: a machine that CAN push replays it
+(never forced) and the pushed sha lands on the task. `step` the task with the hand-off id and exit.
+Never stop at a patch file, never hunt for other credentials, never rewrite the remote.
+
 NEVER LEAVE UNCOMMITTED WORK. Short on time or unable to finish: put it on a branch
 (`git checkout -b responder-wip/<slug>`, add YOUR files, commit "WIP: <item> - <what is left>",
 push the branch), record the branch on the board, and escalate with `ask`. The launcher checks
@@ -560,7 +598,12 @@ CLOSE THE LOOP, by kind:
               --evidence <sha|url>`.
 - question -> `answer <id> --text "<the answer>"` (delivered to the asker in about a second).
               NEVER answer a review gate (tagged `review`, titled "Review gate:"): only a
-              person may. If one reached you, touch nothing and exit.
+              person may. If one reached you, touch nothing and exit. And never answer an ask
+              whose only remedy is a PERSON'S action (hardware or console access, a host
+              administration step, a reserved approval, a credential only they hold):
+              answering retires it from their inbox, so the one signal that reaches them is
+              gone. Leave it open, record what you measured, and name the person action in
+              your final message.
 - error    -> `ack-error <fingerprint> --note "claimed: <what you are checking>"` FIRST, so every
               other console sees it is in flight; fix the cause and ship; then
               `ack-error <fingerprint> --note "resolved: <root cause> evidence <sha|url>"`.
@@ -828,10 +871,26 @@ def respond(item_id: str) -> int:
                 _early_exit(base, run_id, item_id, "stood-down",
                             "taken or cleared elsewhere before launch; no session was spent.")
             return 0
+        claimed = kind != "task"
+        if claimed:
+            verdict = _claim_item(base, item_id)
+            if verdict.startswith("held:"):
+                _run_finished(run_id, "stood-down")
+                _log("respond %s: being worked by %s; standing down (nothing charged)"
+                     % (item_id, verdict[5:]))
+                _early_exit(base, run_id, item_id, "stood-down",
+                            "claimed by %s, which is working it; no session was spent."
+                            % verdict[5:])
+                return 0
+            if verdict == "unreachable":
+                _log("respond %s: the item-claim route is unreachable; proceeding WITHOUT a "
+                     "claim (a rare double-fix beats a problem nobody fixes)" % item_id)
         prompt = _charter(item, bound)
         try:
             argv = _runtime_argv(prompt, run_id)
         except ValueError as error:
+            if claimed:
+                _claim_item(base, item_id, release=True)
             _run_finished(run_id, "runtime-unavailable")
             _agent_error(base, "responder_runtime_unavailable", str(error))
             _log("respond %s: %s" % (item_id, error))
@@ -852,6 +911,8 @@ def respond(item_id: str) -> int:
             rc, tail, reaped = run_session(argv, _workspace(), _session_env(session), bound,
                                            lane, run_id)
         except OSError as error:
+            if claimed:
+                _claim_item(base, item_id, release=True)
             _run_finished(run_id, "failed")
             _agent_error(base, "responder_launch_failed", "the session command could not start",
                          str(error))
@@ -859,6 +920,8 @@ def respond(item_id: str) -> int:
     finally:
         _release(lane)
 
+    if kind != "task":
+        _claim_item(base, item_id, release=True)     # given back the moment the run ends
     outcome = verify_outcome(base, item, killed=rc is None)
     dirty = uncommitted(_workspace(), dirty_before)
     responses = _read_json(responses_path, {})

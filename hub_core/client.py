@@ -1208,8 +1208,11 @@ def _payload_hand_back(arguments: argparse.Namespace) -> tuple[str, dict[str, An
     token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
     if not token:
         raise ValueError("provide --lease-token or set HUB_LEASE_TOKEN")
-    return "hand-back", {"id": arguments.task_id, "token": token, "agent": _agent(arguments),
-                         "note": arguments.note}
+    payload = {"id": arguments.task_id, "token": token, "agent": _agent(arguments),
+               "note": arguments.note}
+    if getattr(arguments, "idle", False):
+        payload["idle"] = True       # did no new work: counted apart from the task's run cap
+    return "hand-back", payload
 
 
 def _journal_lease(task_id: str, result: Any) -> None:
@@ -3288,6 +3291,9 @@ def _parser() -> argparse.ArgumentParser:
     hand_back.add_argument("--agent")
     hand_back.add_argument("--lease-token", dest="lease_token")
     hand_back.add_argument("--note", required=True, help="why the run ended with the task unfinished")
+    hand_back.add_argument("--idle", action="store_true",
+                           help="the run recorded no new checkpoint or push: counted apart from the "
+                                "task's run cap (the row's note carries the idle count)")
     hand_back.set_defaults(payload=_payload_hand_back)
 
     answer = commands.add_parser("answer",

@@ -79,6 +79,18 @@ Stopping the wrapper is not stopping the daemon: verify the process TREE is gone
 every armed action check that its payload is still the newest before applying it, so a zombie that
 fires late aborts instead of rolling a newer configuration back.
 
+## 7. Enrolment is done when the distribution row says so
+
+A machine's setup is finished when the hub's own grade says it is, never when the steps "all
+passed". End every enrolment or repair pass by asking the authoritative surface
+(`python -m hub_core.client distribution`, `GET /hub/distribution.json`): this seat's row must read
+`current`. A row that is still unreported right after an install means the telemetry has not made a
+round trip yet — make any authenticated call and read it again. Anything still drifted after the
+update step re-ran is a broken update loop: say so and ask, with the exact row. Leaving it stale is
+leaving an alarm armed, because drift on an online seat reaches the operator by itself. The same
+holds for the unattended lane on that machine: `python -m hub_core.unattended status` shows whether
+it is paused, disarmed (an expired login) or armed, and the board shows its runs.
+
 ## Proving it
 
 Each part has a real operation: send a message to a console and watch it land (then ack it);

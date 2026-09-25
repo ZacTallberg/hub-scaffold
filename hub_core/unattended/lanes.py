@@ -10,6 +10,12 @@ liveness reads as alive — a lock we cannot prove dead is a lock we do not stea
 Why two lanes. One lock made a one-minute answer wait behind a ninety-minute build. Questions
 (and anything else short) run in the SHORT lane; tasks run in the LONG lane.
 
+Why a one-slot ATTENTION lane. Several needs-attention conditions often share ONE cause (three
+apps missing the same liveness route read as three items). On the long lane's parallel slots each
+got its own responder, all three fixed the same thing side by side and one pushed an identical
+file. In series the second run starts after the first fix is on the board and finds its item
+already cleared, so attention runs one at a time in a lane of its own.
+
 Why slots. A fixed number of long slots holds a 32-thread workstation to the same throughput as a
 4-core laptop. The long lane gets half the logical cores or one slot per ``GB_PER_SLOT`` of memory,
 whichever is smaller, never below the floor and never above the automatic ceiling; an explicit
@@ -30,11 +36,14 @@ LONG_SLOTS_FLOOR = 2
 LONG_SLOTS_MAX = 6
 GB_PER_SLOT = 5          # one agent session plus the tests it runs
 
-SHORT, LONG = "short", "long"
+SHORT, LONG, ATTENTION = "short", "long", "attention"
 
 
 def lane_for(kind: str) -> str:
-    """A task has the long clock; everything else is short."""
+    """A task has the long lane; a needs-attention item its own one-slot lane; everything else
+    is short."""
+    if kind == "attention":
+        return ATTENTION
     return LONG if kind == "task" else SHORT
 
 
@@ -85,6 +94,8 @@ def slot_paths(lane: str) -> list[Path]:
     if lane == LONG:
         count, _why = long_lane_slots()
         return [base / ("lane-long-%d.lock" % index) for index in range(1, count + 1)]
+    if lane == ATTENTION:
+        return [base / "lane-attention.lock"]
     return [base / "lane-short.lock"]
 
 
@@ -147,7 +158,7 @@ def status() -> dict:
     """Every slot of both lanes: free, held (pid alive, beat age), or stale."""
     slots, why = long_lane_slots()
     rows = []
-    for lane in (SHORT, LONG):
+    for lane in (SHORT, LONG, ATTENTION):
         for path in slot_paths(lane):
             if not path.exists():
                 rows.append({"lane": lane, "slot": path.name, "state": "free"})

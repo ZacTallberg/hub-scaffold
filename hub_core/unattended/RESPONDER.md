@@ -42,10 +42,12 @@ THE ITEM DECIDES THE PATH, NEVER WHETHER IT GETS DONE:
   - NON-CORE ships straight through: layout, wording, navigation, sorting or filtering what the
     application already shows, bringing a page to the house standard. Build it, ship it, look at
     the deployed page, `finish` it.
-  - CORE ships after its owner's yes: new functionality, a new data source or access to data, new
-    agent tools, a change to how a figure is computed, roles and permissions. Build it to a
-    reviewable branch, `ask` the owner what it adds and why, `step` the task with the branch and
-    the question id, and exit.
+  - CORE ships after the OPERATOR's yes: new functionality, a new data source or access to
+    data, new agent tools, a change to how a figure is computed, roles and permissions. That yes
+    is about BUSINESS IMPACT, never about who built the application: applications are shared,
+    nobody owns one, and "somebody else's app" is never a reason to stand down or wait. Build it
+    to a reviewable branch, `ask` the operator what it adds and why, `step` the task with the
+    branch and the question id, and exit.
   - "Too big", "unclear" and "not now" are not endings. Nothing is dropped silently.
 - A task that begins RESUMING was left in progress by a run whose clock ran out. Its FIRST job is
   what that run recorded: the pushed commit, the deploy it was waiting on. Deployed and working:
@@ -53,12 +55,27 @@ THE ITEM DECIDES THE PATH, NEVER WHETHER IT GETS DONE:
   Only if nothing was pushed do you build it.
 - A QUESTION: answer it only with confidence you can point to (the code, the board, something you
   verified this session): `python -m hub_core.client answer <id> --text "<the answer>"`. If you
-  cannot, gather what you found and ask the ONE remaining choice.
+  cannot, gather what you found and ask the ONE remaining choice. BUT when the only thing that
+  satisfies the ask is a PERSON'S action (console or hardware access, a host administration step,
+  the one approval the operator reserved, a credential only they hold), do NOT answer it:
+  answering RETIRES the ask from that person's inbox, so the one signal that reaches them
+  disappears. Leave it open, put what you measured on the board (a `step` on its task, or a
+  `finding`), and say in your final message exactly which person action is left.
 - An ESCALATION (a question carrying `hop 1`) was raised by an earlier unattended run that
   stopped. It waited half an hour on purpose: read the state AGAIN before you believe it —
   "not deployed at my clock" usually is deployed by now. Clear what is mechanical, then answer
   the escalation itself so whoever waited is told. What YOU raise is stamped one hop deeper
   automatically, and hop 2 goes to a person: it is the last unattended pass this chain gets.
+
+A TASK IS DONE ONLY WHEN ITS COMMIT IS ON THE PROTECTED BRANCH -- AND A PUSH REFUSED FOR AUTH IS
+NOT AN ENDING. If `git push` is refused for authentication (`Permission denied (publickey)`,
+`could not read Username`, `terminal prompts disabled`, a credential prompt that cannot appear),
+this machine cannot push; another one can. With your change committed on top of the current
+branch, from your worktree run `python -m hub_core.client handoff <task>`: it uploads your commits
+to the hub as a bundle, a machine that CAN push rebases them onto the branch and pushes them
+(never forced), and the pushed sha lands on the task. Then `step` the task naming the hand-off id
+and the refusal line, and exit. Never stop at a local patch file, never hunt for other
+credentials, never rewrite the remote.
 
 A PUSH IS NOT A SHIP UNTIL IT IS LIVE. Never `finish`, and never answer "shipped", on work the
 deployed system is not serving yet. Pushed but not live when your clock says stop: `step` the
@@ -70,6 +87,14 @@ NEVER LEAVE UNCOMMITTED WORK. Stage your own files by name (never `git add -A`: 
 may share the repository). Short on time: commit to a WIP branch, push it, and `step` the task
 naming it. The launcher reports any uncommitted files it finds when you exit; a pushed branch is
 recoverable, a dirty tree somebody has to hunt for is not.
+
+WHAT THE LAUNCHER DOES AROUND YOU, so you do not work against it: a task you leave in progress is
+handed back and offered again with your plan, so `step` the pushed sha (with its pipeline) or
+the next run resumes blind; a run that recorded no new checkpoint or push is handed back as IDLE
+and does not count toward the task's run cap; a task at its cap gets `needs_person` on the board
+with the reason, the last sha and its failing evidence; your session is STOPPED (its whole tree
+killed) if somebody else finishes or takes the task while you work; and an expired agent login
+disarms this machine until a person logs in again.
 
 End your final message with ONE line:
 UNATTENDED-SUMMARY finished=N answered=N escalated=N

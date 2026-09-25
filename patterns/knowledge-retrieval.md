@@ -33,6 +33,17 @@ duplicate / correction / contradiction / unrelated with one sentence of reason. 
 (an unparseable reply leaves the entry open) and exits 2 when there is judging to do and no
 model, so a scheduled pass that settles nothing is loud. It writes back through the served API.
 
+**Cite the record you act on, and search before you share.** When a record — a lesson, finding,
+answer or resolution, delivered in a prompt block or found by `search` — changes what you do, name
+its id in your reply or your checkpoint, in one clause ("per `<record id>`, reading the cookie name
+from the page"). Measured on the board this came from: thousands of records reached prompts in a
+day and agents named a handful, so nobody could tell a rule that saved an afternoon from one that
+was noise. A citation is how the loop learns which is which — cited records earn their triggers,
+delivered-and-never-cited ones get narrowed or retired. The same day about one new lesson in eight
+restated a record that already existed, so `search` for the rule before you share it; if it is
+there, cite it instead of filing a copy (an identical live rule returns `duplicate_of` and writes
+nothing).
+
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
 `--verified-as-of YYYY-MM-DD`; every surface prints both.

@@ -129,6 +129,18 @@ protocol handler, no browser grant.
 .\register-responder.ps1 -Remove                                        # leave
 ```
 
+The same script schedules the lane launcher instead with `-Launcher unattended`:
+`python -m hub_core.unattended --home <dir> scan --launch --workspace <dir>` (settings in
+`<dir>\unattended.env`, the same token-file rule; `HUB_PUBLISH_HOSTS` arms its hand-off
+publisher). Its tick gets a twenty-minute limit because it may run one publish pass (its own
+ten-minute ceiling) before it reads the queue. `-Remove` needs the same `-Launcher` (or
+`-TaskName`) to find the task.
+
+```powershell
+.\register-responder.ps1 -Launcher unattended -HomeDir "$env:USERPROFILE\.hub-unattended" -Workspace C:\src
+.\register-responder.ps1 -Launcher unattended -Remove
+```
+
 The task runs under `pythonw.exe` so the scheduler never flashes a console window, refuses to
 overlap itself, and gives each poll a ten-minute limit (the sessions it starts are detached and
 bounded by their own clocks). The sessions get a hidden console of their own, so nothing below

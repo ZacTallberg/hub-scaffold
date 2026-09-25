@@ -55,6 +55,33 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   why: only the wake lock (`keep_awake.py`) is included, because a jiggler exists to get around
   a screen-lock policy.
 
+### Round 2 — unattended lane (canon): attention work, hand-off publisher, honest counts
+
+- **Needs-attention is work.** `python -m hub_core.unattended` offers the conditions the hub marks
+  `actor: agent` (never one without the field), runs them one at a time in their own lane on the
+  task clock, and counts one cleared only when `/hub/attention.json` drops it (unbuilt list =
+  `unverified`, refunded); attention may use a third of an hourly launch ceiling.
+- **Hand-off publisher** (`hub_core/unattended/publisher.py`, `publish` verb, run first on every
+  `scan --launch`): a machine that PROVED it can push (ssh keys only, a dry run, never a stored
+  password) replays a hand-off bundle onto the branch, rebased and never forced, reads it back and
+  reports the pushed sha; conflicts are reported with their paths. The charter tells a run whose
+  push is refused for auth to hand off instead of leaving a patch.
+- **Counts that mean what they say.** A run that recorded no new checkpoint or push is handed back
+  `idle` (`/hub/api/hand-back` `idle`, client `--idle`, MCP `idle`) and does not count toward the
+  run cap; the cap and the per-machine attempt cap write `needs_person` with the failing evidence;
+  a refusal is a deferral the scan honours; a stand-down leaves no ledger row; a task another
+  holder finished or took is stopped and recorded `superseded`, never cleared or charged.
+- **One machine, one run, one login.** Questions and conditions take an item claim before a run
+  is queued and release it when it ends (both launchers); a per-item lock stops two launchers on
+  one machine; an expired agent login disarms the lane until a person logs in; a dated weekly
+  usage reset is read; an abandoned task holder is offered as a resume.
+- **No credential in a URL.** Every remote the worktree module reads or builds, and every reason
+  string, is stripped of userinfo (ssh keeps its user); an old launcher clone is healed in place.
+  Ledger writes retry against a clock instead of vanishing. Doctrine: applications are shared
+  (a core change waits on the operator's yes, never an app's builder); cite the record you act on;
+  enrolment is done when the distribution row says so. `register-responder.ps1 -Launcher
+  unattended` schedules the lane launcher.
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and

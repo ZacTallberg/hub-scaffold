@@ -210,7 +210,7 @@ def _plan_progress(ent):
 
 def _handed_back_count(plan):
     """Runs that ended with this task unfinished (the hand-back row's own count)."""
-    return sum(int(s.get("times") or 1) for s in (plan or [])
+    return sum(checkpoints.charged_runs(s) for s in (plan or [])
                if isinstance(s, dict) and s.get("kind") == "handed_back")
 
 

@@ -13,6 +13,9 @@ every run is classified before it is charged:
   (not logged in, bad key, no credit), or exited non-zero having spent nothing. Nothing is
   charged; the board gets a critical agent-error with the worker's own last words; launches pause
   for half an hour, because a credential a person must renew will not fix itself by retrying.
+* AUTH EXPIRED — the subset of a dead harness that is an expired login (``auth_expired`` on the
+  verdict). It DISARMS the lane until a person logs in again (``__main__.auth_expired``) instead
+  of pausing it: a credential nobody renewed does not renew itself.
 * API ERROR — the run DID work and the model API ended it (a 5xx the runtime gave up on). Not the
   item's failure and not a dead harness: a warning on the board, a five-minute pause, the item
   back on the queue.
@@ -33,6 +36,14 @@ USAGE_LIMIT_RE = re.compile(
     r"(?:usage|session|weekly|daily|5-hour) limit (?:reached|exceeded)", re.I)
 USAGE_RESET_CLOCK_RE = re.compile(
     r"resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([\w/+-]+)\))?", re.I)
+# A WEEKLY limit names a DATE ("resets Sep 28, 3pm (Region/City)"). The clock pattern cannot
+# match it (a month sits between "resets" and the hour), so it fell to the default pause and a
+# machine probed a dead account every half hour for days.
+USAGE_RESET_DATED_RE = re.compile(r"resets\s+(?:on\s+)?([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2}),?\s+"
+                                  r"(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b"
+                                  r"(?:\s*\(([\w/+-]+)\))?", re.I)
+_MONTHS = {m: i + 1 for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul",
+                                            "aug", "sep", "oct", "nov", "dec"))}
 USAGE_RESET_EPOCH_RE = re.compile(r"limit reached\|(\d{10})")
 USAGE_LIMIT_DEFAULT_PAUSE_S = 1800
 USAGE_LIMIT_MAX_PAUSE_S = 6 * 3600
@@ -42,6 +53,12 @@ HARNESS_DEAD_RE = re.compile(
     r"oauth token (?:has )?expired|credit balance is too low|"
     r"unable to (?:authenticate|connect to the api)", re.I)
 HARNESS_DEAD_PAUSE_S = 1800
+# The subset of a dead harness that is an EXPIRED LOGIN: a credential nobody renewed does not
+# renew itself, so it DISARMS the lane until a person logs in (see ``__main__.auth_expired``),
+# rather than pausing it and burning the next item on the same dead login every half hour.
+AUTH_EXPIRED_RE = re.compile(
+    r"oauth (?:session|token) (?:has )?expired|not logged in|please run /login|invalid api key|"
+    r"authentication[ _-]?error", re.I)
 API_ERROR_PAUSE_S = 300
 
 
@@ -142,8 +159,27 @@ def usage_limit_until(rc, text: str, now: float | None = None) -> float | None:
         return None
     now = now or time.time()
     match = USAGE_RESET_EPOCH_RE.search(text)
+    dated = None if match else USAGE_RESET_DATED_RE.search(text)
     if match:
         target = float(match.group(1))
+    elif dated and dated.group(1).lower() in _MONTHS:
+        month, day = _MONTHS[dated.group(1).lower()], int(dated.group(2))
+        hour = int(dated.group(3)) % 12 + (12 if dated.group(5).lower() == "pm" else 0)
+        minute = int(dated.group(4) or 0)
+        try:
+            from datetime import datetime
+            zone = None
+            if dated.group(6):
+                from zoneinfo import ZoneInfo
+                zone = ZoneInfo(dated.group(6))
+            here = datetime.fromtimestamp(now, zone) if zone else datetime.fromtimestamp(now)
+            at = here.replace(month=month, day=day, hour=hour, minute=minute, second=0,
+                              microsecond=0)
+            if at.timestamp() <= now:                     # "Jan 2" read in late December
+                at = at.replace(year=at.year + 1)
+            target = at.timestamp()
+        except Exception:  # noqa: BLE001 - an unreadable date gets the default
+            target = now + USAGE_LIMIT_DEFAULT_PAUSE_S
     else:
         match = USAGE_RESET_CLOCK_RE.search(text)
         if not match:
@@ -209,13 +245,22 @@ def harness_dead(rc, tokens: int, turns: int, text: str) -> str:
     return "the worker exited %s having spent no tokens: it never ran" % rc
 
 
+def auth_expired_text(rc, text: str) -> str:
+    """The matched words when a run EXITED NON-ZERO because this machine's agent login is
+    expired or missing; '' otherwise. A killed run (rc None) and a clean exit are never it."""
+    if rc in (0, None):
+        return ""
+    match = AUTH_EXPIRED_RE.search(text or "")
+    return match.group(0).strip() if match else ""
+
+
 def classify(rc, stdout: str, *, tail_chars: int = 4000) -> dict:
     """One verdict for a finished run: ``{kind, tokens, turns, result, session, reason, until}``
     where ``kind`` is ``usage-limit`` | ``api-error`` | ``harness-dead`` | ``ran``."""
     tokens, result, turns = parse_output(stdout)
     text = (result or "") + "\n" + (stdout or "")[-tail_chars:]
     verdict = {"tokens": tokens, "turns": turns, "result": result, "session": session_of(stdout),
-               "reason": "", "until": None, "kind": "ran"}
+               "reason": "", "until": None, "kind": "ran", "auth_expired": ""}
     until = usage_limit_until(rc, text)
     if until:
         verdict.update(kind="usage-limit", until=until,
@@ -228,4 +273,12 @@ def classify(rc, stdout: str, *, tail_chars: int = 4000) -> dict:
     dead = harness_dead(rc, tokens, turns, text)
     if dead:
         verdict.update(kind="harness-dead", reason=dead, until=time.time() + HARNESS_DEAD_PAUSE_S)
+    # An expired login is a lane fault whatever the token count: a run that did a few turns and
+    # then lost its login is not the item's failure either.
+    expired = auth_expired_text(rc, text)
+    if expired:
+        verdict["auth_expired"] = expired
+        if verdict["kind"] == "ran":
+            verdict.update(kind="harness-dead", until=time.time() + HARNESS_DEAD_PAUSE_S,
+                           reason="the agent login on this machine expired (%s)" % expired)
     return verdict

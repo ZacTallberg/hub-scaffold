@@ -21,6 +21,16 @@ a whole word — guessing the wrong repository is worse than having no worktree.
 ``HUB_REPO_URL_TEMPLATE`` (``https://git.example.com/team/{slug}.git``), reached with
 ``git ls-remote`` before it is used.
 
+NO CREDENTIAL EVER TRAVELS IN A URL. A person's checkout can carry one in its origin
+(``https://user:<token>@git.example.com/...``); copying that origin into every clone the launcher
+makes spreads the token into each of their configs, into the prompt's worktree brief and into the
+board's fault rows. Every URL this module reads or builds -- a checkout's origin, the template, the
+clone's own remote -- passes through ``no_userinfo`` first, and every reason string that could echo
+one through ``redact``. Git gets credentials from its helper, never from a remote URL, so nothing
+that works is lost by stripping. An ssh URL keeps its user (``ssh://git@host/...`` names the
+account the key logs in as) and loses only a password; an scp-style SSH remote (``git@host:path``)
+has no scheme and is left exactly as it is.
+
 When no worktree can be made the session falls back to the launcher's directory — and that
 fallback is REPORTED to the board as an agent-error, because a hole in the lane that exists only in
 one machine's log is a hole nobody knows about.
@@ -58,6 +68,37 @@ def slug_of(title: str) -> str:
     return slug if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,99}", slug) else ""
 
 
+_USERINFO = re.compile(r"^([a-z][a-z0-9+.\-]*)://([^/@\s]*)@", re.I)
+_USERINFO_ANYWHERE = re.compile(r"\b([a-z][a-z0-9+.\-]*)://([^/@\s]*)@", re.I)
+
+
+def _strip(match) -> str:
+    """An ssh transport keeps its USER (``ssh://git@host`` names the account the key logs in as)
+    and loses only a ``:password``; every other scheme loses the whole userinfo, because a token
+    is as often the user part (``https://<token>@``) as the password part."""
+    scheme, userinfo = match.group(1), match.group(2)
+    if scheme.lower() in ("ssh", "git+ssh", "ssh+git"):
+        user = userinfo.split(":", 1)[0]
+        return "%s://%s@" % (scheme, user) if user else "%s://" % scheme
+    return "%s://" % scheme
+
+
+def no_userinfo(url: str) -> str:
+    """The URL with any credential removed; an scp-style remote is returned unchanged."""
+    return _USERINFO.sub(_strip, str(url or "").strip())
+
+
+def redact(text: str) -> str:
+    """Any scheme URL inside free text (git's stderr, a reason) with its credential removed."""
+    return _USERINFO_ANYWHERE.sub(_strip, str(text or ""))
+
+
+def project_of(url: str) -> str:
+    """The repository's name from any remote form, lowercased -- the task's ``project`` slug."""
+    name = _repo_name(no_userinfo(url)).strip().lower()
+    return name if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,80}", name) else ""
+
+
 def _key(name: str) -> str:
     return str(name or "").strip().lower().replace("_", "-")
 
@@ -78,7 +119,7 @@ def repo_url_for(slug: str, workspace: Path) -> tuple[str, str]:
         if not (child / ".git").exists():
             continue
         result = git(["-C", child, "config", "--get", "remote.origin.url"], timeout=15)
-        url = (result.stdout or "").strip() if result.returncode == 0 else ""
+        url = no_userinfo((result.stdout or "").strip() if result.returncode == 0 else "")
         if not url:
             continue
         name = _repo_name(url)
@@ -91,7 +132,7 @@ def repo_url_for(slug: str, workspace: Path) -> tuple[str, str]:
         return url, "%s is the only checkout here whose name carries %r" % (name, slug)
     template = os.environ.get("HUB_REPO_URL_TEMPLATE", "").strip()
     if template and "{slug}" in template:
-        url = template.replace("{slug}", slug)
+        url = no_userinfo(template.replace("{slug}", slug))
         if git(["ls-remote", "--heads", url], timeout=60).returncode == 0:
             return url, "HUB_REPO_URL_TEMPLATE, reached with ls-remote"
         return "", "HUB_REPO_URL_TEMPLATE gave %s, which ls-remote could not reach" % url
@@ -108,6 +149,7 @@ def default_branch(repo: Path) -> str:
 
 
 def _fallback(item_id: str, slug: str, why: str, workspace: str):
+    why = redact(why)
     log("worktree: %s" % why)
     board.report_fault(
         "unattended_worktree_unavailable",
@@ -146,6 +188,7 @@ def carry_notes(workspace: Path, name: str, repo: Path, tree: Path) -> list[str]
 
 def prepare(item_id: str, title: str, workspace: str, repo_url: str = ""):
     """(the directory the session runs in, what was made). Never raises."""
+    repo_url = no_userinfo(repo_url)
     slug = slug_of(title) or (_repo_name(repo_url) if repo_url else "")
     root = Path(workspace)
     if not slug:
@@ -170,10 +213,16 @@ def prepare(item_id: str, title: str, workspace: str, repo_url: str = ""):
             result = git(["clone", "--no-checkout", url, repo], timeout=1800)
             if result.returncode != 0:
                 return _fallback(item_id, slug, "clone of %s failed: %s"
-                                 % (url, (result.stderr or "").strip()[-300:]), workspace)
+                                 % (url, redact((result.stderr or "").strip())[-300:]), workspace)
         else:
-            url = (git(["-C", repo, "config", "--get", "remote.origin.url"], timeout=15).stdout
+            raw = (git(["-C", repo, "config", "--get", "remote.origin.url"], timeout=15).stdout
                    or "").strip()
+            url = no_userinfo(raw)
+            if raw and raw != url:
+                # A clone made before this rule carries the credential in its own config. It is
+                # the launcher's scratch clone (never a person's checkout): heal it in place.
+                if git(["-C", repo, "remote", "set-url", "origin", url], timeout=15).returncode == 0:
+                    log("worktree: removed a credential from the origin URL of %s" % repo)
         fetched = git(["-C", repo, "fetch", "--prune", "origin"], timeout=900).returncode == 0
         base = default_branch(repo)
         kept = (tree / ".git").exists()
@@ -195,7 +244,8 @@ def prepare(item_id: str, title: str, workspace: str, repo_url: str = ""):
                              timeout=600)
             if result.returncode != 0:
                 return _fallback(item_id, slug, "worktree for %s failed: %s"
-                                 % (item_id, (result.stderr or "").strip()[-300:]), workspace)
+                                 % (item_id, redact((result.stderr or "").strip())[-300:]),
+                                 workspace)
             git(["-C", tree, "branch", "--set-upstream-to", "origin/" + base], timeout=30)
         head = (git(["-C", tree, "rev-parse", "--short=12", "HEAD"], timeout=15).stdout or "").strip()
         carried = carry_notes(root, slug, repo, tree)
@@ -207,7 +257,7 @@ def prepare(item_id: str, title: str, workspace: str, repo_url: str = ""):
         return str(tree), made
     except Exception as exc:  # noqa: BLE001
         return _fallback(item_id, slug, "worktree for %s failed: %s: %s"
-                         % (item_id, type(exc).__name__, exc), workspace)
+                         % (item_id, type(exc).__name__, redact(str(exc))), workspace)
 
 
 def brief(made: dict) -> str:
@@ -219,7 +269,8 @@ def brief(made: dict) -> str:
                  made["tracks"], "" if made.get("fetched") else " as of the last successful fetch"))
     return ("\nYOUR WORKTREE (made for this run; it is your working directory):\n"
             "path: %s\nrepository: %s (%s)\nbranch: %s, tracking %s, at %s\nstate: %s\n"
-            % (made["path"], made["slug"], made.get("url") or "?", made["branch"], made["tracks"],
+            % (made["path"], made["slug"], no_userinfo(made.get("url") or "") or "?", made["branch"],
+               made["tracks"],
                made.get("base") or "?", state))
 
 
