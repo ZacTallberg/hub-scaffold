@@ -5,6 +5,7 @@ these. NOT session/login gated (the agent uses a header token). Fail-closed if n
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import subprocess
@@ -1104,11 +1105,27 @@ def close_deployed_tasks(deploy_id, deployed_sha):
     the UNATTENDED ones through the one done path (a lease the hub holds, the deploy record as
     evidence). A person's task is only stepped. Returns what happened for the record's answer."""
     from hub_core import task_completion
-    tasks = hub_app.current_state().get("by_type", {}).get("task", [])
-    matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor)
+
+    from . import deploy_close
+    state = hub_app.current_state()
+    tasks = state.get("by_type", {}).get("task", [])
+    # A sha a checkpoint's PROSE names counts only when a deploy record served exactly it.
+    served = [str(d.get("sha") or "") for d in state.get("by_type", {}).get("deploy", [])
+              if d.get("sha")]
+    matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor,
+                                                      served=served)
     closed, stepped, refused = [], [], {}
-    for task, commit in matches:
+    for task, commit, retry in matches:
         tid = task["id"]
+        if retry:
+            # Stepped already, and an earlier close was refused (a live lease, a version race):
+            # offered to the close again, never stepped twice.
+            res = deploy_close.close_one(task, commit, deployed_sha, deploy_id)
+            if res.get("closed"):
+                closed.append(tid)
+            elif res.get("why"):
+                refused[tid] = res["why"]
+            continue
         at = _utc_now()
         plan = [dict(x) for x in (task.get("plan") or []) if isinstance(x, dict)]
         plan.append(task_completion.deployed_step(commit, deployed_sha, deploy_id, at))
@@ -1121,12 +1138,12 @@ def close_deployed_tasks(deploy_id, deployed_sha):
         if not task_completion.is_unattended(task):
             stepped.append(tid)
             continue
-        why = _hub_finish(tid, commit, deployed_sha, deploy_id)
-        if why:
-            refused[tid] = why
-            _record_auto_close(tid, "refused", why, commit, deploy_id)
-        else:
+        fresh = (hub_app.current_state().get("entities") or {}).get(tid) or task
+        res = deploy_close.close_one(fresh, commit, deployed_sha, deploy_id)
+        if res.get("closed"):
             closed.append(tid)
+        elif res.get("why"):
+            refused[tid] = res["why"]
     out = {"closed": closed, "stepped": stepped, "refused": refused}
     if unchecked:
         out["unchecked"] = ("the repository could not answer whether %s %s contained in %s; only a "
@@ -1255,6 +1272,12 @@ def claim(request, b):
                                                           frees)
                                  if v["state"] == "gone" else
                                  "; the lease frees itself in %ds unless renewed" % frees)
+                lost = hub_app.taken_over_notice(existing, agent, _claim_session(request, b))
+                if lost:
+                    # This caller HELD the task and it was taken over while it was away: say so
+                    # by name, so it hands its changes over instead of pushing over the holder.
+                    error.update({"code": "taken_over", "msg": lost["msg"],
+                                  "held_by": lost["held_by"], "taken_at": lost["taken_at"]})
             return JsonResponse({"errors": [error]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
@@ -1264,6 +1287,8 @@ def claim(request, b):
                             machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
+        if res.get("took_over") and res.get("took_over_from"):
+            _notify_taken_over(eid, ent, agent, res)
         if status != "in_progress":
             transition, transition_status = _append(
                 "task", eid, {"type": "task", "status": "in_progress"},
@@ -1289,6 +1314,43 @@ def claim(request, b):
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+def _notify_taken_over(eid, ent, agent, lease) -> None:
+    """Tell the console whose lease was just taken over that it lost the task.
+
+    Its own step/finish is refused with reason ``taken_over``; this message reaches it even if
+    it never tries either -- a console whose machine only dropped off the network may still be
+    editing, and must learn the task is someone else's before it pushes. Pinned to the previous
+    holder's machine and console. Never raises: a missed notice must not undo a granted claim."""
+    try:
+        prev = lease.get("took_over_from") or {}
+        old = str(prev.get("agent") or "").strip().lower()
+        if not old or not _valid_agent_name(old):
+            return
+        why = ("the console holding it (%s) had ended" % prev.get("session") if prev.get("ended")
+               else "its console (%s) was %s" % (prev.get("session") or "?",
+                                                 prev.get("state") or "gone"))
+        body = ("%s (%s) was taken over by %s%s because %s. Stop work on it: hand anything you "
+                "changed for it to %s (a message naming your branch, sha or patch) rather than "
+                "pushing -- they are working the same outcome now.\n\n%s"
+                % (eid, ent.get("title") or "", agent,
+                   (" on " + lease["machine"]) if lease.get("machine") else "", why, agent,
+                   board_link(eid)))
+        local = "m-takeover-%s" % hashlib.sha256(
+            ("%s|%s|%s" % (eid, prev.get("claimed"), agent)).encode("utf-8")).hexdigest()[:12]
+        note = {"type": "note", "category": "context", "status": "standing",
+                "title": "%s was taken over by %s" % (eid, agent), "tags": ["message", "open"],
+                "to": old, "from_agent": "hub", "body_md": body}
+        if prev.get("machine"):
+            note["machine"] = str(prev["machine"])[:60]
+        if prev.get("session") and _SESSION_ID.fullmatch(str(prev["session"])):
+            note["session"] = str(prev["session"])
+        _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), note,
+                expected_version=None, agent=agent, idem="takeover:" + local,
+                etype="note.created")
+    except Exception:                                        # noqa: BLE001
+        logging.getLogger(__name__).exception("could not notify the previous holder of %s", eid)
 
 
 def keep_lease_on_raced_transition(res, transition_status) -> bool:
@@ -1324,6 +1386,7 @@ def release(request, b):
     if agent and agent != lease.get("agent"):
         return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
     hub_app.release_lease(eid, token)
+    _kick_deploy_close()
     return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
 
 
@@ -1416,9 +1479,21 @@ def hand_back(request, b):
         if status != 200:
             return JsonResponse(resp, status=status)
         released = hub_app.release_lease(eid, token)
+    # A close the deploy record already proved and this lease refused can land now -- in the
+    # close sweep's own thread, never on this request (deploy_close.sweep_async).
+    _kick_deploy_close()
     return JsonResponse({"ok": True, "task": eid, "handed_back": times - idle, "idle": idle,
                          "handed_back_total": times,
                          "lease_released": released, "version": resp["data"]["version"]})
+
+
+def _kick_deploy_close() -> None:
+    try:
+        from . import deploy_close
+        deploy_close.sweep_async(force=True)
+    except Exception:                                        # noqa: BLE001 - never break a write
+        logging.getLogger(__name__).warning("could not start the deploy-close sweep",
+                                            exc_info=True)
 
 
 def _bounded_setting(name, default, low, high):

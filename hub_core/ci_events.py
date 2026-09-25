@@ -427,6 +427,54 @@ def retain(hub_dir, body, outcome, *, record=None) -> None:
             pass
 
 
+#: Pipeline states in which the pipeline has not finished: its result is still to come.
+ACTIVE = frozenset({"created", "waiting_for_resource", "preparing", "pending", "running",
+                    "scheduled"})
+
+
+def sha_status(hub_dir, sha: str) -> dict:
+    """What CI last said about one commit, from the retained deliveries -- never their bodies.
+
+    ``{"sha", "found", "status", "active", "project", "pipeline", "at"}``: ``found`` is False
+    when no pipeline delivery for the sha has arrived (yet); ``active`` is True while the newest
+    pipeline for it is not terminal. A reader that must not act while a pipeline runs (an
+    unattended launcher re-offering a handed-back task) asks here instead of the CI provider, so
+    it needs no provider credential and works for any sender this module understands."""
+    sha = re.sub(r"[^0-9a-f]", "", str(sha or "").strip().lower())[:40]
+    out = {"sha": sha, "found": False, "status": "", "active": False, "project": "",
+           "pipeline": "", "at": None}
+    if len(sha) < 7:
+        return out
+    newest = None
+    cur, prev = _log_paths(hub_dir)
+    for path in (cur, prev):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if sha not in line:
+                continue                       # cheap pre-filter before parsing
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("kind") != "pipeline":
+                continue
+            got = str(rec.get("sha") or "").lower()
+            if not got or not (got.startswith(sha) or sha.startswith(got)):
+                continue
+            if newest is None or float(rec.get("at") or 0) >= float(newest.get("at") or 0):
+                newest = rec
+    if newest is None:
+        return out
+    status = str(newest.get("status") or "")
+    out.update(found=True, status=status, active=status in ACTIVE,
+               project=str(newest.get("project") or ""), pipeline=str(newest.get("pipeline") or ""),
+               at=newest.get("at"))
+    return out
+
+
 def retained(hub_dir, *, pipeline="", job="", project="", limit=20) -> tuple[list, dict]:
     """(deliveries newest first, a description of the store). The store names its own path,
     size and writability, so an empty answer says WHY it is empty."""

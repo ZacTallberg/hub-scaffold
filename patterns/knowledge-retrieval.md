@@ -46,7 +46,57 @@ nothing).
 
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
-`--verified-as-of YYYY-MM-DD`; every surface prints both.
+`--verified-as-of YYYY-MM-DD`. Every knowledge surface (the per-prompt index, search hits, the
+mirror feed) carries ONE label for each record, decided in one place (`hub_core/staleness.py`):
+
+    as of 2026-01-04 (12 d ago)                                            a durable rule
+    STATE as of 2026-01-04 (12 d ago) · verify before acting: <check>      a state claim with a check
+    STATE as of 2026-01-04 (12 d ago) · UNVERIFIED — no verify line; ...   a state claim with none
+    ... · CHECK FAILED 2026-01-15 (404): GET <url> -> HTTP 404 — NEEDS REVIEW
+
+A record reads as STATE from a deliberately literal phrase list over its rule ("still needs",
+"is down", "not yet", "awaiting", "measured <date>", "currently", "port N serves", "latest
+version"); a dated EVENT ("shipped <date>") is history and is not. The judgement runs once per
+record version; age is applied when the label is rendered. A record that should carry a check
+and does not gets one without being rewritten: `python -m hub_core.client attest <id> --verify
+"<check>" [--asof YYYY-MM-DD]` (`POST /hub/api/attest`, MCP `attest_record`).
+
+**Re-check every check, on a schedule.** `python -m hub_core.client recheck-knowledge` runs each
+live record's `verify` and writes the result onto the record as `recheck` (`answered`, `failed`,
+`skipped`, with the day the current status began). It NEVER executes a stored command: a bare
+URL, `GET <url>` or a curl whose flags are all read-only becomes ONE bounded GET (no
+credentials, timeout, size cap, redirects only to http/https); anything else (ssh, SQL, a script,
+a curl that posts or sends a header) is `skipped` and says why. A failure adds a `needs-review`
+tag and makes the label CHECK FAILED — it never retires the record; a heuristic may not retire
+knowledge. A record is rewritten only when its outcome changes or once a week, so a quiet pass
+costs no ledger writes; exit 3 means the hub refused a write-back.
+
+**Compare doctrine with the lessons.** `python -m hub_core.client detect-contradictions` splits
+every served doctrine document (`doctrine.json`) into rule-bearing sentences, asks
+`related.json` for each sentence's closest live lessons, and has the judge model read each pair
+(duplicate / correction / contradiction / unrelated, cached per line and lesson version). It also
+collects every lesson pair `adjudicate` already settled as a contradiction. Each contradiction is
+filed ONCE as a review — a delivered human gate, never taken by an unattended responder — carrying
+both texts and a stable `[contradiction:<id>]` marker, so a rerun never files it twice and never
+reopens one a person answered. It edits nothing. Exit 2 means there was judging to do and no model.
+
+**Adopter wiring (the scaffold ships no scheduler).** Run both nightly, after `semantic_index`,
+from a machine that can reach what the checks name (a laptop off the network records every
+internal check as failed) and holds a credential with `note:write` and `ask:write`:
+
+    python -m hub_core.client recheck-knowledge        # red only on exit 3
+    python -m hub_core.client detect-contradictions    # red on exit 2 (no model) or 3
+
+**Candidates from a session observer are held for a person.** A tool that distils finished
+sessions into "worth remembering" lines must not write them straight into the knowledge base: an
+unreviewed summary would ride every prompt on every machine. It files them with
+`python -m hub_core.client propose-knowledge "<text>"`, or appends one JSON object per line
+(`{id, text, kind?, importance?}`) to an outbox file that `python -m hub_core.client ship-outbox
+--outbox <file>` sends (complete lines only; the offset moves only when the hub accepted the
+batch; the queue is idempotent by id). The queue (`knowledge-candidates.json`) lives beside the
+ledger, never in it, so nothing serves a candidate. A decider (`HUB_DECIDERS`) adopts one as a
+lesson or finding, or declines it with a reason, with `decide-candidate <id> adopt|decline`.
+Nothing auto-promotes.
 
 ## 2. Find by meaning
 

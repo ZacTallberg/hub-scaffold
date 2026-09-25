@@ -116,6 +116,33 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
   distinctly when it was refused; restart when any module changes; jittered back-off; keep
   companion tools on a hub-published pin.
 
+### Round 2: leases, seats, the unattended lane, hand-off, and knowledge that dates itself
+
+- **Leases follow the holder, not the clock.** An ended console frees its task at once; a fresh
+  lease holds before its console is seen; a heartbeating machine silent 10 minutes is released;
+  every takeover rotates the fencing token and tells the console that lost it (`taken_over`). The
+  sweep writes `lease_released` (never counted as a run giving up); a task item claim lives twice
+  the task bound.
+- **A deploy close that was refused is retried until it lands**, off the request path, and
+  `POST /hub/api/deploy/reconcile` replays the newest deploy record with progress in a state file.
+- **Work nobody will pick up reaches a person**: `task_needs_person` for an unattended task at the
+  run cap, flagged `needs_person`, or refused its close; a silent seat warns its owner after a
+  day and becomes one stable retire-or-return item when dormant (archived rows included).
+  Distribution keeps dormant seats listed and grades `python` (`HUB_REQUIRED_PYTHON`) and shows
+  `push` from `X-Hub-Python` / `X-Hub-Push`.
+- **The unattended lane**: a hand-back waits for the pipeline of the commit its run pushed
+  (`GET /hub/ci-status.json`); `step` lifts a sha written in its note; an interrupted clone is
+  repaired and a failed one names its kind; the board's read kicks the liveness sweep.
+- **Publish hand-off** (`patterns/publish-handoff.md`): a machine that cannot push uploads a
+  bundle, a machine that can claims it under a fenced lease, rebases, pushes (never forced) and
+  the pushed sha lands on the task. Off until `HUB_HANDOFF_GIT_HOSTS` names the allowed hosts.
+- **Knowledge dates itself**: one STATE / UNVERIFIED / CHECK FAILED label on the index, search
+  and feed; `attest` attaches a check; `recheck-knowledge` re-runs URL-shaped checks (one
+  bounded GET, never a shell); `detect-contradictions` files doctrine-vs-lesson conflicts as
+  review gates; observers propose lessons into a review-first candidate queue.
+- Patterns: the push probe never presents a stored password; the client daemon's delivery,
+  change-gating and off-path warming rules.
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and

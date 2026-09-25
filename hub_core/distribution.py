@@ -19,8 +19,13 @@ Rules this module holds, each paid for on the origin system:
 * A ROW WITHOUT A MACHINE IS LEGACY, A MACHINE WITHOUT KIT TELEMETRY IS A PHANTOM. Neither is
   graded, counted, or paged — both are listed, so they stay visible for tracing.
 * OFFLINE IS NOT DRIFT. A seat that cannot reach the hub cannot converge; blaming it teaches
-  people the surface lies. Seats silent past DORMANT_AFTER_S collapse to a count, so the offline
-  list stays short enough that a yesterday-was-fine seat is noticed in it.
+  people the surface lies. Seats silent past DORMANT_AFTER_S are DORMANT and kept off the offline
+  list, so it stays short enough that a yesterday-was-fine seat is noticed in it.
+* COLLAPSED IS NOT DROPPED. A dormant seat stays in the machine list (state ``dormant``, never
+  graded), in the verdict, and in the operator inbox as ONE stable "confirm it is retired, or turn
+  it on" item -- including a row presence retirement already archived, for DORMANT_KEEP_S. On the
+  origin system a seat past the horizon left the list, the verdict and the inbox at once, so the
+  one failure that needs a person became nobody's item exactly when it became permanent.
 * THE VERDICT CARRIES ITS OWN SCOPE. "every online seat is current" is true and reads as
   all-clear while excluding exactly the seats most likely to have a problem. The verdict names
   what it did NOT grade: silent seats, phantoms, legacy rows, and artifacts nobody publishes.
@@ -29,12 +34,20 @@ Rules this module holds, each paid for on the origin system:
   kind ``offline`` (never ``drift``). Drift on an ONLINE seat is raised only once the artifact
   has been published longer than DRIFT_PATIENCE_S, measured from the published file's own mtime,
   and the item says when it was computed, because a seat that just updated reports it on its next
-  request.
+  request. A graded fact with NO published file (the seat's interpreter, below) has no mtime, so
+  its patience runs from when THIS seat was first observed stale on it (``first_stale``, kept by
+  the adapter across passes) -- read as zero it could never raise an item at all.
+* A RUNTIME REQUIREMENT IS GRADED LIKE AN ARTIFACT. A seat reports its interpreter version
+  (``python`` on its presence row) and whether it can push (``push``: yes | no | unknown, from its
+  own non-interactive probe -- patterns/machine-push-identity.md). With a required ``major.minor``
+  configured, a seat on another line is stale; an absent report is ``unreported``, never stale.
+  ``push`` is shown, never graded: a seat that cannot push is the hand-off lane's business.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from pathlib import Path
 
@@ -45,6 +58,7 @@ OFFLINE_AFTER_S = 2 * 3600
 DORMANT_AFTER_S = 72 * 3600
 DARK_AFTER_S = 6 * 3600
 DRIFT_PATIENCE_S = 6 * 3600
+DORMANT_KEEP_S = 30 * 86400
 
 
 def _digest(raw: bytes) -> str:
@@ -86,6 +100,26 @@ def grade(reported, accepted) -> str:
         else "stale"
 
 
+def grade_python(reported, required) -> str:
+    """current | stale | unreported | unpublished for a seat's interpreter against a required
+    ``(major, minor)`` (``None`` = nothing required, so nothing is graded)."""
+    if not required:
+        return "unpublished"
+    value = str(reported or "").strip()
+    if not value:
+        return "unreported"
+    m = re.match(r"(\d+)\.(\d+)", value)
+    if not m:
+        return "stale"
+    return "current" if (int(m.group(1)), int(m.group(2))) == tuple(required)[:2] else "stale"
+
+
+def parse_required_python(value):
+    """``"3.13"`` -> ``(3, 13)``; anything unparseable -> None (not graded)."""
+    m = re.match(r"^\s*(\d+)\.(\d+)\s*$", str(value or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 def _epoch(value) -> float:
     try:
         return float(value or 0)
@@ -94,8 +128,12 @@ def _epoch(value) -> float:
 
 
 def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
-           is_service=None) -> dict:
-    """Every (seat, artifact) against the published truth, plus a verdict that states its scope."""
+           is_service=None, retired=None, required_python=None) -> dict:
+    """Every (seat, artifact) against the published truth, plus a verdict that states its scope.
+
+    ``retired`` are presence rows retirement archived: a kit seat among them silent between
+    DORMANT_AFTER_S and DORMANT_KEEP_S is still listed as dormant (retirement archives; only an
+    explicit forget deletes). ``required_python`` is an optional ``(major, minor)``."""
     now = time.time() if now is None else now
     is_kit = is_kit or (lambda r: bool(r.get("machine")) and bool(r.get("client") or r.get("artifacts")))
     is_service = is_service or (lambda agent: False)
@@ -120,9 +158,13 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
         age = max(0.0, now - seen) if seen else None
         entry = {"machine": name, "agent": agent,
                  "seen_min_ago": int(age // 60) if age is not None else None, "artifacts": {}}
+        entry["python"] = str(row.get("python") or "") or "unreported"
+        entry["push"] = str(row.get("push") or "") or "unreported"
         if age is not None and age > DORMANT_AFTER_S:
             dormant.append(name)
-            continue
+            entry["state"] = "dormant"
+            machines.append(entry)
+            continue                                   # listed, never graded
         if age is None or age > OFFLINE_AFTER_S:
             entry["state"] = "offline"
             offline.append(name)
@@ -140,6 +182,8 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
         if mem_grade:
             checks["local_memory"] = mem_grade
             entry["memory"] = mem_detail
+        if required_python:
+            checks["python"] = grade_python(row.get("python"), required_python)
         entry["artifacts"] = checks
         stale = sorted(k for k, v in checks.items() if v == "stale")
         entry["state"] = "drifted" if stale else "current"
@@ -147,6 +191,23 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
             entry["stale"] = stale
             drifted.append("%s (%s)" % (name, ", ".join(stale)))
         machines.append(entry)
+
+    listed = {str(m.get("machine") or "").lower() for m in machines}
+    for row in retired or []:
+        if not isinstance(row, dict) or is_service(str(row.get("agent") or "")):
+            continue
+        name = str(row.get("machine") or "").strip()
+        if not name or name.lower() in listed or not is_kit(row):
+            continue
+        seen = _epoch(row.get("last_seen"))
+        age = max(0.0, now - seen) if seen else None
+        if age is None or age <= DORMANT_AFTER_S or age > DORMANT_KEEP_S:
+            continue                                   # past the keep window it is history
+        listed.add(name.lower())
+        dormant.append(name)
+        machines.append({"machine": name, "agent": str(row.get("agent") or "?"),
+                         "state": "dormant", "seen_min_ago": int(age // 60), "artifacts": {},
+                         "retired_row": True})
 
     graded = [m for m in machines if m.get("state") in ("current", "drifted")]
     if not pub:
@@ -162,13 +223,15 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
     if offline:
         scope.append("%d silent, not graded: %s" % (len(offline), ", ".join(sorted(offline))))
     if dormant:
-        scope.append("%d gone 72h+ (collapsed)" % len(set(dormant)))
+        scope.append("%d dormant past %d h, awaiting retire-or-return: %s"
+                     % (len(set(dormant)), DORMANT_AFTER_S // 3600, ", ".join(sorted(set(dormant)))))
     if phantoms:
         scope.append("%d phantom caller(s) not counted" % len(phantoms))
     if legacy:
         scope.append("%d legacy row(s) not graded" % len(legacy))
     return {
-        "published": {k: v["sha"] for k, v in pub.items()},
+        "published": {**{k: v["sha"] for k, v in pub.items()},
+                      **({"python": "%d.%d" % tuple(required_python)[:2]} if required_python else {})},
         "machines": machines,
         "converged": bool(graded) and not drifted,
         "graded": len(graded),
@@ -179,20 +242,74 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
         "legacy": len(legacy),
         "verdict": head + ("" if not scope else " (" + "; ".join(scope) + ")"),
         "thresholds": {"offline_after_s": OFFLINE_AFTER_S, "dormant_after_s": DORMANT_AFTER_S,
-                       "dark_after_s": DARK_AFTER_S, "drift_patience_s": DRIFT_PATIENCE_S},
+                       "dark_after_s": DARK_AFTER_S, "drift_patience_s": DRIFT_PATIENCE_S,
+                       "dormant_keep_s": DORMANT_KEEP_S},
     }
 
 
+def observe_stale(report: dict, prior: dict | None, *, now: float | None = None) -> dict:
+    """``{"machine:artifact": epoch first observed stale}`` for every stale pair in ``report``,
+    carrying the prior clock forward (the adapter persists it between passes). A pair that is no
+    longer stale is dropped, so a recurrence starts a fresh clock. Pure."""
+    now = time.time() if now is None else now
+    prior = prior if isinstance(prior, dict) else {}
+    cur = {}
+    for m in report.get("machines") or []:
+        if m.get("state") != "drifted":
+            continue
+        for artifact in m.get("stale") or []:
+            key = "%s:%s" % (m.get("machine"), artifact)
+            try:
+                cur[key] = float(prior.get(key) or now)
+            except (TypeError, ValueError):
+                cur[key] = now
+    return cur
+
+
+def drift_age_s(artifact: str, machine, pub: dict, first_stale: dict | None,
+                now: float | None = None) -> float:
+    """How long ``machine`` has had to converge on ``artifact``: the published file's age when
+    there is a file, else how long this seat has been observed stale on it (0 when unknown --
+    late, never early)."""
+    now = time.time() if now is None else now
+    meta = pub.get(artifact) or {}
+    if meta.get("published_at"):
+        return max(0.0, now - float(meta["published_at"]))
+    since = (first_stale or {}).get("%s:%s" % (machine, artifact))
+    try:
+        return max(0.0, now - float(since)) if since else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def inbox_items(report: dict, pub: dict, *, now: float | None = None,
-                reply_cmd: str = "python -m hub_core.client distribution") -> list:
-    """Operator inbox items: seats gone silent (kind ``offline``) and persistent drift on an
-    ONLINE seat (kind ``drift``). Ids are stable per machine so a long-lived condition is ONE
-    item, not one per check."""
+                reply_cmd: str = "python -m hub_core.client distribution",
+                first_stale: dict | None = None) -> list:
+    """Operator inbox items: seats gone silent (kind ``offline``), seats DORMANT past
+    DORMANT_AFTER_S (one retire-or-return item each), and persistent drift on an ONLINE seat
+    (kind ``drift``). Ids are stable per machine so a long-lived condition is ONE item, not one
+    per check."""
     now = time.time() if now is None else now
     as_of = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     out = []
     for m in report.get("machines") or []:
         seen_min = m.get("seen_min_ago")
+        if m.get("state") == "dormant" and seen_min is not None:
+            days = seen_min / 1440.0
+            out.append({
+                "kind": "offline", "id": "dormant:%s" % m["machine"], "from": "the hub",
+                "title": "%s has been silent %.0f days: confirm it is retired, or turn it on"
+                         % (m["machine"], days),
+                "body": ("Seat %s (agent %s) has made no request to this hub for %.0f days. Past "
+                         "%d hours it is no longer graded, but it is still enrolled: its credential "
+                         "works and it still counts as a seat. If it is retired, forget its presence "
+                         "row (python -m hub_core.client forget-presence --machine %s) and revoke "
+                         "its credential; if not, turn it on and it catches up by itself."
+                         % (m["machine"], m.get("agent") or "?", days, DORMANT_AFTER_S // 3600,
+                            m["machine"])),
+                "at": as_of, "as_of": as_of, "reply_cmd": reply_cmd,
+            })
+            continue
         if m.get("state") == "offline" and seen_min is not None and seen_min * 60 >= DARK_AFTER_S:
             hours = seen_min / 60.0
             out.append({
@@ -209,7 +326,7 @@ def inbox_items(report: dict, pub: dict, *, now: float | None = None,
         if m.get("state") != "drifted":
             continue
         overdue = [a for a in m.get("stale") or []
-                   if now - float((pub.get(a) or {}).get("published_at") or now) > DRIFT_PATIENCE_S]
+                   if drift_age_s(a, m.get("machine"), pub, first_stale, now) > DRIFT_PATIENCE_S]
         if not overdue:
             continue                                    # still inside normal propagation
         out.append({

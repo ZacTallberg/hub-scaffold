@@ -83,6 +83,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/<type>.json` | a WHOLE collection as `{data, count, cursor, metadata}`, rows in exactly the snapshot's shape — type is the singular (`task, run, adr, feat, gap, cap, deploy, note, directive, ack`) or the snapshot key (`tasks`, `notes`, …). Conditional on a per-collection tag (304 when unchanged). |
 | `GET /hub/<type>/<local>.json` | one entity by local id, e.g. `GET /hub/task/0001.json` (includes computed flags). A task also carries `holder` (the live lease's agent, console and liveness, or `null`; the fencing token never leaves the claims directory), `readiness` (the same classification as `next.json`, so `stale_reclaim:true` tells a launcher "a run that ended left this in progress" without attempting a claim) and `handed_back` (runs that ended with it unfinished). A task read with `?lineage=1` also carries its **lineage ladder** (see below). |
 | `GET /hub/held.json[?repo=]` | the promotion queue: every OPEN hold, oldest first, with `age_s`, `urgency` (info/warn/critical, four times faster for a commit on one disk only), its holder and a one-line `detail`; metadata counts promoted and abandoned. |
+| `GET /hub/handoffs.json[?status=open\|all\|published\|failed&task=]` | the publish hand-off queue: OPEN hand-offs oldest first (member visibility), each with its task, project, branch, base/head, bytes, `claims`, the live `claim` (holder, fence, `expires_in_s`, never its token) and `age_s`; `metadata.open` counts what waits. |
 | `GET /hub/item-claims.json` | every per-machine item claim still in force: `{item: {machine, session, agent, age_s, releases_in_s, holder_state, gone_s, frees_in_s}}`; a claim whose console is GONE past the grace is omitted. |
 | `GET /hub/schema/<type>.schema.json` | the JSON schema for a type — read it to know the exact fields before you write. |
 | `POST /hub/api/gap` `feat` `note` | Upsert the remaining mutable entity types. Identity is derived from their content. |
@@ -90,6 +91,9 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `POST /hub/api/finding` `method` `review` | Record a FINDING (a fact discovered), METHOD (`category` ∈ extraction, analysis, transformation, verification, governance, presentation) or REVIEW (a question only a person may answer). `title`, `note`, `evidence`, `tags`, `relates_to`, `verify`, `verified_as_of`; re-filing the same title needs `expected_version`. Scope `note:write`. |
 | `POST /hub/api/eval` | Record one run of a STANDING EVAL (`hub_core/evals.py`): `{suite, pairs, excluded, paths: {<path>: {n, "@1", "@5", ...}}, notes, commit, golden_sha}`. Numbers only in `paths`; a malformed run is refused `422` (`need_suite`, `need_paths`, `too_many_paths`), never clamped. Stored in the `HUB_DIR/evals.jsonl` sidecar, never the ledger (a measurement is a reading, not a board fact), newest 400 runs per suite, writers serialized by a cross-process lock. The author is the authenticated writer. Answers `201 {data: <row as stored>}`. Scope `eval:write`. `manage.py retrieval_eval --post` records the same row in-process. |
 | `GET /hub/eval.json?suite=&limit=` | The eval trend, newest last: `{data: [runs], metadata: {suites, count, etag}}`; `limit` ≤ 400 (default 60). Conditional on all three carriers (`If-None-Match`, `X-Hub-ETag`, `?etag=`). Member visibility. Client: `evals [--suite]`; MCP: `eval_trend`. |
+| `POST /hub/api/attest` | Attach the check that answers a knowledge record's claim NOW and/or re-date it, without rewriting it: `{id, verify?, verified_as_of? (YYYY-MM-DD, default today)}`. Only those fields change (a new check clears the old check's `recheck` verdict and `needs-review` tag). 409 `not_knowledge` for anything but a lesson, finding, method or crystallized note. Answers the record's new `label`. Scope `note:write`. Client `attest`; MCP `attest_record`. |
+| `POST /hub/api/knowledge-candidates` | File candidate lessons an observer distilled: `{items: [{id, text (≥20 chars), kind?, importance?, project?, occurred_on?, machine?, model?}]}` (≤100). Idempotent by `id` — a candidate already queued is left as it is, whatever its status, so a re-sent outbox never reopens a decision. Stored in `HUB_DIR/knowledge_candidates.jsonl`, NEVER the ledger: no knowledge surface serves a candidate. Scope `note:write`. Client `propose-knowledge` / `ship-outbox`; MCP `propose_knowledge`. |
+| `POST /hub/api/knowledge-candidate/decide` | `{id, decision: adopt\|decline, as: lesson\|finding, note}` — a person's call: only a scoped credential whose subject is in `HUB_DECIDERS` (default the operator); everything else is 403 `decision_needs_a_person`. `adopt` writes a lesson (overlap-tagged like any lesson; an identical live rule records `duplicate_of` instead) or a finding, tagged `from-observer` with its provenance; `decline` requires `note`. A decided candidate answers 409 `already_decided`. Client `decide-candidate`; MCP `decide_candidate`. |
 | `POST /hub/api/history` | **Opt-in.** A workstation's batch of new console turns: `{agent, sessions:[{session, runtime, cwd, title, turns:[{ts, role, text}]}]}` (≤ 512 KB). Needs `history:write`; a scoped credential uploads as its own subject. NOT `@writer`: secret-shaped spans are replaced by `[REDACTED]` rather than refusing the batch. Stored in the `HUB_DIR/histories/` sidecar, never the ledger; answers `{sessions, turns, redacted_on_receipt}`. 404 while disabled. |
 | `POST /hub/api/retire` | Retire or re-open one knowledge record — `gap`, `note`, `directive`, `adr`, or an adopter-added `finding` — by `id` or `type` + exact `title`. Each type moves only to a status its schema enumerates (defaults: note/directive/adr → `superseded`, finding → `stale`; a gap must name its status). Any move other than a re-open requires `note`, which is appended to the record's text with a dated `[status YYYY-MM-DD by agent]` stamp, never written over it. `closed`/`mitigated` gaps require `addressed_by` (422 `need_addressed_by` names it). Needs `record:retire` plus the target type's `<type>:write` scope. Retired records — dead by status (`superseded, dropped, rejected, retracted, stale`) or named in a live record's `supersedes` — leave `search.json` at once (`hub_core/record_state.py` is the one definition). |
 | `POST /hub/api/mcp` | **MCP** (Model Context Protocol, 2026-07-28 + Tasks extension) over the board: JSON-RPC 2.0, token-gated, stateless. Board tools cover pull/claim/heartbeat/release/fail/finish; run tools create, message, command, checkpoint, request input, hand off, resume, cancel, complete, and fail durable executions. `tasks/get`, `tasks/update`, and `tasks/cancel` operate only real AgentRun handles and return current top-level result shapes. MCP task notifications are not advertised because this view has no subscription transport. Hub SSE is the shipped immediate-push rail; MCP task methods are interoperable point control, never a UI polling cycle. Every mutation goes back through the ordinary write seam. |
@@ -113,20 +117,22 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/doctor.json?app=<slug>` | one service diagnosed: its health row (synthesized for an undeclared service that ever reported), OPEN problems, resolved ones apart as history, and a verdict — `blocked` (an unclaimed problem), `waiting` (held or escalated: somebody's work in flight), else its health verdict. `404` for a name nothing knows. |
 | `GET /hub/overlap.json[?agent=&session=]` | crossovers between live consoles, computed once on the hub: `file` > `problem` > `task` > `project` (same subtree or subject) > `topic` (same external system from `HUB_OVERLAP_SYSTEMS`, or the same distinctive file). With `session`/`agent`: only that side's signals, phrased from it, with who, what they are on, how to reach them, and a proposed split; `unseen` marks what it has not been told. Without: the roster and every pair. |
 | `GET /hub/enroll/status.json?credential=<id>` | `active` / `revoked` / `expired` / `unknown` for one scoped credential — never anything secret — so an un-enrolled machine learns it instead of retrying a dead token. |
-| `GET /hub/search.json?q=…` | ranked search over every live, non-chatter record (inter-agent messages and restated questions are excluded; a question's resolution lives in its answer) and the published capability catalog. BM25F (title 3 > tags 2 > body 1, IDF + length-normalized), fused convexly with dense retrieval when an embedder is configured. `metadata.fusion` says which halves ran, `metadata.partial` is a `<memory-partial>` block present ONLY when something could not be seen (keyword-only, unembedded records, uncountable catalog), `metadata.hint` appears when nothing matched (a fact about the words used, not about the board), `metadata.timing_ms` gives each stage, and `metadata.scored` (every record either half ranked — the denominator of what is shown) sits beside `metadata.matched` (records sharing a word with the query). `?limit=` 1–50; `?mode=fused\|lexical\|semantic` and `?alpha=` exist for measurement. Ties break by id. The corpus is built once per ledger head and catalog revision. |
+| `GET /hub/knowledge-candidates.json?status=open\|adopted\|declined\|all` | The review-first candidate queue, oldest first, with `metadata.by_status`. Member visibility (unreviewed model output). |
+| `GET /hub/search.json?q=…` | ranked search over every live, non-chatter record (inter-agent messages and restated questions are excluded; a question's resolution lives in its answer) and the published capability catalog. BM25F (title 3 > tags 2 > body 1, IDF + length-normalized), fused convexly with dense retrieval when an embedder is configured. `metadata.fusion` says which halves ran, `metadata.partial` is a `<memory-partial>` block present ONLY when something could not be seen (keyword-only, unembedded records, uncountable catalog), `metadata.hint` appears when nothing matched (a fact about the words used, not about the board), `metadata.timing_ms` gives each stage, and `metadata.scored` (every record either half ranked — the denominator of what is shown) sits beside `metadata.matched` (records sharing a word with the query). `?limit=` 1–50; `?mode=fused\|lexical\|semantic` and `?alpha=` exist for measurement. Ties break by id. The corpus is built once per ledger head and catalog revision. A knowledge hit carries `label` — the record's ONE standing line (`hub_core/staleness.py`): `as of <date>`, `STATE as of … · verify before acting: <check>`, `STATE … · UNVERIFIED`, with ` · CHECK FAILED … — NEEDS REVIEW` or ` · check answered …` from the re-check; the per-prompt index (`guidance.json` memory rows) and the mirror feed (`knowledge/since` puts, which also carry raw `recheck`) render the same label. |
 | `GET /hub/perf.json` | the ANSWERING process: `process{role, pid, uptime_s, background_clock{status, age_s, tick report}}` and `prewarm{state, steps}`. See `docs/OPERATIONS.md` → Process roles. |
 | `GET /hub/history.json` | **Opt-in, operator-only.** With `agent` + `session` (`machine` optional, `limit` ≤ 3000): one console's stored turns oldest to newest (`turns[]` of `{ts, role: user\|assistant\|tool\|event, text}`, `turn_count`, `served`, `earlier_not_served`), ETag + 304 on the sidecar's size/mtime; with no session: the stored consoles, newest first. Readable with `history:read` or the adopter's `HUB_HISTORY_VIEWER` predicate; 404 to everyone else and while `HUB_HISTORIES_ENABLED` is off. |
 | `GET /hub/evidence.json[?q=&repo=&commit=&limit=]` | **Members only** (a narrowed reader gets 404: a reading can name internal systems). What the team already measured: readings ranked by subject + summary (BM25F) when `q` is given, else newest first; `commit` matches as a prefix either way. `{data[], metadata{count, stored, keep}}`, ETag/304 on all three carriers. Client: `evidence put|find`; MCP: `post_evidence`, `find_evidence`. |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
 | `GET /hub/agent-updates.json?limit=N` | the agents' own first-person feed of what they did — `{at, epoch, agent, machine, kind, summary, evidence, item, by}`, newest first, bounded to the last 200 lines; metadata carries `last_24h`. The same rows ride `live.updates`. |
-| `GET /hub/distribution.json` | every seat graded against what this hub publishes (the client it serves, `CHARTER-CORE.md` when present, and each `HUB_DISTRIBUTED_ARTIFACTS` file): per seat `current` / `drifted` (with the stale artifacts) / `offline` (silent past 2h — named, never graded as drift) / `phantom` / `legacy`; seats gone 72h+ collapse to a count. The `verdict` leads and states what it did NOT grade. Hashes compare LF-normalized bytes (CRLF and raw forms accepted) and split `version+sha` before grading. A seat silent 6h+ becomes an OPERATOR inbox item of kind `offline`; drift on an ONLINE seat becomes kind `drift` only once the artifact has been published 6h+. |
+| `GET /hub/distribution.json` | every seat graded against what this hub publishes (the client it serves, `CHARTER-CORE.md` when present, and each `HUB_DISTRIBUTED_ARTIFACTS` file): per seat `current` / `drifted` (with the stale artifacts) / `offline` (silent past 2h — named, never graded as drift) / `dormant` (silent past 72h — still listed, never graded, including rows presence retirement archived up to 30 days; each is ONE stable operator item `dormant:<machine>`, "confirm it is retired, or turn it on") / `phantom` / `legacy`. Each seat also shows `python` and `push` as reported; with `HUB_REQUIRED_PYTHON = "3.13"` set, `python` is graded like an artifact (another line is stale, an absent report `unreported`). The `verdict` leads and states what it did NOT grade. Hashes compare LF-normalized bytes (CRLF and raw forms accepted) and split `version+sha` before grading. A seat silent 6h+ becomes an OPERATOR inbox item of kind `offline`; drift on an ONLINE seat becomes kind `drift` only once the artifact has been published 6h+ (a graded fact with no published file, like `python`, from when that seat was first observed stale on it). |
+| `GET /hub/ci-status.json?sha=` | what CI last said about one commit, from the retained deliveries (never their bodies, so an ordinary member read): `found`, `status`, `active` (the newest pipeline for the sha is not terminal), `project`, `pipeline`, `at`. The unattended launcher reads it to hold a handed-back task back while the pipeline of the commit its run pushed is still running (bounded: 10 min when no pipeline has reported, 25 min when the status is unreadable). Client `ci-status <sha>`, MCP `ci_status`. |
 | `GET /hub/built.json[?person=]` | what each PERSON built, derived from the ledger, never curated: completed tasks, releases, authored gaps/feats/ADRs/decisions/notes. A machine identity folds into the agent that reports from it (raw presence rows, so an offline laptop still folds); a machine name never labels a person; service identities are never people. |
 | `GET /hub/ci-events.json?pipeline=\|job=\|project=[&limit=]` | **credential with `ci:read` required** — the raw CI deliveries behind a CI row, newest first, plus a `store` block (path, bytes, writability) so an empty answer says whether nothing arrived or nothing can be kept. Two rotated files of 4 MB each. |
 | `GET /hub/dag.graphml` | the open dependency DAG as GraphML, for any graph tool that reads the format. |
 | `GET /hub/next.json?unattended=1` | The **unattended lane**: only tasks marked `unattended`, priority P0–P2 (P3 is a wish list), never a `work_kind: decision`, and never one a live run is already on. Work a run handed back is `todo` again and re-offered here. Every row (on either form of `next.json`) is annotated like the task feed below. |
 | `GET /hub/project/<slug>/tasks.json` | One project's task feed for a consuming app: `{project, open[], finished[], counts}` — open tasks plus those finished in the last 14 days, each annotated with `holder` (agent, console, `live`/`abandoned`), `responder` (latest run: waiting/working/finished + outcome), `pushed` (typed `pushed` checkpoint first; a note sha only as `source: note`, never hex glued to an id), `handed_back`, `deployed`, and `ci_problem` (an unacked error row joined on the task's OWN recorded sha or pipeline, never on project alone). Carries an `ETag` that moves only when something a reader shows moves; `If-None-Match` answers **304**. |
 | `GET /hub/task/<local>.json` | Also carries the same annotations; `python -m hub_core.client recall <id>` prints it as state, holder, commits and the checkpoint trail in order. |
-| `GET /hub/attention.json` | **Needs attention**: every fixable operational condition — seats gone silent, clients older than the one this hub serves, consoles working with no task, orphaned leases, stalled or unclosed tasks, unstarted unattended requests, expiring/expired credentials, unanswered questions, answers their asker has not acknowledged yet (`answers_unread`: an inbox chore, never a delivery fault), unclaimed errors — each with `severity`, `who` acts, the exact `fix`, the `evidence` values that produced it, and a real `age_s` (first-seen is persisted). Cleared conditions move to `recently_cleared` with how long they stood. A source that could not be read is named in `sources` and silences only its own detectors. `ETag`/304 (ages are excluded from the tag). |
+| `GET /hub/attention.json` | **Needs attention**: every fixable operational condition — seats gone silent (a warn to the seat's owner after a day; past 72 h ONE stable `seat_dormant` "confirm it is retired, or turn it on" item, archived rows included for 30 days), unattended tasks no responder will take again (`task_needs_person`: handed back at the run cap, flagged `needs_person` by a launcher, or a refused deploy close — critical at once for P0, naming the pushed sha), clients older than the one this hub serves, consoles working with no task, orphaned leases, stalled or unclosed tasks, unstarted unattended requests, expiring/expired credentials, unanswered questions, answers their asker has not acknowledged yet (`answers_unread`: an inbox chore, never a delivery fault), unclaimed errors — each with `severity`, `who` acts, the exact `fix`, the `evidence` values that produced it, and a real `age_s` (first-seen is persisted). Cleared conditions move to `recently_cleared` with how long they stood. A source that could not be read is named in `sources` and silences only its own detectors. `ETag`/304 (ages are excluded from the tag). |
 | `GET /hub/consoles.json[?session=<id>]` | Every live console split `attended` / `unattended` (live runs) / `finished` (runs that ended in the last 30 min, kept as a recap with their outcome), each with an honest state (`working` under two minutes of quiet, else `idle` with "idle 12 min, last did …"), the digest a supervisor reported, and the task IT claimed. `crossovers[]` lists every pair of consoles on the same file, task, subsystem or subject; `?session=` adds `addressed[]` — the signals for that console with the peer's focus, task, latest checkpoint (a peer report), how to reach them and a suggested split. |
 | `GET /hub/doctrine.json?doc=<name>` | a standing document rendered through its facet fences for THE PRESENTING CREDENTIAL: `{doc, served[], facets_visible[], subject, sha256, text}`. A credential with scope `facet:<name>` (or `facet:*`, or `*`) sees that facet's blocks, an anonymous read sees none; hidden blocks leave no trace and the response names only the facets this caller CAN see. `404 unknown_doc` lists the served names; a source file carrying a C0 control character (a lost `\a` in a Windows path) is refused `503 control_chars` naming the offsets, never served. A near-miss fence marker (wrong shape, trailing text) hides the rest of the document from every reader below `*`. Documents come from `HUB_DOCTRINE_FILES` (default `PROJECT/DOCTRINE.md`, `CHARTER-CORE.md`, `AGENTS.md`). Fence syntax: `patterns/multi-agent-coordination.md`. |
 
@@ -251,12 +257,29 @@ A caller's empty `take` answers `409 no_ready_task` with `withheld` counts by re
   token), a claim from another agent is granted with `took_over_from`, and a renewal from another
   console of the same agent takes over the recorded holder. Inside the grace the claim is refused
   `409 leased` with `holder_state: "gone"` and `frees_in_s`. UNPROVABLE never releases anything; only the clock does.
+- **An ENDED console releases at once.** A console presence records as over -- its session state
+  `gone` (it said goodbye) or an unattended run stamped `ended` / reported `done` -- is GONE with
+  no grace: a task without an owner is taken over immediately. Ended sessions are never live.
+- **A heartbeating machine that went silent releases after 10 minutes.** A holder whose machine's
+  presence row carries a heartbeat stamp (it runs a daemon) and which has made no request at all
+  for `MACHINE_SILENT_S` (600 s) is GONE with `machine_silent` and released at once, by the sweep
+  and by the next claim; the takeover records `took_over_from.machine_silent` and rotates the
+  token. A machine that has never heartbeated never qualifies -- its holders stay UNPROVABLE.
+- **A fresh lease is held before its console is seen.** A lease claimed or renewed within
+  `FRESH_LEASE_S` (10 min) is refused `409 held_by_console` to another console of the same agent
+  even when the holder has not reached the roster yet. Past that, a same-agent takeover (holder
+  ended, gone, or stale and unprovable) makes the caller the holder, records `took_over_from`
+  and ROTATES the fencing token -- the old console can never complete over the new one.
+- **A console that lost its lease is told.** Its next claim/step/finish is refused with reason /
+  code `taken_over`, naming the new holder and when; and the takeover posts a message pinned to
+  its machine and console saying to hand its changes over rather than push.
 - **The hub hands back abandoned work.** On its own read paths (throttled) the Hub returns an
   `in_progress` task to `todo` when its lease expired more than `HUB_LEASE_SWEEP_GRACE_S`
   (default 1 h) ago, or when no lease holds it and nothing moved for `HUB_LEASE_SWEEP_UNHELD_S`
   (default 4 h), or when the console holding its live lease is GONE past `HUB_GONE_GRACE_S`. It
-  writes ONE self-counting `handed_back` lifecycle row naming who held it and how long ago it
-  lapsed (or went). Decision tasks are never handed back.
+  writes ONE self-counting `lease_released` lifecycle row naming who held it and how long ago it
+  lapsed (or went) -- its own kind, never the launcher's `handed_back`, so an expired lease never
+  counts against the unattended run cap. Decision tasks are never handed back.
 - **Lifecycle rows are not work.** A plan row with `lifecycle: true` or a lifecycle `kind`
   (`handed_back`, `lease_released`, `reaped`, `launcher_timeout`, `claim_expired`, `lifecycle`) is
   shown but never counted in "N of N done"; a recurring one counts itself in `times`.
@@ -268,7 +291,8 @@ A caller's empty `take` answers `409 no_ready_task` with `withheld` counts by re
 `POST /hub/api/item-claim` (`task:claim`, explicit `@writer`) `{item, machine, [release, session]}` claims
 a NON-task item — a question id or an error fingerprint — for ONE machine. A different machine
 gets `409 claimed_elsewhere` naming the holder and when the claim releases; the same machine
-re-claims idempotently (renewing the TTL, 30 minutes). The claim records its console (`session`,
+re-claims idempotently (renewing the TTL: 30 minutes, or 3 hours when the item is a board task,
+whose run is bounded longer; the granted `ttl_s` rides the row). The claim records its console (`session`,
 or the `X-Hub-Session` header): when that console is provably GONE past `HUB_GONE_GRACE_S` the
 claim is no longer in force and another machine is granted it with `took_over_from`; inside the
 grace the `409` says `holder_state: "gone"` and `frees_in_s`. A claimed question or error is
@@ -298,6 +322,40 @@ and the record keeps `hub_saw: "local_only"`. The refusal's `searched` names eve
 and what each saw. `POST /hub/api/held/promote` requires `evidence` (the pipeline, sha or URL of the
 rebuild that ran); `POST /hub/api/held/abandon` requires `reason`. Open holds ride the rail with
 urgency climbing by age.
+
+### The publish hand-off lane (`handoff`)
+
+A worker whose machine cannot push (an unregistered per-machine key, a credential manager that
+cannot prompt unattended) hands its commits to a machine that can; see
+`patterns/publish-handoff.md`. Nothing is created unless the operator lists the git hosts a
+hand-off may point at in `HUB_HANDOFF_GIT_HOSTS` (a list or a comma-separated string; the
+pseudo-host `file` admits `file://` remotes). Unset, every submission is refused
+`403 handoff_disabled`.
+
+`POST /hub/api/handoff` (`handoff:submit`) `{task, project, remote, base, head, bundle_b64,
+[branch, commits, subject, note, idem_key]}` stores a git bundle of `base..head` (20 MB decoded
+ceiling, read from the request stream -- it is token-gated by the same credential check as every
+write, not by `@writer`, whose body read stops at Django's upload limit). Refused: `bad_task`,
+`task_not_found`, `host_not_allowed` (the origin is not on an allowed host), `project_mismatch`,
+`bad_sha`, `nothing_to_publish`, `bad_bundle`, `bundle_head_mismatch`, `bundle_base_mismatch` (the
+bundle must have `base` as its prerequisite), `base_not_on_server` (the commit resolver shows the
+base on no server), `bundle_too_large` (413), and a secret-shaped field outside the bundle. A
+credential in `remote` is stripped before it is stored. Idempotent on `idem_key`
+(`replayed`); the same head already waiting answers that record (`duplicate`).
+
+`POST /hub/api/handoff/claim` (`handoff:publish`) `{machine, [id, ttl_s]}` leases the oldest open
+hand-off (or `id`): `{token, fence, ttl_s, ...record}`, or `data: null`. The fence increases with
+every claim; TTL is 60-1800 s (default 900). A hand-off whose lease lapsed `MAX_CLAIMS` (3) times
+with no result is closed `failed`. `POST /hub/api/handoff/bundle` `{id, token, fence}` answers
+`{bundle_b64, bytes, sha256}` to the newest claim only (`409 not_holder` otherwise).
+`POST /hub/api/handoff/result` `{id, token, fence, outcome, [pushed_sha | reason, conflicts,
+note]}`: `published` needs the full `pushed_sha` and is refused `pushed_sha_not_on_server` when
+the commit resolver shows it on no server (`verified: null` when it could not ask); `failed` and
+`released` need a `reason`, and `released` ("this machine cannot push either") returns the
+hand-off to the queue without spending a claim. A stale fence or wrong token is `409 not_holder`.
+A terminal result writes a checkpoint onto the task -- `kind: "pushed"` with the `sha` for a
+publish, which the deploy close reads -- and messages the author's machine;
+`data.notified` says whether each landed.
 
 ### Evidence in the task's own project
 
@@ -537,7 +595,7 @@ raw BEL). The refusal names the field, offsets and character; fix the source and
 | Endpoint (scope) | Key body fields | Behaviour |
 |---|---|---|
 | `/hub/api/task` (`task:write`) | create: `title`, `acceptance`, optional `priority`, `project`, `unattended`, `work_kind`, `idem_key` | **A retried create is not a new record**: the id is allocated per attempt, so with an `idem_key` the replay lookup spans every task and answers the retry with the first attempt's record plus `replayed: true` (the client stamps one key per intent). `unattended: true` offers it to the unattended lane. A `work_kind: decision` with `unattended: true` — on create, on update, or setting the flag on an existing decision — is `409 decision_not_unattended`. |
-| plan items | `kind`, `sha`, `pipeline_id`, `pipeline_url`, `lifecycle`, `times`, `auto` | Typed checkpoints: `pushed` names the commit (`client step --sha --pipeline`), `deployed` is written by a verified deploy, and the scheduler kinds (`handed_back`, `lease_released`, `reaped`, `launcher_timeout`, `claim_expired`, `lifecycle`) are shown but never counted toward "N of N done", nor are `auto` placeholders grown to reach a numbered step. An unknown kind is refused by the schema. |
+| plan items | `kind`, `sha`, `pipeline_id`, `pipeline_url`, `lifecycle`, `times`, `auto` | Typed checkpoints: `pushed` names the commit (`client step --sha --pipeline`; a `step` whose `--note` names a commit and has no `--sha` or `--kind` has the first one lifted into `--sha`, with a warning when the note names several — never refused), `deployed` is written by a verified deploy, and the scheduler kinds (`handed_back`, `lease_released`, `reaped`, `launcher_timeout`, `claim_expired`, `lifecycle`) are shown but never counted toward "N of N done", nor are `auto` placeholders grown to reach a numbered step. An unknown kind is refused by the schema. |
 | `/hub/api/hand` (`task:release`) | `id`, `agent`, optional `token`, `note` | Back to the queue **for an unattended worker**: `todo`, `unattended: true`, lease released, one counted `handed_back` scheduler row. Refused on a decision. |
 | `/hub/api/unclaim` (`task:release`) | `id`, `agent`, optional `token`, `note` | Let go: lease released, `in_progress` back to `todo`, `unattended` unchanged. With nothing held and nothing in flight it is a no-op (`noop: true`) and writes nothing. |
 | — the orphaned-lease remedy | (either verb, no `token`) | Without the fencing token, a lease is released only when it belongs to the SAME agent (and credential subject) and its claiming console is no longer live. A live console's lease is `409 lease_live`; another agent's is `409 held`. |
@@ -561,6 +619,19 @@ onto the task as `auto_close`. Ancestry is asked of the repository at `HUB_WORK_
 (`HUB_VCS_ANCESTRY=none` when the image carries none); a question it could not answer is reported
 as `unchecked`, never read as "no". The closure is fail-soft: the release record is already
 durable.
+
+A refused close is **retried, not final**. An unattended task already stepped `deployed` but not
+done is offered to the close again on every later deploy (never stepped twice), on the hand-back,
+release or lease sweep that frees its lease, and by a throttled sweep started from the board's
+read path -- always in ONE single-flight background thread, never on the request. A task whose own
+checkpoint says it is NOT finished ("NOT DONE", "active on purpose") is refused with the quote in
+`auto_close.why` and is not retried; the attention list takes it to a person. A sha written in a
+checkpoint's prose counts only when a deploy record served exactly that commit.
+`POST /hub/api/deploy/reconcile` (`deploy:write`) replays the newest deploy record and retries
+every stepped close in a thread (202; 200 with the running state if one is going); a `running`
+state that has not moved for 2 minutes belongs to a dead process and is restarted, and a replay
+stops at 10 minutes and says so. `GET /hub/deploy-reconcile.json` (member) reads its progress and
+result from `HUB_DIR/deploy-reconcile.json`, so every hub process answers the same.
 
 **Client telemetry.** Every `hub_core.client` call sends `X-Hub-Client-Version` (a digest of the
 client); write responses carry `X-Hub-Client-Current`, and the attention list names each seat
@@ -614,7 +685,10 @@ four disciplines, each learned from a seat that lost work without knowing it:
   race and is returned. A `409` that names no version (a lease or content refusal) raises at once.
 - **Kit telemetry.** Every request carries `X-Hub-Client` and `X-Hub-Artifacts` (the client's own
   sha, the charter core's, and any `HUB_ARTIFACTS=name=path,...`), which is what `distribution`
-  grades and what separates a computer from a phantom caller.
+  grades and what separates a computer from a phantom caller. It also sends `X-Hub-Python` (the
+  interpreter version) and, when the machine's push probe exports `HUB_PUSH_STATE`
+  (`yes|no|unknown`, `patterns/machine-push-identity.md`), `X-Hub-Push`; both are kept on the
+  machine row. An absent header reads `unreported`, never stale.
 
 Read verbs: `distribution`, `built [--person]`, `ci-events --project|--pipeline|--job`. CI/deploy
 steps report with `ci-report --kind pipeline|job|deploy --project P --status S [...]`, authenticated

@@ -41,6 +41,17 @@ OWNER_PATIENCE_S = 30 * 60
 OPERATOR_PATIENCE_S = 24 * 3600
 SILENT_INFO_S = 3600
 SILENT_WARN_S = 6 * 3600
+#: A silent seat reaches its OWNER after this long (a warn), holding a lease or not: an evening
+#: or a weekend day is not an alarm, a working week passing unnoticed is.
+OWNER_SILENT_S = 24 * 3600
+#: Past this a seat is DORMANT (hub_core.distribution.DORMANT_AFTER_S): ONE stable
+#: "confirm it is retired, or turn it on" item, never a fresh line per sweep.
+DORMANT_AFTER_S = 72 * 3600
+#: ...and an archived (retired) row keeps that item this long, then it is history.
+DORMANT_KEEP_S = 30 * 86400
+#: The unattended launcher's run cap (hub_core.unattended.board.TASK_MAX_RUNS): a task handed
+#: back this many times is never offered to a responder again -- it is a person's from here.
+TASK_CAP_RUNS = 3
 CREDENTIAL_WARN_S = 14 * 86400
 CREDENTIAL_CRITICAL_S = 3 * 86400
 QUESTION_WAIT_S = 2 * 3600
@@ -193,32 +204,67 @@ def detect_untracked(ctx) -> list:
 
 def detect_seats(ctx) -> list:
     """A seat that has stopped reporting. Info while it could be a closed laptop; warn once it
-    has been silent a working day WHILE it still holds a live lease (work nobody is doing)."""
+    has been silent a working day WHILE it still holds a live lease (work nobody is doing), or
+    for a day whatever it holds -- a warn reaches the seat's OWNER, the one person who can turn
+    it on (an info line reached nobody who could act). Past DORMANT_AFTER_S it becomes ONE stable
+    retire-or-return item instead: the seat is still enrolled and still counts, and a machine that
+    stopped calling home must not become nobody's item exactly when it became permanent."""
     now = ctx["now"]
     leased = {str(l.get("agent") or "").lower() for l in ctx.get("leases") or []}
     out = []
-    for agent, row in (ctx.get("presence") or {}).items():
-        for m in row.get("machines") or []:
-            stamps = [float(m.get(k) or 0) for k in ("heartbeat_at", "activity_at", "last_seen")]
-            last = max(stamps) if stamps else 0
-            if not last:
-                continue
-            silent = now - last
-            if silent < SILENT_INFO_S:
-                continue
-            holds = agent.lower() in leased
-            severity = "warn" if holds and silent >= SILENT_WARN_S else "info"
-            machine = str(m.get("machine") or "")
-            out.append(item("seat_silent", "seats", severity, agent=agent, machine=machine,
+    seats = [(agent, m) for agent, row in (ctx.get("presence") or {}).items()
+             for m in row.get("machines") or []]
+    # Rows presence retirement ARCHIVED (it never deletes) are still enrolled seats: within
+    # DORMANT_KEEP_S they keep their one retire-or-return item, or the seat would become
+    # nobody's item at the very horizon where it became permanent.
+    listed = {(str(a).lower(), str(m.get("machine") or "").lower()) for a, m in seats}
+    for r in ctx.get("retired") or []:
+        key = (str(r.get("agent") or "").lower(), str(r.get("machine") or "").lower())
+        if not key[0] or not key[1] or key in listed:
+            continue
+        stamp = max(float(r.get(k) or 0) for k in ("heartbeat_at", "activity_at", "last_seen"))
+        if stamp and DORMANT_AFTER_S <= now - stamp <= DORMANT_KEEP_S:
+            listed.add(key)
+            seats.append((key[0], r))
+    for agent, m in seats:
+        stamps = [float(m.get(k) or 0) for k in ("heartbeat_at", "activity_at", "last_seen")]
+        last = max(stamps) if stamps else 0
+        if not last:
+            continue
+        silent = now - last
+        if silent < SILENT_INFO_S:
+            continue
+        holds = agent.lower() in leased
+        machine = str(m.get("machine") or "")
+        if silent >= DORMANT_AFTER_S:
+            days = silent / 86400.0
+            out.append(item("seat_dormant", "seats", "warn", agent=agent, machine=machine,
                             who=agent, subject="%s:%s" % (agent, machine or "-"),
-                            title="%s%s has not reported for %s%s"
-                                  % (agent, ("@" + machine) if machine else "", age_phrase(silent),
-                                     " and still holds a lease" if holds else ""),
-                            detail="Silent, not retired: it reappears the moment it checks in.",
-                            fix="Check the seat is running; if it is gone for good, drop its row "
-                                "(python -m hub_core.client forget-presence --machine %s)"
-                                % (machine or "<machine>"),
+                            title="%s%s has been silent %.0f days: confirm it is retired, or "
+                                  "turn it on" % (agent, ("@" + machine) if machine else "",
+                                                  days),
+                            detail="It is still enrolled -- its credential works and it counts "
+                                   "as a seat -- but it has made no request in %.0f days, so "
+                                   "nothing reaches it and the distribution view no longer "
+                                   "grades it.%s" % (days, " It still holds a lease."
+                                                     if holds else ""),
+                            fix="If it is retired, drop its row (python -m hub_core.client "
+                                "forget-presence --machine %s) and revoke its credential; if "
+                                "not, turn it on -- it catches up by itself." % (machine or "<machine>"),
                             evidence={"silent_s": int(silent), "holds_lease": holds}))
+            continue
+        severity = ("warn" if (holds and silent >= SILENT_WARN_S) or silent >= OWNER_SILENT_S
+                    else "info")
+        out.append(item("seat_silent", "seats", severity, agent=agent, machine=machine,
+                        who=agent, subject="%s:%s" % (agent, machine or "-"),
+                        title="%s%s has not reported for %s%s"
+                              % (agent, ("@" + machine) if machine else "", age_phrase(silent),
+                                 " and still holds a lease" if holds else ""),
+                        detail="Silent, not retired: it reappears the moment it checks in.",
+                        fix="Check the seat is running; if it is gone for good, drop its row "
+                            "(python -m hub_core.client forget-presence --machine %s)"
+                            % (machine or "<machine>"),
+                        evidence={"silent_s": int(silent), "holds_lease": holds}))
     return out
 
 
@@ -246,6 +292,82 @@ def detect_clients(ctx) -> list:
                                 "itself.",
                             evidence={"client": have, "hub_client": want,
                                       "reported_at": m.get("client_at")}))
+    return out
+
+
+def _handed_back_runs(task) -> int:
+    """The launcher's hand-backs (kind ``handed_back``, summing ``times``). The hub's own lease
+    releases (``lease_released``) are deliberately not counted: an expired lease is not a run
+    giving up."""
+    return sum(int(s.get("times") or 1) for s in (task.get("plan") or [])
+               if isinstance(s, dict) and s.get("kind") == "handed_back")
+
+
+def detect_capped(ctx) -> list:
+    """An unattended task no responder will take again, and that no person has been told about.
+
+    The launcher stops offering a task at its run cap and the queue shows it as ordinary todo,
+    so the only reader left is a person who happens to open it -- on the origin system a P0 with
+    a verified-live fix sat at the cap for almost a week. Fires on the launcher's
+    ``needs_person`` field, on the cap reached by hand-back count, or on a deploy close the hub
+    was REFUSED (``auto_close.state == refused``). Goes to the task's owner (``assigned_to``,
+    else whoever filed it, else the operator): critical at once for P0, a warn after the owner's
+    patience otherwise, and to the operator through the ordinary escalation. A pushed sha is
+    named, because "a fix is live and only a person can finish it" is the cheapest item there is."""
+    from . import task_rows
+    operator = ctx.get("operator") or ""
+    known = {str(a).lower() for a in (ctx.get("presence") or {})}
+    out = []
+    for t in ctx.get("tasks") or []:
+        caps = [str(c).lower() for c in (((t.get("routing") or {}).get("required_capabilities")
+                                          or []) if isinstance(t, dict) else [])]
+        if not isinstance(t, dict) or not (t.get("unattended") in (True, 1, "1", "true")
+                                            or "unattended" in caps):
+            continue
+        if str(t.get("status") or "") not in ("todo", "in_progress", "blocked"):
+            continue
+        tid = str(t.get("id") or "")
+        need = t.get("needs_person") if isinstance(t.get("needs_person"), dict) else None
+        runs = _handed_back_runs(t)
+        ac = t.get("auto_close") if isinstance(t.get("auto_close"), dict) else None
+        refused = ac if ac and ac.get("state") == "refused" else None
+        if not (need or runs >= TASK_CAP_RUNS or refused):
+            continue
+        prov = t.get("provenance") if isinstance(t.get("provenance"), dict) else {}
+        owner = ""
+        for cand in (t.get("assigned_to"), t.get("owner"), prov.get("created_by"),
+                     prov.get("agent")):
+            cand = str(cand or "").strip().lower()
+            if cand and (not known or cand in known):
+                owner = cand
+                break
+        owner = owner or operator
+        pushed = task_rows.pushed(t) or {}
+        sha = str((need or {}).get("sha") or (refused or {}).get("sha") or pushed.get("sha") or "")
+        prio = str(t.get("priority") or "").upper()
+        if need:
+            why = "the launcher handed it to a person: %s" % str(need.get("reason") or
+                                                                 "no reason given")[:200]
+        elif refused:
+            why = "the deploy record's close was refused: %s" % str(refused.get("why") or "")[:200]
+        else:
+            why = "it was handed back %d times, so no responder will take it again" % runs
+        out.append(item(
+            "task_needs_person", "tasks", "critical" if prio == "P0" else "warn",
+            agent=owner, who=owner or "the operator", subject=tid,
+            title="%s: %s -- %s" % (tid, str(t.get("title") or "")[:80],
+                                    "a fix is pushed and only a person can finish it" if sha
+                                    else "no responder will take it; a person must"),
+            detail="Why: %s.%s Responders stop at the cap and the queue shows it as ordinary "
+                   "todo, so nothing else will surface it."
+                   % (why, (" The newest pushed commit is %s." % sha[:12]) if sha else ""),
+            fix=("Read its checkpoints (python -m hub_core.client recall %s). If the work is done, "
+                 'finish it (python -m hub_core.client finish %s --accept-note "<outcome>" '
+                 "--evidence <sha|url>); if it needs a decision, make it on the task; if it should "
+                 "run again, hand it to someone (python -m hub_core.client hand %s --to <agent>)."
+                 % (tid, tid, tid)),
+            evidence={"task": tid, "priority": prio, "handed_back": runs, "sha": sha[:40],
+                      "needs_person": need, "auto_close": refused}))
     return out
 
 
@@ -375,6 +497,7 @@ def detect_answers(ctx) -> list:
 
 DETECTORS = (
     ("tasks", detect_tasks, ("tasks",)),
+    ("capped", detect_capped, ("tasks",)),
     ("unstarted", detect_unstarted, ("tasks", "leases", "runs")),
     ("leases", detect_leases, ("tasks", "leases", "sessions")),
     ("untracked", detect_untracked, ("sessions",)),

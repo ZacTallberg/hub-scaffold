@@ -187,6 +187,10 @@ SESSION_FIELDS = {"kind": 16, "run": 64, "subject": 120, "subject_title": 160, "
                   "runtime": 16, "phase": 16, "doing": 180, "narration": 220,
                   "last_result": 60, "outcome": 24, "state": 16}
 SESSION_NUMBERS = ("started", "ended", "bounded_s", "doing_at")
+#: Facts a seat reports about the computer itself, kept on its machine row: the interpreter the
+#: client runs on (``X-Hub-Python``) and whether this machine can push (``X-Hub-Push``: yes | no
+#: | unknown, from the adopter's non-interactive push probe). name -> max length.
+MACHINE_FACTS = {"python": 24, "push": 8}
 UNATTENDED_KINDS = ("responder", "scheduled", "autoworker", "unattended")
 UNATTENDED_RECAP_S = 1800       # a finished run stays visible as a recap this long, then goes
 
@@ -338,7 +342,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
             app: str = "", state: str = "", runtime: str = "", files=None,
             retract_focus: str = "", extra: dict | None = None, client: str = "",
             client_digest: str = "", artifacts=None, project: str = "",
-            unattended=None, memory_health: str = "") -> None:
+            unattended=None, memory_health: str = "",
+            machine_facts: dict | None = None) -> None:
     """Record one observation of `agent`. Merge-never-clobber; keyed per (agent, machine);
     per-console sessions live INSIDE the machine row (a session is a fact about a machine),
     carrying its name, repo, app, state, focus and recently edited files. A heartbeat stamps
@@ -347,9 +352,11 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
     fields (SESSION_FIELDS: kind, run, subject, the supervisor's digest, project, files);
     ``client`` the reporting client's version, kept per machine so a seat running an older
     client than the hub serves is visible. ``project`` and ``unattended`` are the
-    crossover facts a client may pass directly (the same as extra project / kind). A focus line
-    is read by every other console, so an e-mail address pasted into it is redacted. Never
-    raises."""
+    crossover facts a client may pass directly (the same as extra project / kind).
+    ``machine_facts`` are what a seat reports about the computer itself (MACHINE_FACTS: its
+    interpreter version, whether it can push), kept on the machine row and graded by
+    hub_core.distribution. A focus line is read by every other console, so an e-mail address
+    pasted into it is redacted. Never raises."""
     agent = (agent or "").strip().lower()
     if not agent:
         return
@@ -367,6 +374,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
     client_digest = str(client_digest or "").strip()[:64]
     # X-Hub-Memory-Health: a fact about the MACHINE's local memory layer (knowledge_mirror).
     memory_health = str(memory_health or "").strip()[:240]
+    facts = {k: str(v).strip()[:limit] for k, limit in MACHINE_FACTS.items()
+             for v in [(machine_facts or {}).get(k)] if v not in (None, "")} if machine else {}
     try:
         pdir = _dir(hub_dir)
         pdir.mkdir(parents=True, exist_ok=True)
@@ -393,6 +402,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
                     client_digest and prior_row.get("client_digest") != client_digest) or artifacts:
                 unchanged = False
             if memory_health and _health_moved(prior_row.get("memory_health"), memory_health):
+                unchanged = False
+            if any(prior_row.get(k) != v for k, v in facts.items()):
                 unchanged = False
             if fresh and unchanged and (not sid or now - epoch(prior_session.get("at")) < QUIET_REWRITE_S):
                 return
@@ -449,6 +460,8 @@ def observe(hub_dir, agent: str, *, machine: str = "", session: str = "", cwd: s
             if machine and memory_health:
                 payload["memory_health"] = memory_health
                 payload["memory_health_at"] = now
+            # What the seat reports about the computer (a fact about the MACHINE row).
+            payload.update(facts)
             # Atomic and durable, waiting out a Windows sharing window (hub_core.atomic).
             atomic.write_json(p, payload)
             # Self-cleaning under the same lock: the write that records a live seat retires
@@ -464,6 +477,24 @@ def _health_moved(prior, line: str) -> bool:
     def core(text):
         return ";".join(p for p in str(text or "").split(";") if not p.startswith("age="))
     return core(prior) != core(line)
+
+
+def retired_rows(hub_dir) -> list:
+    """Rows presence retirement archived (``_retired/``). Retirement archives, it never deletes,
+    and a seat that stopped calling home is still enrolled until a person forgets it -- so the
+    distribution view keeps listing these as dormant. Never raises."""
+    out = []
+    try:
+        for p in sorted(_retired_dir(hub_dir).glob("*.json")):
+            try:
+                row = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(row, dict) and row.get("agent"):
+                out.append(row)
+    except OSError:
+        pass
+    return out
 
 
 _ROWS_MEMO = {"key": None, "rows": None, "at": 0.0}
