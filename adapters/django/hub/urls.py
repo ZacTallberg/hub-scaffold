@@ -6,8 +6,8 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, held, histories_api, hub_api, hub_write, hubsite, knowledge_api,
-               knowledge_write, veil, mcp_server, read_auth, run_api)
+from . import (app_services, evidence_api, held, histories_api, hub_api, hub_write, hubsite,
+               knowledge_api, knowledge_write, veil, mcp_server, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -43,6 +43,9 @@ urlpatterns = [
     path("guidance.json", R(knowledge_api.guidance_json), name="guidance"),
     path("knowledge/since", R(knowledge_api.knowledge_since), name="knowledge-since"),
     path("capabilities.json", R(knowledge_api.capabilities_json), name="capabilities"),
+    # The shared evidence store (hub_core.evidence): readings keyed by subject and commit, so a
+    # console reads the probe a peer already ran instead of re-running it.
+    path("evidence.json", R(evidence_api.evidence_json), name="evidence"),
     path("whoami.json", R(hub_api.whoami_json), name="whoami"),
     # Standing documents rendered through their facet fences for the presenting credential.
     path("doctrine.json", R(hub_api.doctrine_json), name="doctrine"),
@@ -132,6 +135,8 @@ urlpatterns = [
     # The ask/answer loop and the directive plane (delivery closed by acks).
     path("api/ask", hub_write.ask),
     path("api/answer", hub_write.answer),
+    path("api/question/withdraw", hub_write.withdraw_question),
+    path("api/evidence", evidence_api.post),
     path("api/directive", hub_write.directive),
     path("api/ack", hub_write.ack),
     # Agent-to-agent mail, delivered by the recipient's inbox like any other addressed item.
@@ -194,7 +199,7 @@ VISIBILITY = {
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
-    "history.json": "member", "doctrine.json": "veiled",
+    "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
     "related.json": "veiled", "guidance.json": "veiled", "knowledge/since": "veiled",
     "capabilities.json": "veiled",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
