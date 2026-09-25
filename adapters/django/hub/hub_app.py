@@ -1199,7 +1199,11 @@ def observe_presence(agent, headers, *, heartbeat=False, extra=None):
             # and whether it is an unattended process nobody is reading.
             project=headers.get("X-Hub-Project") or "",
             unattended=(None if unattended in (None, "") else
-                        str(unattended).strip().lower() in ("1", "true", "yes")))
+                        str(unattended).strip().lower() in ("1", "true", "yes")),
+            # The computer's own facts, graded by the distribution view: which interpreter the
+            # client runs on, and whether the machine proved it can push. Absent = unreported.
+            machine_facts={"python": headers.get("X-Hub-Python") or "",
+                           "push": headers.get("X-Hub-Push") or ""})
         stamp = _presence.stamp(HUB_DIR)
         now = _time.time()
         if stamp != _PRESENCE_PUBLISH["stamp"] and now - _PRESENCE_PUBLISH["at"] >= 2.0:
@@ -1253,17 +1257,40 @@ def distribution_report(now=None):
         pub = _distribution.published(distribution_files())
         report = _distribution.assess(read_presence_rows(), pub, now=now,
                                       is_kit=_presence.is_kit_machine,
-                                      is_service=_presence.is_service_identity)
+                                      is_service=_presence.is_service_identity,
+                                      retired=_presence.retired_rows(HUB_DIR),
+                                      required_python=_distribution.parse_required_python(
+                                          _dj_setting("HUB_REQUIRED_PYTHON") or ""))
         return report, pub
     except Exception as exc:                                 # noqa: BLE001
         return {"machines": [], "converged": False, "graded": 0,
                 "verdict": "distribution could not be computed: %s" % type(exc).__name__}, {}
 
 
+def _distribution_first_stale(report, now=None):
+    """The first-observed-stale clock for graded facts that have no published file, kept in
+    ``HUB_DIR/distribution-first-stale.json`` across passes. An unreadable store starts every
+    clock now (an item raised late, never early). Never raises."""
+    path = HUB_DIR / "distribution-first-stale.json"
+    try:
+        prior = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        prior = {}
+    cur = _distribution.observe_stale(report, prior, now=now)
+    if cur != prior:
+        try:
+            from hub_core import atomic as _atomic
+            _atomic.write_json(path, cur)
+        except Exception:                                    # noqa: BLE001
+            pass
+    return cur
+
+
 def distribution_inbox_items(now=None):
     report, pub = distribution_report(now)
     try:
-        return _distribution.inbox_items(report, pub, now=now)
+        return _distribution.inbox_items(report, pub, now=now,
+                                         first_stale=_distribution_first_stale(report, now))
     except Exception:                                        # noqa: BLE001
         return []
 

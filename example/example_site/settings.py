@@ -99,6 +99,10 @@ HUB_PROJECT_REPOS = json.loads(os.environ.get("HUB_PROJECT_REPOS", "") or "{}")
 # before they are released, measured from its last-seen stamp. Default 30 minutes.
 HUB_GONE_GRACE_S = int(os.environ.get("HUB_GONE_GRACE_S", "1800") or 1800)
 
+# The interpreter line every seat must run ("major.minor"), graded on /hub/distribution.json.
+# Empty = not graded.
+HUB_REQUIRED_PYTHON = os.environ.get("HUB_REQUIRED_PYTHON", "")
+
 # Reads are authenticated by default (a Django user, a scoped agent credential, or the shared
 # root token). This example mounts no sign-in, so its local preview declares the board public
 # — only under DEBUG. Outside DEBUG the example refuses anonymous reads, and a real adopter

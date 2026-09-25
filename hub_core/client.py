@@ -137,6 +137,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import random
 import re
 import sys
@@ -961,6 +962,11 @@ def _presence_headers(arguments: argparse.Namespace | None = None) -> dict[str, 
         "X-Hub-Session-Kind": os.environ.get("HUB_SESSION_KIND", ""),
         "X-Hub-Run": os.environ.get("HUB_RUN_ID", ""),
         "X-Hub-Subject": os.environ.get("HUB_SUBJECT", ""),
+        # Facts about the computer the distribution view grades: the interpreter this client
+        # runs on, and -- when the adopter's push probe (patterns/machine-push-identity.md)
+        # exports it -- whether this machine can push (yes | no | unknown).
+        "X-Hub-Python": platform.python_version(),
+        "X-Hub-Push": os.environ.get("HUB_PUSH_STATE", ""),
     }
     if arguments is not None:
         if getattr(arguments, "machine", None):
