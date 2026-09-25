@@ -17,6 +17,7 @@ board loses the difference, so each has its own verb::
     python -m hub_core.client prompt-context --hook < hook.json         # from a prompt hook
     python -m hub_core.client knowledge-sync --out ~/.hub-client/knowledge.json
     python -m hub_core.client adjudicate                                 # needs HUB_JUDGE_URL
+    python -m hub_core.client consolidate [--apply]                      # + HUB_EMBED_URL
 
 Registered by `client._parser`; kept in its own module so the core client stays small.
 """
@@ -344,6 +345,141 @@ def _run_adjudicate(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _git(code_dir, *args) -> tuple:
+    import subprocess
+    try:
+        proc = subprocess.run(["git", "-C", str(code_dir), *args], capture_output=True, text=True,
+                              timeout=20)
+    except (OSError, subprocess.SubprocessError) as error:
+        return 127, "", str(error)
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Fold duplicate lessons/findings, supersede corrections, derive applies_when — through
+    the served API, with the judge (HUB_JUDGE_*) and the embedder (HUB_EMBED_*) of THIS machine.
+
+    Exit status: 0 the pass ran (a dry run that proposes nothing is a result) · 2 judging,
+    deriving or embedding to do and no model · 3 the hub refused a write · 4 the trigger line
+    asks for something the parse did not produce, or a scheduled run was asked to write ·
+    5 --require-commit: the code running does not contain the commit that asked."""
+    from pathlib import Path
+    from urllib.parse import quote
+    from . import consolidate as cons
+    from . import semantic
+    _utf8_stdout()
+    code_dir = Path(cons.__file__).resolve().parent.parent
+    state = Path(arguments.state_dir or os.path.join(str(_c._state_dir()), "consolidate"))
+    log_dir = state / "runs"
+
+    # THE CODE THAT RUNS MUST CONTAIN THE COMMIT THAT ASKED. A trigger pushed with a commit is
+    # executed by whatever checkout the runner has; if that checkout is older, the run silently
+    # obeys the old parse (on the source instance: an apply ignored its reviewer's hold-back, and
+    # a single-record revert reverted a whole run). Refuse before anything else.
+    if arguments.require_commit:
+        rc, _out, err = _git(code_dir, "merge-base", "--is-ancestor", arguments.require_commit, "HEAD")
+        _hrc, head, _e = _git(code_dir, "rev-parse", "HEAD")
+        if rc != 0:
+            return {"_exit": 5, "refused": "CONSOLIDATE_REFUSED the code at %s (HEAD %s) does not "
+                    "contain commit %s%s -- nothing run" % (code_dir, head or "?", arguments.require_commit,
+                                                            (": " + err[:200]) if err else "")}
+        print("CODE_UNDER_TEST %s HEAD %s contains %s" % (code_dir, head, arguments.require_commit))
+
+    apply_writes, revert_run = bool(arguments.apply), (arguments.revert or "").strip()
+    exclude = [x for x in (arguments.except_ids or "").split(",") if x]
+    only = [x for x in (arguments.only or "").split(",") if x]
+    apply_limit = arguments.apply_limit
+    if arguments.scheduled and (apply_writes or revert_run or arguments.from_trigger):
+        # A SCHEDULE NEVER READS THE TRIGGER FILE and never writes: re-reading an `apply` line
+        # every night would re-apply yesterday's reviewed plan and, since an apply judges
+        # nothing new, the loop would stall on old verdicts. Only a deliberate invocation writes.
+        return {"_exit": 4, "refused": "a --scheduled run is always a dry run; drop --apply/--revert/"
+                "--from-trigger (only a deliberately pushed trigger line or a person may write)"}
+    if arguments.from_trigger:
+        lines = [ln.strip() for ln in Path(arguments.from_trigger).read_text(encoding="utf-8-sig").splitlines()
+                 if ln.strip() and not ln.strip().startswith("#")]
+        last = lines[-1] if lines else ""
+        print("TRIGGER LINE: %s" % last)
+        try:
+            spec = cons.parse_trigger_line(last)
+        except cons.TriggerRefused as error:
+            return {"_exit": 4, "refused": "CONSOLIDATE_REFUSED the trigger line was not fully "
+                    "understood (%s); nothing run" % error}
+        apply_writes = spec["mode"] == "apply"
+        revert_run = spec["run"]
+        exclude, only = spec["exclude"], spec["only"]
+        if spec["apply_limit"] is not None:
+            apply_limit = spec["apply_limit"]
+    # A VERIFIER NAMES ITS SUBJECT: what was parsed, and which code parsed it.
+    _hrc, head, _e = _git(code_dir, "rev-parse", "--short", "HEAD")
+    print("PARSED mode=%s apply_limit=%s exclude=%s only=%s | code %s at %s"
+          % ("revert" if revert_run else ("apply" if apply_writes else "dry-run"), apply_limit,
+             exclude, only, cons.__file__, head or "?"))
+
+    def write(eid, fields, version, idem):
+        try:
+            _c._post(base, "note", {"id": eid, "agent": arguments.agent or cons.AGENT,
+                                    "expected_version": version, "idem_key": idem, **fields},
+                     extra_headers=_c._presence_headers(arguments))
+            return True, "written"
+        except (RuntimeError, ValueError) as error:
+            return False, str(error)[:300]
+
+    if revert_run:
+        def get_current(eid):
+            parts = str(eid).split(":")
+            if len(parts) != 3:
+                return None
+            try:
+                return _c._get(base, f"{quote(parts[1])}/{quote(parts[2])}.json").get("data")
+            except RuntimeError:
+                return None
+        try:
+            t = cons.revert(revert_run, log_dir=log_dir, get_current=get_current, write=write, only=only)
+        except ValueError as error:
+            return {"_exit": 3, "refused": str(error)}
+        return {**t, "mode": "revert", "run": revert_run, "_exit": 3 if t["refused"] else 0}
+
+    notes = [n for n in (_c._get(base, "note.json").get("data") or []) if isinstance(n, dict)]
+    records = cons.live(notes)
+    if not semantic.configured():
+        return {"_exit": 2, "records": len(records),
+                "msg": "consolidation needs an embedder to find candidate pairs and none is "
+                       "configured here (set HUB_EMBED_URL, optionally HUB_EMBED_MODEL/_TOKEN)"}
+    label = "%s|%s" % (semantic.embed_url(), os.environ.get("HUB_EMBED_MODEL", "").strip())
+    conn = cons.open_cache(state / "cache.sqlite3")
+    try:
+        shas = {eid: cons.sha(cons.key_text(ent)) for eid, ent in records.items()}
+        have = cons.cached_vectors(conn, shas.values(), label)
+        todo = sorted({s: eid for eid, s in shas.items() if s not in have}.items())
+        batch = max(1, semantic._batch_max())
+        for i in range(0, len(todo), batch):
+            chunk = todo[i:i + batch]
+            try:
+                vecs = semantic.embed([cons.key_text(records[eid]) for _s, eid in chunk])
+            except semantic.EmbedUnavailable as error:
+                return {"_exit": 2, "records": len(records), "embedded": len(have),
+                        "msg": "the embedder could not embed %d record(s): %s" % (len(todo) - i, error)}
+            new = [(s, v) for (s, _eid), v in zip(chunk, vecs)]
+            cons.store_vectors(conn, new, label)
+            have.update(new)
+        vectors = {eid: have[s] for eid, s in shas.items() if s in have}
+        t = cons.run(records, vectors, conn, write=write, log_dir=log_dir, apply_writes=apply_writes,
+                     judge_limit=arguments.judge_limit, trigger_limit=arguments.trigger_limit,
+                     apply_limit=apply_limit, exclude=exclude)
+    finally:
+        conn.close()
+    # The re-learn count has no served scoreboard in this scaffold: it is printed (RELEARN) and
+    # returned here, for an adopter to post wherever their trend store lives.
+    t["state_dir"] = str(state)
+    if t.get("needs_model"):
+        t["_exit"] = 2
+        t["msg"] = "judging or trigger derivation left undone: no judge model (HUB_JUDGE_URL/_MODEL)"
+    elif (t.get("apply") or {}).get("refused"):
+        t["_exit"] = 3
+    return t
+
+
 # ── registration ──
 
 def register(commands) -> None:
@@ -462,3 +598,28 @@ def register(commands) -> None:
     adj.add_argument("--dry-run", action="store_true", dest="dry_run")
     adj.add_argument("--agent")
     adj.set_defaults(runner=_run_adjudicate)
+
+    con = commands.add_parser("consolidate", help="fold duplicate lessons/findings, supersede corrections, "
+                              "derive applies_when (dry run unless --apply; judge + embedder on THIS machine)")
+    con.add_argument("--apply", action="store_true",
+                     help="write the plan an EARLIER dry run judged (an apply judges nothing new)")
+    con.add_argument("--apply-limit", type=int, default=60, dest="apply_limit", help="max hub writes this run")
+    con.add_argument("--except", dest="except_ids", default="",
+                     help="comma-separated ids a reviewer held back: every action touching one is dropped")
+    con.add_argument("--revert", default="", help="restore every record run <RUN> wrote")
+    con.add_argument("--only", default="", help="with --revert: restore only these comma-separated ids")
+    con.add_argument("--from-trigger", default="", dest="from_trigger",
+                     help="read the LAST non-comment line of FILE: 'apply [limit=N] [except <ids>]', "
+                          "'revert <run> [only <ids>]', anything else a dry run; a line the parse "
+                          "does not fully understand refuses (exit 4)")
+    con.add_argument("--scheduled", action="store_true",
+                     help="an unattended schedule: always a dry run; refuses --apply/--revert/--from-trigger")
+    con.add_argument("--require-commit", default="", dest="require_commit",
+                     help="refuse (exit 5) unless the code running contains this commit")
+    con.add_argument("--judge-limit", type=int, default=400, dest="judge_limit")
+    con.add_argument("--trigger-limit", type=int, default=300, dest="trigger_limit")
+    con.add_argument("--state-dir", default="", dest="state_dir",
+                     help="verdict/trigger/vector cache and run logs (default <client state>/consolidate); "
+                          "an apply or revert must use the dry run's state dir")
+    con.add_argument("--agent")
+    con.set_defaults(runner=_run_consolidate)
