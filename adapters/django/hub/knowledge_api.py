@@ -501,7 +501,9 @@ def knowledge_since(request):
         -> {cursor, more, items: [put|revoke|reset ...], head}
 
     An empty or 0 cursor is the bootstrap: page with `more` until it is false. A caught-up
-    caller gets an empty page and, with its ETag sent back (If-None-Match or ?etag=), a 304."""
+    caller gets an empty page and, with its ETag sent back (If-None-Match, X-Hub-ETag or
+    ?etag=), a 304: the same three carriers every conditional route reads, because a proxy on
+    the path can drop If-None-Match and then a caught-up mirror is re-sent a full 200 forever."""
     cur = knowledge.parse_cursor(request.GET.get("cursor"))
     try:
         limit = max(1, min(int(request.GET.get("limit") or knowledge.FEED_MAX), knowledge.FEED_MAX))
@@ -511,7 +513,11 @@ def knowledge_since(request):
     head_seq = key[1]
     cat_sha, cat_items = _catalog_sha()
     tag = '"k-%s"' % knowledge.cursor_str(cur)
-    ops, last, more = knowledge.ledger_ops(state, cur["L"], limit)
+    # A narrowed reader is sent no revoke for a record it could never see (knowledge.ledger_ops).
+    from . import veil as _veil
+    reader = _veil.veil_for(request)
+    ops, last, more = knowledge.ledger_ops(state, cur["L"], limit,
+                                           visible=None if reader.open else reader.visible)
     nxt = dict(cur)
     nxt["L"] = last if more else max(cur["L"], head_seq)
     items = list(ops)
@@ -520,10 +526,12 @@ def knowledge_since(request):
         # half a catalog between polls.
         items.extend(knowledge.catalog_ops(cat_items))
         nxt["C"] = cat_sha
-    sent = request.headers.get("If-None-Match") or request.GET.get("etag") or ""
+    sent = (request.headers.get("If-None-Match") or request.headers.get("X-Hub-ETag")
+            or request.GET.get("etag") or "")
     if not items and sent.strip().replace("W/", "").strip('"') == tag.strip('"'):
         resp = HttpResponse(status=304)
         resp["ETag"] = tag
+        resp["X-Hub-ETag"] = tag
         return resp
     body = {"cursor": knowledge.cursor_str(nxt), "more": bool(more), "items": items,
             "head": {"seq": head_seq, "hash": key[2], "catalog": cat_sha}}
@@ -532,4 +540,5 @@ def knowledge_since(request):
     resp = JsonResponse(body)
     if not items:
         resp["ETag"] = tag
+        resp["X-Hub-ETag"] = tag
     return resp

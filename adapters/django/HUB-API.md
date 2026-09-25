@@ -554,7 +554,7 @@ durable.
 
 **Client telemetry.** Every `hub_core.client` call sends `X-Hub-Client-Version` (a digest of the
 client); write responses carry `X-Hub-Client-Current`, and the attention list names each seat
-running a different client. `HUB_CLIENT_SELF_UPDATE=1` lets a stale client fast-forward its own
+running a different client. A machine with a local memory layer also sends `X-Hub-Memory-Health: mode=<retrieval mode of its last recall>;age=<s>;feed=fresh|stale|absent[;hw_cores=;hw_ram_gb=;hw_gpu=]` (`hub_core/knowledge_mirror.py`); presence keeps it per machine and `distribution.json` grades it as `local_memory` -- only where reported, `stale` when recent recalls ran a mode outside `HUB_LOCAL_MEMORY_MODES` (default `hybrid`). `HUB_CLIENT_SELF_UPDATE=1` lets a stale client fast-forward its own
 git checkout — opt-in, `pull --ff-only` only, rate-limited to one attempt per 15 minutes with the
 stamp written before the attempt, detached and fail-soft.
 

@@ -294,8 +294,24 @@ def put_op(ent, kind) -> dict:
     return item
 
 
-def ledger_ops(state, since: int, limit: int) -> tuple:
-    """(ops, last_seq_taken, more) for knowledge records changed after `since`."""
+def ledger_ops(state, since: int, limit: int, visible=None) -> tuple:
+    """(ops, last_seq_taken, more) for knowledge records changed after `since`.
+
+    `visible` is a narrowed reader's record filter (the veil). A REVOKE CARRIES AN ID, and ids
+    are often slugs of titles: a revoke for a record the reader was never shown tells it the
+    record existed. The response scrub drops a revoke whose id or reason NAMES a hidden term,
+    but a record hidden by its tag alone would still leak its id -- and the reader's mirror
+    never held it, so there is nothing to revoke. With `visible`, such revokes are not sent."""
+    entities = state.get("entities") or {}
+
+    def shown(eid) -> bool:
+        if visible is None:
+            return True
+        ent = entities.get(eid)
+        try:
+            return bool(ent) and bool(visible(ent))
+        except Exception:                                    # noqa: BLE001 - fail closed
+            return False
     changed = []
     for ent in (state.get("entities") or {}).values():
         if not isinstance(ent, dict):
@@ -315,15 +331,16 @@ def ledger_ops(state, since: int, limit: int) -> tuple:
     ops = []
     for seq, ent, kind in changed[:limit]:
         if kind is None or is_dead(ent, superseded):
-            ops.append({"op": "revoke", "id": ent["id"], "reason": ent.get("status") or "retired",
-                        "at": (ent.get("provenance") or {}).get("updated_at") or "", "seq": seq})
+            if shown(ent["id"]):
+                ops.append({"op": "revoke", "id": ent["id"], "reason": ent.get("status") or "retired",
+                            "at": (ent.get("provenance") or {}).get("updated_at") or "", "seq": seq})
             continue
         ops.append(put_op(ent, kind))
         # A put that supersedes something retires it in the same page: the target's own seq may
         # be older than the mirror's cursor, so it would never be revisited.
         target = ent.get("supersedes")
         for t in (target if isinstance(target, list) else [target]):
-            if t and t != ent["id"]:
+            if t and t != ent["id"] and shown(str(t)):
                 ops.append({"op": "revoke", "id": str(t), "reason": "superseded by %s" % ent["id"],
                             "seq": seq})
     last = changed[min(limit, len(changed)) - 1][0] if changed and more else None

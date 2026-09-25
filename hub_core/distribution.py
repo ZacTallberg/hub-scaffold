@@ -38,6 +38,8 @@ import hashlib
 import time
 from pathlib import Path
 
+from . import knowledge_mirror as _knowledge_mirror
+
 W = 16                                   # reported shas are compared at 16 hex chars
 OFFLINE_AFTER_S = 2 * 3600
 DORMANT_AFTER_S = 72 * 3600
@@ -131,6 +133,13 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
             reported["client"] = row["client"]         # version+sha form, split by grade()
         checks = {artifact: grade(reported.get(artifact), meta.get("accepted"))
                   for artifact, meta in pub.items()}
+        # LOCAL MEMORY, graded only where the machine reported one (it is an optional layer):
+        # wired but recalling in a degraded mode within the hour is not current. "Present"
+        # alone read current on a machine whose recall had silently fallen back.
+        mem_grade, mem_detail = _knowledge_mirror.grade_health(row.get("memory_health") or "")
+        if mem_grade:
+            checks["local_memory"] = mem_grade
+            entry["memory"] = mem_detail
         entry["artifacts"] = checks
         stale = sorted(k for k, v in checks.items() if v == "stale")
         entry["state"] = "drifted" if stale else "current"
