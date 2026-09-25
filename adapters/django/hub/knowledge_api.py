@@ -17,11 +17,13 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timezone
 
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_GET
 
 from hub_core import bm25, capability_catalog, errorlog, inbox as inbox_core, knowledge, lexical, semantic
+from hub_core import staleness
 from hub_core.canonical import content_hash
 from hub_core.validate import validate
 
@@ -145,10 +147,13 @@ def _corpus(state, key, cat_items):
         # only what the record carries BESIDE them — repeating the title there would weigh it
         # twice and make the declared field weights a fiction.
         body = knowledge.body_of(ent)
+        kind = knowledge.knowledge_kind(ent)
         rows[ent["id"]] = {"id": ent["id"], "type": ent.get("type"), "title": title[:200],
-                           "kind": knowledge.knowledge_kind(ent) or ent.get("type"),
+                           "kind": kind or ent.get("type"),
                            "status": ent.get("status") or ent.get("maturity") or "",
                            "excerpt": body[:400]}
+        if kind:
+            rows[ent["id"]]["_label"] = knowledge.label_inputs(ent, kind)
         docs[ent["id"]] = {"title": title, "body": body,
                            "tags": " ".join(str(t) for t in (ent.get("tags") or []))}
     for it in cat_items or []:
@@ -259,8 +264,17 @@ def search_json(request):
         metadata["partial"] = partial
     timing["total"] = time.perf_counter() - started
     metadata["timing_ms"] = {k: round(v * 1000, 1) for k, v in timing.items()}
-    data = [dict(rows[eid], score=round(fused[eid], 4), lexical=lexical_scores.get(eid, 0.0))
-            for eid in ordered[:limit] if eid in rows]
+    now = datetime.now(timezone.utc)
+
+    def _hit(eid):
+        # A knowledge hit carries its rendered label, never the raw inputs.
+        row = {k: v for k, v in rows[eid].items() if k != "_label"}
+        label = staleness.render_inputs(rows[eid].get("_label"), now=now)
+        if label:
+            row["label"] = label
+        row.update(score=round(fused[eid], 4), lexical=lexical_scores.get(eid, 0.0))
+        return row
+    data = [_hit(eid) for eid in ordered[:limit] if eid in rows]
     if not data:
         # "NOTHING MATCHES" IS THE MOST DANGEROUS LINE A SEARCH PRINTS. From an index that could
         # only read wording it is a fact about the asker's VOCABULARY, not about what the board
@@ -396,8 +410,14 @@ def memory_index(state, key, *, cap=40, focus="", full=0):
         if not meta.get("ranked"):
             rows, meta = _rank_by_wording(rows, focus, key, meta)
     out = []
+    now = datetime.now(timezone.utc)
     for i, r in enumerate(rows[:cap]):
         row = {k: r[k] for k in ("id", "type", "title", "tier", "verified_as_of", "verify") if r.get(k)}
+        # The record's ONE label (STATE / UNVERIFIED / CHECK FAILED), identical on search and the
+        # feed; the prompt block prints it instead of a bare date.
+        label = staleness.render_inputs(r.get("_label"), now=now)
+        if label:
+            row["label"] = label
         if i < full:
             rule = knowledge.clip(r.get("rule"), MEMORY_RULE_CHARS)
             why = knowledge.clip(r.get("why"), MEMORY_WHY_CHARS)
