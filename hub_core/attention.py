@@ -84,7 +84,8 @@ def _plural(n, one, many=None) -> str:
 #   now, operator, tasks (task rows), activity ({task_id: epoch}), leases (live lease rows),
 #   runs (run rows), sessions (live console rows with task_id), presence (per-agent rows with
 #   machines), hub_client (the client version the hub serves), credentials (public credential
-#   records), errors_unclaimed (bar-clearing unacked error rows), questions (open question items)
+#   records), errors_unclaimed (bar-clearing unacked error rows), questions (open question items),
+#   answers (answer directives still active: {id, asker, at, revision})
 
 def detect_tasks(ctx) -> list:
     operator = ctx.get("operator") or ""
@@ -337,6 +338,41 @@ def detect_questions(ctx) -> list:
     return out
 
 
+def detect_answers(ctx) -> list:
+    """AN UNREAD ANSWER IS NOT A MISSED DELIVERY. An answer stays active until its asker ACKS
+    it, so "delivered but not yet acknowledged" is an inbox chore for the asker, never a fault
+    in the delivery path -- calling it one sends a person to repair a client that is working.
+    One item per asker, oldest first, with the exact command that clears it."""
+    by_asker: dict = {}
+    for a in ctx.get("answers") or []:
+        age = task_health.age_s(a.get("at"), ctx["now"])
+        if age is None:
+            continue
+        by_asker.setdefault(str(a.get("asker") or "").lower(), []).append((a, age))
+    out = []
+    for asker, rows in by_asker.items():
+        if not asker:
+            continue
+        rows.sort(key=lambda r: -r[1])
+        oldest = rows[0][1]
+        if oldest < SILENT_INFO_S:
+            continue
+        first = rows[0][0]
+        rev = int(first.get("revision") or 0)
+        out.append(item("answers_unread", "communication",
+                        "warn" if oldest >= SILENT_WARN_S else "info", agent=asker, who=asker,
+                        title="%s to %s's questions not yet read (oldest %s)"
+                              % (_plural(len(rows), "answer"), asker, age_phrase(oldest)),
+                        detail="An answer leaves this list when its asker acknowledges it; it "
+                               "is not a delivery fault.",
+                        fix="python -m hub_core.client inbox --agent %s, read it, then "
+                            "python -m hub_core.client ack %s%s"
+                            % (asker, first.get("id"), (" --revision %d" % rev) if rev else ""),
+                        evidence={"answers": [r[0].get("id") for r in rows][:10],
+                                  "oldest_s": int(oldest)}))
+    return out
+
+
 DETECTORS = (
     ("tasks", detect_tasks, ("tasks",)),
     ("unstarted", detect_unstarted, ("tasks", "leases", "runs")),
@@ -347,6 +383,7 @@ DETECTORS = (
     ("credentials", detect_credentials, ("credentials",)),
     ("errors", detect_errors, ("errors",)),
     ("questions", detect_questions, ("questions",)),
+    ("answers", detect_answers, ("answers",)),
 )
 
 

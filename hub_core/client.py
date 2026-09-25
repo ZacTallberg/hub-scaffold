@@ -172,7 +172,19 @@ def client_version() -> str:
 def _telemetry_headers() -> dict[str, str]:
     # X-Hub-Client itself carries version+sha (_common_headers); this is the digest the
     # hub compares against the client it serves.
-    return {"X-Hub-Client-Version": client_version()}
+    headers = {"X-Hub-Client-Version": client_version()}
+    # Whether this machine's local memory WORKS, not only whether it is there: the mode of its
+    # last recall, how long ago, whether the knowledge mirror is fresh (and, when the engine
+    # records it, the hardware it runs on). Sent only by a machine that has a local memory
+    # layer at all; telemetry, so any failure sends nothing.
+    try:
+        from . import knowledge_mirror
+        line = knowledge_mirror.health_line()
+        if line:
+            headers["X-Hub-Memory-Health"] = line
+    except Exception:                                        # noqa: BLE001
+        pass
+    return headers
 
 
 def _note_hub_client(response) -> None:
@@ -1246,6 +1258,42 @@ def _payload_answer(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
     return "answer", payload
 
 
+def _payload_withdraw(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """The asker's half of closing a question: its blocker cleared, a newer ask supersedes it,
+    or its answer is already on the board. `answer` is anyone's who may answer; this is only
+    the asker's, so a settled ask stops counting as stuck."""
+    return "question/withdraw", {"question": arguments.question_id, "reason": arguments.reason,
+                                 "agent": _agent(arguments)}
+
+
+def _run_evidence(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """`evidence put "<subject>" --summary ... [--body-file F]` stores one reading;
+    `evidence find "<subject words>" [--repo R] [--commit SHA]` reads what was already measured."""
+    from urllib.parse import urlencode
+    if arguments.action == "find":
+        query: dict[str, Any] = {"limit": arguments.limit}
+        for key in ("repo", "commit"):
+            if getattr(arguments, key, None):
+                query[key] = getattr(arguments, key)
+        if arguments.subject:
+            query["q"] = arguments.subject
+        return _get(base, "evidence.json?" + urlencode(query))
+    if not arguments.subject or not arguments.summary:
+        raise ValueError('evidence put needs "<subject>" and --summary "<what was measured, what it showed>"')
+    body = arguments.body or ""
+    if arguments.body_file:
+        with open(arguments.body_file, "r", encoding="utf-8", errors="replace") as fh:
+            body = fh.read()
+    payload: dict[str, Any] = {"agent": _agent(arguments), "subject": arguments.subject,
+                               "kind": arguments.kind, "summary": arguments.summary}
+    if body:
+        payload["body"] = body
+    for key in ("repo", "commit"):
+        if getattr(arguments, key, None):
+            payload[key] = getattr(arguments, key)
+    return _post(base, "evidence", payload, extra_headers=_presence_headers(arguments))
+
+
 def _run_tier(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     """Read every agent's visibility tier, or set one (credential:manage scope)."""
     if arguments.set is None:
@@ -1358,7 +1406,33 @@ def _payload_msg(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         value = getattr(arguments, name, None)
         if value:
             payload[name] = value
+    # A MESSAGE HAS AN END, fixed at INTENT time: a send queued offline and replayed tomorrow
+    # must not arrive with a fresh day of life. The hub caps it at a week.
+    import datetime as _dt
+    hours = getattr(arguments, "expires", None)
+    hours = MSG_EXPIRES_DEFAULT_H if hours is None else hours
+    if not (0.25 <= hours <= 168):
+        raise ValueError("msg --expires must be between 0.25 and 168 hours; work that must outlive "
+                         "a week belongs in a task or a finding, not a message")
+    payload["expires_at"] = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=hours)
+                             ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # THE SHAPE A PEER CAN ACT ON: a message between two consoles on one problem is almost
+    # always a finding, its evidence and a proposed split.
+    structured = {}
+    for key in ("finding", "split"):
+        value = " ".join(str(getattr(arguments, key, None) or "").split())
+        if value:
+            structured[key] = value[:2000]
+    evidence = [str(e).strip() for e in (getattr(arguments, "evidence", None) or []) if str(e).strip()]
+    if evidence:
+        structured["evidence"] = " ".join(evidence)[:2000]
+    if structured:
+        payload["structured"] = structured
     return "message", payload
+
+
+#: `msg` without --expires: a console-to-console message is about work in flight today.
+MSG_EXPIRES_DEFAULT_H = 24.0
 
 
 def _payload_update(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -1658,6 +1732,8 @@ def _reader_query(arguments: argparse.Namespace) -> str:
         query["session"] = session
     if machine:
         query["machine"] = machine
+    if getattr(arguments, "expired", False):
+        query["expired"] = 1
     return urlencode(query)
 
 
@@ -1671,7 +1747,8 @@ _INBOX_HEADINGS = (("message", "MESSAGES"), ("gate", "GATES ONLY A PERSON CAN CL
 def render_inbox(data: dict[str, Any]) -> str:
     """The addressed set as text a person reads: grouped by kind, each with its reply command."""
     items = data.get("items") or []
-    if not items:
+    expired = data.get("expired") or []
+    if not items and not expired:
         return "Nothing is addressed to you."
     lines = []
     known = {kind for kind, _ in _INBOX_HEADINGS}
@@ -1689,6 +1766,15 @@ def render_inbox(data: dict[str, Any]) -> str:
             lines.append("  - %s" % (item.get("title") or item.get("id")))
             if item.get("reply_cmd"):
                 lines.append("      %s" % item["reply_cmd"])
+    if expired:
+        lines.append("EXPIRED MESSAGES (%d) -- kept, never delivered" % len(expired))
+        for item in expired:
+            lines.append("  - %s (from %s, expired %s%s)" % (
+                item.get("title") or item.get("id"), item.get("from") or "?",
+                item.get("expires_at") or "unknown",
+                ", implied" if item.get("expiry_implied") else ""))
+            if item.get("ack_cmd"):
+                lines.append("      retire: %s" % item["ack_cmd"])
     return "\n".join(lines)
 
 
@@ -3308,6 +3394,29 @@ def _parser() -> argparse.ArgumentParser:
                              "record the disclosure (veil:disclose scope)")
     answer.set_defaults(payload=_payload_answer)
 
+    withdraw = commands.add_parser(
+        "withdraw", help="close YOUR OWN question with the reason it is no longer live (ask:write)")
+    withdraw.add_argument("question_id")
+    withdraw.add_argument("--agent")
+    withdraw.add_argument("--reason", required=True,
+                          help="why it is no longer live, and where its answer or newer ask is")
+    withdraw.set_defaults(payload=_payload_withdraw)
+
+    evidence = commands.add_parser(
+        "evidence", help="the shared evidence store: `put` one raw reading (probe, trace, "
+                         "measurement, timing) keyed by subject and commit, or `find` what was measured")
+    evidence.add_argument("action", choices=("put", "find"))
+    evidence.add_argument("subject", nargs="?", default="")
+    evidence.add_argument("--summary", help="put: one line -- what was measured and what it showed")
+    evidence.add_argument("--kind", default="probe", choices=("probe", "trace", "measurement", "timing"))
+    evidence.add_argument("--body", help="put: the printed output that shows it (16 KB max)")
+    evidence.add_argument("--body-file", dest="body_file", help="put: read the body from a file")
+    evidence.add_argument("--repo")
+    evidence.add_argument("--commit")
+    evidence.add_argument("--limit", type=int, default=20)
+    evidence.add_argument("--agent")
+    evidence.set_defaults(runner=_run_evidence)
+
     tier = commands.add_parser("tier", help="read tiers, or set one agent's visibility tier")
     tier.add_argument("target", nargs="?", help="the agent")
     tier.add_argument("--set", choices=("operator", "member", "contributor", ""),
@@ -3353,6 +3462,13 @@ def _parser() -> argparse.ArgumentParser:
     msg.add_argument("--title")
     msg.add_argument("--session", help="the recipient console id (from `consoles`)")
     msg.add_argument("--machine", help="pin delivery to one of the recipient's machines")
+    msg.add_argument("--expires", type=float,
+                     help="hours until it stops being delivered (default 24, 0.25-168); kept and "
+                          "listed after that, never pushed into a console")
+    msg.add_argument("--finding", help="what you found (rides `structured` for the reader)")
+    msg.add_argument("--evidence", action="append", default=[],
+                     help="a sha, URL, path or evidence-store id that dereferences (repeatable)")
+    msg.add_argument("--split", help="the proposed division of work between the two consoles")
     msg.add_argument("--agent")
     msg.set_defaults(payload=_payload_msg)
 
@@ -3541,6 +3657,8 @@ def _parser() -> argparse.ArgumentParser:
     inbox.add_argument("--via", help="how it was delivered (recorded on the receipt)")
     inbox.add_argument("--text", action="store_true",
                        help="grouped for a person: decisions, questions, TASK ROT, attention, crossovers")
+    inbox.add_argument("--expired", action="store_true",
+                       help="also list expired messages (kept, never delivered)")
     inbox.set_defaults(runner=_run_inbox)
 
     receipts = commands.add_parser("receipts",

@@ -333,10 +333,49 @@ def _route(item, agent: str, session: str, live) -> dict | None:
 
 # ── messages and directives ─────────────────────────────────────────────────────────────────
 
-def message_items(state, agent: str, machine: str = "", now=None) -> list:
+#: A message written before messages carried `expires_at` lives this long past its creation.
+LEGACY_MESSAGE_TTL_S = 72 * 3600
+
+
+def _instant(raw):
+    try:
+        at = _dt.datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=_dt.timezone.utc)
+    try:
+        return at.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def message_expiry(ent) -> tuple:
+    """(expires_epoch, implied) for a message note.
+
+    A stamped `expires_at` wins. A note without one expires at created_at + LEGACY_MESSAGE_TTL_S
+    (`implied` True). A note with neither a readable expiry nor a readable creation time returns
+    (None, True): it cannot be aged, and an unageable message is one the delivery path must NOT
+    push into a console -- a console that reopens after days is otherwise handed every stale
+    message at once, as if each were current."""
+    at = _instant(ent.get("expires_at")) if ent.get("expires_at") else None
+    if at is not None:
+        return at, False
+    prov = ent.get("provenance") or {}
+    created = _instant(prov.get("created_at") or prov.get("updated_at") or "")
+    if created is None:
+        return None, True
+    return created + LEGACY_MESSAGE_TTL_S, True
+
+
+def message_items(state, agent: str, machine: str = "", now=None,
+                  include_expired: bool = False) -> list:
     """Open messages ADDRESSED to this agent (agent -> agent, no operator in the loop). A
     message pinned to a DIFFERENT machine of the same agent is not this machine's to deliver
-    or retire; a reader that names no machine sees it."""
+    or retire; a reader that names no machine sees it.
+
+    An EXPIRED message is never part of the delivered set (items_for, inbox/wait). It is kept --
+    nothing is deleted -- and `include_expired` lists it, marked, for a reader who asks."""
     agent, machine = _norm(agent), _norm(machine)
     if not agent:
         return []
@@ -353,10 +392,15 @@ def message_items(state, agent: str, machine: str = "", now=None) -> list:
         pinned = _norm(ent.get("machine"))
         if pinned and machine and pinned != machine:
             continue
+        exp, implied = message_expiry(ent)
+        expired = exp is None or now >= exp
+        if expired and not include_expired:
+            continue
         prov = ent.get("provenance") or {}
         sender = _text(ent.get("from_agent") or prov.get("agent") or "", 60)
         sender_session = _text(ent.get("from_session"), 64)
         at = _prov_at(ent)
+        structured = ent.get("structured") if isinstance(ent.get("structured"), dict) else {}
         out.append({
             "kind": "message", "id": eid, "from": sender or "a board member",
             "from_session": sender_session, "to": agent,
@@ -368,10 +412,22 @@ def message_items(state, agent: str, machine: str = "", now=None) -> list:
                 sender or "<agent>", (" --session " + sender_session) if sender_session else ""),
             "ack_cmd": "python -m hub_core.client inbox --agent %s --ack %s"
                        % (agent, eid.rsplit(":", 1)[-1]),
+            "expires_at": (_dt.datetime.fromtimestamp(exp, _dt.timezone.utc)
+                           .strftime("%Y-%m-%dT%H:%M:%SZ") if exp is not None else ""),
+            "expiry_implied": implied,
+            **({"expired": True} if expired else {}),
+            **({"structured": {k: _text(v, 2000) for k, v in structured.items()}}
+               if structured else {}),
             **_written(at, now),
         })
     out.sort(key=lambda item: item.get("at") or "", reverse=True)
     return out
+
+
+def expired_message_items(state, agent: str, machine: str = "", now=None) -> list:
+    """The expired messages still addressed to `agent` -- LISTED on request, never delivered."""
+    return [i for i in message_items(state, agent, machine, now, include_expired=True)
+            if i.get("expired")]
 
 
 def _pinned_elsewhere(ent, machine: str, session: str) -> bool:

@@ -98,10 +98,63 @@ def save_delivered(sid, keys) -> None:
 
 
 def reset_delivered(sid) -> None:
+    for path in (_receipt_path(sid), _live_path(sid)):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+# ── the live block speaks on CHANGE ──
+#
+# A status line that repeats unchanged on every prompt is read past, and then missed the one
+# time it changes. Measured on one fleet's hook output: of ~1,800 status blocks, 39% differed
+# from the previous one only in elapsed-time numbers and 11% were byte-identical. So the live
+# block is fingerprinted with its AGES masked ("waited 4 h", "oldest 43 min", "7 days") while
+# its COUNTS stay (1 -> 2 addressed items is news at once), sent when the fingerprint moves, and
+# otherwise repeated at most once per STATUS_REMIND_S as a reminder.
+
+#: An unchanged live block is repeated at most this often within one session.
+STATUS_REMIND_S = 30 * 60
+_AGE_TOKEN = re.compile(r"(?i)\b\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?"
+                        r"|d|days?|w|wk|weeks?)\b")
+
+
+def _live_path(sid) -> Path:
+    return state_dir() / "receipts" / (_safe(sid) + ".live.json")
+
+
+def live_fingerprint(block: str) -> str:
+    return hashlib.sha1(_AGE_TOKEN.sub("<age>", block or "").encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def live_due(sid, block: str, now: float | None = None) -> bool:
+    """True when this session should see `block` now: it changed in substance since the last
+    delivery, or the last delivery is older than STATUS_REMIND_S. Records the delivery when
+    due. No session id, or an unreadable receipt, means always due -- a lost receipt costs one
+    repeated line, never a missed change."""
+    if not block:
+        return False
+    if not sid:
+        return True
+    now = time.time() if now is None else now
+    fp = live_fingerprint(block)
+    path = _live_path(sid)
     try:
-        _receipt_path(sid).unlink()
+        prior = json.loads(path.read_text(encoding="utf-8"))
+        if (isinstance(prior, dict) and prior.get("fp") == fp
+                and now - float(prior.get("at") or 0) < STATUS_REMIND_S):
+            return False
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"fp": fp, "at": now}), encoding="utf-8")
+        os.replace(tmp, path)
     except OSError:
         pass
+    return True
 
 
 # ── rendering ──
