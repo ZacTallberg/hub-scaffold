@@ -851,9 +851,12 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                 and str(cur.get("session")) != session):
             # A lease whose console is provably GONE past its grace is released here exactly as
             # the sweep would release it, so a claim never waits on a sweep that has not run yet.
-            if lease_verdict(cur, now=now)["released"]:
+            v = lease_verdict(cur, now=now)
+            if v["released"]:
                 took_over = {"session": cur.get("session"), "machine": cur.get("machine"),
-                             "agent": cur.get("agent"), "at": now}
+                             "agent": cur.get("agent"), "claimed": cur.get("claimed"),
+                             "gone_s": v.get("gone_s"), "ended": bool(v.get("ended")),
+                             "at": now}
                 cur = None
         if cur and cur.get("expires", 0) > now:
             if (cur.get("agent") != agent or
@@ -861,6 +864,11 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                     (cur.get("credential_id") and cur.get("credential_id") != credential_id)):
                 refusal = {"ok": False, "reason": "held", "held_by": cur.get("agent"),
                            "expires": cur.get("expires")}
+                lost = taken_over_notice(cur, agent, session)
+                if lost:
+                    # The console whose lease was taken over is back (its step/finish re-claims
+                    # first): say WHY it lost the task, so it stops instead of racing the holder.
+                    refusal.update(lost)
                 if cur.get("session"):
                     # Say WHEN it frees: a gone holder's lease is released by the sweep once its
                     # grace runs out, well before the clock; a live one only by the clock.
@@ -884,26 +892,37 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
             holder = str(cur.get("session") or "")
             if session and holder and session != holder:
                 from hub_core import liveness
-                state, _seen = roster().state(holder, cur.get("machine") or "")
-                if state == liveness.LIVE:
-                    return {"ok": False, "reason": "held_by_console",
-                            "held_by": cur.get("agent"), "held_by_session": holder,
-                            "held_by_machine": cur.get("machine") or None,
-                            "expires": cur.get("expires")}
-                if state == liveness.GONE:
-                    # The recorded console is PROVABLY gone and this one is doing the work now:
-                    # the record names the console actually on it, so the board stops naming a
-                    # dead session and holder_state reads live again.
-                    cur["took_over_from"] = {"session": holder,
-                                             "machine": cur.get("machine") or None, "at": now}
-                    cur["session"] = session
-                    if machine:
-                        cur["machine"] = machine
-                    holder = session
-                else:
-                    # UNPROVABLE: renew (refusing would strand work whose holder really is
-                    # gone) but keep the recorded holder; do not claim to be it.
-                    session = machine = ""
+                roster_ = roster()
+                state, _seen = roster_.state(holder, cur.get("machine") or "")
+                ended = roster_.is_ended(holder)
+                # A FRESH lease is held even before its console reaches the roster: a new
+                # console's first presence row can land minutes after its first claim, and a
+                # second console of the same agent "renewing" in that gap used to receive the
+                # token and close work that had just begun.
+                touched = max(float(cur.get("claimed") or 0), float(cur.get("last_heartbeat") or 0))
+                fresh = (now - touched) < liveness.FRESH_LEASE_S
+                if not ended and (state == liveness.LIVE or fresh):
+                    refusal = {"ok": False, "reason": "held_by_console",
+                               "held_by": cur.get("agent"), "held_by_session": holder,
+                               "held_by_machine": cur.get("machine") or None,
+                               "expires": cur.get("expires")}
+                    refusal.update(taken_over_notice(cur, agent, session) or {})
+                    return refusal
+                # The recorded console ENDED, is provably GONE, or went stale unseen: this console
+                # takes the task over AS ITSELF. The record names the console actually on it,
+                # the takeover is on record, and the fencing token ROTATES, so the old console
+                # can never complete over this one (it used to keep the old holder's name and
+                # hand this caller the same token).
+                cur["took_over_from"] = {"session": holder, "agent": cur.get("agent"),
+                                         "machine": cur.get("machine") or None,
+                                         "claimed": cur.get("claimed"), "state": state,
+                                         "ended": ended, "at": now}
+                cur["token"] = _uuid.uuid4().hex
+                cur["session"] = session
+                if machine:
+                    cur["machine"] = machine
+                holder = session
+                took_over = cur["took_over_from"]
             if session and not holder:
                 cur["session"] = session
             if machine and not cur.get("machine"):
@@ -922,7 +941,7 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
             _publish_realtime("lease.heartbeat", task=task_id, agent=agent,
                               expires=cur["expires"])
             _schedule_lease_truth(cur)
-            return {"ok": True, "created": False,
+            return {"ok": True, "created": False, "took_over": bool(took_over),
                     "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         # The CLAIMING CONSOLE rides the lease: with several consoles of one agent live, the
         # session is the only fact that says which of them took responsibility — a claim must
@@ -944,8 +963,31 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
                           expires=lease["expires"])
         _schedule_lease_truth(lease)
-        return {"ok": True, "created": True,
+        return {"ok": True, "created": True, "took_over": bool(took_over),
                 "heartbeat_after_s": max(1, ttl_s // 3), **lease}
+
+
+def taken_over_notice(lease, agent, session="") -> dict:
+    """The refusal fields a console gets when the lease it held was TAKEN OVER while it was away:
+    who holds it now, when and why, and what to do -- so a console that went quiet (a dropped
+    network, a sleep) and came back stops instead of pushing over the new holder. Empty when this
+    caller is not the one the lease was taken from."""
+    prev = (lease or {}).get("took_over_from")
+    if not isinstance(prev, dict):
+        return {}
+    same_console = bool(session) and str(prev.get("session") or "") == str(session)
+    same_agent = str(prev.get("agent") or "") == str(agent or "") and not session
+    if not (same_console or same_agent):
+        return {}
+    why = ("the console holding it had ended" if prev.get("ended") else
+           "its console was %s" % (prev.get("state") or "gone"))
+    return {"reason": "taken_over", "held_by": lease.get("agent"),
+            "held_by_session": lease.get("session") or None,
+            "held_by_machine": lease.get("machine") or None,
+            "taken_at": prev.get("at"),
+            "msg": ("%s took this task over because %s; stop work on it and hand your changes to "
+                    "%s (a message with your branch or sha) rather than pushing"
+                    % (lease.get("agent"), why, lease.get("agent")))}
 
 
 def leases(*, now=None, include_expired=False):
