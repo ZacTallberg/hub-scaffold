@@ -29,6 +29,7 @@ urlpatterns = [
     path("demo-app/agent/history", demo_app.agent_history),
     path("demo-app/agent/conversation", demo_app.agent_conversation),
     path("demo-app/profile.json", demo_app.profile),
+    path("demo-app/menu/rank", demo_app.menu_rank),
     path("demo-app/feed.json", demo_app.feed),
     # Two example adopting apps wearing the shared banner (DEBUG only; see demo.py).
     path("demo/access.json", demo.access_json),
