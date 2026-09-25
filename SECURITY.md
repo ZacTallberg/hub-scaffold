@@ -148,6 +148,11 @@ The services the hub offers the apps around it (`patterns/app-services.md`) spli
   trust it to name the person. They must be reached only from an app's server, behind that app's
   own sign-in. A credential holding `profile:write` can change any person's preferences, and
   `agent:ask` spends the agent service's quota — issue them per app, scoped, and expiring.
+- `/hub/api/menu/rank` (`menu:rank`) likewise authenticates an app's server and spends the
+  configured model's queue. What it sends the model is only the catalog's ids, labels and hints
+  plus short fact values; the answer is validated against that catalog, so a model can reorder a
+  menu but never add or change an action (only items the app marked optional may be
+  hidden, nothing destructive may be pinned). Its status read never returns the model's address.
 - `/hub/api/profile` has one more door, for the person's own same-origin browser, and it is shut
   until the adopter names `HUB_PERSON` (a `(request) -> username` behind its own sign-in). Through
   it the person is whoever the resolver says: a `?person=` naming anyone else answers 404, a POST
