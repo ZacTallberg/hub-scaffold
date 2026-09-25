@@ -143,6 +143,38 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 - Patterns: the push probe never presents a stored password; the client daemon's delivery,
   change-gating and off-path warming rules.
 
+### Round 2 (lane fh3): delivery that reaches a person, knowledge that is used, reads off the request path
+
+- **Mail and asks reach the person they were meant for.** Mail for an ended console prefers a live
+  console on the same machine (a console-addressed message is stamped with its machine; session ids
+  match on full ids). A message older than 6 h arrives marked `late` with what became of its
+  subject. An ask that replaces another hides the older one while it is open; the operator's human
+  gates fold into one line with a count and the oldest wait; an unattended answer from an ask's own
+  asker to a question meant for a person is kept as `proposed_answers` and the ask stays open. A
+  lease taken over from a gone console tells that console's agent, on its machine.
+- **Claims and sweeps.** A claim that names no console is refused while the holding console is live
+  or fresh; the lease sweep runs in one background thread, never on a reader's request, and a
+  refused hand-back reaches the error stream. The board's audit is served from the last completed
+  run (`served_from` when behind), computed in the background and persisted.
+- **Needs-attention is work.** Every item names its `actor`; an agent item reaches its owner at any
+  severity and an unattended responder takes it (a machine-bound one only there); an orphaned-lease
+  item needs a GONE liveness verdict, not a missing row. A task whose newest checkpoint is a push is
+  held for its deploy instead of relaunched.
+- **Crossover sees worktrees:** one file is (project, path in repo), wherever it is checked out.
+- **Knowledge that is used:** merge-on-write (`reinforced_by`) for restated lessons and findings;
+  meaning-ranked rows carry `score`, `?peer=` answers `peer_similarity`; the prompt hook cuts by
+  relevance and skips a repeated focus; records ride task starts, problem claims, `doctor` and CI
+  problem items (`knowledge`); `client consolidate` folds duplicates, supersedes corrections,
+  records contradictions and derives `applies_when` (dry run by default, revertible);
+  `tools/knowledge_use.py` measures whether delivered records are referred to.
+- **Truth about what runs:** sources-seen stamps are a strict, locked read-modify-write with a
+  backfill from the error log; `distribution.json` grades PINNED artifacts
+  (`HUB_DISTRIBUTION_PINS`); the health kit's liveness reports the commit the process LOADED beside
+  the deploy stamp (`stamp_mismatch`); a commit a complete repository has never seen is "not an
+  ancestor", not "could not ask"; opt-in `HUB_CI_DEPLOY_JOB_CLOSES` lets a green deploy job close
+  tasks for a project that posts no release record. A publish channel checks what a file IS, never
+  its size (`patterns/doctrine-publish.md` law 9).
+
 ### Integration: fifteen lanes on one engine, one verb per intent
 
 - **One presence row, every field.** Console name/repo/app/runtime, the supervisor's digest and
