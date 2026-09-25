@@ -64,7 +64,8 @@ with no address is not a row (a row is a door) but is counted, so the omission i
 
 **One drawer from the avatar,** under the band and over the page strip, in the order a person
 needs it: who you are (name — role, *Change icon*, *Preferences*), your starred apps, the app's
-`profile` island, an **Admins only** section (the `admin` island and People and Permissions),
+`profile` island, an **Admins only** section (the `admin` island, People and Permissions, and
+Component settings when the hub says this reader may edit),
 then a pinned foot — **How this works** (guided tour, About this app, the `help` island), the
 super-admin **View as** card, and **Sign out** (always a POST). Four grounds say whose a row is:
 the app's, the hub's, admin, help. Roles come from `data-role` ("admin" anywhere in it is an admin,
@@ -106,6 +107,24 @@ Optional parts (`events`, `what`, search) are drawn only when they come back. On
 reversible way. The box greys the viewer's own row as a courtesy, but **every guard is the
 server's** — self-demotion, self-removal and the last-admin rule — and its refusal is shown
 verbatim. POSTs carry `X-CSRFToken`; a refusal that is not JSON still names its HTTP status.
+
+## Component settings: the app's properties for the hosted components
+
+Not a person's choice (that is Preferences) but the app's, for everyone who uses it. On every
+page the banner reads `GET {hub}/components/props/<app>.json` (or `data-props`) and hands the
+record on as `window.HubComponentProps` plus a `hub:component-props` window event
+(`{app, props, preview}`), which the agent, search bar and header takeover already follow.
+
+When that answer says `can_edit` — the adopter's `HUB_COMPONENT_EDITOR(request, slug)` decides,
+never `data-role` — the Admins-only section offers **Component settings**: a box over the page
+with one tab per component that declares properties, drawn from the served schema (so a new
+component brings its own controls), each field with its hint, its limit counted as you type, a
+select-all toggle on multi-value fields, and *Back to default*. Every change is PREVIEWED on the
+page through the same event (`preview: true`); **Save for everyone** posts
+`{app, props}` to `/hub/api/component-props` with the CSRF token, and whatever the hub refused
+is named rather than silently kept. Closing the box, Discard or Escape put the page back on
+what is saved. The box re-reads the record when it opens, so a draft never resurrects a value
+someone else just changed, and editors see who changed what last.
 
 ## The person's record: `/hub/api/profile`
 
