@@ -2203,8 +2203,11 @@ def _run_attention(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
         who = arguments.mine.lower()
         data["items"] = [i for i in data.get("items") or [] if i.get("agent") == who]
     return {"verdict": data.get("verdict"), "counts": data.get("counts"),
+            # WHO clears each item rides the projection (actor person|agent, and whether only the
+            # machine it names can clear it): a list that drops it cannot route the work.
             "items": [{k: i.get(k) for k in ("severity", "title", "who", "fix", "age_s",
-                                              "evidence", "id")}
+                                              "evidence", "id", "kind", "actor",
+                                              "on_its_machine", "agent", "machine")}
                       for i in data.get("items") or []],
             "recently_cleared": (data.get("recently_cleared") or [])[:5],
             "sources": data.get("sources")}
