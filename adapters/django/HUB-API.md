@@ -691,7 +691,12 @@ four disciplines, each learned from a seat that lost work without knowing it:
   read the board before resending). A replay refusal is dead-lettered, never a wedge; `flush --dead
   [ID]` replays dead letters as their queuer and archives what is refused again, `flush
   --dead-archive [ID]` archives by hand. Nothing is deleted. Concurrent drains remove only the
-  entries they consumed, by id.
+  entries they consumed, by id, and only one drains at a time: a second drain (every write verb
+  drains first) waits up to 20 s for the running one, then drains what it left, so an entry is
+  never replayed twice and a write is not queued merely because another console was draining. A
+  dead-lettered report of WORK (a step, completion, ask, answer, create, record) is also posted to
+  the operational stream as `report_dead_lettered` (severity error), naming the replay command:
+  the console that wrote it has usually ended, and a file nobody reads is not a report.
 - **A lost version race is retried once.** `step` and `record` (create/amend a
   gap/feat/note/adr/decision/capability, e.g. `record gap --id <id> --set status=mitigated`) read
   the current version first; a `409`/`428` that names the current version is retried once — `step`

@@ -3451,11 +3451,27 @@ def _run_finish(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
 #   contract). `flush --dead` replays dead letters as their queuer and ARCHIVES what is refused
 #   again; `flush --dead-archive` archives one handled by hand. Nothing is ever deleted: a
 #   warning that rides every invocation and names nothing to run teaches people to read past it.
+# * A DEAD LETTER OF WORK REACHES THE BOARD. A refused replay of a report of work (a step, a
+#   completion, an ask, a create) is work the board never heard about, and the console that wrote
+#   it has usually ended; the local file is read only by somebody who runs `flush --dead`. Each
+#   one is posted to the operational stream (`report_dead_lettered`, severity error, so it is ON the
+#   queue, not below its bar), where any seat can take it.
+# * ONE DRAIN AT A TIME, AND A WRITE WAITS FOR IT. Two drains replaying the same entries send
+#   them twice; a write that gave up on another console's drain after a fraction of a second was
+#   queued behind it and its author told "NOT ON THE BOARD YET" -- measured on the origin system,
+#   a reply re-sent by hand that way reached its recipient twice. A drain holds a drain lock; a
+#   second one waits up to FLUSH_WAIT_S for it, then drains what is left itself.
 
 QUEUED_EXIT = 4
 OUTCOME_UNKNOWN_EXIT = 5
 QUEUEABLE = {"create", "complete", "ask", "answer", "directive", "ack", "app-error",
              "agent-error", "ack-error", "step", "record"}
+#: Reports of WORK, whose dead letter is posted to the board. An error report that is itself
+#: refused is not re-reported (that would loop on the very channel that refused it).
+WORK_REPORTS = QUEUEABLE - {"app-error", "agent-error", "ack-error"}
+#: How long a drain waits for ANOTHER process's drain before draining what is left itself. A
+#: drain is a handful of hub round trips; a fraction of a second was shorter than one of them.
+FLUSH_WAIT_S = 20
 
 
 def _queue_path():
@@ -3582,9 +3598,60 @@ def _replay(bases: list[str], entry: dict[str, Any]) -> dict[str, Any]:
         _REPLAY_ORIGIN = None
 
 
+def _surface_dead_letter(bases: list[str], entry: dict[str, Any], error: BaseException) -> None:
+    """Post a dead-lettered report of WORK to the operational stream, so it is a problem any seat
+    can take instead of a line in a file nobody reads. Never raises: a failed report must not
+    break the drain, and the dead letter itself is already kept locally."""
+    verb = str(entry.get("verb") or "")
+    if verb not in WORK_REPORTS or not bases:
+        return
+    args = entry.get("args") or {}
+    origin = entry.get("origin") or {}
+    subject = str(args.get("task_id") or args.get("title") or args.get("question_id")
+                  or args.get("question") or "")[:160]
+    payload = {"agent": origin.get("agent") or args.get("agent") or _agent(argparse.Namespace()),
+               "source": "client", "code": "report_dead_lettered", "severity": "error",
+               "message": ("a queued %s %s (queued %s) was refused on replay and is NOT on the "
+                           "board" % (verb, subject, entry.get("ts") or "?"))[:800],
+               "details": ("refusal: %s\nqueued by console %s on %s; replay it with "
+                           "`python -m hub_core.client flush --dead %s` on that machine, or redo "
+                           "the work's report by hand" % (
+                               str(error)[:600], str(origin.get("session") or "?")[:12],
+                               origin.get("machine") or "?", entry.get("id") or ""))[:2000]}
+    if origin.get("machine"):
+        payload["machine"] = origin["machine"]
+    _REPORTING["active"] = True
+    try:
+        _post(bases, "agent-error", payload, timeout=8)
+    except Exception:                                    # noqa: BLE001 - never break the drain
+        pass
+    finally:
+        _REPORTING["active"] = False
+
+
+def _flush_lock():
+    from .process_lock import ProcessFileLock
+    _state_dir().mkdir(parents=True, exist_ok=True)
+    return ProcessFileLock(_state_dir(), name=".queue.flush.lock", timeout=FLUSH_WAIT_S)
+
+
 def flush_queue(bases: list[str], verbose: bool = True) -> tuple[int, int]:
     """Replay queued writes in order. Returns (sent, still_queued). Stops at the first
-    unreachable hub; dead-letters refusals and continues."""
+    unreachable hub; dead-letters refusals and continues. One drain at a time: a second caller
+    waits for the running drain (FLUSH_WAIT_S), then drains what it left."""
+    from .process_lock import LockBusy
+    with _queue_lock():
+        if not _jsonl_load(_queue_path()):
+            return 0, 0                 # the common case: no lock, no wait
+    try:
+        with _flush_lock():
+            return _flush_queue_locked(bases, verbose)
+    except LockBusy:
+        with _queue_lock():
+            return 0, len(_jsonl_load(_queue_path()))
+
+
+def _flush_queue_locked(bases: list[str], verbose: bool) -> tuple[int, int]:
     with _queue_lock():
         entries = _jsonl_load(_queue_path())
     if not entries:
@@ -3610,12 +3677,14 @@ def flush_queue(bases: list[str], verbose: bool = True) -> tuple[int, int]:
         except HubRefused as error:
             _jsonl_append(_dead_path(), {**entry, "dead_error": str(error)[:400]})
             consumed.add(entry.get("id") or "")
+            _surface_dead_letter(bases, entry, error)
             if verbose:
                 print(f"DEAD-LETTER {label}: {str(error)[:200]}", file=sys.stderr)
         except Exception as error:                          # noqa: BLE001 - THE FLOOR
             _jsonl_append(_dead_path(), {**entry, "dead_error":
                                          f"unhandled while replaying: {type(error).__name__}: {error}"[:400]})
             consumed.add(entry.get("id") or "")
+            _surface_dead_letter(bases, entry, error)
     with _queue_lock():
         current = [e for e in _jsonl_load(_queue_path()) if (e.get("id") or "") not in consumed]
         _jsonl_write(_queue_path(), current)
