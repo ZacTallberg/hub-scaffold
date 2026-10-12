@@ -1,7 +1,7 @@
 {
   "name": "banner",
   "title": "App banner",
-  "what": "One shared header every adopting app links: page navigation (strip or sidebar) the person can arrange for themselves (hide pages from the sidebar, pin, reorder, a home page), the person's preferences everywhere or per app, their apps with stars, one drawer from the avatar, info bubbles, a derived tour and read-me, and People and Permissions over the data-access-url contract.",
+  "what": "One shared header every adopting app links: page navigation (strip or sidebar) the person can arrange for themselves (hide pages from the sidebar, pin, reorder, a home page), the person's preferences everywhere or per app, their apps with stars, one drawer from the avatar, info bubbles that can hand their subject to the page's agent, a derived tour and read-me, and People and Permissions over the data-access-url contract.",
   "link": [
     "<link rel=\"stylesheet\" href=\"{hub}/components/banner/banner.css\">",
     "<script src=\"{hub}/components/banner/banner.js\" defer></script>"
@@ -41,7 +41,9 @@
     "css": ["--ab-h", "--ab-band-h", "--ab-zoom", "--ab-sidebar-w"],
     "storage": ["localStorage ab:prefs (a cache of the person's record, including nav_hidden and nav_layout)", "localStorage ab:fixes:<app> (which fix notices this browser has already shown)"],
     "html_attributes": ["data-theme", "data-ab-font", "data-ab-motion", "data-ab-tips", "data-ab-help", "data-ab-strip (on the mount: the strip look from the `strip` property)"],
-    "events": ["app-banner:ready", "app-banner:prefs", "app-banner:action"],
+    "events": ["app-banner:ready", "app-banner:prefs", "app-banner:action",
+               "app-banner:tour-missing (detail {steps:[{step, title, selector}]}: declared tour steps whose target is not on this page; never an error)",
+               "hub:agent-ask (dispatched on document, cancelable, {question, about}: an info bubble's Ask about this, only when the page has [data-hub-agent])"],
     "page_attributes_read": ["data-ab-info", "data-ab-info-title", "data-ab-tip", "data-ab-help"]
   },
   "rules": [
@@ -51,7 +53,8 @@
     "The home page drives the band's name link; arriving at the app's root from outside the app, in the first moments of the page, with no query or fragment, and only when data-home is absolute, lands there.",
     "A redraw never rearranges: the navigation is rebuilt only when what it is drawn from changed, and a rebuilt sidebar keeps each group's open state and its scroll.",
     "One profile save in the air at a time: a change made meanwhile is queued and sent after it, in order, and the answer to a save that has been overtaken is not adopted.",
-    "A menu opened by hover gives no focus back when it closes; one opened by a click or the keyboard does."
+    "A menu opened by hover gives no focus back when it closes; one opened by a click or the keyboard does.",
+    "A declared tour step whose target is below the fold is scrolled to before it is drawn; one whose target is absent is named (number, title, selector) and announced, never forwarded as an error."
   ],
   "props": [
     {"key": "strip", "label": "Page strip look", "type": "choice", "default": "underline",

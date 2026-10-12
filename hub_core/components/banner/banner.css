@@ -279,7 +279,8 @@ html[data-ab-motion="reduce"] .ab-sb-acts { transition: none; }
   border-radius: var(--ab-radius); background: var(--ab-surface-1); border: 1px solid var(--ab-line); box-shadow: var(--ab-shadow); }
 .ab-info-title { display: block; margin-bottom: 4px; }
 .ab-info-text { margin: 0 0 8px; color: var(--ab-muted); }
-.ab-info-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--ab-line); padding-top: 6px; }
+.ab-info-foot { display: flex; justify-content: flex-end; gap: 14px; border-top: 1px solid var(--ab-line); padding-top: 6px; }
+.ab-info-ask { margin-right: auto; font-weight: 600; }
 .ab-info-hide, .ab-link { border: 0; background: none; padding: 2px 0; color: var(--ab-accent); font: inherit; font-size: 13px; cursor: pointer; }
 .ab-link:hover, .ab-info-hide:hover { text-decoration: underline; }
 .ab-link:disabled { color: var(--ab-muted); cursor: default; text-decoration: none; }

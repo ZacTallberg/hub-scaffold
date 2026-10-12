@@ -410,8 +410,46 @@
   var infoTitle = el("strong", { class: "ab-info-title" });
   var infoText = el("p", { class: "ab-info-text" });
   var infoHideAll = el("button", { class: "ab-info-hide", type: "button", text: "Hide all info bubbles" });
+  /* ASK ABOUT THIS. A bubble explains what a thing is FOR; the next question is usually "and how
+     do I use it here", which is the agent's. Offered only where the page has an agent component
+     to take it (an agent-less page shows no button that asks nobody), and the question is
+     written by the context menu's shared composer (HubMenu.questionAbout) when it is on the
+     page, so every surface asks in one voice -- else plainly here, naming the app and the page
+     by its NAV name, never the h1 (which on a dashboard states a finding). */
+  var infoAsk = el("button", { class: "ab-info-hide ab-info-ask", type: "button", text: "Ask about this" });
   info.appendChild(infoTitle); info.appendChild(infoText);
-  info.appendChild(el("div", { class: "ab-info-foot" }, [infoHideAll]));
+  info.appendChild(el("div", { class: "ab-info-foot" }, [infoAsk, infoHideAll]));
+  function agentHere() { return !!doc.querySelector("[data-hub-agent]"); }
+  function pageName() {
+    var here = null;
+    (function walk(items) {
+      items.forEach(function (n) { if (!here && n.current) here = n; walk(list(n.children)); });
+    })(NAV);
+    if (here) {
+      var kid = list(here.children).filter(function (c) { return c.current; })[0];
+      return (kid || here).label || "";
+    }
+    return String(doc.title || "").split(/\s[-|·–—]\s/)[0].trim();
+  }
+  infoAsk.addEventListener("click", function (e) {
+    e.stopPropagation();
+    var node = infoFor, title = node ? infoName(node) : infoTitle.textContent, text = infoText.textContent;
+    var thing = { kind: "info", intent: "use", text: title, facts: text ? "It says: " + text : "", element: node || null };
+    var question = "";
+    try { if (win.HubMenu && typeof win.HubMenu.questionAbout === "function") question = win.HubMenu.questionAbout(thing) || ""; }
+    catch (err) { console.warn(LOG + "the shared question composer failed: " + err); }
+    if (!question) {
+      var page = pageName();
+      question = "In " + APP_NAME + (page ? ", on the " + page + " page" : "") + ": how do I use “" + title +
+                 "” here?" + (text ? " (It says: " + text + ")" : "");
+    }
+    infoPointerIn = false; hideInfo(true);
+    var ev;
+    try { ev = new CustomEvent("hub:agent-ask", { cancelable: true, detail: { question: question, about: thing } }); }
+    catch (err) { return; }
+    doc.dispatchEvent(ev);
+    if (!ev.defaultPrevented) sayToast("The agent on this page did not take the question.");
+  });
   var infoFor = null, infoShowT = 0, infoHideT = 0, infoPointerIn = false;
   function infoOn() { return doc.documentElement.getAttribute("data-ab-tips") !== "off"; }
   function infoName(node) {
@@ -453,6 +491,7 @@
     infoFor = node;
     infoTitle.textContent = infoName(node); infoTitle.hidden = !infoTitle.textContent;
     infoText.textContent = text;
+    infoAsk.hidden = !agentHere();
     info.hidden = false; placeInfo(node);
   }
   /* The grace timer HIDES and touches nothing else: moving straight from one explained thing to
@@ -2240,12 +2279,20 @@
   }
   function declaredTour(steps) {
     var out = [], missing = [];
-    steps.forEach(function (st) {
+    steps.forEach(function (st, i) {
       var sel = st.selector || st.target, n = sel ? q(sel) : null;
       if (vis(n)) out.push({ node: n, title: st.title || "", text: st.text || "" });
-      else missing.push(sel || "(no selector)");
+      else missing.push({ step: i + 1, title: st.title || "", selector: sel || "" });
     });
-    if (missing.length) console.warn(LOG + "guided tour: " + missing.length + " declared step(s) point at nothing on this page and were skipped: " + missing.join(", "));
+    /* A step whose target is absent is NAMED (its number, title and selector) and announced as
+       app-banner:tour-missing, never forwarded as an error: a target can be absent on purpose
+       (a control only an admin sees). Without the name, "the tour skipped something" is not
+       findable when a page's markup moved under a declared step. */
+    if (missing.length) {
+      console.warn(LOG + "guided tour: " + missing.length + " declared step(s) point at nothing on this page and were skipped: " +
+                   missing.map(function (m) { return "#" + m.step + " “" + m.title + "” (" + (m.selector || "no selector") + ")"; }).join(", "));
+      try { doc.dispatchEvent(new CustomEvent("app-banner:tour-missing", { detail: { steps: missing } })); } catch (e) {}
+    }
     return out;
   }
   var tourScrim = el("div", { class: "ab-tour-scrim ab-surface", hidden: true });
@@ -2265,6 +2312,15 @@
     if (!st) { endTour(); return; }
     var r = box(st.node);                                 // re-read: the page does not hold still
     if (!r.width && !r.height) { tourGo(1); return; }
+    /* A TARGET BELOW THE FOLD IS SCROLLED TO, instantly, before the ring is drawn -- a ring
+       placed off screen narrates nothing. This is also what reveals a target that FADES IN as
+       it enters the viewport (opacity 0 until an observer sees it): waiting for it to become
+       visible before scrolling to it would wait forever. */
+    if (r.bottom < 0 || r.top > vh() || r.right < 0 || r.left > vw()) {
+      try { st.node.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }); }
+      catch (e) { st.node.scrollIntoView(); }
+      r = box(st.node);
+    }
     var pad = 6;
     tourRing.style.top = r.top - pad + "px"; tourRing.style.left = r.left - pad + "px";
     tourRing.style.width = r.width + pad * 2 + "px"; tourRing.style.height = r.height + pad * 2 + "px";
