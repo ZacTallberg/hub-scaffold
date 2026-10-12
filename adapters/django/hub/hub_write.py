@@ -539,6 +539,9 @@ def task(request, b):
     refusal = _decision_guard(b, is_create)
     if refusal is not None:
         return refusal
+    refusal = _outcome_forgery_guard(b, is_create)
+    if refusal is not None:
+        return refusal
     twins = []
     fixer_step = False
     if is_create:
@@ -612,6 +615,30 @@ def task(request, b):
 
 def _is_true(value) -> bool:
     return value in (True, 1, "1", "true")
+
+
+def _outcome_forgery_guard(b, is_create):
+    """An outcome row (verified / rejected) enters a plan only through POST /hub/api/task/outcome,
+    which stamps ``by`` from the authenticated caller and applies its effects (close, reopen). A
+    whole-plan write that ADDS one would be a verdict nobody can attribute; rows the task already
+    carries ride along unchanged (writers send the whole plan)."""
+    from hub_core import checkpoints
+    plan = b.get("plan")
+    if not isinstance(plan, list):
+        return None
+    have = set()
+    if not is_create:
+        current = hub_app.entity(b.get("id")) or {}
+        have = {(r.get("kind"), str(r.get("sha") or ""), str(r.get("note_at") or ""))
+                for r in current.get("plan") or [] if isinstance(r, dict)}
+    for r in plan:
+        if (isinstance(r, dict) and r.get("kind") in checkpoints.OUTCOME_KINDS
+                and (r.get("kind"), str(r.get("sha") or ""), str(r.get("note_at") or "")) not in have):
+            return JsonResponse({"errors": [{"code": "use_outcome",
+                "msg": "a %s row is recorded through POST /hub/api/task/outcome (client: "
+                       "`verify` / `reject`), never written into a plan" % r.get("kind")}]},
+                status=409)
+    return None
 
 
 def _decision_guard(b, is_create):
@@ -1115,15 +1142,30 @@ _DEPLOY_CLOSE_SERIAL = __import__("threading").Lock()
 def run_deploy_close(deploy_id, sha, *, wait_s=DEPLOY_CLOSE_INLINE_S) -> dict:
     """Run close_deployed_tasks(deploy_id, sha) on its own daemon thread, serialized with every
     other deploy close, and wait at most ``wait_s`` for it. Returns its outcome, or
-    ``{"queued": True}`` when it is still running (it finishes and records its own failure)."""
+    ``{"queued": True}`` when it is still running (it finishes and records its own failure). A
+    busy ledger is retried ``DEPLOY_CLOSE_BUSY_ATTEMPTS`` times, ``DEPLOY_CLOSE_BUSY_BACKOFF_S`` x
+    the try apart, instead of losing the close."""
     import threading
     box, done = {}, threading.Event()
 
     def _run():
         started = time.monotonic()
         try:
-            with _DEPLOY_CLOSE_SERIAL:
-                box["outcome"] = close_deployed_tasks(deploy_id, sha)
+            for attempt in range(1, DEPLOY_CLOSE_BUSY_ATTEMPTS + 1):
+                try:
+                    with _DEPLOY_CLOSE_SERIAL:
+                        box["outcome"] = close_deployed_tasks(deploy_id, sha)
+                    break
+                except StoreBusy:
+                    # BUSY IS BACK-PRESSURE, NOT A VERDICT. The record is written once; a close
+                    # lost here would be lost for good (the sweep only retries tasks already
+                    # stepped). Every step is idempotent, so the close is ridden out -- outside
+                    # the serial lock, so another record's close is not held behind the wait.
+                    if attempt == DEPLOY_CLOSE_BUSY_ATTEMPTS:
+                        raise
+                    box["outcome"] = {"deferred": "the ledger was busy; retrying"}
+                    done.set()                   # the record's answer need not wait for this
+                    time.sleep(DEPLOY_CLOSE_BUSY_BACKOFF_S * attempt)
         except Exception as exc:                             # noqa: BLE001 - recorded, never raised
             hub_app.record_error("hub.deploy-close", "deploy-driven task closure failed: %s"
                                  % type(exc).__name__, severity="error",
@@ -1197,15 +1239,17 @@ def close_deployed_tasks(deploy_id, deployed_sha):
               if d.get("sha")]
     matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor,
                                                       served=served)
-    closed, stepped, refused = [], [], {}
+    closed, stepped, refused, awaiting = [], [], {}, []
     for task, commit, retry in matches:
         tid = task["id"]
         if retry:
-            # Stepped already, and an earlier close was refused (a live lease, a version race):
-            # offered to the close again, never stepped twice.
+            # Stepped already, and an earlier close was refused (a live lease, a version race,
+            # no verification yet): offered to the close again, never stepped twice.
             res = deploy_close.close_one(task, commit, deployed_sha, deploy_id)
             if res.get("closed"):
                 closed.append(tid)
+            elif res.get("awaiting"):
+                awaiting.append(tid)
             elif res.get("why"):
                 refused[tid] = res["why"]
             continue
@@ -1215,19 +1259,23 @@ def close_deployed_tasks(deploy_id, deployed_sha):
         resp, status = _append("task", tid, {"type": "task", "plan": plan},
                                expected_version=task.get("version"), agent=DEPLOY_ACTOR,
                                idem="deploy-step:%s:%s" % (tid, commit[:12]), etype="task.updated")
+        if status == 503:
+            # A busy ledger wrote nothing: the whole close is retried (each step is idempotent).
+            raise StoreBusy("deploy close step", 0.0)
         if status != 200:
             refused[tid] = "the deployed checkpoint could not be written (%s)" % status
             continue
-        if not task_completion.is_unattended(task):
-            stepped.append(tid)
-            continue
+        stepped.append(tid)
         fresh = (hub_app.current_state().get("entities") or {}).get(tid) or task
         res = deploy_close.close_one(fresh, commit, deployed_sha, deploy_id)
         if res.get("closed"):
             closed.append(tid)
+        elif res.get("awaiting"):
+            awaiting.append(tid)
         elif res.get("why"):
             refused[tid] = res["why"]
-    out = {"closed": closed, "stepped": stepped, "refused": refused}
+    out = {"closed": closed, "stepped": stepped, "awaiting_verification": awaiting,
+           "refused": refused}
     if unchecked:
         out["unchecked"] = ("the repository could not answer whether %s %s contained in %s; only a "
                             "task naming the served sha exactly could close"
@@ -1236,17 +1284,120 @@ def close_deployed_tasks(deploy_id, deployed_sha):
     return out
 
 
-def _hub_finish(tid, commit, deployed_sha, deploy_id):
-    """Finish one unattended task as the hub: claim a short lease (refused when anyone else
-    holds it — the hub never finishes work another agent holds), then the shared done path.
-    Returns '' on success, else the reason."""
-    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
-            % (commit[:12], deployed_sha[:12], deploy_id))
-    payload = {"type": "task", "status": "done", "verified_by": [note],
-               "evidence_uri": [deploy_id, commit], "auto_close": {
+DEPLOY_CLOSE_BUSY_ATTEMPTS = 4
+DEPLOY_CLOSE_BUSY_BACKOFF_S = 20.0
+
+
+def _hub_finish(tid, commit, deployed_sha, deploy_id, *, person=False):
+    """Finish one task as the hub once its deployed commit is VERIFIED: claim a short lease, then
+    the shared done path. Returns '' on success, else the reason.
+
+    An unattended task held by another live run is refused (that run is still watching it and
+    hands it back moments later; the sweep retries). A PERSON's task is closed over its lease:
+    the verification is the machine check a person would otherwise be asked to make, and a
+    console that renews for hours must not keep verified work open. The holder is told, in its
+    inbox, by the hub."""
+    from hub_core import task_completion
+    task = (hub_app.current_state().get("entities") or {}).get(tid) or {}
+    ver = task_completion.verification_row(task, commit)
+    note = ("Closed by the hub: its recorded commit %s is live in build %s (%s) and was verified "
+            "after the deploy%s." % (commit[:12], deployed_sha[:12], deploy_id,
+                                      (" by %s (%s)" % (ver.get("by") or "?", ver.get("artifact")
+                                                        or "-")) if ver else ""))
+    evidence = [deploy_id, commit] + ([str(ver["artifact"])] if ver and ver.get("artifact") else [])
+    payload = {"type": "task", "status": "done", "verified_by": [note[:300]],
+               "evidence_uri": evidence, "auto_close": {
                    "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
-    return hub_grant_done(tid, payload, credential_id="hub-deploy-close",
-                          idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+    holder = ""
+    if person:
+        lease = hub_app._read_lease(tid) or {}
+        if float(lease.get("expires") or 0) > time.time() and lease.get("agent") != DEPLOY_ACTOR:
+            holder = str(lease.get("agent") or "")
+            hub_app.release_lease(tid, lease.get("token"))
+    why = hub_grant_done(tid, payload, credential_id="hub-deploy-close",
+                         idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+    if not why and holder:
+        _tell_verified_close(task, holder, note)
+    return why
+
+
+def _tell_verified_close(task, holder, note):
+    """The person whose task the hub closed hears it in their own inbox. Never raises."""
+    try:
+        eid = str(task.get("id") or "")
+        local = "m-verified-close-%s" % hashlib.sha1(eid.encode("utf-8")).hexdigest()[:12]
+        body = ("%s\n\nIf the work is not finished, record what is still wrong: `reject %s --note "
+                "\"...\"` reopens the same task." % (note, eid))
+        msg = {"type": "note", "title": ("%s closed: verified live" % eid)[:200],
+               "category": "context", "status": "standing", "tags": ["message", "open"],
+               "to": holder, "from_agent": DEPLOY_ACTOR, "body_md": body}
+        _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), msg,
+                expected_version=None, agent=DEPLOY_ACTOR, idem="verified-close-msg:" + local,
+                etype="note.created")
+    except Exception:                                        # noqa: BLE001 - a notice never fails a close
+        logging.getLogger(__name__).warning("verified-close notice failed", exc_info=True)
+
+
+@writer(scope="task:write")
+def task_outcome(request, b):
+    """POST /hub/api/task/outcome -- what the machine check (or the requester) says about a
+    task's DEPLOYED build: ``{id, kind: verified|rejected, sha, result: pass|fail, artifact, note,
+    facts}``.
+
+    An outcome is a RECEIPT, not work: it needs no lease (it is written about work, often by
+    somebody other than whoever holds it), the fold keeps it whatever a later plan write sends,
+    and ``by`` is the authenticated caller, never the body. A passing verification closes a task
+    already stepped ``deployed`` (hub_core.task_completion: done is the machine check). A failed
+    verification or a rejection on a closed task REOPENS the same task; every row written before
+    a rejection stops counting. A rejection is the requester's to make: the task's creator or an
+    operator-tier caller (the board's root credential included)."""
+    from hub_core import task_completion
+    from . import deploy_close, veil
+    eid = b.get("id")
+    kind = str(b.get("kind") or "").strip().lower()
+    if not isinstance(eid, str) or not eid.strip():
+        return JsonResponse({"errors": [{"code": "missing_id"}]}, status=400)
+    caller = str(request.hub_auth.subject or b.get("agent") or "agent")
+    for _attempt in range(3):
+        ent = hub_app.entity(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if kind == "rejected":
+            creator = str((ent.get("provenance") or {}).get("created_by") or "")
+            operator = (request.hub_auth.mode != "scoped-agent"
+                        or veil.tier_of(caller) == "operator")
+            if caller != creator and not operator:
+                return JsonResponse({"errors": [{"code": "not_requester",
+                    "msg": "a rejection is the requester's: %s filed %s (or an operator may "
+                           "reject it); record a failed check with kind=verified result=fail"
+                           % (creator or "?", eid)}]}, status=403)
+        try:
+            row = task_completion.outcome_row(
+                kind, sha=b.get("sha") or "", result=b.get("result") or "",
+                artifact=b.get("artifact") or "", note=b.get("note") or "", by=caller,
+                facts=b.get("facts"), at=_utc_now())
+        except ValueError as exc:
+            return JsonResponse({"errors": [{"code": "bad_outcome", "msg": str(exc)}]}, status=422)
+        plan = [dict(x) for x in (ent.get("plan") or []) if isinstance(x, dict)]
+        plan.append(row)
+        payload = {"type": "task", "plan": plan}
+        reopen = (ent.get("status") == "done"
+                  and (kind == "rejected" or row.get("result") == "fail"))
+        if reopen:
+            payload["status"] = "todo"
+        resp, status = _append("task", eid, payload, expected_version=ent.get("version"),
+                               agent=caller, idem=b.get("idem_key"), etype="task.updated")
+        if status == 409:
+            continue                # a version race: re-read and re-apply the same outcome
+        break
+    if status != 200:
+        return JsonResponse(resp, status=status)
+    out = {"id": eid, "kind": kind, "row": row, "reopened": bool(reopen)}
+    if kind == "verified" and row.get("result") == "pass":
+        out["close"] = deploy_close.close_if_deployed(eid) or {
+            "closed": False, "why": "no deployed receipt for this task yet: the deploy record "
+                                    "closes it when it lands"}
+    return JsonResponse({"data": out})
 
 
 def hub_grant_done(tid, payload, *, credential_id, idem):

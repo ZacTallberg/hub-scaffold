@@ -60,16 +60,17 @@ def _deploy_id_of(row: dict) -> str:
 
 
 def close_if_deployed(tid: str) -> dict:
-    """Close an unattended task that ALREADY carries a ``deployed`` checkpoint, now -- unless its
-    own trail says the work is not finished (refused, with the quote, onto the task). Never
+    """Close a task that ALREADY carries a ``deployed`` checkpoint (written after its newest
+    rejection), now -- when a verification of that deployed commit passed after it, and unless
+    its own trail says the work is not finished. Every refusal is written onto the task. Never
     raises."""
     try:
         task = (hub_app.current_state().get("entities") or {}).get(tid)
-        if not task or task.get("type") != "task" or not task_completion.is_unattended(task):
+        if not task or task.get("type") != "task":
             return {}
         if str(task.get("status") or "") not in task_completion.OPEN_STATES:
             return {}
-        row = task_completion.deployed_row(task)
+        row = task_completion.deployed_after_floor(task)
         if row is None:
             return {}
         commit = str(row.get("sha") or "")
@@ -93,11 +94,20 @@ def close_one(task: dict, commit: str, deployed_sha: str, deploy_id: str) -> dic
         why = 'its own checkpoint says the work is not finished: "%s"' % unfinished[:150]
         hub_write._record_auto_close(tid, "refused", why, commit, deploy_id)
         return {"closed": False, "why": why}
-    unseen = task_completion.not_seen(task)
-    if unseen:
-        hub_write._record_auto_close(tid, "refused", unseen, commit, deploy_id)
-        return {"closed": False, "why": unseen}
-    why = hub_write._hub_finish(tid, commit, deployed_sha, deploy_id)
+    # DONE IS THE MACHINE CHECK: the deploy proved the commit is live; a `verified` pass written
+    # after it proves the request was met. Until one lands the task waits, and says so.
+    deployed = task_completion.deployed_after_floor(task, commit)
+    if deployed is None:
+        why = "the deployed receipt for %s predates the newest rejection" % commit[:12]
+        hub_write._record_auto_close(tid, "awaiting", why, commit, deploy_id)
+        return {"closed": False, "why": why, "awaiting": True}
+    unverified = task_completion.verification_after_deploy(task, commit, deployed,
+                                                           hub_app.git_is_ancestor)
+    if unverified:
+        hub_write._record_auto_close(tid, "awaiting", unverified, commit, deploy_id)
+        return {"closed": False, "why": unverified, "awaiting": True}
+    why = hub_write._hub_finish(tid, commit, deployed_sha, deploy_id,
+                                person=not task_completion.is_unattended(task))
     if why and why != "gone or already done":
         hub_write._record_auto_close(tid, "refused", why, commit, deploy_id)
         return {"closed": False, "why": why}
@@ -105,7 +115,7 @@ def close_one(task: dict, commit: str, deployed_sha: str, deploy_id: str) -> dic
 
 
 def sweep(force: bool = False, now: float | None = None, limit: int = SWEEP_LIMIT) -> dict:
-    """Retry the close of every unattended, not-done task already stepped ``deployed``."""
+    """Retry the close of every not-done task already stepped ``deployed`` and verified after."""
     now = time.time() if now is None else now
     if not force and now - _LAST["at"] < SWEEP_INTERVAL_S:
         return {"skipped": "throttled"}

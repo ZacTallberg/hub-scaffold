@@ -518,7 +518,7 @@ def checkpoint_step(rec: dict, agent: str, machine: str, now: float | None = Non
                    res.get("note") or "")).strip()
         return {"step": ("Published via hand-off %s: %s" % (rec["id"], sha[:12]))[:80],
                 "done": True, "kind": "pushed", "sha": sha, "note": note[:600],
-                "note_at": _iso(now)}
+                "note_at": _iso(now), "receipt": "handoff"}
     conflicts = res.get("conflicts") or []
     note = ("Hand-off %s could NOT be published by %s: %s%s. The commits are still in the "
             "author's checkout (%s on %s)."

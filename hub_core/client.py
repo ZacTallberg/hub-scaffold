@@ -685,7 +685,8 @@ def _window_closed(base: str) -> None:
 # replays the first event instead of writing again). Only these are retried automatically: a
 # retry of anything else could double-apply, and a retry that reports failure for a write that
 # landed is worse than the failure it was avoiding.
-RETRY_SAFE_OPERATIONS = frozenset({"task", "directive", "answer", "ask", "ack", "gap", "note"})
+RETRY_SAFE_OPERATIONS = frozenset({"task", "directive", "answer", "ask", "ack", "gap", "note",
+                                   "task/outcome"})
 RETRY_ATTEMPTS = 3
 RETRY_STATUSES = frozenset({502, 503, 504})   # the edge lost the response or the hub was busy
 
@@ -2976,23 +2977,24 @@ def _now_iso() -> str:
 
 
 def _lift_note_sha(arguments: argparse.Namespace, verb: str) -> str:
-    """A commit sha written in the note with no --sha becomes the structured --sha -- NEVER a
-    refusal. What a deploy record closes a task by, and what an unattended launcher reads to wait
-    for a pipeline, is the structured field; a sha buried in prose was only a fallback guess. A
-    refusal was tried on the origin system and lost the checkpoint of every unattended run that
-    wrote its sha in words, so the first sha-looking token is lifted, a warning names it when
-    there were several, and the write always goes. An explicit --kind means the caller chose the
-    checkpoint's shape, so nothing is lifted. Returns the sha it lifted, or ''."""
+    """A commit sha written in the note with no --sha is NOT recorded as this task's push -- the
+    write still goes, as a plain checkpoint, and a warning names the sha and the flag to use.
+
+    The structured --sha is what a deploy record steps a task by; lifting a sha out of prose was
+    a guess, and on the instance this was lifted from it closed a task on ANOTHER task's commit
+    that the note merely mentioned, while the task's own work sat on a branch. A refusal is not
+    the answer either (it lost every checkpoint that wrote its sha in words): the checkpoint
+    lands, and only the caller can say which commit is this task's. Returns the sha it saw."""
     if getattr(arguments, "sha", None) or getattr(arguments, "kind", None):
         return ""
     from .task_rows import note_shas
     found = note_shas(getattr(arguments, "note", "") or "")
     if not found:
         return ""
-    arguments.sha = found[0]
-    if len(found) > 1:
-        print("warning: the %s note names %d commits (%s); recorded %s as its --sha. Pass --sha "
-              "to choose." % (verb, len(found), ", ".join(found[:5]), found[0]), file=sys.stderr)
+    print("warning: the %s note names commit%s %s but no --sha: recorded as a plain checkpoint. "
+          "If %s is this task's push, record it with --sha so a deploy can step the task."
+          % (verb, "s" if len(found) > 1 else "", ", ".join(found[:5]),
+             "one of them" if len(found) > 1 else "it"), file=sys.stderr)
     return found[0]
 
 
@@ -3032,11 +3034,42 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
                            "kind": picked.get("kind") or "checkpoint",
                            "progress": f"{counts['done']}/{counts['total']}"}
     if lifted:
-        out["sha_from_note"] = lifted
+        out["sha_in_note_not_recorded"] = lifted
     if counts["lifecycle"] or counts["placeholders"]:
         out["not_counted"] = {"lifecycle": counts["lifecycle"],
                               "placeholders": counts["placeholders"]}
     return out
+
+
+def _run_outcome(base: str, arguments: argparse.Namespace, kind: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {"id": _fetch_task(base, arguments.task_id)["id"],
+                               "agent": _agent(arguments), "kind": kind,
+                               "note": arguments.note or ""}
+    if getattr(arguments, "sha", None):
+        payload["sha"] = arguments.sha
+    if getattr(arguments, "artifact", None):
+        payload["artifact"] = arguments.artifact
+    if kind == "verified":
+        payload["result"] = "fail" if arguments.failed else "pass"
+    if getattr(arguments, "facts", None):
+        try:
+            payload["facts"] = json.loads(arguments.facts)
+        except ValueError as error:
+            raise ValueError("--facts must be a JSON object: %s" % error) from error
+    return _post(base, "task/outcome", payload, extra_headers=_presence_headers(arguments))
+
+
+def _run_verify(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Record the machine check of a task's DEPLOYED build: what you opened as the requester
+    would, at which commit, and what you read. A pass closes a task already stepped `deployed`;
+    a fail (--failed) on a closed task reopens it."""
+    return _run_outcome(base, arguments, "verified")
+
+
+def _run_reject(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+    """The requester says the deployed work does not meet the request: the same task reopens and
+    every receipt before this one stops counting."""
+    return _run_outcome(base, arguments, "rejected")
 
 
 def _run_plan(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -4227,8 +4260,8 @@ def _parser() -> argparse.ArgumentParser:
     step.add_argument("--step", help="step text fragment or 1-based index (grows the plan); "
                                      "default = first undone work step")
     step.add_argument("--note", help="what actually happened at this checkpoint")
-    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed); when "
-                      "absent, a sha written in --note is lifted into it")
+    step.add_argument("--sha", help="the commit this checkpoint pushed (records kind=pushed). A "
+                      "sha only written in --note is NOT recorded as the push (a warning says so)")
     step.add_argument("--pipeline", help="the numeric id of the pipeline that built --sha")
     step.add_argument("--pipeline-url", dest="pipeline_url")
     step.add_argument("--kind", help="checkpoint kind (default checkpoint, or pushed with --sha)")
@@ -4237,6 +4270,29 @@ def _parser() -> argparse.ArgumentParser:
     step.add_argument("--machine")
     step.add_argument("--focus")
     step.set_defaults(runner=_run_step)
+
+    for verb, runner, text in (
+            ("verify", _run_verify, "record the machine check of a task's DEPLOYED build (a pass "
+                                    "closes a task stepped deployed; --failed on a closed one "
+                                    "reopens it)"),
+            ("reject", _run_reject, "the requester says the deployed work does not meet the "
+                                    "request: reopens the same task")):
+        outcome = commands.add_parser(verb, help=text)
+        outcome.add_argument("task_id")
+        outcome.add_argument("--agent")
+        outcome.add_argument("--sha", required=(verb == "verify"),
+                             help="the deployed commit the check looked at")
+        outcome.add_argument("--artifact", required=(verb == "verify"),
+                             help="what the check READ: a URL, a screenshot path, a probe's output")
+        outcome.add_argument("--note", required=(verb == "reject"),
+                             help="what was seen (verify) / what is still wrong (reject)")
+        outcome.add_argument("--facts", help="a JSON object of the structured readings")
+        if verb == "verify":
+            outcome.add_argument("--failed", action="store_true",
+                                 help="the deployed build does NOT meet the request")
+        outcome.add_argument("--machine")
+        outcome.add_argument("--focus")
+        outcome.set_defaults(runner=runner)
 
     plan = commands.add_parser("plan", help='declare or extend a checklist: --steps "a|b|c"')
     plan.add_argument("task_id")

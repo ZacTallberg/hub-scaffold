@@ -27,8 +27,19 @@ import re
 LIFECYCLE_KINDS = frozenset({"handed_back", "lease_released", "reaped", "launcher_timeout",
                              "claim_expired", "lifecycle"})
 
+#: What the MACHINE check said about a deployed build: a `verified` row (result pass | fail, the
+#: sha it looked at, the artifact it read) or a requester's `rejected` ("still broken"). Outcomes
+#: are written through their own route (POST /hub/api/task/outcome), never by `step`, and are
+#: never work: they say whether the work landed, not that more of it was done.
+OUTCOME_KINDS = frozenset({"verified", "rejected"})
+
+#: Rows the SYSTEM writes about a task -- the deploy record's `deployed`, the outcome rows, and a
+#: published hand-off's `pushed` (marked ``receipt: "handoff"``). A plan write never removes one
+#: (``keep_receipts``).
+RECEIPT_KINDS = frozenset({"deployed"}) | OUTCOME_KINDS
+
 #: Every kind the schema accepts; `checkpoint` is the default for a reported step.
-KINDS = frozenset({"checkpoint", "pushed", "deployed"}) | LIFECYCLE_KINDS
+KINDS = frozenset({"checkpoint", "pushed", "deployed"}) | LIFECYCLE_KINDS | OUTCOME_KINDS
 
 _PLACEHOLDER = re.compile(r"^step \d+$")
 _LIFECYCLE_TEXT = re.compile(
@@ -88,10 +99,52 @@ def is_lifecycle(step) -> bool:
     return bool(_LIFECYCLE_TEXT.search("%s %s" % (step.get("step") or "", step.get("note") or "")))
 
 
+def is_receipt(step) -> bool:
+    """Is this row one the SYSTEM wrote about the task (deployed, an outcome, a hand-off push)?"""
+    if not isinstance(step, dict):
+        return False
+    kind = step.get("kind")
+    return kind in RECEIPT_KINDS or (kind == "pushed" and step.get("receipt") == "handoff")
+
+
+def _receipt_key(row) -> tuple:
+    return (row.get("kind"), str(row.get("sha") or "").lower(), str(row.get("note_at") or ""))
+
+
+def keep_receipts(old_plan, new_plan) -> list:
+    """A plan write never removes a system receipt.
+
+    Writers send the WHOLE plan, so a numbered step that landed on a receipt's index rewrote it in
+    place: on the instance this was lifted from, a task's `deployed` row became an agent's
+    `pushed` note and the task stopped counting as verified live. A receipt the old plan had and
+    the new one lacks goes back at its index; the row that took that slot moves to the END, minus
+    the fields it only inherited from the receipt. Applied in the fold, so the ledger is never
+    rewritten and old events re-derive their receipts too."""
+    old_plan = [r for r in (old_plan or []) if isinstance(r, dict)]
+    new_plan = list(new_plan or [])
+    have = {_receipt_key(r) for r in new_plan if is_receipt(r)}
+    lost = [(i, r) for i, r in enumerate(old_plan) if is_receipt(r) and _receipt_key(r) not in have]
+    if not lost:
+        return new_plan
+    plan, moved = list(new_plan), []
+    for i, r in lost:
+        if i >= len(plan) or is_receipt(plan[i]) or not isinstance(plan[i], dict):
+            plan.append(r)
+            continue
+        took = plan[i]
+        plan[i] = r
+        own = {k: v for k, v in took.items() if k != "done" and r.get(k) != v}
+        if own:
+            own.setdefault("step", str(own.get("note") or "step")[:80])
+            moved.append({"done": took.get("done", False), **own})
+    return plan + moved
+
+
 def work_steps(task_or_plan) -> list:
-    """The plan with placeholders and lifecycle rows removed — what a person means by the work."""
+    """The plan with placeholders, lifecycle rows and outcome receipts removed — what a person
+    means by the work."""
     plan = (task_or_plan.get("plan") if isinstance(task_or_plan, dict) else task_or_plan) or []
-    return [s for s in plan if isinstance(s, dict)
+    return [s for s in plan if isinstance(s, dict) and s.get("kind") not in OUTCOME_KINDS
             and not is_lifecycle(s) and not is_placeholder(s)]
 
 
@@ -139,6 +192,9 @@ def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_
     Raises ValueError with a sentence a worker can act on."""
     if kind not in KINDS:
         raise ValueError("kind must be one of %s" % sorted(KINDS))
+    if kind in OUTCOME_KINDS:
+        raise ValueError("an outcome (%s) is recorded with `verify` / `reject` (POST "
+                         "/hub/api/task/outcome), never as a step" % kind)
     sha = str(sha or "").strip().lower()
     if sha and not re.fullmatch(r"[0-9a-f]{7,40}", sha):
         raise ValueError("sha must be a 7..40 character hexadecimal commit id")
@@ -154,8 +210,15 @@ def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_
         while len(rows) < index:
             rows.append({"step": "step %d" % (len(rows) + 1), "done": False, "auto": True})
         target = rows[index - 1]
+        if is_receipt(target):
+            # A receipt is the system's record, never a slot a step may overwrite: the report
+            # lands as a NEW row instead (the fold would restore the receipt anyway).
+            target = {"step": (str(note).strip().splitlines() or ["checkpoint"])[0][:120]
+                      or "checkpoint"}
+            rows.append(target)
     elif wanted:
-        target = next((s for s in rows if wanted.lower() in str(s.get("step", "")).lower()), None)
+        target = next((s for s in rows if not is_receipt(s)
+                       and wanted.lower() in str(s.get("step", "")).lower()), None)
         if target is None:
             raise ValueError("no plan step matches %r" % wanted)
     else:

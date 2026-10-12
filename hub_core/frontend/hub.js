@@ -243,6 +243,7 @@
   function isWorkStep(s) {
     if (!s || typeof s !== "object") return false;
     if (s.lifecycle === true || LIFECYCLE_KINDS[s.kind]) return false;
+    if (s.kind === "verified" || s.kind === "rejected") return false;   // outcomes, not work
     if (!s.done && !String(s.note || "").trim() &&
         (s.auto === true || /^step \d+$/i.test(String(s.step || "").trim()))) return false;
     return true;
@@ -255,7 +256,8 @@
       var kind = s.kind || "checkpoint";
       var label = (i + 1) + ". " + (s.done ? "✓ " : "○ ") + (s.step || "");
       var meta = [];
-      if (!isWorkStep(s)) meta.push(s.auto ? "placeholder — not counted" : "scheduler row — not counted");
+      if (!isWorkStep(s)) meta.push(s.kind === "verified" || s.kind === "rejected" ? "outcome — not counted as work"
+                                     : s.auto ? "placeholder — not counted" : "scheduler row — not counted");
       if (kind !== "checkpoint") meta.push(kind + (s.times > 1 ? " ×" + s.times : ""));
       if (s.sha) meta.push("commit " + s.sha);
       if (s.pipeline_id) meta.push("pipeline " + s.pipeline_id);
@@ -268,6 +270,38 @@
                       text: "open pipeline" }) : null
       ].filter(Boolean)));
     }).filter(Boolean);
+  }
+  // What the MACHINE check said about the deployed build: every verified / rejected row, newest
+  // first, in full (note, the artifact it read, its facts), plus the app's own rate. Done is
+  // this check, never a person's confirmation.
+  function outcomeRows(task) {
+    var rows = ((task && task.plan) || []).filter(function (s) {
+      return s && (s.kind === "verified" || s.kind === "rejected");
+    }).slice().sort(function (a, b) { return String(b.note_at || "").localeCompare(String(a.note_at || "")); });
+    var out = rows.map(function (s) {
+      var verdict = s.kind === "rejected" ? "rejected by the requester" : (s.result === "pass" ? "verified — pass" : "verified — FAIL");
+      var meta = [verdict];
+      if (s.sha) meta.push("commit " + s.sha);
+      if (s.by) meta.push("by " + s.by);
+      if (s.note_at) meta.push(relativeTime(s.note_at));
+      var art = s.artifact ? (/^https?:\/\//.test(s.artifact)
+        ? el("a", { class: "cell-sub", href: s.artifact, rel: "noopener noreferrer", target: "_blank", text: s.artifact })
+        : el("div", { class: "cell-sub mono", text: s.artifact })) : null;
+      var facts = s.facts && typeof s.facts === "object" ? Object.keys(s.facts).map(function (k) {
+        return el("div", { class: "cell-sub mono", text: k + ": " + JSON.stringify(s.facts[k]) });
+      }) : [];
+      return row(s.kind === "rejected" ? "Rejected" : "Verified", el("div", null, [
+        el("div", { class: "cell-sub mono", text: meta.join(" · ") }),
+        s.note ? el("div", { class: "detail-prose", text: s.note }) : null,
+        art
+      ].concat(facts).filter(Boolean)));
+    });
+    var rates = (D.live && D.live.verified_live) || {};
+    var app = task && (task.project || (/^([a-z0-9][a-z0-9-]{1,60}):/.exec(String(task.title || "").toLowerCase()) || [])[1]);
+    var rate = app && rates[app];
+    if (rate) out.push(row("App outcome", app + ": " + rate.verified_live + " of " + rate.closed +
+                                          " closed requests verified live, " + rate.failed + " failed"));
+    return out;
   }
   function isLifecycleStep(step) {
     return !!(step && (step.lifecycle === true || LIFECYCLE_KINDS[step.kind]));
@@ -3045,6 +3079,8 @@
       if (liveRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Live", "pulse", liveRows)]));
       var cps = checkpointRows(r);
       if (cps.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Checkpoints", "checks", cps)]));
+      var outs = outcomeRows(r);
+      if (outs.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Outcomes", "target", outs)]));
       var lane = [
         r.unattended ? row("Queue", "unattended — offered to unattended workers (P0-P2)") : null,
         r.project ? rowMono("Project", r.project) : null,
