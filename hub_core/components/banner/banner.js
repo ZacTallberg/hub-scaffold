@@ -125,6 +125,14 @@
     image: ["M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
             "M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z", "M21 15l-5-5L5 21"],
     eye: ["M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"],
+    "eye-off": ["M9.9 4.2A10 10 0 0 1 12 4c6.5 0 10 8 10 8a17 17 0 0 1-2.2 3.2", "M6.6 6.6A17 17 0 0 0 2 12s3.5 8 10 8a10 10 0 0 0 5.4-1.6",
+                "M9.9 9.9a3 3 0 0 0 4.2 4.2", "M2 2l20 20"],
+    pin: ["M12 17v5", "M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"],
+    more: ["M5 12h.01", "M12 12h.01", "M19 12h.01"],
+    grip: ["M9 5h.01", "M15 5h.01", "M9 12h.01", "M15 12h.01", "M9 19h.01", "M15 19h.01"],
+    up: ["M18 15l-6-6-6 6"],
+    reset: ["M3 12a9 9 0 1 0 3-6.7L3 8", "M3 3v5h5"],
+    arrange: ["M3 6h10", "M3 12h10", "M3 18h10", "M18 4v16", "M15 7l3-3 3 3", "M15 17l3 3 3-3"],
     external: ["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"],
     chart: ["M3 3v18h18", "M7 15l4-4 3 3 5-6"],
     list: ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"],
@@ -182,7 +190,8 @@
   var PREF_KEY = "ab:prefs";
   var APP_SCOPED = ["theme", "motion", "text", "ui", "font", "nav_open", "tips", "help"];
   var PREFS = { kind: "initials", image: "", theme: "", motion: "full", text: 100, ui: 100,
-                font: "", nav_open: "", tips: "on", help: "on", starred: [], apps: {} };
+                font: "", nav_open: "", tips: "on", help: "on", starred: [], apps: {},
+                nav_hidden: {}, nav_layout: {} };
   var REACH = { apps: [], granted_without_url: 0, loaded: false };
   var PROFILE_STATE = { lane: "unknown", error: "", saving: false };
 
@@ -260,37 +269,58 @@
       .then(function (body) {
         var d = body && body.data;
         if (!d) return;
-        adopt(d.prefs);
+        // A choice made while this read was in the air is newer than its answer: a save's own
+        // answer will bring the record, so this one is not adopted over it.
+        if (!SAVE.flight) adopt(d.prefs);
         REACH = { apps: list(d.apps), granted_without_url: d.granted_without_url || 0, loaded: true };
         writeCache(); applyPrefs(); redrawOpen();
         // The first paint used this browser's cache (or the default); the record may say the
-        // sidebar is a rail here. Redraw only when it actually differs.
-        if (NAV_STYLE === "sidebar" && navNode && navNode.classList.contains("ab-sb-rail") === sidebarOpen()) buildNav();
+        // sidebar is a rail here, or that pages are hidden, pinned or reordered. Redraw only
+        // when what the navigation is drawn from actually differs.
+        navSync(); applyHome(true);
       })
       .catch(function (err) { PROFILE_STATE.error = String(err && err.message || err); redrawOpen(); });
   }
   /* SAVE one change. `payload` is exactly what changed ({theme:"dark"} everywhere, or
      {apps:{<app>:{theme:"dark"}}} for this app only); the server merges per key and per app,
-     so saving THIS app's override never drops another app's. A failed save is SAID. */
+     so saving THIS app's override never drops another app's. A failed save is SAID.
+
+     ONE SAVE IN THE AIR AT A TIME, AND AN ANSWER ALREADY OVERTAKEN IS NOT ADOPTED. A save's
+     answer is the record as the hub held it when THAT request arrived. Sent all at once and
+     adopted as they landed, three quick choices (hide three pages) could see the answer to the
+     first land after the third was drawn and put the page back to one -- the record right, the
+     page wrong until the next load. So a change made while a save is in flight is QUEUED and
+     sent after it, in order (two writes can never reach the hub reversed), only the answer to
+     the LAST queued save is adopted, and every caller's `done` fires once the queue drains. */
+  var SAVE = { flight: false, queue: [], waiters: [], ok: true };
   function savePrefs(payload, done) {
     writeCache(); applyPrefs();
     if (!PROFILE_URL || PROFILE_STATE.lane === "absent") { if (done) done(true); return; }
+    SAVE.queue.push(payload);
+    if (done) SAVE.waiters.push(done);
+    if (!SAVE.flight) saveSend();
+  }
+  function saveSend() {
+    var payload = SAVE.queue.shift();
+    SAVE.flight = true;
     PROFILE_STATE.saving = true; PROFILE_STATE.error = "";
     fetch(profileUrl(), { method: "POST", credentials: "same-origin",
       headers: { "Content-Type": "application/json", Accept: "application/json", "X-CSRFToken": csrf() },
       body: JSON.stringify({ prefs: payload }) })
       .then(profileAnswer)
       .then(function (body) {
-        PROFILE_STATE.saving = false;
-        if (body && body.data) {
-          adopt(body.data.prefs);
-          if ((body.data.ignored || []).length) console.warn(LOG + "the hub ignored: " + body.data.ignored.join(", "));
-        }
-        writeCache(); applyPrefs(); if (done) done(true);
+        if (body && body.data && (body.data.ignored || []).length) console.warn(LOG + "the hub ignored: " + body.data.ignored.join(", "));
+        if (SAVE.queue.length) return;          // overtaken: this describes the page as it WAS
+        if (body && body.data) adopt(body.data.prefs);
+        writeCache(); applyPrefs(); navSync();
       })
-      .catch(function (err) {
-        PROFILE_STATE.saving = false; PROFILE_STATE.error = String(err && err.message || err);
-        if (done) done(false);
+      .catch(function (err) { SAVE.ok = false; PROFILE_STATE.error = String(err && err.message || err); })
+      .then(function () {
+        if (SAVE.queue.length && PROFILE_STATE.lane !== "absent") { saveSend(); return; }
+        SAVE.queue = []; SAVE.flight = false; PROFILE_STATE.saving = false;
+        var waiters = SAVE.waiters, ok = SAVE.ok;
+        SAVE.waiters = []; SAVE.ok = true;
+        waiters.forEach(function (fn) { try { fn(ok); } catch (e) { console.warn(LOG + "a save callback failed: " + e); } });
       });
   }
   /* Set one key the way the person expects: where THIS app already overrides it, change the
@@ -310,7 +340,10 @@
 
   /* -------------------------------------------------------------- overlays ----
      ONE open surface at a time. Every surface registers its closer here; Escape, a click
-     outside, or opening another closes it and hands focus back to what opened it. */
+     outside, or opening another closes it and hands focus back to what opened it -- unless it
+     was opened by HOVER (focusBack false): a strip menu that opened under the pointer and closed
+     when the pointer moved on would otherwise focus its tab, and the browser draws a
+     :focus-visible ring on a tab nothing is pointing at. */
   var openThing = null;
   var scrim = el("div", { class: "ab-scrim ab-surface", hidden: true });
   function closeOpen() {
@@ -318,7 +351,7 @@
     var t = openThing; openThing = null;
     try { t.close(); } catch (e) { console.warn(LOG + "a surface failed to close: " + e); }
     scrim.hidden = true;
-    if (t.opener && t.opener.isConnected) { try { t.opener.focus({ preventScroll: true }); } catch (e) {} }
+    if (t.focusBack !== false && t.opener && t.opener.isConnected) { try { t.opener.focus({ preventScroll: true }); } catch (e) {} }
   }
   function openAs(kind, opener, close, useScrim) {
     closeOpen();
@@ -330,6 +363,7 @@
     if (openThing.kind === "drawer") fillDrawer();
     else if (openThing.kind === "fixes") fillFixes();
     else if (openThing.kind === "apps") fillApps();
+    else if (openThing.kind === "arrange") fillArrange();
   }
   scrim.addEventListener("click", closeOpen);
   doc.addEventListener("keydown", function (e) { if (e.key === "Escape" && openThing) { closeOpen(); } });
@@ -609,11 +643,11 @@
     // writing the pill by id (countId) exactly as it did before the band existed.
     return el("span", { class: cls, id: n.countId || null, hidden: v === "" || v === "0", text: v });
   }
-  function navLink(n, cls) {
+  function navLink(n, cls, isHome) {
     return el("a", { class: cls, href: n.href || "#", "aria-current": n.current ? "page" : null,
                      "data-ab-info": n.hint || null, "data-ab-info-title": n.hint ? n.label : null }, [
       n.icon && ICON[n.icon] ? icon(n.icon, "ab-nav-glyph") : null,
-      el("span", { text: n.label || "" }), navCount(n, "ab-count")]);
+      el("span", { text: n.label || "" }), isHome ? homeMark("ab-tab-home") : null, navCount(n, "ab-count")]);
   }
   /* A menu hanging below the strip must not live inside the strip's CLIP: the strip scrolls
      sideways (overflow-x:auto), which makes the other axis clip too, and a menu at top:100%
@@ -637,25 +671,32 @@
      hover-opened menu that is clicked stays; a pinned menu clicked again closes. Touch and
      keyboard keep click, Enter/Space and Escape. */
   var HOVER_OPEN = 140, HOVER_CLOSE = 260;
-  function navGroup(n) {
+  function navGroup(n, homeKey, orig) {
     var wrap = el("div", { class: "ab-tabgroup" });
     var btn = el("button", { class: "ab-tab ab-tab-more" + (n.current ? " ab-on" : ""), type: "button",
                              "aria-haspopup": "menu", "aria-expanded": "false" }, [
       n.icon && ICON[n.icon] ? icon(n.icon, "ab-nav-glyph") : null,
       el("span", { text: n.label || "" }), icon("down", "ab-caret")]);
-    var pop = el("div", { class: "ab-tabpop ab-surface", role: "menu", hidden: true, "aria-label": n.label || "More" });
+    var pop = el("div", { class: "ab-tabpop ab-surface", role: "menu", hidden: true, "aria-label": n.label || "More",
+                          "data-ab-navpop": "" });
     list(n.children).forEach(function (c) {
+      var isHome = !!homeKey && homeKey === navKey(orig || n, c);
       pop.appendChild(el("a", { class: c.current ? "ab-on" : null, role: "menuitem", href: c.href || "#",
                                 "aria-current": c.current ? "page" : null }, [
         c.icon && ICON[c.icon] ? icon(c.icon, "ab-nav-glyph") : null,
-        el("span", null, [el("strong", { text: c.label || "" }), c.hint ? el("small", { text: c.hint }) : null]),
+        el("span", null, [el("strong", null, [c.label || "", isHome ? homeMark("ab-tab-home") : null]),
+                          c.hint ? el("small", { text: c.hint }) : null]),
         navCount(c, "ab-count")]));
     });
     var open = false, pinned = false, tOpen = 0, tClose = 0;
     function show(byClick) {
       clearTimeout(tOpen); clearTimeout(tClose);
-      if (open) { if (byClick) pinned = true; return; }
+      // A click on a menu the pointer already opened makes it the person's: closing it now
+      // hands focus back to the tab, as a clicked or keyed menu always has.
+      if (open) { if (byClick) { pinned = true; if (openThing) openThing.focusBack = true; } return; }
       openAs("tabpop", btn, function () { pop.hidden = true; open = false; pinned = false; btn.setAttribute("aria-expanded", "false"); }, false);
+      // Opened under the pointer: closing it must not focus the tab (closeOpen's focusBack).
+      if (openThing) openThing.focusBack = !!byClick;
       pop.hidden = false; floatPop(pop, btn);
       open = true; pinned = !!byClick;
       btn.setAttribute("aria-expanded", "true");
@@ -694,63 +735,581 @@
     savePrefs({ apps: o });
     buildNav();
   }
-  function sidebarRow(n, child) {
+
+  /* ------------------------------------------- the person's arrangement ----
+     A person may take pages out of an app's sidebar, pin pages to the top, drag them into
+     their own order, and choose the page the app opens on for them. All of it is THEIRS, in
+     THIS app, on their hub record (hub_core/profiles.py: nav_hidden and nav_layout, each its own
+     per-app map) -- never the app's, and never a change to the page itself.
+
+     ROW KEYS are the page's label, or "Group / Page" for a sub-page, and are only ever compared
+     against the pages the app declares NOW: a renamed or retired page simply comes back where
+     the app put it. The failure direction is "shown", never "lost". The app's order is the
+     default and the way back ("Reset order" forgets the app's entry), and a page the app adds
+     later appears after the ones the person ordered.
+
+     HIDING IS THE SIDEBAR'S. The strip has no foot to put the way back in, so it draws every
+     page; an app flipped between the two loses nothing either way. The page you are on is never
+     concealed, and a group whose every page is hidden goes with them. The way back is one small
+     line at the sidebar's foot, "Show N hidden", present only while something is hidden.
+
+     PINNED MEANS ON TOP, in both modes: a pinned page (a sub-page too) leaves its place and is
+     drawn first. THE HOME PAGE is where the band's name links, and arriving at the app's root
+     from OUTSIDE the app lands there -- only from outside, only in the first moments of the
+     page, never on a URL that carries a query or a fragment, and only when data-home is an
+     absolute address (a relative "./" cannot say where the root is). */
+  var SB_REVEAL = false;      // this page only: are the hidden rows being shown?
+  var NAV_DRAWN = null;       // what the drawn navigation was drawn from
+  function navKey(parent, n) {
+    return (parent ? String(parent.label || "").trim() + " / " : "") + String(n.label || "").trim();
+  }
+  function keyList(v) { return list(v).filter(function (k) { return typeof k === "string" && k; }); }
+  function navHidden() { return keyList((PREFS.nav_hidden || {})[APP]); }
+  function navLayout() {
+    var l = (PREFS.nav_layout || {})[APP];
+    l = l && typeof l === "object" ? l : {};
+    return { pinned: keyList(l.pinned), order: keyList(l.order), home: typeof l.home === "string" ? l.home : "" };
+  }
+  function navLayoutEmpty() { var l = navLayout(); return !l.pinned.length && !l.order.length && !l.home; }
+  /* Everything a drawn navigation depends on. A redraw happens only when this CHANGES: tearing
+     the sidebar down and building it again on every answer shut every group a person had
+     opened, reset a count the app had written into a row by id, and dropped keyboard focus. */
+  function navDrawnFrom() {
+    var l = navLayout();
+    return JSON.stringify([NAV_STYLE, NAV_STYLE === "sidebar" ? (sidebarOpen() ? "open" : "rail") : "",
+      NAV_STYLE === "sidebar" ? navHidden() : [], NAV_STYLE === "sidebar" && SB_REVEAL, l.pinned, l.order, l.home]);
+  }
+  function navSync() { if (NAV.length && NAV_DRAWN !== navDrawnFrom()) buildNav(); applyHome(false); }
+  /* Every page the app declares, by key, with its parent. */
+  function navIndex() {
+    var byKey = {};
+    NAV.forEach(function (n) {
+      byKey[navKey(null, n)] = { n: n, parent: null };
+      list(n.children).forEach(function (c) { byKey[navKey(n, c)] = { n: c, parent: n }; });
+    });
+    return byKey;
+  }
+  function navArranged() {
+    var lay = navLayout(), byKey = navIndex(), used = {}, pinned = [], rest = [], rank = {};
+    lay.pinned.forEach(function (k) {
+      var hit = byKey[k];
+      if (!hit || used[k]) return;
+      used[k] = 1;
+      pinned.push({ key: k, n: hit.n, parent: hit.parent });
+    });
+    lay.order.forEach(function (k, i) { if (rank[k] === undefined) rank[k] = i; });
+    var tops = NAV.map(function (n, i) { return { n: n, i: i, k: navKey(null, n) }; });
+    if (lay.order.length) {
+      tops.sort(function (a, b) {
+        var ra = rank[a.k], rb = rank[b.k];
+        if (ra !== undefined && rb !== undefined) return ra - rb;
+        if (ra !== undefined) return -1;
+        if (rb !== undefined) return 1;
+        return a.i - b.i;
+      });
+    }
+    var custom = lay.order.length > 0 || pinned.length > 0;
+    tops.forEach(function (t) {
+      if (used[t.k]) return;
+      var copy = {};
+      Object.keys(t.n).forEach(function (f) { copy[f] = t.n[f]; });
+      // A separator belongs to the app's order; once the person has rearranged, the app's
+      // grouping no longer describes what sits either side of it.
+      if (custom) copy.sep = false;
+      if (list(t.n.children).length) {
+        copy.children = list(t.n.children).filter(function (c) { return !used[navKey(t.n, c)]; });
+      }
+      rest.push({ key: t.k, n: copy, orig: t.n });
+    });
+    var home = byKey[lay.home] ? lay.home : "";
+    return { pinned: pinned, rest: rest, home: home, homeItem: home ? byKey[home].n : null };
+  }
+  function setNavHidden(key, hide) {
+    var keys = navHidden(), at = keys.indexOf(key), map = {};
+    if (hide && at < 0) keys.push(key);
+    if (!hide && at >= 0) keys.splice(at, 1);
+    Object.keys(PREFS.nav_hidden || {}).forEach(function (k) { map[k] = PREFS.nav_hidden[k]; });
+    if (keys.length) map[APP] = keys; else delete map[APP];
+    PREFS.nav_hidden = map;
+    if (!keys.length) SB_REVEAL = false;     // nothing left to show: the foot goes with its state
+    buildNav();
+    // This browser speaks ONLY for the app it stands in: the hub merges per app, and an empty
+    // list is how "nothing hidden here any more" is said.
+    var o = {}; o[APP] = keys.slice();
+    savePrefs({ nav_hidden: o });
+  }
+  /* Write this app's arrangement: `fn` edits a copy; an empty result removes the entry. */
+  function setNavLayout(fn) {
+    var l = navLayout();
+    fn(l);
+    var entry = {};
+    if (l.pinned.length) entry.pinned = l.pinned;
+    if (l.order.length) entry.order = l.order;
+    if (l.home) entry.home = l.home;
+    var map = {};
+    Object.keys(PREFS.nav_layout || {}).forEach(function (k) { map[k] = PREFS.nav_layout[k]; });
+    if (Object.keys(entry).length) map[APP] = entry; else delete map[APP];
+    PREFS.nav_layout = map;
+    buildNav();
+    applyHome(false);
+    if (openThing && openThing.kind === "arrange") fillArrange();
+    var o = {}; o[APP] = entry;
+    savePrefs({ nav_layout: o });
+  }
+  function isPinned(key) { return navLayout().pinned.indexOf(key) >= 0; }
+  function isTopKey(key) { return NAV.some(function (n) { return navKey(null, n) === key; }); }
+  function sectionKeys(sec) {
+    var a = navArranged();
+    return (sec === "pin" ? a.pinned : a.rest).map(function (r) { return r.key; });
+  }
+  /* THE ONE MOVE every control is built from: take `key` out of wherever it is and put it at
+     `index` in `toSec` ("pin" or "rest"). A sub-page dropped among the pages is simply
+     unpinned -- it goes back into its group. Keys that resolve to nothing today are kept at the
+     end rather than forgotten, and an order identical to the app's is not stored at all. */
+  function placeKey(key, toSec, index) {
+    setNavLayout(function (l) {
+      var live = navIndex();
+      var pins = l.pinned.filter(function (k) { return k !== key; });
+      var order = sectionKeys("rest").filter(function (k) { return k !== key; });
+      var parked = l.order.filter(function (k) { return !live[k] && k !== key; });
+      if (toSec === "pin") {
+        var livePins = pins.filter(function (k) { return live[k]; });
+        var gone = pins.filter(function (k) { return !live[k]; });
+        livePins.splice(Math.max(0, Math.min(index, livePins.length)), 0, key);
+        pins = livePins.concat(gone);
+      } else if (isTopKey(key)) {
+        order.splice(Math.max(0, Math.min(index, order.length)), 0, key);
+      }
+      l.pinned = pins;
+      var appOrder = NAV.map(function (n) { return navKey(null, n); })
+                        .filter(function (k) { return pins.indexOf(k) < 0; });
+      l.order = order.join("\n") === appOrder.join("\n") ? [] : order.concat(parked);
+    });
+  }
+  function moveKey(key, sec, delta) {
+    var keys = sectionKeys(sec), i = keys.indexOf(key), j = i + delta;
+    if (i < 0 || j < 0 || j >= keys.length) return;
+    placeKey(key, sec, j);
+  }
+  function togglePin(key) {
+    if (isPinned(key)) setNavLayout(function (l) { l.pinned = l.pinned.filter(function (k) { return k !== key; }); });
+    else placeKey(key, "pin", sectionKeys("pin").length);
+  }
+  function setHome(key) { setNavLayout(function (l) { l.home = l.home === key ? "" : key; }); }
+  function resetLayout() { setNavLayout(function (l) { l.pinned = []; l.order = []; l.home = ""; }); }
+
+  /* ---- the home page ---- */
+  var HOME_T0 = Date.now(), HOME_TOUCHED = false;
+  ["pointerdown", "keydown"].forEach(function (t) {
+    doc.addEventListener(t, function () { HOME_TOUCHED = true; }, { capture: true, once: true });
+  });
+  function normPath(p) { return String(p || "/").replace(/\/index\.html?$/i, "/").replace(/\/+$/, "") || "/"; }
+  function applyHome(mayJump) {
+    var appHome = D.home || "./";
+    var h = navArranged().homeItem;
+    home.setAttribute("href", h && h.href ? h.href : appHome);
+    home.setAttribute("data-ab-tip", h ? APP_NAME + " — your home page: " + (h.label || "") : APP_NAME + " home");
+    if (!mayJump || !h || !h.href || !/^(\/|https?:)/i.test(appHome)) return;
+    try {
+      var root = new URL(appHome, location.href), here = new URL(location.href), dest = new URL(h.href, location.href);
+      if (dest.origin !== here.origin || normPath(dest.pathname) === normPath(here.pathname)) return;
+      if (normPath(here.pathname) !== normPath(root.pathname) || here.search || here.hash) return;
+      if (doc.referrer && doc.referrer.indexOf(root.origin + normPath(root.pathname)) === 0) return;   // came from inside
+      if (HOME_TOUCHED || Date.now() - HOME_T0 > 2500) return;
+      location.replace(dest.href);
+    } catch (e) { /* an unparseable address: the link still goes there, nothing jumps */ }
+  }
+
+  /* ---- the row menu (the sidebar's "...") ---- */
+  var navMenu = el("div", { class: "ab-navmenu ab-surface", role: "menu", hidden: true });
+  function openNavMenu(anchor, key, label, sec) {
+    if (openThing && openThing.kind === "navmenu" && openThing.opener === anchor) { closeOpen(); return; }
+    var lay = navLayout(), pinned = lay.pinned.indexOf(key) >= 0, isHome = lay.home === key;
+    var keys = sec ? sectionKeys(sec) : [], at = keys.indexOf(key), hidden = navHidden().indexOf(key) >= 0;
+    navMenu.textContent = "";
+    navMenu.setAttribute("aria-label", label);
+    function item(name, text, fn, off, filled) {
+      var b = el("button", { type: "button", role: "menuitem", class: "ab-navmenu-item", disabled: off ? true : null },
+                 [icon(name, "ab-navmenu-glyph", filled), el("span", { text: text })]);
+      b.addEventListener("click", function (e) { e.stopPropagation(); closeOpen(); fn(); });
+      navMenu.appendChild(b);
+    }
+    item("pin", pinned ? "Unpin" : "Pin to top", function () { togglePin(key); }, false, pinned);
+    item("home", isHome ? "Stop opening here" : "Make this my home page", function () { setHome(key); }, false, isHome);
+    if (at >= 0 && keys.length > 1) {
+      navMenu.appendChild(el("div", { class: "ab-navmenu-sep" }));
+      item("up", "Move up", function () { moveKey(key, sec, -1); }, at === 0);
+      item("down", "Move down", function () { moveKey(key, sec, 1); }, at === keys.length - 1);
+    }
+    navMenu.appendChild(el("div", { class: "ab-navmenu-sep" }));
+    item(hidden ? "eye" : "eye-off", hidden ? "Show in the sidebar" : "Hide from the sidebar",
+         function () { setNavHidden(key, !hidden); });
+    openAs("navmenu", anchor, function () { navMenu.hidden = true; anchor.setAttribute("aria-expanded", "false"); }, false);
+    navMenu.hidden = false;
+    anchor.setAttribute("aria-expanded", "true");
+    var r = box(anchor), mw = navMenu.offsetWidth, mh = navMenu.offsetHeight;
+    navMenu.style.left = Math.round(Math.max(8, Math.min(vw() - mw - 8, r.right - mw))) + "px";
+    navMenu.style.top = Math.round(r.bottom + 4 + mh > vh() - 8 ? Math.max(8, r.top - mh - 4) : r.bottom + 4) + "px";
+    var first = navMenu.querySelector("button:not([disabled])");
+    if (first) first.focus();
+  }
+  navMenu.addEventListener("keydown", function (e) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    var items = Array.prototype.filter.call(navMenu.querySelectorAll("button"), function (b) { return !b.disabled; });
+    var i = items.indexOf(doc.activeElement);
+    e.preventDefault();
+    var next = items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+    if (next) next.focus();
+  });
+
+  /* ---- drag to rearrange ----
+     Every row and tab carries its key and section; the same ones are drop targets. `axis` is
+     "y" in the sidebar and the Arrange box, "x" on the strip: which half of the target the
+     pointer is over says before or after it. Dropping a page into the pinned section pins it
+     there; dropping a pinned page among the pages unpins it at that spot. */
+  var DRAG = null;
+  function dropClear() {
+    Array.prototype.forEach.call(doc.querySelectorAll(".ab-drop-before, .ab-drop-after, .ab-drop-into"), function (n) {
+      n.classList.remove("ab-drop-before", "ab-drop-after", "ab-drop-into");
+    });
+  }
+  function dragWire(node, key, sec, axis) {
+    node.setAttribute("draggable", "true");
+    node.setAttribute("data-ab-key", key);
+    // A link inside a draggable row would drag its URL instead of the row.
+    Array.prototype.forEach.call(node.querySelectorAll("a"), function (a) { a.setAttribute("draggable", "false"); });
+    node.addEventListener("dragstart", function (e) {
+      if (e.target !== node && !(e.target.closest && e.target.closest("[data-ab-key]") === node)) return;
+      e.stopPropagation();
+      DRAG = { key: key, node: node };
+      node.classList.add("ab-dragging");
+      try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", key); } catch (x) {}
+    });
+    node.addEventListener("dragend", function () { node.classList.remove("ab-dragging"); dropClear(); DRAG = null; });
+    node.addEventListener("dragover", function (e) {
+      if (!DRAG || DRAG.node === node) return;
+      e.preventDefault(); e.stopPropagation();
+      var r = node.getBoundingClientRect();
+      var after = axis === "x" ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;
+      dropClear();
+      node.classList.add(after ? "ab-drop-after" : "ab-drop-before");
+      node._abAfter = after;
+    });
+    node.addEventListener("drop", function (e) {
+      if (!DRAG) return;
+      e.preventDefault(); e.stopPropagation();
+      // The move redraws the strip or sidebar and takes the dragged node with it, so its
+      // dragend may never fire: the drag is over here.
+      var moving = DRAG.key, after = !!node._abAfter;
+      DRAG = null; dropClear();
+      if (moving === key) return;
+      var keys = sectionKeys(sec).filter(function (k) { return k !== moving; }), at = keys.indexOf(key);
+      placeKey(moving, sec, at < 0 ? keys.length : at + (after ? 1 : 0));
+    });
+  }
+  /* An empty pinned section must still take a drop, or nothing could ever be pinned by
+     dragging: a section heading is a target that appends. */
+  function dropZone(node, sec) {
+    node.addEventListener("dragover", function (e) { if (!DRAG) return; e.preventDefault(); dropClear(); node.classList.add("ab-drop-into"); });
+    node.addEventListener("dragleave", function () { node.classList.remove("ab-drop-into"); });
+    node.addEventListener("drop", function (e) {
+      if (!DRAG) return;
+      e.preventDefault();
+      var moving = DRAG.key; DRAG = null; dropClear();
+      placeKey(moving, sec, sec === "pin" ? sectionKeys("pin").filter(function (k) { return k !== moving; }).length : 0);
+    });
+  }
+
+  /* ---- the Arrange box: the same controls as a list, for BOTH modes ----
+     The strip has no room for a menu on every tab, and dragging is not something a keyboard
+     can do -- so one box lists every page with its pin, home and up/down, opened from the
+     strip's last control or the sidebar's top bar. */
+  var arrangeBox = el("div", { class: "ab-arrange ab-surface", role: "dialog", "aria-label": "Arrange pages", hidden: true });
+  function placeArrange() {
+    if (arrangeBox.hidden || !openThing || openThing.kind !== "arrange" || !openThing.opener) return;
+    var r = box(openThing.opener), w = arrangeBox.offsetWidth;
+    var left = NAV_STYLE === "sidebar" ? r.left : r.right - w;
+    arrangeBox.style.left = Math.round(Math.max(8, Math.min(vw() - w - 8, left))) + "px";
+    arrangeBox.style.top = Math.round(r.bottom + 6) + "px";
+    arrangeBox.style.maxHeight = Math.round(Math.max(200, vh() - r.bottom - 20)) + "px";
+  }
+  win.addEventListener("resize", placeArrange);
+  function openArrange(anchor) {
+    if (openThing && openThing.kind === "arrange") { closeOpen(); return; }
+    openAs("arrange", anchor, function () {
+      arrangeBox.hidden = true;
+      Array.prototype.forEach.call(doc.querySelectorAll(".ab-arrange-btn"), function (b) { b.setAttribute("aria-expanded", "false"); });
+    }, false);
+    anchor.setAttribute("aria-expanded", "true");
+    arrangeBox.hidden = false;
+    fillArrange();
+  }
+  function fillArrange() {
+    var act = doc.activeElement, focusRow = act && act.closest && act.closest(".ab-arrange [data-ab-key]");
+    var focusSel = focusRow ? [focusRow.getAttribute("data-ab-key"), act.getAttribute("data-act")] : null;
+    arrangeBox.textContent = "";
+    var a = navArranged(), lay = navLayout();
+    arrangeBox.appendChild(el("div", { class: "ab-arrange-head" }, [
+      el("strong", { text: "Arrange pages" }),
+      el("small", { text: "Only for you, in " + APP_NAME + ". Drag to reorder." })]));
+    function btn(name, say, act2, fn, on, off) {
+      var b = el("button", { type: "button", class: "ab-arrange-act" + (on ? " ab-on" : ""), title: say, "aria-label": say,
+                             "aria-pressed": on === undefined ? null : (on ? "true" : "false"),
+                             "data-act": act2, disabled: off ? true : null }, [icon(name, "ab-arrange-glyph", !!on)]);
+      b.addEventListener("click", function (e) { e.stopPropagation(); fn(); });
+      return b;
+    }
+    function row(r, sec, i, n, child) {
+      var key = r.key, label = r.n.label || "", pinned = lay.pinned.indexOf(key) >= 0, isHome = a.home === key;
+      var where = r.parent ? (r.parent.label || "") + " › " : "";
+      var kids = [
+        el("span", { class: "ab-arrange-grip", "aria-hidden": "true" }, child ? [] : [icon("grip", "ab-arrange-glyph")]),
+        el("span", { class: "ab-arrange-label", title: where + label }, [where ? el("small", { text: where }) : null, el("span", { text: label })]),
+        btn("home", isHome ? "Stop opening " + label + " first" : "Make " + label + " my home page", "home",
+            function () { setHome(key); }, isHome),
+        btn("pin", pinned ? "Unpin " + label : "Pin " + label + " to the top", "pin", function () { togglePin(key); }, pinned)];
+      if (child) {
+        // Sub-pages are not reordered here; two spacers keep the columns aligned.
+        kids.push(el("span", { class: "ab-arrange-act ab-arrange-spacer", "aria-hidden": "true" }));
+        kids.push(el("span", { class: "ab-arrange-act ab-arrange-spacer", "aria-hidden": "true" }));
+      } else {
+        kids.push(btn("up", "Move " + label + " up", "up", function () { moveKey(key, sec, -1); }, undefined, i === 0));
+        kids.push(btn("down", "Move " + label + " down", "down", function () { moveKey(key, sec, 1); }, undefined, i === n - 1));
+      }
+      var line = el("div", { class: "ab-arrange-row" + (child ? " ab-arrange-child" : "") }, kids);
+      if (child) line.setAttribute("data-ab-key", key); else dragWire(line, key, sec, "y");
+      return line;
+    }
+    var pinHead = el("div", { class: "ab-arrange-sec", text: "Pinned" });
+    dropZone(pinHead, "pin");
+    arrangeBox.appendChild(pinHead);
+    if (!a.pinned.length) arrangeBox.appendChild(el("div", { class: "ab-arrange-empty", text: "Nothing pinned. Pin a page, or drag one here, to keep it at the top." }));
+    a.pinned.forEach(function (r, i) { arrangeBox.appendChild(row(r, "pin", i, a.pinned.length, false)); });
+    var restHead = el("div", { class: "ab-arrange-sec", text: "Pages" });
+    dropZone(restHead, "rest");
+    arrangeBox.appendChild(restHead);
+    a.rest.forEach(function (r, i) {
+      arrangeBox.appendChild(row(r, "rest", i, a.rest.length, false));
+      list(r.n.children).forEach(function (c) {
+        arrangeBox.appendChild(row({ key: navKey(r.orig, c), n: c, parent: r.orig }, "rest", 0, 0, true));
+      });
+    });
+    var reset = el("button", { type: "button", class: "ab-secondary", disabled: navLayoutEmpty() ? true : null, text: "Reset to the app's order" });
+    reset.addEventListener("click", function (e) { e.stopPropagation(); resetLayout(); });
+    var done = el("button", { type: "button", class: "ab-primary", text: "Done" });
+    done.addEventListener("click", function (e) { e.stopPropagation(); closeOpen(); });
+    arrangeBox.appendChild(el("div", { class: "ab-arrange-foot" }, [reset, done]));
+    // Keep the keyboard where it was across the redraw a press causes.
+    if (focusSel) {
+      var back = Array.prototype.filter.call(arrangeBox.querySelectorAll("[data-ab-key]"), function (n) {
+        return n.getAttribute("data-ab-key") === focusSel[0];
+      })[0];
+      back = back && back.querySelector('[data-act="' + focusSel[1] + '"]');
+      if (back && !back.disabled) back.focus();
+    }
+    placeArrange();
+  }
+  function arrangeButton(cls, withLabel) {
+    var b = el("button", { class: cls + " ab-arrange-btn", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false",
+                           "aria-label": "Arrange pages", "data-ab-tip": "Arrange pages: pin, reorder, choose your home page" },
+               [icon("arrange", withLabel ? "ab-sb-glyph" : "ab-nav-glyph"), withLabel ? el("span", { class: "ab-sb-label", text: "Arrange" }) : null]);
+    b.addEventListener("click", function (e) { e.stopPropagation(); openArrange(b); });
+    /* A change made in the box redraws the strip or sidebar, and this button with it: the open
+       box moves over to the new button, or it would be placed against one no longer on the page. */
+    if (openThing && openThing.kind === "arrange") { openThing.opener = b; b.setAttribute("aria-expanded", "true"); }
+    return b;
+  }
+
+  function sidebarActs(key, label, sec) {
+    var pinned = isPinned(key);
+    var pinSay = pinned ? "Unpin “" + label + "”" : "Pin “" + label + "” to the top";
+    var pin = el("button", { class: "ab-sb-act" + (pinned ? " ab-sb-act--on" : ""), type: "button",
+                             title: pinSay, "aria-label": pinSay, "aria-pressed": pinned ? "true" : "false" },
+                 [icon("pin", "ab-sb-actglyph", pinned)]);
+    pin.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); togglePin(key); });
+    var moreSay = "More for “" + label + "”: home page, move, hide";
+    var more = el("button", { class: "ab-sb-act", type: "button", title: moreSay, "aria-label": moreSay,
+                              "aria-haspopup": "menu", "aria-expanded": "false" }, [icon("more", "ab-sb-actglyph")]);
+    more.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); openNavMenu(more, key, label, sec); });
+    return el("span", { class: "ab-sb-acts" }, [pin, more]);
+  }
+  function homeMark(cls) {
+    return el("span", { class: cls, title: "Your home page in this app" }, [icon("home", "ab-home-glyph", true)]);
+  }
+  function sidebarLink(n, child, isHome, from) {
     return el("a", { class: "ab-sb-link" + (child ? " ab-sb-child" : "") + (n.current ? " ab-on" : ""),
                      href: n.href || "#", "aria-current": n.current ? "page" : null,
-                     "data-ab-tip": n.label || "", "data-ab-info": n.hint || null,
+                     "data-ab-tip": (from ? from + " › " : "") + (n.label || ""), "data-ab-info": n.hint || null,
                      "data-ab-info-title": n.hint ? n.label : null }, [
       n.icon && ICON[n.icon] ? icon(n.icon, "ab-sb-glyph") : el("span", { class: "ab-sb-dot" }),
-      el("span", { class: "ab-sb-label", text: n.label || "" }), navCount(n, "ab-count")]);
+      el("span", { class: "ab-sb-label", text: n.label || "" }), isHome ? homeMark("ab-sb-home") : null, navCount(n, "ab-count")]);
   }
+  function sidebarRow(n, child, key, hidden, sec, isHome, from) {
+    return el("div", { class: "ab-sb-row" + (hidden ? " ab-sb-hid" : "") },
+              [sidebarLink(n, child, isHome, from), sidebarActs(key, n.label || "", sec)]);
+  }
+  /* A pinned page is drawn as a plain row wherever it came from (a sub-page included). */
+  function leafOf(n) {
+    return { label: n.label, href: n.href, icon: n.icon, hint: n.hint, current: n.current, count: n.count, countId: n.countId };
+  }
+
   var navNode = null;
-  function buildNav() {
-    if (navNode && navNode.parentNode) navNode.parentNode.removeChild(navNode);
-    navNode = null;
-    doc.documentElement.style.removeProperty("--ab-sidebar-w");
-    doc.body.classList.remove("ab-has-sidebar");
-    if (!NAV.length) return;
-    if (NAV_STYLE === "sidebar") {
-      var open = sidebarOpen();
-      var aside = el("aside", { class: "ab-sb ab-surface" + (open ? "" : " ab-sb-rail"), "aria-label": "Sections" });
-      var toggle = el("button", { class: "ab-sb-toggle", type: "button", "aria-expanded": open ? "true" : "false",
-                                  "data-ab-tip": (open ? "Collapse" : "Expand") + " (Ctrl+B)" }, [
-        icon("rail-close", "ab-sb-tclose"), icon("rail-open", "ab-sb-topen"),
-        el("span", { class: "ab-sb-label", text: "Collapse" })]);
-      toggle.addEventListener("click", function (e) { e.stopPropagation(); setSidebarOpen(!sidebarOpen()); });
-      aside.appendChild(el("div", { class: "ab-sb-top" }, [toggle]));
-      var navList = el("nav", { class: "ab-sb-nav", "aria-label": "Pages" });
-      NAV.forEach(function (n) {
-        if (n.sep) navList.appendChild(el("span", { class: "ab-sb-sep" }));
-        if (!list(n.children).length) { navList.appendChild(sidebarRow(n, false)); return; }
-        var fold = el("details", { class: "ab-sb-fold" });
-        fold.open = !open || !!n.open || !!n.current || list(n.children).some(function (c) { return c.current; });
-        fold.appendChild(el("summary", { class: "ab-sb-link ab-sb-head" + (n.current ? " ab-within" : ""),
-                                         "data-ab-tip": n.label || "", "data-ab-info": n.hint || null,
-                                         "data-ab-info-title": n.hint ? n.label : null }, [
-          n.icon && ICON[n.icon] ? icon(n.icon, "ab-sb-glyph") : el("span", { class: "ab-sb-dot" }),
-          el("span", { class: "ab-sb-label", text: n.label || "" }), icon("right", "ab-sb-chev")]));
-        var kids = el("div", { class: "ab-sb-kids" });
-        list(n.children).forEach(function (c) { kids.appendChild(sidebarRow(c, true)); });
-        fold.appendChild(kids);
-        navList.appendChild(fold);
+  function buildSidebar(old) {
+    /* A REDRAW MUST NOT REARRANGE THE SIDEBAR. What each fold was is read off the sidebar being
+       replaced (on the rail, from the state remembered before it was forced open) and handed to
+       the new one, with the column's scroll -- or hiding one page inside a group would shut the
+       group under the pointer. */
+    var wasOpen = {}, scrollTop = 0;
+    if (old) {
+      Array.prototype.forEach.call(old.querySelectorAll(".ab-sb-fold"), function (f) {
+        var k = f.getAttribute("data-ab-key");
+        if (k) wasOpen[k] = f.hasAttribute("data-was-open") ? f.getAttribute("data-was-open") === "1" : !!f.open;
       });
-      aside.appendChild(navList);
-      doc.body.appendChild(aside);
-      navNode = aside;
-      doc.documentElement.style.setProperty("--ab-sidebar-w", open ? "232px" : "56px");
+      var oldList = old.querySelector(".ab-sb-nav");
+      if (oldList) scrollTop = oldList.scrollTop;
+    }
+    var open = sidebarOpen(), hiddenKeys = navHidden(), reveal = SB_REVEAL, hiddenHere = 0, arr = navArranged();
+    function isHid(k) { return hiddenKeys.indexOf(k) >= 0; }
+    var aside = el("aside", { class: "ab-sb ab-surface" + (open ? "" : " ab-sb-rail"), "aria-label": "Sections" });
+    var toggle = el("button", { class: "ab-sb-toggle", type: "button", "aria-expanded": open ? "true" : "false",
+                                "data-ab-tip": (open ? "Collapse" : "Expand") + " (Ctrl+B)" }, [
+      icon("rail-close", "ab-sb-tclose"), icon("rail-open", "ab-sb-topen"),
+      el("span", { class: "ab-sb-label", text: "Collapse" })]);
+    toggle.addEventListener("click", function (e) { e.stopPropagation(); setSidebarOpen(!sidebarOpen()); });
+    aside.appendChild(el("div", { class: "ab-sb-top" }, [toggle, open ? arrangeButton("ab-sb-toggle ab-sb-arrange", false) : null]));
+    var navList = el("nav", { class: "ab-sb-nav", "aria-label": "Pages" });
+    // PINNED, FIRST -- with a heading only when something is pinned, so an app nobody has
+    // arranged reads exactly as it did.
+    if (arr.pinned.length) {
+      var ph = el("div", { class: "ab-sb-sec", text: "Pinned" });
+      if (open) dropZone(ph, "pin");
+      navList.appendChild(ph);
+      arr.pinned.forEach(function (r) {
+        var hid = isHid(r.key);
+        if (hid) hiddenHere += 1;
+        if (hid && !reveal && !r.n.current) return;
+        var rowEl = sidebarRow(leafOf(r.n), false, r.key, hid, "pin", arr.home === r.key, r.parent ? r.parent.label : "");
+        if (open) dragWire(rowEl, r.key, "pin", "y");
+        navList.appendChild(rowEl);
+      });
+      var rh = el("div", { class: "ab-sb-sec", text: "Pages" });
+      if (open) dropZone(rh, "rest");
+      navList.appendChild(rh);
+    }
+    arr.rest.forEach(function (r) {
+      var n = r.n, key = r.key, selfHid = isHid(key), kidsOf = list(n.children);
+      if (selfHid) hiddenHere += 1;
+      if (n.sep) navList.appendChild(el("span", { class: "ab-sb-sep" }));
+      if (!kidsOf.length) {
+        if (selfHid && !reveal && !n.current) return;
+        // A group whose every page was pinned away is left as a plain row for itself.
+        var leafRow = sidebarRow(list(r.orig.children).length ? leafOf(n) : n, false, key, selfHid, "rest", arr.home === key, "");
+        if (open) dragWire(leafRow, key, "rest", "y");
+        navList.appendChild(leafRow);
+        return;
+      }
+      // A page inside a hidden GROUP is not itself hidden, so bringing the group back brings
+      // back exactly what was in it. The group goes when it was hidden itself, or when every
+      // page in it was -- unless the page you are on is inside it.
+      var kidHid = kidsOf.map(function (c) { return isHid(navKey(r.orig, c)); });
+      kidHid.forEach(function (h) { if (h) hiddenHere += 1; });
+      var within = !!n.current || kidsOf.some(function (c) { return c.current; });
+      if ((selfHid || kidHid.every(Boolean)) && !reveal && !within) return;
+      var fold = el("details", { class: "ab-sb-fold", "data-ab-key": key });
+      var prior = wasOpen[key], wantOpen = prior === undefined ? (!!n.open || within) : prior;
+      if (!open) { fold.setAttribute("data-was-open", wantOpen ? "1" : "0"); fold.open = true; }
+      else fold.open = wantOpen;
+      fold.appendChild(el("summary", { class: "ab-sb-link ab-sb-head" + (n.current ? " ab-within" : "") + (selfHid ? " ab-sb-hid" : ""),
+                                       "data-ab-tip": n.label || "", "data-ab-info": n.hint || null,
+                                       "data-ab-info-title": n.hint ? n.label : null }, [
+        n.icon && ICON[n.icon] ? icon(n.icon, "ab-sb-glyph") : el("span", { class: "ab-sb-dot" }),
+        el("span", { class: "ab-sb-label", text: n.label || "" }),
+        arr.home === key ? homeMark("ab-sb-home") : null,
+        sidebarActs(key, n.label || "", "rest"), icon("right", "ab-sb-chev")]));
+      var kids = el("div", { class: "ab-sb-kids" });
+      kidsOf.forEach(function (c, i) {
+        var ck = navKey(r.orig, c);
+        if (kidHid[i] && !reveal && !c.current) return;
+        kids.appendChild(sidebarRow(c, true, ck, kidHid[i], "", arr.home === ck, ""));
+      });
+      fold.appendChild(kids);
+      if (open) dragWire(fold, key, "rest", "y");
+      navList.appendChild(fold);
+    });
+    aside.appendChild(navList);
+    /* THE WAY BACK, only when there is something to come back from, very small and at the foot:
+       it is reached for occasionally, and a control among the pages would cost every reader
+       attention every day. The count is pages this app still declares -- a key for a page that
+       no longer exists is not counted, or the line would promise a tab it cannot show. */
+    var foot = [];
+    if (hiddenHere) {
+      var showSay = reveal ? "Put the hidden pages away again"
+                           : "Show the " + hiddenHere + " page" + (hiddenHere === 1 ? "" : "s") + " you hid, to bring " + (hiddenHere === 1 ? "it" : "them") + " back";
+      var show = el("button", { class: "ab-sb-show" + (reveal ? " ab-on" : ""), type: "button",
+                                "aria-pressed": reveal ? "true" : "false", title: showSay, "aria-label": showSay }, [
+        icon(reveal ? "eye-off" : "eye", "ab-sb-showglyph"),
+        el("span", { class: "ab-sb-label", text: reveal ? "Done" : "Show " + hiddenHere + " hidden" })]);
+      show.addEventListener("click", function (e) { e.stopPropagation(); SB_REVEAL = !SB_REVEAL; buildNav(); });
+      foot.push(show);
+    }
+    if (!navLayoutEmpty() && open) {
+      var rs = el("button", { class: "ab-sb-show", type: "button", title: "Put the pages back in the app's order, with nothing pinned and no home page" }, [
+        icon("reset", "ab-sb-showglyph"), el("span", { class: "ab-sb-label", text: "Reset order" })]);
+      rs.addEventListener("click", function (e) { e.stopPropagation(); resetLayout(); });
+      foot.push(rs);
+    }
+    if (foot.length) aside.appendChild(el("div", { class: "ab-sb-foot" }, foot));
+    if (old && old.parentNode) old.parentNode.replaceChild(aside, old); else doc.body.appendChild(aside);
+    if (scrollTop) navList.scrollTop = scrollTop;
+    return aside;
+  }
+  function buildNav() {
+    var old = navNode;
+    navNode = null;
+    if (NAV_STYLE === "sidebar" && NAV.length) {
+      navNode = buildSidebar(old && old.classList.contains("ab-sb") ? old : null);
+      if (old && old !== navNode && old.parentNode) old.parentNode.removeChild(old);
+      doc.documentElement.style.setProperty("--ab-sidebar-w", sidebarOpen() ? "232px" : "56px");
       doc.body.classList.add("ab-has-sidebar");
+      NAV_DRAWN = navDrawnFrom();
       publishChrome();
       return;
     }
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    // A strip's dropdowns live on <body> (outside the strip's clip); the old strip's go with it.
+    Array.prototype.forEach.call(doc.querySelectorAll("[data-ab-navpop]"), function (p) { p.parentNode.removeChild(p); });
+    doc.documentElement.style.removeProperty("--ab-sidebar-w");
+    doc.body.classList.remove("ab-has-sidebar");
+    if (!NAV.length) return;
+    /* THE STRIP: pinned pages first, a separator, then the rest in the person's order. Every
+       top-level tab drags sideways; the Arrange control at the strip's end does the same for a
+       keyboard, and is where a sub-page is pinned or made home. */
+    var arr = navArranged();
     var strip = el("nav", { class: "ab-strip", "aria-label": "Pages" });
     var inner = el("div", { class: "ab-strip-in" });
-    NAV.forEach(function (n) {
-      if (n.sep) inner.appendChild(el("span", { class: "ab-tab-sep", "aria-hidden": "true" }));
-      inner.appendChild(list(n.children).length ? navGroup(n) : navLink(n, "ab-tab" + (n.current ? " ab-on" : "")));
+    arr.pinned.forEach(function (r) {
+      var t = navLink(leafOf(r.n), "ab-tab ab-tab-pinned" + (r.n.current ? " ab-on" : ""), arr.home === r.key);
+      dragWire(t, r.key, "pin", "x");
+      inner.appendChild(t);
     });
+    if (arr.pinned.length) {
+      var sepPin = el("span", { class: "ab-tab-sep", "aria-hidden": "true" });
+      dropZone(sepPin, "pin");
+      inner.appendChild(sepPin);
+    }
+    arr.rest.forEach(function (r) {
+      var n = r.n;
+      if (n.sep) inner.appendChild(el("span", { class: "ab-tab-sep", "aria-hidden": "true" }));
+      var t = list(n.children).length ? navGroup(n, arr.home, r.orig)
+            : navLink(list(r.orig.children).length ? leafOf(n) : n, "ab-tab" + (n.current ? " ab-on" : ""), arr.home === r.key);
+      dragWire(t, r.key, "rest", "x");
+      inner.appendChild(t);
+    });
+    inner.appendChild(arrangeButton("ab-tab ab-tab-arrange", false));
     strip.appendChild(inner);
     mount.appendChild(strip);
     navNode = strip;
+    NAV_DRAWN = navDrawnFrom();
     publishChrome();
   }
   doc.addEventListener("keydown", function (e) {
@@ -1795,6 +2354,9 @@
   function cpSame(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
   function cpDirty() { return !!CP_DRAFT && !cpSame(CP_DRAFT, CP || {}); }
   function publishProps(props, preview) {
+    // The banner's OWN properties are applied here too, so a preview in the editor shows at once.
+    var mine = (props || {}).banner || {};
+    mount.setAttribute("data-ab-strip", mine.strip === "classic" ? "classic" : "underline");
     var detail = { app: APP, props: props || {}, preview: !!preview };
     try { win.HubComponentProps = detail; } catch (e) {}
     try { win.dispatchEvent(new CustomEvent("hub:component-props", { detail: detail })); } catch (e) {}
@@ -2101,11 +2663,13 @@
      Every body-appended surface is created ABOVE this line and appended HERE, once: appending
      a surface before its declaration runs against `undefined` (var hoists the name, not the
      value), throws, and silently kills every line after it at load. */
-  [scrim, chip, info, appsPop, fixesPop, fixToasts, drawer, markMenu, fileInput, crop, ppBox, cpBox, tourScrim, tourRing, tourCard, readBox]
+  [scrim, chip, info, appsPop, fixesPop, fixToasts, drawer, markMenu, fileInput, crop, ppBox, cpBox, tourScrim, tourRing, tourCard, readBox,
+   navMenu, arrangeBox]
     .forEach(function (n) { doc.body.appendChild(n); });
   applyPrefs();
   slotSync();
   buildNav();
+  applyHome(true);
   publishChrome();
   loadProfile();
   cpLoad(function () { if (openThing && openThing.kind === "drawer") fillDrawer(); });

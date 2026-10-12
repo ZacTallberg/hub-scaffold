@@ -32,6 +32,19 @@ for a record it already holds, and APP_SCOPED is the pair to change together.
 STARRED is a list that REPLACES (unstarring is the absence of a slug, so a merge could never
 remove one): strings only, de-duplicated, the person's order kept, capped.
 
+HOW A PERSON ARRANGED AN APP'S PAGES. `nav_hidden` {slug: [row key]} is the pages they took
+out of that app's sidebar; `nav_layout` {slug: {pinned: [key], order: [key], home: key}} is
+what they pinned to the top, the order they dragged the pages into, and the page the app opens
+on for them. Row keys are the banner's own (a page's label, or "Group / Page" for a sub-page)
+and are only ever compared against the pages an app declares NOW, so a renamed or retired page
+simply comes back where the app put it: the failure direction is "shown", never "lost". Each
+is ITS OWN MAP, not keys inside `apps`, because `apps` carries how a page READS and has a
+"use my everywhere-settings here" control that clears it wholesale -- hidden tabs and pins
+riding there would be wiped by a button about text size. Both merge PER SLUG (the banner on
+one app speaks only for that app, and a stale browser cache must not overwrite what the person
+arranged in another), a slug's value REPLACES wholesale (showing or unpinning is the absence of
+a key), and an empty value removes the slug.
+
 THE MARK HAS TWO KINDS. {"kind": "initials"} or {"kind": "image", "image": "data:image/...;
 base64,..."}. The picture never arrives as a file: the browser crops it square, scales it
 small and exports a data URL, so there is no upload endpoint, no multipart parsing and no
@@ -72,9 +85,14 @@ APP_SCOPED = frozenset({"theme", "motion", "text", "ui", "agent", "font", "nav_o
                         "tips", "help"})
 DEFAULTS = {"kind": "initials", "image": "", "theme": "", "motion": "full",
             "text": 100, "ui": 100, "agent": "float", "font": "", "nav_open": "",
-            "tips": "on", "help": "on", "starred": [], "apps": {}}
+            "tips": "on", "help": "on", "starred": [], "apps": {},
+            "nav_hidden": {}, "nav_layout": {}}
 
 MAX_STARRED = 12
+#: Hidden pages and arranged pages, per app: bounded so a looping client cannot grow the store.
+MAX_NAV_KEYS = 80
+MAX_NAV_KEY_CHARS = 160
+_NAV_KEY_BAD = re.compile(r"[\x00-\x1f\x7f]")
 MAX_APP_OVERRIDES = 64
 
 #: The encoded picture cap: comfortably above a small square, far below a store-bloating blob.
@@ -164,6 +182,64 @@ def _clean_apps(value, refused) -> dict:
     return kept
 
 
+def _row_keys(value, label, refused) -> list:
+    """Banner row keys: strings only, trimmed, no control characters, bounded, de-duplicated,
+    the person's order kept (it IS their order). A non-list is refused, a bad key is refused
+    by position and the rest kept."""
+    if not isinstance(value, list):
+        refused.append(label)
+        return []
+    keep: list = []
+    for i, item in enumerate(value):
+        key = item.strip() if isinstance(item, str) else ""
+        if not key or len(key) > MAX_NAV_KEY_CHARS or _NAV_KEY_BAD.search(key):
+            refused.append("%s[%d]" % (label, i))
+            continue
+        if key not in keep:
+            keep.append(key)
+        if len(keep) >= MAX_NAV_KEYS:
+            break
+    return keep
+
+
+def _clean_nav(key, value, refused) -> dict:
+    """{slug: ...} for nav_hidden (a key list) or nav_layout ({pinned, order, home}). An EMPTY
+    value is kept: it is how the banner says "nothing hidden / back to the app's order here",
+    and update() turns it into a removal."""
+    kept: dict = {}
+    if not isinstance(value, dict):
+        refused.append(key)
+        return kept
+    for slug, inner in value.items():
+        slug_n = slug.strip().lower() if isinstance(slug, str) else ""
+        if not SLUG_RE.fullmatch(slug_n) or len(kept) >= MAX_APP_OVERRIDES:
+            refused.append("%s.%s" % (key, slug))
+            continue
+        if key == "nav_hidden":
+            kept[slug_n] = _row_keys(inner, "nav_hidden.%s" % slug_n, refused)
+            continue
+        if not isinstance(inner, dict):
+            refused.append("nav_layout.%s" % slug_n)
+            continue
+        entry: dict = {}
+        for field, v in inner.items():
+            label = "nav_layout.%s.%s" % (slug_n, field)
+            if field in ("pinned", "order"):
+                keys = _row_keys(v, label, refused)
+                if keys:
+                    entry[field] = keys
+            elif field == "home":
+                home = _row_keys([v], label, refused) if isinstance(v, str) and v else []
+                if home:
+                    entry["home"] = home[0]
+                elif v not in ("", None):
+                    refused.append(label)
+            else:
+                refused.append(label)
+        kept[slug_n] = entry
+    return kept
+
+
 def clean(raw) -> tuple[dict, list]:
     """(accepted subset, refused keys). Unknown keys and out-of-range values are refused."""
     out, refused = {}, []
@@ -185,6 +261,9 @@ def clean(raw) -> tuple[dict, list]:
         if key == "apps":
             out["apps"] = _clean_apps(value, refused)
             continue
+        if key in ("nav_hidden", "nav_layout"):
+            out[key] = _clean_nav(key, value, refused)
+            continue
         ok, value = _clean_value(key, value)
         if ok:
             out[key] = value
@@ -204,6 +283,10 @@ def _stored(store: dict, person: str) -> dict:
     apps = {k: {kk: vv for kk, vv in v.items() if vv is not None}
             for k, v in (stored.get("apps") or {}).items()}
     stored["apps"] = {k: v for k, v in apps.items() if v}
+    # clean() keeps an empty per-app value so a WRITE can say "nothing here any more"; a stored
+    # record never holds one (update() removes the slug), and a read must not hand one back.
+    for key in ("nav_hidden", "nav_layout"):
+        stored[key] = {k: v for k, v in (stored.get(key) or {}).items() if v}
     prefs.update(stored)
     return prefs
 
@@ -231,7 +314,16 @@ def update(hub_dir, person: str, raw) -> tuple[dict, list]:
         store = _load(hub_dir)
         merged = _stored(store, person)
         incoming_apps = incoming.pop("apps", None)
+        incoming_nav = {k: incoming.pop(k) for k in ("nav_hidden", "nav_layout") if k in incoming}
         merged.update(incoming)
+        for key, per_app in incoming_nav.items():
+            nav = dict(merged.get(key) or {})
+            for slug, value in per_app.items():
+                if value:
+                    nav[slug] = value
+                else:
+                    nav.pop(slug, None)        # nothing hidden / the app's own order: no trace
+            merged[key] = nav
         if isinstance(incoming_apps, dict):
             apps = {k: dict(v) for k, v in (merged.get("apps") or {}).items()}
             for slug, inner in incoming_apps.items():

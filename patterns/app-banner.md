@@ -47,7 +47,28 @@ horizontal scroller clips its other axis too. The sidebar collapses to a rail (C
 field); on the rail a fold opens as a flyout on hover **and** focus, and nothing is
 `display:none`, so Tab still reaches every page. Its open/rail state is the person's, per app.
 `count`/`countId` draw a pill the app's own script keeps updating by id; zero is hidden. An item
-with no `hint` is reported once in the console.
+with no `hint` is reported once in the console. A menu opened by hover gives no focus back when
+it closes (a focus ring on a tab nothing points at); one opened by a click or the keyboard does.
+The strip's look is the banner's `strip` component property: `underline` (default — a line grows
+from the centre under the page you point at, and stays, in the accent, under the page you are on)
+or `classic` (a ground on hover, a bottom border under the current page), so a contested look is
+one setting away from the earlier one, with no deploy.
+
+**The person arranges the pages, for themselves.** In the sidebar every row shows a pin and a
+`…` menu on hover or focus (pin to top, make this my home page, move up/down, hide from the
+sidebar); rows drag to reorder, and into or out of **Pinned**. The strip draws pinned pages first,
+its tabs drag sideways, and an **Arrange** control at its end (and on the sidebar's top bar) lists
+every page with the same controls for a keyboard. Hiding is the sidebar's (the strip has nowhere
+to put the way back): the page you are on is never concealed, a group whose every page is hidden
+goes with them, and **Show N hidden** — one small line at the foot, there only while something
+is hidden — draws them dimmed to bring back. The **home page** is where the band's name links;
+arriving at the app's root from OUTSIDE the app (no referrer inside it, no query or fragment, in
+the first moments of the page, `data-home` absolute) lands there. All of it is stored on the
+person's hub record as `nav_hidden` / `nav_layout`, per app, keyed by the page's label (or
+`Group / Page`) and compared only against the pages the app declares now, so a renamed page comes
+back where the app put it. The navigation is redrawn only when what it is drawn from changed, and
+a rebuilt sidebar keeps each group's open state and its scroll; one profile save is in the air at
+a time, later changes queue behind it in order, and an answer already overtaken is not adopted.
 
 **Preferences that follow the person.** Theme, size (zoom), text size, reading face, motion, and
 the two help switches, held at the hub (`/hub/api/profile`, below) so a choice made in one app is

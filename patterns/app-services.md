@@ -102,7 +102,9 @@ Both follow one shape — **the hub authenticates the app, the app vouches for t
   placement, sidebar state, help switches, starred apps and mark (initials, or a small
   PNG/JPEG/WebP data URL; SVG refused). Closed sets; out-of-range values are dropped and
   reported. Any page key (and the agent placement) can also be set for ONE app under
-  `prefs.apps.<slug>`; `?app=<slug>` answers `resolved`, the values that app should draw. The
+  `prefs.apps.<slug>`; `?app=<slug>` answers `resolved`, the values that app should draw. How
+  the person arranged an app's pages — hidden from its sidebar (`nav_hidden`), pinned, reordered,
+  a home page (`nav_layout`) — are their own per-app maps beside `apps`, merged per slug. The
   GET lists the apps the person can reach (`HUB_APPS` joined with the adopter's `HUB_REACH`
   seam). Mutable per-person state lives in `HUB_DIR/profiles.json`, not the ledger. When the
   hub shares an origin with the site that signs people in, the same route also answers the
