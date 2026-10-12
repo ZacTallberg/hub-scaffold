@@ -134,6 +134,7 @@ def from_gitlab(body: dict) -> dict:
             "status": _status(body.get("build_status")),
             "trigger": slug(pipeline.get("source") or "", 24),
             "finished_at": body.get("build_finished_at"),
+            "started_at": body.get("build_started_at"),
             "allow_failure": allow is True or str(allow) == "True",
             "failure_reason": slug(body.get("build_failure_reason") or "", 40),
             "url": "%s/-/jobs/%s" % (web, body.get("build_id")) if web and body.get("build_id") else "",
@@ -149,11 +150,13 @@ def from_generic(body: dict) -> dict:
         "project": slug(body.get("project")) or "unknown",
         "pipeline": str(body.get("pipeline") or "")[:40],
         "job": slug(body.get("job")),
+        "job_id": str(body.get("job_id") or "")[:40],
         "ref": slug(body.get("ref") or "", 40),
         "sha": str(body.get("sha") or "")[:40],
         "status": _status(body.get("status")),
         "trigger": slug(body.get("trigger") or "", 24),
         "finished_at": body.get("finished_at"),
+        "started_at": body.get("started_at"),
         "allow_failure": bool(body.get("allow_failure")),
         "failure_reason": slug(body.get("failure_reason") or "", 40),
         "restored_sha": slug(body.get("restored_sha") or "", 40),
@@ -273,6 +276,27 @@ def retire(hub_dir, project, ref, ran, sha, event_epoch, *, whole_pipeline=False
 
 # ── Ingest ──
 
+def _deploy_window(hub_dir, ev: dict, now: float) -> None:
+    """A deploy job on a deploying ref is a restart window (hub_core.deploy_windows): a browser
+    gateway failure wholly inside it is held, not queued. Running = an open window."""
+    name = str(ev.get("job") or "")
+    ref = str(ev.get("ref") or "").lower()
+    if "deploy" not in name or (ref and ref not in errorlog.deploy_refs()):
+        return
+    status = ev.get("status")
+    if status not in ("running", "success", "failed", "canceled"):
+        return
+    from . import deploy_windows
+    start = _epoch(ev.get("started_at")) or (now if status == "running" else 0)
+    end = _epoch(ev.get("finished_at")) if status != "running" else None
+    if status != "running" and not end:
+        end = now
+    deploy_windows.record(hub_dir, ev.get("project"), start or end, end,
+                          label="%s %s #%s" % (ev.get("project"), name,
+                                               ev.get("job_id") or ev.get("pipeline") or "?"),
+                          now=now)
+
+
 def ingest(hub_dir, body: dict, *, record=None, ack=None, unack=None,
            ignore_jobs=()) -> dict:
     """Decide what one delivery means, write it, and return what was done."""
@@ -342,6 +366,7 @@ def ingest(hub_dir, body: dict, *, record=None, ack=None, unack=None,
 
     if kind == "job":
         name = ev.get("job") or "job"
+        _deploy_window(hub_dir, ev, now)
         if status == "success":
             n = retire(hub_dir, project, ev.get("ref"), {name}, ev.get("sha"), event_epoch, ack=ack)
             return {"recorded": False, "reason": "status=success", "superseded": n}
