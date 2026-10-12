@@ -58,8 +58,11 @@ produce the receipts.
    `service_runner.py --verify <name>` asserts health and the gate posture.
 
 Later: `python app-kit/tools/kits.py status path/to/app` says, per vendored kit, whether it is
-current, stale (the kit changed since), edited locally (an update would overwrite that), or
-retired (and what replaced it).
+current, stale (the kit changed since), edited locally, or retired (and what replaced it).
+`python app-kit/tools/kits.py update <kit> path/to/app [--dry-run]` brings a stale copy current
+WITHOUT losing the app's edits: a three-way merge per file (untouched -> take the kit's, edited
+here only -> keep, both -> `git merge-file`), and any conflict writes nothing and leaves the
+material in `.kit-update/<kit>/` (add that directory to the app's `.gitignore`).
 
 ## Run the example
 
@@ -85,7 +88,9 @@ set DJANGO_SETTINGS_MODULE=config.settings & python -m assistant.audit    (with 
 ## Keeping the kit honest
 
 - **Provenance, not memory.** `kits.py record` writes `kits.json`: a sha per file and per kit.
-  `add` copies it into the app, `status` compares. A kit is `active` or `retired` (with
+  `add` copies it into the app, `status` compares, `update` merges the kit's changes into an
+  edited copy (the record keeps the KIT's bytes per file, so an edit stays an edit). A kit is
+  `active` or `retired` (with
   `replaced_by`) in its `KIT.json`; a retired kit cannot be vendored.
 - **Self-sufficient kits.** `record` refuses a kit whose Python imports leave the kit (other than
   the standard library, Django, or a seam declared in its `REQUIRES.md`), whose templates reference
