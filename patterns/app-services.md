@@ -27,6 +27,15 @@ the files at `/hub/components/<name>/<file>` and lists them at `/hub/components/
 - **Presentation only.** No board record and no identity is ever served here, which is why these
   reads can sit outside any read-auth boundary you add. Only files on disk under the component,
   with an allowed suffix, are served — there is no caller-controlled path.
+- **An app can pin a release.** Linking the master means a bad release reaches every app at
+  once. `/hub/components/@<commit>/<name>/<file>` serves a component as it was at a SHIPPED
+  commit (an ancestor of what the hub runs), read straight out of the hub's git history -- no
+  second copy -- and cached as immutable. The index lists each component's shipped releases
+  (`versions`: commit, date, and the `VERSION` its main script declared). A component that loads
+  its own parts from its own base gets them from the same commit. An unknown or unshipped commit
+  is a 404, never the latest bytes (that would un-pin the app without telling it). It needs a
+  checkout with history where the hub runs; without one every pin is a 404 and `versions` is
+  empty.
 
 Shipped component: `agent` (below). Add one by creating its directory; nothing else changes.
 
