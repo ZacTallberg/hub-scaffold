@@ -14,6 +14,334 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Round 3 — the origin system's improvements since round 2, upserted as whole units
+
+Six lanes re-derived three weeks of the origin instance's changes onto this template's own structure,
+each unit proven by its real operation on the example app, then integrated and proven together. The
+deploy close is the one place two lanes met: the later form (a recorded verification of the deployed
+build closes a task) replaces the interim one (a `SEEN:` checkpoint), and every surface that advised
+the old step now names `verify`.
+
+#### API surface: done is the machine check, fenced claims, honest back-pressure
+
+- **Done is the machine check.** A deploy record now only steps a task `deployed`: it proves the
+  commit is live, not that the request was met. The task -- unattended or a person's -- closes once a
+  `verified` row with `result: pass` names the deployed commit (or a build containing it), written
+  after the receipt and after the newest `rejected` row, with no failure standing after it; until
+  then `auto_close.state` is `awaiting` and names what is missing. `POST /hub/api/task/outcome`
+  (client `verify` / `reject`) writes outcomes as receipts: no lease, `by` stamped from the caller,
+  the artifact read is required; a failed check or a rejection reopens the same task, and a
+  rejection is the requester's. Per app, over every closed task, the board says "N of M closed
+  requests verified live, F failed". `step` no longer lifts a sha out of a note (it warns): a
+  mentioned commit once closed a task on another task's work. A deploy close that meets a busy
+  ledger is retried on its own thread instead of being lost.
+- **A plan write never removes a receipt.** The fold keeps `deployed`, outcome and published
+  hand-off rows whatever a later whole-plan write sends; a numbered step that lands on one appends.
+- **Item claims are fenced by an epoch.** Each claim aggregate carries a monotonically increasing
+  epoch; a grant that makes a new holder bumps it (compare-and-set with `expected_epoch`), problem
+  claims bump the same counter, and a write carrying `X-Hub-Claim-Aggregate`/`-Epoch` for an
+  aggregate claimed again since is refused `409 stale_epoch` -- a holder that went quiet and woke
+  up cannot write over its successor. The unattended launcher hands its session the epoch it was
+  granted; attended consoles are never fenced. `problem:`/`error:` spellings fold into one
+  aggregate. Every lost claim, lost compare-and-set and stale write is an event line.
+- **Every event says who wrote it and why.** Events carry `machine`, `console` and `unattended`
+  (hashed into the chain only when present, so older events still verify) and `parent_event_id`
+  for their cause -- the deploy record behind each receipt and close, the passing verification
+  behind the close it triggers; the hub's own close is written as the hub. A verification is
+  `independent` only when a credential granted `verify:independent` wrote it and that subject
+  pushed none of the task's work (pushes are stamped `by` their writer); otherwise
+  `self-checked`. A verifier credential never reaches the roster.
+- **The write door validates what an event writes.** An update is validated as the record it
+  writes (fold stamps and fields the schema has dropped left out), and an error under a field the
+  payload did not send is logged, not refused -- a new fold stamp can no longer refuse every write
+  of a type. `manage.py check` now carries `hub.E001`: it folds a real create + update and
+  validates the result, so an undeclared stamp fails the pipeline instead.
+- **Failures that never reached an ERROR handler now do.** A thread or the process dying of an
+  exception is a `hub.thread` / `hub.process` row (`errorlog.install_excepthooks`, armed at app
+  start); `HubErrorHandler` keeps a WARNING that carries a traceback (a loop that caught a failure
+  to keep going) at severity warning; the background tick records its own failure; the board
+  reports Content-Security-Policy refusals.
+- **Resolving a problem answers the ask it was escalated on**, through the one answer path, so an
+  ask never outlives its problem and reaches a person about something already fixed.
+- **A deploy that verified and was then killed at its job ceiling is a warning.** `client deploy`
+  prints `DEPLOY_RECORD_POSTED ... result=ok`; a log whose last such line is followed by the
+  runner's ceiling kill is `verified_then_killed` (critical and UNVERIFIED when the record names
+  another commit). A `[FAIL]` line is read past the runner's timestamp prefix.
+- **Search reads the whole question.** Up to 1000 characters (was 200); the tokenizer drops
+  trailing punctuation and indexes a compound's parts; a record the question cites by id ranks
+  after the rest; BM25 scores through postings; the index is rebuilt only when the indexed text
+  changed, and a search reuses its folded state for 30 s.
+- **A warming process holds heavy reads instead of folding cold on every thread.**
+  `WarmupHoldMiddleware`: while prewarm runs, a `GET /hub/*` read sleeps (computing nothing) and is
+  served warm; every hold ends at one deadline (`HUB_WARMUP_HOLD_S`, 20 s) and is capped
+  (`HUB_WARMUP_HOLD_MAX`), past which it is shed 503 + Retry-After. A deploy no longer queues its
+  health probe behind cold folds, and clients see no 503s for a normal warm-up.
+- **A busy ledger on the live stream is a planned `busy` frame** (`reason: "ledger"`), at open or
+  mid-stream, WSGI and ASGI -- never an unhandled error after the response has left.
+- **A console's row names every task it holds** (`tasks`, focus first), because the hub refuses a
+  peer's write on each of them.
+- **Hosted components never make an app's page wait on the hub.** Plain URLs serve
+  stale-while-revalidate (1 day) and stale-if-error (1 week) after 5 fresh minutes; `?v=<version>`
+  is immutable (a stale `v` lives a minute); `components/versions.json` lists versions;
+  `ComponentFastPathMiddleware` answers component files before sessions and sign-in; bytes and
+  versions are memoised on mtime.
+- **The veil drops a document's unfenced line, not the whole document**, fail closed, and the veil
+  audit reports such lines as `fence_drift_lines`; the board page scrubs its payload as its last
+  step before render.
+- **A board snapshot younger than 5 s is reused whatever moved** (`HUB_SNAPSHOT_MIN_REBUILD_S`),
+  and one snapshot builds at a time -- readers arriving during a build reuse it. Each snapshot
+  carries `generated_at`.
+- **A web process leaves the scheduled full replay to a live backgrounder**; a stale backgrounder
+  or a chain break still replays in place.
+- **inbox.json reuses a reader's projection while its change signal holds** (the long-poll's
+  signal; at most 30 s); new mail moves the signal and is never hidden.
+- **A web process serves the backgrounder's board audit** (re-read when the file moves) instead of
+  auditing every new head on the request interpreter; without a live backgrounder it still audits.
+- **A browser gateway failure wholly inside a deploy restart is held, not queued.** Deploy jobs
+  reported to the CI ingest record windows (`hub_core.deploy_windows`); a 502/503/504/no-response
+  row whose whole failure interval lies inside the serving project's windows plus 360 s is held
+  below the bar, named; one that began before or outlasts the deploy queues as before.
+- **guidance.json answers 304** when nothing its reader reads moved: the tag leaves out ticking
+  ages and durations (a 5-minute bucket instead) and is accepted as `If-None-Match` or `X-Hub-ETag`.
+- **`components/versions.json` is declared public** with the component files it fingerprints; the hub's own audit had failed it as an ungated read route.
+
+#### Work lanes: deploy close, inbox, attention, claims, sweeps
+
+- **A deploy close reads what the task says NOW.** Only the newest work checkpoint (by
+  `note_at`) can refuse an automatic close; one early "NOT DONE" used to refuse it for the task's
+  whole life. The client's echo of a refused finish is never the task's word, the retry sweep
+  re-reads the task's words every pass, and the unfinished vocabulary gains "not pushed / merged
+  / on main", "branch-only", "not this task's commit" and "waiting on the operator's yes".
+
+- **A refused close is recorded once per reason**, not once per retry (`auto_close.reason_key`;
+  `_append(idem_exact=True)` for keys that already name the fact). A prose sha counts only when
+  the task recorded no commit of its own. The close sweep runs every minute and replays a deploy
+  record a late-recorded push missed.
+- **Fix-task mirrors: the lock guards the map file only.** The ledger fold and write run outside
+  the mirror lock (the create's key `fix-task:<pid>` is exact, so a retried or racing create
+  replays the first record); a busy mirror lock or busy ledger skips the pass and only three in a
+  row fail the job; the `web` role never kicks a reconcile. A mirror whose problem aged out of the
+  error window is handed back to `todo` once with a checkpoint saying why, `no_such_problem`
+  explains itself, and a message addressed to a problem or question id is refused.
+- **Lease sweep: a hand-back that loses a version race is retried.** A 409 re-reads the task,
+  re-asks whether it is still due (a claim made meanwhile ends it) and retries up to three
+  times, instead of leaving the task in progress with nobody on it and a refusal row per pass. A
+  503 busy reaches the board only after three consecutive busy passes on the same task.
+- **Sources-seen: a busy lock defers, it does not drop or alarm.** A stamp that meets a busy
+  lock waits on a queue the next writer writes (a CI stamp has no error row a backfill could
+  recover it from), and reaches the board only after three busy stamps over ten minutes. A
+  synthetic probe row is recognised by its context path or operation as well as its message.
+- **Mail for an ended console follows its work.** Readdressed mail goes to the live console on
+  the same subject, then the same repository / app / project, then the same machine, and only
+  then the freshest -- read from the ended console's own presence record.
+- **Attention: undelivered mail reaches its sender; a held capped task reads in flight.** An
+  open message past its expiry raises `message_undelivered` to the sender (person-only) for three
+  days. `task_needs_person` on a task a live console holds is info, "in flight · <holder>"; a
+  task already stepped live says verify on the deployed surface, never finish over the close's
+  refusal. A responder offers an item naming a machine only on that machine.
+- **Item claims are per aggregate and remember.** An attention condition about a task is that
+  task, so a claim on either refuses the other machine (`409 held_as`); the launcher claims tasks
+  too. A claim with `class` returns `history`, the endings earlier runs left on that class, and
+  the launcher writes them into the next run's prompt.
+- **Probes and component lanes are not service rows.** `HUB_APPS` entries may declare
+  `kind: "probe"` (withheld from the services table, problems still fold) or `part_of: "<slug>"`
+  (its errors and problems are counted on the host's row), so neither reads "partial" forever.
+- **Lifecycle history in the ledger.** Lease claims, takeovers and releases, the problem
+  lifecycle (claimed / released / escalated / resolved / reopened) and responder runs (started /
+  finished) are now events on log-only `<project>:outcome:` aggregates the fold skips, beside the
+  side files that keep only the latest state. A busy ledger spools a live transition for the
+  background tick (the spool lock is never held across ledger writes); the reopen sweep defers on
+  a busy lock and skips recorded keys without it. Read it at `GET /hub/outcomes.json`.
+
+#### Where a write's time goes, dispatch on a wake, nothing built twice
+
+- **Writes say where their time goes.** Every authenticated call is split into named phases
+  (`hub_core/write_timing.py`: auth, body, secret scan, handler, the append's open / entity read /
+  validate / store with the store's own lock-wait split, a claim's lock wait / state / lease /
+  knowledge, and `pre_view`), served on `/hub/perf.json` `write_phases` and on every response as
+  a `Server-Timing` header, so a caller subtracts the server's time from its own wall clock.
+  `hub.middleware.InFlightMiddleware` (outermost) adds `process_pressure`: requests in flight at
+  arrival, the routes holding threads now, and interpreter wake lag (`HUB_SERVER_THREADS` names
+  the pool). A claim's knowledge lookup now runs after the claims lock is released.
+- **next.json builds once per task generation.** Keyed on every task's (id, version, status) and
+  the lease directory instead of the ledger (which non-task writes move constantly), built from
+  the incremental fold, single-flight (an identical request waits for the build in flight), the
+  unattended filter applied before classification, its build phases timed.
+- **Dispatch on a wake, not a heartbeat.** `GET /hub/task_wake.json` is a hash of the
+  responder-eligible todo tasks that holds no thread; `python -m hub_core.unattended watch` scans
+  the moment it moves (`HUB_WAKE_POLL_S`, 3 s) and at least every `--interval`.
+- **A deploy record answers within seconds.** Its task close runs on its own thread (waited for at
+  most 3 s, else `tasks: {queued: true}`), and every deploy close is serialized, so records landing
+  together no longer race each other on one task's version.
+- **Nothing is built twice.** `GET /hub/task/<n>/shipped.json` answers, from the retained CI
+  deliveries (no provider credential anywhere), the newest default-branch commit whose SUBJECT
+  names the task and its pipeline, plus the task's own recorded push; the unattended launcher
+  waits while such a pipeline runs and otherwise tells the session to verify the commit rather
+  than rebuild it. Client `shipped`.
+- **Runs are measurable from every machine.** The cross-machine run ledger
+  (`hub_core/run_ledger.py`, `POST /hub/api/run-ledger`, `GET /hub/run-ledger.json`, client
+  `run-ledger`): a rolling window, one row per run id, per-machine medians, outcomes and phase
+  shares, and a row cap that says when it bites. The launcher posts each ended run.
+- **Verbs read the task without the board.** `task/<n>.json?raw=1` is the writer's read (the
+  record plus its holder, no snapshot); start, step, plan and finish use it. A new note on a
+  checkpoint that recorded a push drops the old sha.
+- **Takeover notices reach only the console that lost the task.** A sibling console's takeover is
+  pinned to the stale console and never readdressed (`session-only`); an ended sibling is told
+  nothing; the notice states the real staleness and names the taker's console for the reply.
+- **Pin a hosted component.** `/hub/components/@<commit>/<name>/<file>` serves a component as it
+  was at a shipped commit, from git history, immutable; the index lists each component's
+  releases. An unshipped or unknown commit is a 404, never the latest bytes.
+- **Knowledge.** A feed `put` names the record's first writer as `author` (`last_writer` beside
+  it), and a cursor from an older `put` shape re-pages once; `knowledge_triggers_dark` is a
+  critical attention item when 50+ live lessons carry no `applies_when`; `client consolidate
+  --apply-triggers` writes only derived triggers. The leak audit renders a route that needs a
+  subject with a real one and never counts a refusal as checked.
+
+#### The agent-side kit: a client that rides restarts, delivers once, tells the truth about what runs
+
+- **A re-run of the same create replays it.** The create idempotency key is derived from the
+  intent (every field the create sends plus the UTC day) instead of a fresh uuid per process, and
+  written back onto the arguments so a queued create replays with the key of the attempt that
+  failed: a client killed after the hub wrote the task and before it printed the id no longer
+  makes a twin when the agent runs the create again.
+- **The client rides out a hub restart.** A refused or reset connection, a proxy 503 that is not
+  the hub's envelope, or a gateway 502/504 on a read waits for the hub on a token-free read
+  (`HUB_CLIENT_HEALTH_PATH`, `cursor.json`) every ~2 s, jittered, up to `HUB_CLIENT_RESTART_RIDE_S`
+  (150 s), then spreads its return and sends again. A write that may have landed is never resent
+  by the ride; only a failure past it opens the blind window or queues. Per-prompt hooks turn the
+  ride off. A refused connection no longer demotes a right route.
+- **One queue drain at a time; a dead letter of work reaches the board.** A drain holds a drain
+  lock and a second one waits for it (20 s) instead of replaying the same entries or queueing a
+  write behind it. A refused replay of a report of work is also posted to the operational stream
+  as `report_dead_lettered` (severity error), naming the console, machine and replay command.
+- **Let-go is routed by the id's type, and a console retires only its own mail.** `unclaim
+  p-<12 hex>` releases the problem; `ack` of a message pinned to another live console of the
+  same agent is refused `409 other_console` (decided by the hub's own routing, failing open on a
+  read error).
+- **No answer is not a refusal.** The publisher's push probe has three verdicts: pushed, REFUSED
+  (an auth fact, cached six hours) and no answer (network, timeout, untrusted certificate, cached
+  an hour); ssh's "Could not read from remote repository" trailer is no longer read as a refusal,
+  and a hand-off whose push never reached the host is released, not failed. A clone that fails on
+  a certificate is classified `tls`, OpenSSH advisory lines are stripped before classifying, and
+  unattended git runs from a neutral directory.
+- **A task left in progress waits on its pushed commit's pipeline**, anchored on the push when
+  there is no hand-back, so a resume is not launched against a pipeline still running.
+- **Truth about what runs.** The client digest and the distribution grade cover every module the
+  client runs (`client-modules`, one definition both sides compute); a pinned artifact off its pin
+  is current only when its tree descends from the pin (`<name>.rel=`); a memory status record from
+  a moment no recall ran (`skipped`, a session-start map) is no longer graded stale.
+- **The prompt hook delivers relevance or says why it delivered nothing.** An unranked prompt gets
+  no rows and one line naming the reason and `search`; overflow pack files are retired (rows that
+  do not fit are counted, not delivered); `HUB_SESSION_LOCAL_RECALL=0` keeps the board's block for
+  a session that loads no local recall hook. `prompt-context`'s live channel is fingerprinted with
+  ages masked and sends only the lines the session was not sent yet, under the current count; an
+  agent-clearable attention condition is not listed to the person.
+- **`kits.py update`** brings a vendored kit current without losing the app's edits: a three-way
+  merge per file between the kit as the app recorded it (verified per file, by exact sha in the
+  kit's history when the recorded commit does not match), the kit now and the app's copy; all or
+  nothing, conflict material in `.kit-update/<kit>/`, and the record keeps the kit's bytes so an
+  edit stays an edit.
+- **Patterns.** `agent-client-daemon.md` gains the third month of the resident client's lessons
+  (delivery keyed by the console a message was written for, the prompt path that never waits on
+  the network, the hang watchdog that looks twice, companion tools that adopt, repair and prove
+  themselves, dispatch on its own thread, opt-in for anything that spends a person's account);
+  `vendored-app-kits.md` the three-way update and the rules a lane that files kit updates must
+  keep; `ci-pipeline.md` pre-push linting with the forge and reading a pipeline's verdict from its
+  jobs; `machine-push-identity.md` classifying git's words, not its trailer.
+
+#### Knowledge: schemas that cannot disagree with themselves, a queue that drains, the loop on the trend
+
+- **A schema that declares one key twice is refused at load.** JSON keeps the last of two equal
+  keys silently, so two edits to one property (two branches, a rebase that keeps both or drops
+  the wrong one) decided the write contract by merge order. `Registry.from_dir` now loads each
+  schema with a hook that raises `SchemaDuplicateKey` naming file and key, so the hub fails at
+  start instead of at the first write. The shipped schemas carried two such duplicates
+  (`directive.session`, `task.project`); each is merged into one declaration that keeps the
+  constraint actually enforced and both descriptions.
+- **Consolidation retires every folded member.** A finding folded into a lesson was only tagged,
+  stayed live, and was found, proposed and re-tagged by every later run; it is now `superseded`
+  with `superseded_by` the canonical lesson, like a folded lesson (revert restores it).
+- **The consolidation plan lists only what an apply writes.** `ACTION` lines and the action
+  counts are writes; a correction across kinds, an oversized cluster, or a contradiction with no
+  room left on the lesson prints as `REPORT` (counted in `reports`); a contradiction already
+  recorded is not proposed again. A review queue padded with things no apply acts on never drains.
+- **Both halves of the knowledge loop join the eval trend.** `tools/knowledge_use.py --post`
+  records suite `knowledge-use` (use rate plus the per-prompt hand-off) and
+  `python -m hub_core.client consolidate --post` records suite `knowledge-loop` (re-learn rate per
+  ISO week). Each prints the row the hub stored; a refused post exits 3.
+- **Retrieval is scored where the client delivers.** `prompt_context.delivered_cut` is the one
+  function that decides which ranked rows a prompt receives (relevance cut by meaning, word cut by
+  wording); `manage.py retrieval_eval` now reports `@cut` (answer among the rows that cut keeps),
+  the mean rows delivered, and how many asks were ranked in an order the client does not cut. A
+  top-k past the cut is never in front of the model.
+- **Deploy and CI write-ups.** `patterns/ci-pipeline.md`: scheduled pipelines are never
+  auto-cancelled by a push (rule 1), and the host's deploy slot holds only work that needs the
+  host — measurements in their own resource group, checkout-only checks off the app host,
+  verification at the end of the deploy job (rule 8). `patterns/deploy-hardening.md`: every
+  post-restart probe shares the cold-start window and waits out only no-answer, gateway 5xx and
+  the app's own warming answer (§7); a config replace retries a transient lock and a restore
+  restamps the deploy stamp (§8); a destructive-migration guard fails closed on an unparseable
+  file, an empty scan and a substring declaration (§9). `patterns/deploy-runbook.md`: consecutive
+  framework commands run in one process.
+
+#### UI: the person arranges the band, every surface can ask the page's agent
+
+- **A person arranges an app's pages for themselves.** In the banner's sidebar every row has a
+  pin and a `…` menu (pin to top, make this my home page, move up/down, hide from the sidebar);
+  rows drag to reorder. The strip draws pinned pages first, drags sideways, and ends in an
+  **Arrange** box that offers the same controls to a keyboard. Hiding is the sidebar's, the page
+  you are on is never concealed, and **Show N hidden** at the foot is the way back. The home page
+  is where the band's name links, and arriving at the app's root from outside lands there. Stored
+  on the person's hub record as `nav_hidden` / `nav_layout` — their own per-app maps beside
+  `apps`, merged per slug, keyed by page label and compared only against the pages the app
+  declares now, so a renamed page comes back where the app put it.
+- **The banner never undoes what a person just did.** The navigation is redrawn only when what it
+  is drawn from changed, and a rebuilt sidebar keeps each group's open state and scroll. One
+  profile save is in the air at a time: later changes queue in order and an answer already
+  overtaken is not adopted (three quick hides used to flicker back to one). A menu opened by
+  hover gives no focus back when it closes.
+- **The strip's look is one property away.** The banner's own `strip` component property:
+  `underline` (default, a line grows from the centre under the page you point at) or `classic`
+  (the earlier ground-and-border look restated whole) — a contested visual change ships with its
+  predecessor one setting away and no deploy.
+- **Header takeover 1.1.0: the replaced header never paints first.** Linked right after the
+  mount without `defer`, it hides exactly the declared `data-replaces` selectors as they are
+  parsed, and removes that rule once the real nodes are marked — or at `DOMContentLoaded` when
+  the banner never drew, so a failed banner leaves the app's own header on screen.
+- **The agent reads the page the person is on — on by default, one click off.** "Reading this
+  page" sends what is on screen at the moment of asking as one `{role: "page"}` thread item
+  (never hidden or password fields, the banner, the panel, or `[data-agent-skip]`; at most 7,000
+  characters); "What it reads" shows the exact text. `agent_broker.compose` lifts it out before
+  counting turns and caps it, so a page never displaces a real turn and existing bridges forward
+  it unchanged.
+- **Other sidebars step aside for the docked agent**, and an app can declare a per-page guide
+  above the conversation (what each section is, and whether the app or a person fills it in).
+- **Every surface can ask the page's agent, in one voice.** Context menu 1.1.0: a right-click on
+  selected words keeps Copy first (Shift + right-click is always the browser's menu; the
+  `selection` property gives an app the plain browser menu back), and links, rows and cells,
+  headings and cards can be asked about. Search bar 1.4.0: nothing matched, or a real question,
+  offers "Ask the agent". Table 1.5.0: Suggest can ask the agent, and a failed Suggest offers it
+  instead of a dead end. Banner info bubbles carry **Ask about this**. All of them go through
+  `hub:agent-ask` and the context menu's one composer (`HubMenu.questionAbout`: what the thing is,
+  where it sits, the page by its nav name), and none is offered where the page has no agent.
+  Text is read without the controls inside it.
+- **Table 1.5.0: double-click a column edge fits it to its content**, measured on an uncapped
+  off-screen copy, so an app's ellipsis caps no longer leave a column clipped after the gesture
+  meant to fix it.
+- **The banner's tour scrolls to a target below the fold** (which also reveals one that fades in
+  on entering the viewport), and a declared step with no target is named by number, title and
+  selector in `app-banner:tour-missing`, never forwarded as an error.
+- **A checkpoint due later reads as waiting, not stalled.** `client step --due <UTC>` (MCP
+  `step_task` `due_at`) records the note and keeps the checkpoint open until that time; a passed,
+  unparseable or more-than-7-day time, or one combined with a sha, is refused. `task_health` gains
+  a `waiting` bucket that is never paged and turns stalled the moment the time passes; the
+  Workstream card lists it apart. A task waiting on an acceptance window was paged every hour as
+  abandoned work.
+- **A failed catalog read backs off** (60 s doubling to 15 min, nothing while the page is hidden,
+  Retry reads at once) instead of re-reading on every live event; the live reconcile leaves an
+  element carrying `data-hub-keep` untouched while its signature holds; ask and error rows give
+  the copy the width.
+
 ### Round 2 — app-kit: whose rows, honest tallies, slug-named migrations
 
 - **Assistant kit: every read is the actor's.** `Entity.scope` narrows every generic family's
