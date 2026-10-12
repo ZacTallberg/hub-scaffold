@@ -271,11 +271,13 @@ def lexical_cut(memory) -> tuple:
     return kept[:LEXICAL_RELEVANT_MAX], len(scored)
 
 
-def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
-    """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
-    the receipt keys of rows that actually rendered, and the rendered rows that did not fit."""
-    memory = list(payload.get("memory") or [])
-    rank = payload.get("memory_rank") or {}
+def delivered_cut(memory, rank) -> tuple:
+    """``(rows, word_cut, cut_applied)``: the rows of a ranked index this client would actually
+    DELIVER, before any per-session de-duplication. The one place the cut is decided, so a
+    measurement of "what reaches the model" (``manage.py retrieval_eval``'s delivered@cut) reads
+    the same rows a prompt gets, never an arbitrary top-k the client never renders."""
+    memory = list(memory or [])
+    rank = rank or {}
     word_cut = None
     if rank.get("ranked") and rank.get("by") == "wording" and any(
             isinstance(m.get("lexical_score"), (int, float)) for m in memory):
@@ -287,6 +289,14 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
     # MEANING-ranked rows are cut the same way, by their absolute score (a ranking by words is
     # left to the word cut above: relevance_filter returns it unchanged).
     memory, cut_applied = relevance_filter(memory, rank)
+    return memory, word_cut, cut_applied
+
+
+def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
+    """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
+    the receipt keys of rows that actually rendered, and the rendered rows that did not fit."""
+    rank = payload.get("memory_rank") or {}
+    memory, word_cut, cut_applied = delivered_cut(payload.get("memory") or [], rank)
     already, fresh = [], []
     if delivered:
         memory = memory[:DELTA_RANK_WINDOW]

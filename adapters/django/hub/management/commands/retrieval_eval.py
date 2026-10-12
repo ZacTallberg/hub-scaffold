@@ -27,7 +27,10 @@ WHAT IS PRINTED, per configuration: top-1 / top-5 / top-10 accuracy.
                    "In answer to your question: <q>") and scoring a question against its own
                    echo inflates the figure. Context sentences sharing >= 60% of the question's
                    words are dropped too; an ask left with < 60 chars is excluded and COUNTED.
-                   One row per ASK: two asks may share a context prefix.
+                   One row per ASK: two asks may share a context prefix. `@cut` scores the
+                   point the client actually delivers -- the rows its own relevance or word
+                   cut keeps (`prompt_context.delivered_cut`, at most a handful) -- over the
+                   asks it applied to; a top-k past that cut is never in front of the model.
 
 `--post` records the run on the board's standing-eval trend (hub_core.evals, read back at
 /hub/eval.json), suite `retrieval-answered-asks` unless `--suite` names another, and prints the
@@ -47,7 +50,7 @@ import re
 from django.core.management.base import BaseCommand
 
 from hub import hub_app, knowledge_api
-from hub_core import bm25, evals, semantic
+from hub_core import bm25, evals, prompt_context, semantic
 
 MIN_GOLDEN = 10
 SPLITS = 5
@@ -211,6 +214,13 @@ class Command(BaseCommand):
                              ("; ranked by %s" % d["ranked_by"]) if d.get("ranked_by") else ""))
         if d["n"]:
             self.stdout.write("   " + "  ".join("@%d %5.1f%%" % (k, d["@%d" % k]) for k in DELIVERED_KS))
+            if d.get("cut_n"):
+                self.stdout.write("   @cut %5.1f%% over %d asks the client's own cut applied to (mean %.2f "
+                                  "rows delivered); %d ranked in an order the client does not cut"
+                                  % (d["@cut"], d["cut_n"], d["cut_rows"], d["uncut"]))
+            else:
+                self.stdout.write("   @cut: no ask was ranked in an order the client cuts (%d uncut) -- "
+                                  "the delivered point is the client's budget, not measured here" % d["uncut"])
         if "posted" in table:
             self.stdout.write("posted: %s" % _json.dumps(table["posted"], sort_keys=True))
 
@@ -218,6 +228,7 @@ class Command(BaseCommand):
         """Rank of each answer in the per-prompt memory index for its ask's context."""
         rows, excluded = delivered_golden(state)
         ranks, by = [], {}
+        cut_hits, cut_n, cut_rows = 0, 0, 0
         for query, answer_id, _ask in rows:
             ranked, _total, meta = knowledge_api.memory_index(
                 state, key, cap=max(DELIVERED_KS), focus=query, full=0)
@@ -225,11 +236,23 @@ class Command(BaseCommand):
             ranks.append(ids.index(answer_id) + 1 if answer_id in ids else None)
             way = meta.get("by") or ("meaning" if meta.get("ranked") else "standing order")
             by[way] = by.get(way, 0) + 1
+            # THE DELIVERED POINT: the rows the client's own cut keeps (prompt_context.
+            # delivered_cut), not a top-k it never renders. A ranking the client does not cut
+            # (standing order) has no such point and is left out of @cut, counted as uncut.
+            kept, word_cut, applied = prompt_context.delivered_cut(ranked, meta)
+            if applied or word_cut is not None:
+                cut_n += 1
+                cut_rows += len(kept)
+                cut_hits += 1 if answer_id in {r.get("id") for r in kept} else 0
         out = {"n": len(rows), "excluded": excluded,
                "ranked_by": ", ".join("%s %d" % kv for kv in sorted(by.items()))}
         n = max(1, len(ranks))
         for k in DELIVERED_KS:
             out["@%d" % k] = round(100.0 * sum(1 for r in ranks if r and r <= k) / n, 1)
+        out["cut_n"], out["uncut"] = cut_n, len(rows) - cut_n
+        if cut_n:
+            out["@cut"] = round(100.0 * cut_hits / cut_n, 1)
+            out["cut_rows"] = round(cut_rows / cut_n, 2)
         return out
 
     def _post(self, table, suite):

@@ -240,7 +240,12 @@ five splits, and ranks ties pessimistically. Move `CONVEX_ALPHA` only to a value
 reported. It needs at least ten answered asks.
 
 The same run scores the **delivered** path — the answer's rank in the per-prompt memory index
-(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25. Its query is the ask's
+(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25, and at **@cut**: whether
+the answer is among the rows the client's own relevance or word cut keeps
+(`prompt_context.delivered_cut`, the one function the prompt hook renders from), with the mean
+number of rows that cut delivered. A top-k the client never renders is not in front of the model;
+on a small board the @5 figure can read 90% while the cut delivers almost nothing, and only @cut
+says so. Its query is the ask's
 CONTEXT with the question removed: every answer restates its question verbatim, and a question
 scored against its own echo reads far better than any real prompt will. Sentences sharing 60% of
 the question's words go too, asks left with fewer than 60 characters are excluded and counted,
