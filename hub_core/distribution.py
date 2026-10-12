@@ -83,6 +83,13 @@ def published(files: dict) -> dict:
     return out
 
 
+def published_digest(digest: str, published_at: float = 0.0) -> dict:
+    """One published artifact that is a COMPUTED digest rather than one file's bytes (the client's
+    module set), in the same shape ``published`` gives a file."""
+    digest = str(digest or "").strip().lower()
+    return {"sha": digest[:W], "accepted": [digest[:W]], "published_at": published_at}
+
+
 def _sha_half(value) -> str:
     value = str(value or "").strip()
     return value.rsplit("+", 1)[-1] if "+" in value else value
@@ -120,18 +127,32 @@ def parse_required_python(value):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def grade_pinned(reported, want: str, got_pin: str = "", install: str = "") -> tuple:
+#: The installer's own ANCESTRY verdict for a tree off the pin (``<name>.rel=``), and what each
+#: means for the seat. Only a descendant of the pin runs everything the pin carries.
+REL_REASONS = {"behind": "behind the pin", "dirty": "behind the pin with local edits (held)",
+               "diverged": "diverged from the pin (held)",
+               "pin-unknown": "cannot see the pin commit (held)"}
+
+
+def grade_pinned(reported, want: str, got_pin: str = "", install: str = "",
+                 rel: str = "") -> tuple:
     """(grade, note) for a PINNED artifact -- one released by moving a pin (a commit, a version)
     rather than by publishing bytes the hub can hash. The seat reports what it RUNS
-    (``<name>=<version>``), the pin it last RECEIVED (``<name>.pin=``) and its installer's result
-    (``<name>.inst=``).
+    (``<name>=<version>``), the pin it last RECEIVED (``<name>.pin=``), its installer's result
+    (``<name>.inst=``) and, for a tree off the pin, the installer's ANCESTRY verdict
+    (``<name>.rel=``: ahead | behind | dirty | diverged | pin-unknown, measured on the machine with
+    ``git merge-base --is-ancestor``).
 
     * no version reported -> ``unreported``: nothing says which one it runs, so a pin bump
       cannot be seen landing there (never "current").
     * the version is the pin -> ``current``.
     * it has not received the current pin yet, or its install of it failed -> ``stale``.
-    * it HAS the current pin and runs something else -> ``current`` with a note: an installer
-      that leaves a newer or locally edited tree alone did so on purpose."""
+    * it HAS the current pin and runs something else -> ``current`` ONLY when the tree DESCENDS
+      from the pin (``rel=ahead``). Behind, edited, diverged, a pin it cannot see, or an install
+      that HELD the tree is ``stale``: that seat runs code older than or beside the pin. On the
+      origin system a seat seven commits BEHIND its pin, held by its installer, graded "current"
+      because any off-pin tree was assumed newer. With no relation reported (an older reporter)
+      the tree an installer left alone is still read as newer, and the note says it was assumed."""
     want = str(want or "").strip().lower()
     ver = _sha_half(reported).strip().lower()
     if not want:
@@ -143,11 +164,19 @@ def grade_pinned(reported, want: str, got_pin: str = "", install: str = "") -> t
     got = str(got_pin or "").strip().lower()
     if got and not (want.startswith(got) or got.startswith(want)):
         return "stale", "runs %s; has not received pin %s yet" % (ver[:12], want[:12])
-    if str(install or "").strip().lower() in ("failed", "error", "refused"):
+    inst = str(install or "").strip().lower()
+    if inst in ("failed", "error", "refused"):
         return "stale", "install of pin %s %s" % (want[:12], install)
     if not got:
         return "stale", "runs %s, pinned %s" % (ver[:12], want[:12])
-    return "current", "on pin %s, tree at %s (left alone: newer or local)" % (want[:12], ver[:12])
+    rel = str(rel or "").strip().lower()
+    if rel == "ahead":
+        return "current", "on pin %s, tree at %s descends from it (newer)" % (want[:12], ver[:12])
+    if rel or inst == "held":
+        return "stale", "runs %s, %s %s" % (ver[:12], REL_REASONS.get(rel, "held off the pin"),
+                                             want[:12])
+    return "current", ("on pin %s, tree at %s (relation unreported; the install left it alone, "
+                       "so assumed newer)" % (want[:12], ver[:12]))
 
 
 def _epoch(value) -> float:
@@ -220,7 +249,8 @@ def assess(rows, pub: dict, *, now: float | None = None, is_kit=None,
         for artifact, want in (pins or {}).items():
             checks[artifact], note = grade_pinned(reported.get(artifact), want,
                                                   reported.get(artifact + ".pin", ""),
-                                                  reported.get(artifact + ".inst", ""))
+                                                  reported.get(artifact + ".inst", ""),
+                                                  reported.get(artifact + ".rel", ""))
             if note:
                 notes[artifact] = note
         entry["artifacts"] = checks

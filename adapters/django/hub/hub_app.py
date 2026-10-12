@@ -1378,8 +1378,8 @@ def distribution_files():
 def distribution_pins():
     """{artifact: pinned version} for artifacts released by moving a pin rather than by
     publishing bytes (HUB_DISTRIBUTION_PINS, {name: sha-or-version}). A seat reports
-    ``<name>=<running version>``, ``<name>.pin=<pin it received>`` and ``<name>.inst=<install
-    result>`` through HUB_ARTIFACTS."""
+    ``<name>=<running version>``, ``<name>.pin=<pin it received>``, ``<name>.inst=<install
+    result>`` and ``<name>.rel=<ancestry of a tree off the pin>`` through HUB_ARTIFACTS."""
     pins = _dj_setting("HUB_DISTRIBUTION_PINS") or os.environ.get("HUB_DISTRIBUTION_PINS") or {}
     if isinstance(pins, str):
         try:
@@ -1389,11 +1389,26 @@ def distribution_pins():
     return {str(k).lower(): str(v) for k, v in pins.items() if v} if isinstance(pins, dict) else {}
 
 
+def _client_modules_published() -> dict:
+    """``client-modules``: the digest over every module the served client runs
+    (hub_core.client._CLIENT_FILES), published as of the newest of those files. Never raises."""
+    try:
+        import hub_core.client as _client_module
+        root = Path(_client_module.__file__).parent
+        newest = max([(root / name).stat().st_mtime for name in _client_module._CLIENT_FILES
+                      if (root / name).exists()] or [0.0])
+        return {"client-modules": _distribution.published_digest(
+            _client_module.client_digest(root), newest)}
+    except Exception:                                        # noqa: BLE001
+        return {}
+
+
 def distribution_report(now=None):
     """(report, published) — the grade of every seat, fail-soft: a broken read is an empty
     report that SAYS it could not grade, never a 500 on the board."""
     try:
         pub = _distribution.published(distribution_files())
+        pub.update(_client_modules_published())
         report = _distribution.assess(read_presence_rows(), pub, now=now,
                                       is_kit=_presence.is_kit_machine,
                                       is_service=_presence.is_service_identity,

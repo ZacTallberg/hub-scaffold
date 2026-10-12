@@ -1336,17 +1336,12 @@ def hub_client_version():
     cached = _CLIENT_VERSION.get("value")
     if cached is not None:
         return cached
-    import hashlib
     from pathlib import Path
     import hub_core as _hc
-    root = Path(_hc.__file__).parent
-    digest = hashlib.sha256()
-    for name in ("client.py", "checkpoints.py", "verifier.py"):
-        try:
-            digest.update((root / name).read_bytes().replace(b"\r\n", b"\n"))
-        except OSError:
-            pass
-    _CLIENT_VERSION["value"] = digest.hexdigest()[:12]
+    from hub_core.client import client_digest
+    # ONE definition of what the client is (hub_core.client._CLIENT_FILES), so the hub and a
+    # seat can never disagree about which files a version covers.
+    _CLIENT_VERSION["value"] = client_digest(Path(_hc.__file__).parent)
     return _CLIENT_VERSION["value"]
 
 

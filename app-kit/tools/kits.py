@@ -6,6 +6,9 @@
     python app-kit/tools/kits.py add <kit> <app-dir> [--slug budget_app]
                                                          # vendor a kit, with provenance
     python app-kit/tools/kits.py status <app-dir>        # current / stale / edited / retired
+    python app-kit/tools/kits.py update <kit> <app-dir> [--dry-run]
+                                                         # bring a vendored copy to the current
+                                                         # kit WITHOUT losing the app's edits
 
 PROVENANCE IS A RECORD, NOT A MEMORY. Each kit is recorded in ``kits.json`` with a sha per file
 and one sha over the kit (sha1 of the sorted ``path\\0sha`` pairs, line endings normalised so a
@@ -20,6 +23,11 @@ or Django, nor to a seam declared in the kit's ``REQUIRES.md``; a ``{% static %}
 quoting the tool; a documentation pointer to a kit path that does not exist -- and it lists every
 problem in one run rather than one per attempt. A run that found no kits at all measured nothing
 and exits 2.
+
+``update`` is the three-way merge that ``add --force`` is not: per file, between the kit as the
+app recorded it, the kit now and the app's copy -- untouched files take the kit's, the app's own
+edits are kept, both-changed files are merged by ``git merge-file``, and a conflict anywhere
+writes NOTHING (the material lands in ``.kit-update/<kit>/``). See the block above ``update()``.
 
 ``add`` refuses: a stale app-kit checkout (behind its upstream -- vendoring an old kit is how a
 fixed bug comes back), a manifest that no longer matches the files (run ``record``), a RETIRED
@@ -386,8 +394,9 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool, slug: str = "") -> in
                   "update would overwrite them:")
             for rel in edited:
                 print(f"  - {rel}")
-            print("Move the change into the kit (so every app gets it), or pass --force to "
-                  "replace the copy and keep a backup of the edited one.")
+            print(f"`kits.py update {kit} {app}` brings the copy current and KEEPS those edits "
+                  "(a three-way merge); move a change into the kit so every app gets it; --force "
+                  "replaces the copy and keeps a backup of the edited one.")
             return 1
 
     # The migration names this copy gets. A copy vendored before keeps the names it was
@@ -493,6 +502,258 @@ def add(kit: str, app: Path, *, anyway: bool, force: bool, slug: str = "") -> in
     return 0
 
 
+# ---------------------------------------------------------------- update: a three-way merge
+#
+# ``add`` refuses an edited copy (or replaces it with --force). ``update`` brings the copy to the
+# current kit WITHOUT losing the app's edits, one file at a time, between three versions:
+#
+#   base   the kit as the app RECORDED it (its files at the recorded source commit, retargeted
+#          the way ``add`` wrote them), verified against the per-file shas of the record;
+#   theirs the kit now (this checkout, recorded in kits.json), retargeted the same way;
+#   ours   the app's file.
+#
+#   ours == base            untouched here -> TAKE theirs
+#   theirs == base          the kit did not change it -> KEEP ours (an edit here stays an edit)
+#   both changed            git merge-file: clean -> MERGE, otherwise CONFLICT
+#   new in the kit          ADD (only inside what the kit installs); an app file already there
+#                           with other bytes is a CONFLICT
+#   dropped by the kit      REPORTED, never deleted
+#   deleted here            kept deleted when the kit did not change it, else CONFLICT
+#
+# ALL OR NOTHING. A conflict, or a base that cannot be verified, writes nothing to the app; the
+# conflict material (ours, base, theirs, the marked merge) is written to .kit-update/<kit>/ for
+# whoever resolves it. A base is verified file by file: a file whose bytes at the recorded commit
+# do not match the record is looked up by its EXACT sha in the kit's history (a copy re-vendored
+# from another commit under an older record would otherwise merge against the wrong base). On
+# success the record carries the KIT's bytes per file -- never the app's -- so the next update
+# still sees every local edit as an edit. Written in the app's own line endings, so the diff is
+# the kit's change, not a whole-file CRLF churn.
+
+def _norm(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n")
+
+
+def _sha_bytes(rel: str, data: bytes) -> str:
+    """The manifest's sha for ``data`` as file ``rel`` (text normalised, as ``file_sha`` does)."""
+    return hashlib.sha1(_norm(data) if Path(rel).suffix in TEXT else data).hexdigest()
+
+
+def _git_kit(args: list, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(KIT_ROOT), *args], capture_output=True, timeout=timeout)
+
+
+def _kit_blob(commit: str, kit: str, rel: str) -> bytes | None:
+    """The kit file ``rel`` at ``commit`` (None when absent there or unreadable)."""
+    if not commit or commit == "unknown":
+        return None
+    out = _git_kit(["show", f"{commit}:./kits/{kit}/{rel}"])
+    return out.stdout if out.returncode == 0 else None
+
+
+def _blob_by_sha(kit: str, rel: str, want: str, limit: int = 200) -> bytes | None:
+    """The bytes of kit file ``rel`` at whichever commit of its history matches ``want`` exactly."""
+    log = _git_kit(["log", "--format=%H", f"-{limit}", "--", f"kits/{kit}/{rel}"])
+    if log.returncode != 0:
+        return None
+    for commit in log.stdout.decode("ascii", "replace").split():
+        data = _kit_blob(commit, kit, rel)
+        if data is not None and _sha_bytes(rel, data) == want:
+            return data
+    return None
+
+
+def _retargeted(files: dict, plan: dict) -> dict:
+    """``{app path: bytes}`` for kit files ``{kit path: bytes}``, migrations renamed and their
+    references rewritten exactly as ``add`` stages them (``retarget_stage``)."""
+    import tempfile
+    if not plan:
+        return dict(files)
+    with tempfile.TemporaryDirectory(prefix="kit-update-") as tmp:
+        stage = Path(tmp)
+        for rel, data in files.items():
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            (stage / rel).write_bytes(data)
+        retarget_stage(stage, {k: v for k, v in plan.items() if k in files})
+        return {plan.get(rel, rel): (stage / plan.get(rel, rel)).read_bytes() for rel in files}
+
+
+def _merge3(ours: bytes, base: bytes, theirs: bytes, work: Path) -> tuple[bytes, bool]:
+    """git merge-file -p over LF-normalised copies: (result, clean?)."""
+    work.mkdir(parents=True, exist_ok=True)
+    o, b, t = work / "ours", work / "base", work / "theirs"
+    o.write_bytes(_norm(ours))
+    b.write_bytes(_norm(base))
+    t.write_bytes(_norm(theirs))
+    r = subprocess.run(["git", "merge-file", "-p", "-L", "ours (this app)", "-L",
+                        "base (recorded kit)", "-L", "theirs (current kit)", str(o), str(b), str(t)],
+                       capture_output=True, timeout=60)
+    return r.stdout, r.returncode == 0
+
+
+def _like(ours: bytes | None, out: bytes) -> bytes:
+    if ours is not None and b"\r\n" in ours and b"\r\n" not in out:
+        return _norm(out).replace(b"\n", b"\r\n")
+    return out
+
+
+def update(kit: str, app: Path, *, anyway: bool, dry_run: bool) -> int:
+    import tempfile
+    try:
+        lag = refuse_if_behind(KIT_ROOT, anyway=anyway)
+    except StaleCheckout as exc:
+        print(f"UPDATE_REFUSED: {exc}")
+        return 1
+    manifest = load_manifest()
+    prov = read_provenance(app)
+    entry = prov["kits"].get(kit)
+    if entry is None:
+        print(f"UPDATE_REFUSED: {app} records no {kit} copy -- `kits.py add {kit} {app}` vendors it")
+        return 1
+    rec = manifest.get(kit)
+    if rec is None or rec["state"] == "retired":
+        print(f"UPDATE_REFUSED: {kit} is " + ("not shipped any more" if rec is None else
+                                              f"retired; use {rec['replaced_by']} instead"))
+        return 1
+    kit_dir = KITS_DIR / kit
+    if kit_sha(kit_files(kit_dir)) != rec["kit_sha"]:
+        print(f"UPDATE_REFUSED: kits.json does not match kits/{kit} -- run `kits.py record` first")
+        return 1
+    if rec["kit_sha"] == entry["kit_sha"]:
+        print(f"CURRENT: {app}'s {kit} copy is already the recorded kit {rec['kit_sha'][:12]}")
+        return 0
+    recorded = {r: s for r, s in entry["files"].items() if r not in DOCS}
+    current = {r: s for r, s in rec["files"].items() if r not in DOCS
+               and r.split("/", 1)[0] in rec["installs"]}
+    plan = dict(entry.get("renamed") or {})
+    if rec.get("retarget_migrations") and entry.get("migration_slug"):
+        plan.update({k: v for k, v in retarget_plan(sorted(current), entry["migration_slug"])
+                     .items() if k not in plan})
+
+    # BASE: the kit as recorded, every file verified against the record's own sha.
+    commit = str(entry.get("source_commit") or "")
+    base_raw, unverified = {}, []
+    for rel, want in sorted(recorded.items()):
+        data = _kit_blob(commit, kit, rel)
+        if data is None or _sha_bytes(rel, data) != want:
+            data = _blob_by_sha(kit, rel, want)
+        if data is None:
+            unverified.append(rel)
+        else:
+            base_raw[rel] = data
+    if unverified:
+        print(f"UPDATE_REFUSED: the recorded base cannot be verified for {len(unverified)} file(s) "
+              f"(not at {commit or 'an unrecorded commit'}, and no commit of the kit's history "
+              "has those exact bytes) -- nothing was written. Re-vendor with `kits.py add --force` "
+              "after reading what this app changed:")
+        for rel in unverified:
+            print(f"  - {rel}")
+        return 1
+    theirs_raw = {rel: (kit_dir / rel).read_bytes() for rel in current}
+    base = _retargeted(base_raw, plan)
+    theirs = _retargeted(theirs_raw, plan)
+
+    actions, out_bytes, conflicts = [], {}, []
+    stamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+    material = app / ".kit-update" / kit / stamp
+    for kit_rel in sorted(set(recorded) | set(current)):
+        where = plan.get(kit_rel, kit_rel)
+        path = app / where
+        ours = path.read_bytes() if path.is_file() else None
+        b, t = base.get(where), theirs.get(where)
+        same = (lambda x, y: x is not None and y is not None and _norm(x) == _norm(y))
+        if t is None:
+            actions.append(("dropped", where, "the kit no longer ships it; left in place"))
+            continue
+        if b is None:
+            if ours is None:
+                actions.append(("add", where, "new in the kit"))
+                out_bytes[where] = t
+            elif same(ours, t):
+                actions.append(("same", where, "already the kit's bytes"))
+            else:
+                actions.append(("CONFLICT", where, "new in the kit, and this app has its own file there"))
+                conflicts.append((where, ours, b"", t, None))
+            continue
+        if ours is None:
+            if same(b, t):
+                actions.append(("kept-deleted", where, "removed here; the kit did not change it"))
+            else:
+                actions.append(("CONFLICT", where, "removed here, and the kit changed it"))
+                conflicts.append((where, b"", b, t, None))
+            continue
+        if same(ours, t):
+            actions.append(("same", where, "already the kit's bytes"))
+        elif same(ours, b):
+            actions.append(("take", where, "untouched here"))
+            out_bytes[where] = _like(ours, t)
+        elif same(b, t):
+            actions.append(("keep", where, "edited here; the kit did not change it"))
+        else:
+            with tempfile.TemporaryDirectory(prefix="kit-merge-") as tmp:
+                merged, clean = _merge3(ours, b, t, Path(tmp))
+            if clean:
+                actions.append(("merge", where, "edited here AND in the kit; merged cleanly"))
+                out_bytes[where] = _like(ours, merged)
+            else:
+                actions.append(("CONFLICT", where, "edited here AND in the kit; the edits overlap"))
+                conflicts.append((where, ours, b, t, merged))
+
+    width = max([len(a[0]) for a in actions] or [4])
+    for verb, where, why in actions:
+        print(f"  {verb:<{width}}  {where}  -- {why}")
+    if conflicts:
+        for where, ours, b, t, merged in conflicts:
+            d = material / where
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "ours").write_bytes(ours)
+            (d / "base").write_bytes(b)
+            (d / "theirs").write_bytes(t)
+            if merged is not None:
+                (d / "merged").write_bytes(merged)
+        print(f"UPDATE_REFUSED: {len(conflicts)} conflict(s) -- NOTHING was written to the app. "
+              f"Each conflict's ours/base/theirs/merged is under {material}; resolve them in the "
+              "app (or move the change into the kit), then run update again.")
+        return 1
+    if dry_run:
+        print(f"DRY RUN: {sum(1 for a in actions if a[0] in ('take', 'merge', 'add'))} file(s) "
+              f"would be written; nothing was. ({kit} {entry['kit_sha'][:12]} -> "
+              f"{rec['kit_sha'][:12]})")
+        return 0
+    written = []
+    try:
+        for where, data in sorted(out_bytes.items()):
+            path = app / where
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".kit-update.tmp")
+            tmp.write_bytes(data)
+            tmp.replace(path)
+            written.append(where)
+    except OSError as exc:
+        print(f"UPDATE_FAILED after writing {len(written)} file(s) ({', '.join(written)}): "
+              f"{type(exc).__name__}: {exc}. The record is unchanged; rerun update once the "
+              "file can be written (a written file now reads as an edit the next run keeps).")
+        return 1
+    # The record carries the KIT's bytes per file (retargeted as written by add), never the
+    # app's, so a kept or merged local edit still reads as an edit next time.
+    new_entry = {k: v for k, v in entry.items()
+                 if k not in ("kit_sha", "files", "source_commit", "installed")}
+    new_entry.update(kit_sha=rec["kit_sha"], source_commit=source_commit(),
+                     updated_at=dt.date.today().isoformat(),
+                     files={r: s for r, s in rec["files"].items() if r not in DOCS})
+    if plan:
+        new_entry["renamed"] = {k: v for k, v in plan.items() if k in current}
+        new_entry["installed"] = {plan[r]: _sha_bytes(r, theirs[plan[r]])
+                                  for r in current if r in plan}
+    prov["kits"][kit] = new_entry
+    (app / PROVENANCE).write_text(json.dumps(prov, indent=1, sort_keys=True) + "\n",
+                                  encoding="utf-8")
+    print(f"UPDATED {kit} {entry['kit_sha'][:12]} -> {rec['kit_sha'][:12]} in {app}: "
+          + ", ".join(f"{n} {v}" for v, n in sorted(
+              {v: sum(1 for a in actions if a[0] == v) for v, _w, _y in actions}.items()))
+          + (f"  [app-kit is {lag} behind its upstream; --anyway]" if lag else ""))
+    return 0
+
+
 def status(app: Path) -> int:
     manifest, prov = load_manifest(), read_provenance(app)
     note = stale_note(KIT_ROOT)
@@ -539,6 +800,11 @@ def main(argv=None) -> int:
                             "(default: the slug recorded before, else the directory name)")
     a_status = sub.add_parser("status")
     a_status.add_argument("app", type=Path)
+    a_update = sub.add_parser("update")
+    a_update.add_argument("kit")
+    a_update.add_argument("app", type=Path)
+    a_update.add_argument("--anyway", action="store_true", help="update from a checkout that is behind")
+    a_update.add_argument("--dry-run", action="store_true", help="say what would happen; write nothing")
     a = ap.parse_args(argv)
     if a.cmd == "record":
         return record()
@@ -549,6 +815,8 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "add":
         return add(a.kit, a.app, anyway=a.anyway, force=a.force, slug=a.slug)
+    if a.cmd == "update":
+        return update(a.kit, a.app, anyway=a.anyway, dry_run=a.dry_run)
     return status(a.app)
 
 

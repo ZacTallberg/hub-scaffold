@@ -154,7 +154,10 @@ fleet's task tokens. It waits until the pipeline is terminal — green means the
 and finishes, red means it fixes — and never forever: 10 minutes when no pipeline has reported for
 the sha, 25 when the hub's CI status is unreadable. A run that pushed nothing waits for nothing.
 This needs CI deliveries reaching the hub (`patterns/ci-evidence.md`); without them every
-hand-back simply waits the no-pipeline window once.
+hand-back simply waits the no-pipeline window once. The same hold applies to a task LEFT in
+progress -- its hand-back refused, its lease expired, its holder gone -- anchored on the push
+itself (within 6 hours) instead of a hand-back: one such task was relaunched 26 seconds after its
+run stopped, against the still-running pipeline of the commit that run had pushed.
 
 A launcher killed so hard that it died too is swept by the next launcher (`sweep`, and at the start
 of every `respond`): its journal names the leases, its pid is gone, and the same proof applies.
@@ -313,7 +316,10 @@ through a model session, so it is mechanical and narrow — ships it from a mach
    throwaway commit to a ref that never exists. A probe never sends a password (a directory-backed
    git host counts an expired stored password toward lockout): ssh keys only (`BatchMode`, no
    password or keyboard-interactive auth, empty credential helper and askpass), and an HTTPS
-   transport is "not proven" — it fails closed. The verdict is cached six hours either way.
+   transport is "not proven" — it fails closed. A refusal or a success is cached six hours; NO ANSWER
+   (a network failure, an untrusted certificate, a timeout) is asked again after an hour and never
+   recorded as "cannot push" -- ssh ends every failure with "Could not read from remote
+   repository", so that line is never read as a refusal (`publisher.push_outcome`).
 2. The URL is built from the record's project PATH and a transport this machine already uses,
    only for a host in `HUB_PUBLISH_HOSTS` — never taken from the hand-off, so a record can never
    steer a publisher at another host. No allowed host: the publisher is off.

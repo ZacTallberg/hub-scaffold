@@ -1,7 +1,7 @@
 # CI pipeline rules for a forward-only deploy
 
 `deploy-contract.md` says what must be true before anyone may say "deployed"; `deploy-runbook.md`
-is how an agent satisfies it by hand. When an adopter drives the same laws from a CI system, eight
+is how an agent satisfies it by hand. When an adopter drives the same laws from a CI system, ten
 pipeline-level rules decide whether deploys land at all. Each was learned from a pipeline that was
 green, or quiet, while nothing shipped. Examples use GitLab CI syntax because it is compact; every
 rule has an equivalent in other CI systems.
@@ -144,6 +144,36 @@ takes cores from the services it serves. Put in it only what must be there:
   shell start (rule 3), and a second job per push doubles the host's CI load for no new
   information. Keep a standalone verify job only for an explicit re-check without a deploy, and
   grow the deploy job's timeout by what verification takes.
+
+## 9. Lint the pipeline file with the forge BEFORE the push leaves the machine
+
+A pipeline file the forge rejects (one script item of the wrong shape) makes every later push an
+empty failed pipeline, and nothing deploys until a person edits the file -- the forge says so only
+after the push. A pre-push hook on the agent's shell tool closes that: for a `git push` whose range
+changes the pipeline file (or a file it includes), POST the file to the forge's own lint endpoint
+and deny the push with the forge's errors and the job's line. Everything else fails OPEN -- a
+command that is not a push exits before anything is imported, and no token, an HTTP error, an 8 s
+timeout or an unreadable range all let the push go: a lint outage must never stop shipping. The
+lint endpoint wants an API-scoped token; read it from where credentials live and cache it, refreshed
+in the background, never inline (one credential read took 33 s), and give the hook a kill switch.
+
+## 10. Read a pipeline's verdict from its jobs, not its status word
+
+- **Cancelled is not red.** A pipeline is cancelled when the next push supersedes it, usually
+  after its deploy job already succeeded. Read its jobs: a cancelled pipeline whose deploy job
+  succeeded and in which no job FAILED is settled (the work's own verification still has to pass on
+  that commit); reading the pipeline-level "canceled" as red kept finished work open across
+  several closes. Unreadable jobs fail closed (not settled).
+- **Only the verifying job's own terminal result is a verdict.** A cancelled, skipped or manual job
+  says nothing either way, and another job failing in the same pipeline (a probe missing its
+  credential) is that job's verdict, never the one you were waiting for. A verdict row a lane
+  wrote on such a non-result is withdrawn with ONE marker row, never by rewriting the row: a
+  receipt is restored on every write, and rewriting it appended a fresh "withdrawn" row on every
+  pass (one task carried 45).
+- **A refused forge call logs what was SENT.** A 400 is a bad request, so the request (API base and
+  path, never the token) and the forge's own error body are the evidence: when every call from one
+  host answered 400 while the same URL answered 200 from a workstation, a log that said only "HTTP
+  400" could not say why.
 
 ## Reporting a failed job
 

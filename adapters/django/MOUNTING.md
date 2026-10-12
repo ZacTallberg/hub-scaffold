@@ -155,7 +155,8 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # Optional: the one interpreter line seats must run ("major.minor"). Unset = not graded.
 # HUB_REQUIRED_PYTHON = "3.13"
 # Artifacts released by moving a PIN instead of publishing bytes, {name: version}. A seat reports
-# name=@<running>, name.pin=@<pin received>, name.inst=@<install result> via HUB_ARTIFACTS.
+# name=@<running>, name.pin=@<pin received>, name.inst=@<install result> and, for a tree off the
+# pin, name.rel=@ahead|behind|dirty|diverged|pin-unknown via HUB_ARTIFACTS.
 # HUB_DISTRIBUTION_PINS = {"companion-tool": "1a2b3c4d5e6f"}
 # Knowledge attached to an EVENT (task start, problem claim, doctor, CI problem items) is only
 # a record scored at least this close to the event's subject; nothing clears it, nothing attached.

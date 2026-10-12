@@ -27,9 +27,11 @@ blocks before its first model call and is killed at the ceiling with zero tokens
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -115,17 +117,37 @@ def worker_env(extra: dict | None = None) -> dict:
     return env
 
 
+#: Lines a client prints on EVERY connection that carry no verdict -- OpenSSH 10's three-line
+#: "** WARNING: connection is not using a post-quantum key exchange algorithm" block. Kept in the
+#: output it filled the whole detail of a readiness row on the origin system, so the real error
+#: behind a reported refusal could not be read.
+_ADVISORY = re.compile(r"^\s*\*\* ")
+
+
+def without_advisories(text: str) -> str:
+    """git/ssh output minus advisory lines; classify and report what is left."""
+    return "\n".join(ln for ln in str(text or "").splitlines() if not _ADVISORY.match(ln))
+
+
 def git(args, *, timeout=120, cwd=None):
     """git with the worker's non-interactive environment, no window, no stdin. On Windows it
     selects the OS certificate store (``http.sslBackend=schannel``): a fresh clone inherits no
     per-repository config, and git's bundled trust store does not carry an enterprise root CA the
     OS does. Selecting the OS store VERIFIES the chain; it never disables verification. Never
-    raises: a failure is a non-zero returncode with the reason in stderr."""
+    raises: a failure is a non-zero returncode with the reason in stderr (advisory lines removed).
+
+    It runs from a NEUTRAL directory unless told otherwise: run from inside a checkout, that
+    repository's own ``.git/config`` answers for the machine (on the origin system a checkout that
+    set the certificate backend hid the machine's own failure), and every call here names its
+    repository with ``-C`` or an absolute path."""
     trust = ["-c", "http.sslBackend=schannel"] if os.name == "nt" else []
     try:
-        return subprocess.run(["git", *trust, *[str(a) for a in args]], cwd=cwd,
-                              capture_output=True, text=True, errors="replace", timeout=timeout,
-                              env=worker_env(), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+        result = subprocess.run(["git", *trust, *[str(a) for a in args]],
+                                cwd=cwd or tempfile.gettempdir(), capture_output=True, text=True,
+                                errors="replace", timeout=timeout, env=worker_env(),
+                                stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+        result.stderr = without_advisories(result.stderr)
+        return result
     except Exception as exc:  # noqa: BLE001
         return subprocess.CompletedProcess(args, 1, "", "%s: %s" % (type(exc).__name__, exc))
 

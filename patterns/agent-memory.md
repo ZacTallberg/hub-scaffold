@@ -95,6 +95,10 @@ sides obey that bit:
   decision means the decider stopped: both sides fall back to the board's block. Disagreement must
   cost duplication, never a gap. A sidecar with no `owns` (an older producer) falls back to the
   switch plus the mirror's age, so the halves can be upgraded in either order.
+- **The bit is per machine; delivery is per SESSION.** A session started without the local recall
+  hook (an unattended run's lean settings) is served by nobody if the board's hook stands down for
+  the machine's engine -- on the origin system none of six such runs got any knowledge. Such a
+  session says so (`HUB_SESSION_LOCAL_RECALL=0` in its environment) and the board's hook serves it.
 - Local delivery gets its OWN slots and a reserved share of the recall budget, and each delivered
   record is keyed `<id>#<text_sha>` in the same per-session receipt as everything else.
 
@@ -139,8 +143,8 @@ What any engine's per-prompt recall owes the reader — the same rules the board
   format) into its delivery receipt; a request that times out logs its phases so far, and the
   worker that kept running logs its full phases when it finishes. "Exceeded 12 s" alone named
   nothing; the phases named two shared model sessions (prompt embeds queued behind index batches).
-  `client prompt-context --hook` keeps `last: {fetch_ms, render_ms, pack_ms, total_ms, outcome,
-  delivered, held, chars, rank}` in its receipt, and an unreachable board line says how long it
+  `client prompt-context --hook` keeps `last: {fetch_ms, render_ms, total_ms, outcome,
+  delivered, withheld, held, chars, rank}` in its receipt, and an unreachable board line says how long it
   was waited on.
 - **Deliver only what the session lacks, and only what landed.** A per-session receipt keyed
   `<source>#<text hash>`, reset on session start and compaction; receipt keys are written only for

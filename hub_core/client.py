@@ -152,7 +152,16 @@ from typing import Any
 
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; HubLiveClient/1.0)"
-_CLIENT_FILES = ("client.py", "checkpoints.py", "verifier.py")
+#: Every module a seat's client RUNS -- this file and the modules its verbs and hooks import --
+#: so a fix to any of them is a new client version. Fingerprinting only the entry file let a fix
+#: to a helper install everywhere and be graded current while seats still ran (or lacked) the old
+#: helper; on the origin system a helper module that a machine never received read exactly like a
+#: current one. An ABSENT module is a state of its own, so a seat that lacks one is not current.
+#: The hub computes the same digest over the client it serves (`client_digest`).
+_CLIENT_FILES = ("client.py", "checkpoints.py", "verifier.py", "client_knowledge.py",
+                 "client_memory.py", "prompt_context.py", "knowledge_mirror.py", "memory_feed.py",
+                 "lesson_triggers.py", "settings_io.py", "inbox.py", "task_rows.py",
+                 "process_lock.py")
 _SEEN = {"hub_client": ""}
 CONVERGE_EVERY_S = 15 * 60
 
@@ -161,15 +170,22 @@ def client_version() -> str:
     """A digest of the client this process runs: this module and the modules its verbs import,
     EOL-normalized so a CRLF checkout and an LF server agree on the same commit. The hub computes
     the same digest over the client it serves and names seats that differ."""
+    from pathlib import Path
+    return client_digest(Path(__file__).resolve().parent)
+
+
+def client_digest(root) -> str:
+    """The digest of the client files under ``root`` (hub_core/), EOL-normalized, each named so a
+    file's bytes cannot be read as another's, and an absent file counted as absent."""
     import hashlib
     from pathlib import Path
-    root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for name in _CLIENT_FILES:
+        digest.update(name.encode("ascii") + b"\0")
         try:
-            digest.update((root / name).read_bytes().replace(b"\r\n", b"\n"))
+            digest.update((Path(root) / name).read_bytes().replace(b"\r\n", b"\n"))
         except OSError:
-            pass
+            digest.update(b"\0absent")
     return digest.hexdigest()[:12]
 
 
@@ -388,9 +404,15 @@ class HubUnreachable(RuntimeError):
     """No answer. `reached` says whether the request may have arrived (a read timeout or a 5xx
     from the hub/its proxy) — for a write that means the outcome is UNKNOWN, not failed."""
 
-    def __init__(self, message: str, *, reached: bool, bases: list[str]):
+    def __init__(self, message: str, *, reached: bool, bases: list[str], restart: bool = False,
+                 base: str = ""):
         self.reached = reached
         self.bases = bases
+        # RESTART-SHAPED: the route is right and the process behind it is not answering yet (the
+        # connection was refused or reset, or the proxy in front has no upstream) -- a hub coming
+        # back from a deploy, never a wrong address or a dead network. `base` is that route.
+        self.restart = restart
+        self.base = base
         hint = ("" if reached else
                 " -- every configured route failed to connect. If you hold another route to the "
                 "same hub (e.g. a tunnel you opened yourself), set HUB_API_BASE to it for this "
@@ -415,9 +437,100 @@ def _is_hub_answer(body: Any) -> bool:
     return isinstance(body, dict) and ("errors" in body or "data" in body or "ok" in body)
 
 
+#: RIDE OUT A HUB RESTART INSTEAD OF FAILING. A hub that deploys often restarts often (the origin
+#: system measured 24 restarts in three hours on one busy day), and the old answer to a refused
+#: connection or a proxy with no upstream was one resend a second later and then "unreachable":
+#: a read failed, a write was queued and its author told not to report it -- and re-sent it by
+#: hand, so the recipient got it twice. A restart is not an outage: the address is right and
+#: the process is back in tens of seconds. So a failure with a restart's shape waits for the
+#: hub on a cheap token-free read (HUB_CLIENT_HEALTH_PATH, default `cursor.json`) every ~2 s,
+#: jittered so a fleet of clients does not return on one beat, then spreads its return over a
+#: second and a half and sends again. Bounded by HUB_CLIENT_RESTART_RIDE_S (150 s; 0 = off);
+#: past it the old path applies (the offline queue, the blind window). A network failure (DNS,
+#: a connect timeout) does not wait here -- that is a route, and the breadth-first sweep handles
+#: it. A write that may already have landed is never resent from here: only a request that
+#: never reached the hub, or a READ, rides; a retry-safe write rides inside `_post` under its
+#: idempotency key. A per-prompt hook turns the ride off (`no_restart_ride`): a prompt must
+#: never wait on a deploy.
+RESTART_POLL_S = 2.0
+_RIDE = {"off": False}
+
+
+def _restart_ride_s() -> int:
+    if _RIDE["off"]:
+        return 0
+    try:
+        return max(0, int(os.environ.get("HUB_CLIENT_RESTART_RIDE_S") or 150))
+    except ValueError:
+        return 150
+
+
+def no_restart_ride() -> None:
+    """For a process that must answer NOW (a prompt or tool hook): fail fast, never wait for a
+    restarting hub."""
+    _RIDE["off"] = True
+
+
+def _restart_shaped(error) -> bool:
+    """A refused, reset or aborted connection: something answers on the route and the process
+    behind it does not -- a restart, never a wrong address."""
+    return isinstance(error, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError))
+
+
+def _await_hub_back(base: str, budget_s: float) -> bool:
+    """Poll the hub's cheap read until it answers 200 or the budget ends. True = it is back.
+    One line to stderr when it starts and one when it ends, so a pause is never read as a hang."""
+    import time as _time
+    if budget_s <= 0 or not base:
+        return False
+    path = (os.environ.get("HUB_CLIENT_HEALTH_PATH") or "cursor.json").lstrip("/")
+    t0 = _time.monotonic()
+    print("hub is restarting; waiting for it to answer, up to %ds ..." % int(budget_s),
+          file=sys.stderr)
+    while _time.monotonic() - t0 < budget_s:
+        _time.sleep(RESTART_POLL_S * random.uniform(0.7, 1.3))
+        try:
+            request = urllib.request.Request(f"{base}/{path}", method="GET",
+                                             headers=_safe_headers(_common_headers()))
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if getattr(response, "status", 200) == 200:
+                    # Spread the return: every client that waited sees 200 in the same poll
+                    # window, and they must not all land on a process that has just come up.
+                    _time.sleep(random.uniform(0, 1.5))
+                    print("hub is back after %.0fs; sending." % (_time.monotonic() - t0),
+                          file=sys.stderr)
+                    return True
+        except Exception:                                    # noqa: BLE001 - still coming up
+            continue
+    print("hub did not come back within %ds." % int(budget_s), file=sys.stderr)
+    return False
+
+
 def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
-             headers: dict[str, str], timeout: int | None = None,
-             _busy: int = 0) -> dict[str, Any]:
+             headers: dict[str, str], timeout: int | None = None) -> dict[str, Any]:
+    """One request over every route, riding out a hub restart (see RESTART_POLL_S). Only the
+    FINAL failure opens the blind window: a restart the client waited out is not an outage."""
+    import time as _time
+    t0 = _time.monotonic()
+    while True:
+        try:
+            return _request_sweep(bases, method, path, data=data, headers=headers,
+                                  timeout=timeout)
+        except HubUnreachable as error:
+            left = _restart_ride_s() - (_time.monotonic() - t0)
+            rideable = error.restart and (not error.reached or method == "GET")
+            if not rideable or left <= 0 or not _await_hub_back(error.base or bases[0], left):
+                if not _REPORTING["active"]:
+                    # Everything that fails while the hub is unreachable is invisible to the
+                    # board, so the span is remembered locally and reported by the first call
+                    # that succeeds.
+                    _window_failed(bases[0] if bases else "", method != "GET", str(error)[:200])
+                raise
+
+
+def _request_sweep(bases: list[str], method: str, path: str, *, data: bytes | None,
+                   headers: dict[str, str], timeout: int | None = None,
+                   _busy: int = 0) -> dict[str, Any]:
     import socket
     import time as _time
     busy = _busy
@@ -462,9 +575,9 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                     except (TypeError, ValueError):
                         delay = 2.0
                     _time.sleep(max(0.5, min(delay, 10.0)) * busy)
-                    return _request([base] + [b for b in bases if b != base], method, path,
-                                    data=data, headers=headers, timeout=timeout,
-                                    _busy=busy)
+                    return _request_sweep([base] + [b for b in bases if b != base], method,
+                                          path, data=data, headers=headers, timeout=timeout,
+                                          _busy=busy)
                 if error.code == 503 and _retryable(parsed):
                     raise HubRefused(error.code, parsed) from error
                 if error.code >= 500 and _is_hub_answer(parsed):
@@ -477,13 +590,14 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                     # hand the request to: it never reached the hub, so even a write is safe to
                     # send again on the next sweep.
                     last = HubUnreachable("gateway HTTP 503, not the hub's answer", reached=False,
-                                          bases=bases)
+                                          bases=bases, restart=True, base=base)
                     break
                 if error.code >= 500:
                     # A gateway 502/504 in front of the hub: the request may have reached it.
                     # Another route ends at the same process, so it would only repeat the answer;
                     # the backed-off second sweep may retry a read.
-                    last = HubUnreachable(f"HTTP {error.code}", reached=True, bases=bases)
+                    last = HubUnreachable(f"HTTP {error.code}", reached=True, bases=bases,
+                                          restart=error.code in (502, 504), base=base)
                     break
                 _mark_route(base, failed=False)   # it answered: this route is right
                 try:
@@ -492,25 +606,25 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                     body = detail
                 raise HubRefused(error.code, body) from error
             except urllib.error.URLError as error:
-                _mark_route(base, failed=True)    # a ROUTE failure: demote it, try the next now
-                last = HubUnreachable(str(error.reason)[:200], reached=False, bases=bases)
+                restart = _restart_shaped(error.reason)
+                if not restart:
+                    # A refused connection is the process restarting behind a right route; only
+                    # a route that could not be reached at all is demoted.
+                    _mark_route(base, failed=True)    # a ROUTE failure: demote it, try the next
+                last = HubUnreachable(str(error.reason)[:200], reached=False, bases=bases,
+                                      restart=restart, base=base)
             except (socket.timeout, TimeoutError, ConnectionError, OSError) as error:
                 # REACHED: the request went out and the answer did not come back. No second
                 # route in this sweep, and never a resend of a write — it may have landed.
                 last = HubUnreachable(f"{type(error).__name__}: {str(error)[:160]}",
-                                      reached=True, bases=bases)
+                                      reached=True, bases=bases,
+                                      restart=_restart_shaped(error), base=base)
                 break
         if last is not None and last.reached and method != "GET":
-            if not _REPORTING["active"]:
-                _window_failed(bases[0] if bases else "", True, str(last)[:200])
             raise last
         if attempt + 1 < ATTEMPTS and _time.monotonic() < deadline:
             _time.sleep(1 + attempt)          # once per sweep, never between two routes
     assert last is not None
-    if not _REPORTING["active"]:
-        # Everything that fails while the hub is unreachable is invisible to the board, so the
-        # span is remembered locally and reported by the first call that succeeds.
-        _window_failed(bases[0] if bases else "", method != "GET", str(last)[:200])
     raise last
 
 
@@ -777,6 +891,9 @@ def _post(base: Any, operation: str, payload: dict[str, Any],
                 raise                      # no route connected: the offline queue's case
             if attempt == RETRY_ATTEMPTS:
                 raise
+            if error.restart and _await_hub_back(error.base or _bases_of(base)[0],
+                                                 _restart_ride_s()):
+                continue                   # back: resend under the SAME key (replayed if landed)
             delay = 0.5 * attempt + random.uniform(0, 0.5)
             print(json.dumps({"transient": str(error)[:200], "retry": attempt,
                               "retry_in_s": round(delay, 2)}), file=sys.stderr)
@@ -1036,7 +1153,10 @@ def _artifact_headers() -> dict[str, str]:
     `name=path,...` (or `name=@<version>` for an artifact released by a pin). Hashes are over LF-normalized bytes, the same form the hub publishes, so a
     checkout with CRLF line endings is not reported as drift. Never raises."""
     import hashlib
-    pairs = {"client": _client_id().rsplit("+", 1)[-1]}
+    # `client` is the entry file's bytes; `client-modules` the digest over every module the
+    # client runs (`_CLIENT_FILES`), so a seat that installed a new client.py but kept -- or never
+    # received -- an older helper module is graded stale instead of current.
+    pairs = {"client": _client_id().rsplit("+", 1)[-1], "client-modules": client_version()}
     sha = _charter_sha()
     if sha:
         pairs["charter"] = sha[:16]
@@ -1047,7 +1167,8 @@ def _artifact_headers() -> dict[str, str]:
             continue
         if path.startswith("@"):
             # A PINNED artifact reports a VERSION, not a file hash: `name=@<running version>`,
-            # `name.pin=@<pin received>`, `name.inst=@<install result>` (HUB_DISTRIBUTION_PINS).
+            # `name.pin=@<pin received>`, `name.inst=@<install result>` and, for a tree off the
+            # pin, `name.rel=@ahead|behind|dirty|diverged|pin-unknown` (HUB_DISTRIBUTION_PINS).
             value = re.sub(r"[^0-9A-Za-z._+-]", "", path[1:])[:40]
             if value:
                 pairs[name] = value
@@ -1089,10 +1210,6 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         payload["work_kind"] = arguments.work_kind
     if arguments.unattended:
         payload["unattended"] = True
-    # ONE KEY PER INTENT: stamped once here and sent on every retry of THIS create, so a retried
-    # request (a response that timed out) replays the first record instead of minting a twin.
-    import uuid
-    payload["idem_key"] = arguments.idem_key or ("create-" + uuid.uuid4().hex)
     if arguments.touch:
         payload["touches"] = arguments.touch
     if arguments.plan_item:
@@ -1112,7 +1229,30 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         # one the event-driven responder (hub_core.responder) takes, so an attended worker
         # that never declared it is never handed the task by `next`.
         payload["routing"] = {"required_capabilities": required}
+    # ONE KEY PER INTENT, derived from WHAT is created -- never a fresh uuid per process. A uuid
+    # covers retries inside one invocation only: on the origin system a create run under a
+    # timeout was killed after the hub wrote the task and before the id was printed, the agent
+    # ran the same create again, and the new process's new uuid made a twin. Keyed on the
+    # writer, the task's words, the flags that shape it and the UTC day, a re-run replays the
+    # first record (the hub answers a repeated key with the record it already made). The key is
+    # written back onto the arguments, so a create that is queued offline replays with the key
+    # of the attempt that failed even if the day has turned.
+    if not arguments.idem_key:
+        arguments.idem_key = create_intent_key(payload, arguments)
+    payload["idem_key"] = arguments.idem_key
     return "task", payload
+
+
+def create_intent_key(payload: dict[str, Any], arguments: argparse.Namespace | None = None) -> str:
+    """The idempotency key of one create INTENT: the same writer asking for the same task (every
+    field the create sends -- title, acceptance, priority, kind, placement, plan, routing) on the
+    same UTC day is the same create. A genuinely second task with identical words on the same
+    day is the same task."""
+    import hashlib
+    shape = {k: v for k, v in payload.items() if k != "idem_key"}
+    shape["day"] = time.strftime("%Y-%m-%d", time.gmtime())
+    return "create-" + hashlib.sha256(json.dumps(shape, sort_keys=True, default=str)
+                                      .encode("utf-8")).hexdigest()[:32]
 
 
 _PROBLEM_ID = re.compile(r"(?:problem:)?(p-[0-9a-f]{12})")
@@ -1378,6 +1518,7 @@ def _ack_any(base: str, item_id: str, agent: str, note: str = "",
         return {"routed": "overlap", "response": body}
     local = item_id.rsplit(":", 1)[-1]
     if local.startswith("m-") and (":note:" in item_id or ":" not in item_id):
+        _refuse_sibling_ack(base, item_id, agent)
         payload = {"agent": agent, "id": item_id}
         if via:
             payload["via"] = via
@@ -1407,6 +1548,57 @@ def _ack_any(base: str, item_id: str, agent: str, note: str = "",
     body = _post(base, "ack-error", {"agent": agent, "fingerprint": item_id.lower(),
                                      "note": note})
     return {"routed": "error-signature", "response": body}
+
+
+def _for_other_console(item: dict[str, Any], me: str | None = None) -> str:
+    """The console a message is addressed to when that is NOT this one, else ''. Mail the hub
+    REROUTED here from an ended console is this console's now. Without knowing our own console
+    nothing can be told apart, so '' (treat it as ours)."""
+    from .inbox import sid_match
+    target = str((item or {}).get("session") or "").strip()
+    mine = str(me if me is not None else os.environ.get("HUB_SESSION_ID", "")).strip()
+    if not target or not mine or item.get("rerouted_from") or sid_match(target, mine):
+        return ""
+    return target
+
+
+def _refuse_sibling_ack(base: Any, item_id: str, agent: str) -> None:
+    """Refuse to retire a message addressed to a DIFFERENT live console of the same agent.
+
+    Measured on the origin system: a message for one console was listed in a sibling console
+    with a ready-made retire line, and running it retired the message before the console it was
+    written for ever saw it. Decided by the hub's own routing: mail this console's inbox carries
+    (its own, or rerouted from an ended console) may be retired here; mail that appears only in
+    the agent-wide listing, pinned to another console, is that console's. FAILS OPEN on any read
+    error -- a refusal must come from the item itself, never from a hub blip."""
+    from urllib.parse import urlencode
+    me = os.environ.get("HUB_SESSION_ID", "").strip()
+    if not me:
+        return
+    want = item_id.rsplit(":", 1)[-1]
+
+    def listed(query: dict[str, Any]) -> dict[str, Any] | None:
+        data = _get(base, "inbox.json?" + urlencode(query), timeout=8).get("data") or {}
+        for item in (data.get("items") or []) + (data.get("expired") or []):
+            if isinstance(item, dict) and str(item.get("id") or "").rsplit(":", 1)[-1] == want:
+                return item
+        return None
+
+    try:
+        query: dict[str, Any] = {"agent": agent, "expired": 1}
+        if os.environ.get("HUB_MACHINE"):
+            query["machine"] = os.environ["HUB_MACHINE"]
+        if listed({**query, "session": me}) is not None:
+            return                                   # this console's (or rerouted to it)
+        item = listed(query)
+    except (RuntimeError, ValueError):
+        return
+    other = _for_other_console(item or {}, me)
+    if other:
+        raise HubRefused(409, {"errors": [{"code": "other_console",
+            "msg": "%s is addressed to console %s, not this one; only that console retires it "
+                   "(it expires on its own at %s)" % (item_id, other[:8],
+                                                      (item or {}).get("expires_at") or "its expiry")}]})
 
 
 def _run_ack(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -2150,6 +2342,16 @@ def _run_hand(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
 def _run_let_go(operation: str):
     def run(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+        pid = _problem_id(arguments.task_id) if operation == "unclaim" else ""
+        if pid:
+            # Letting go of a PROBLEM is the problem's release, routed by the id's own type like
+            # `claim` and `release`. Sent as a task let-go it was looked up as a task, refused
+            # 404 and dead-lettered, and the problem kept showing a holder that had let go.
+            payload = {"problem": pid, "agent": _agent(arguments), **_console_fields()}
+            if arguments.note:
+                payload["note"] = arguments.note
+            return _post(base, "problem/release", payload,
+                         extra_headers=_presence_headers(arguments))
         payload: dict[str, Any] = {"id": arguments.task_id, "agent": _agent(arguments)}
         token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
         if token:
@@ -2246,9 +2448,13 @@ def _run_wait(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
             # back off and retry (capped); a one-shot wait still reports the failure.
             if not arguments.follow:
                 raise
-            print(json.dumps({"transient": str(error)[:200], "retry_in_s": backoff}),
+            # A hub RESTART was already ridden inside the read (it never reaches here while the
+            # hub is coming back); what reaches here is an outage. Jittered, so a fleet of
+            # notifiers does not return on one beat when it ends.
+            delay = backoff * random.uniform(0.8, 1.2)
+            print(json.dumps({"transient": str(error)[:200], "retry_in_s": round(delay, 1)}),
                   file=sys.stderr, flush=True)
-            _time.sleep(backoff)
+            _time.sleep(delay)
             backoff = min(60.0, backoff * 2)
             continue
         backoff = 1.0
@@ -2363,13 +2569,16 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
       doctrine  the charter core (+ HUB_DOCTRINE_FILE): emitted when its text changes, on
                 SessionStart (which also covers resume and post-compaction), or with --force;
                 otherwise SILENT — the session already holds it
-      live      what is addressed to this agent/console now (inbox): re-sent whenever it moves
+      live      what is addressed to this agent/console now (inbox): when it moves IN SUBSTANCE
+                (ages masked), only the lines this session has not been sent yet go out, under
+                the current count -- one changed count no longer re-sends every item
       nudge     the projects this console is in without a task: re-sent whenever it moves
 
     The per-session state file records the hash and time each channel was last emitted — the
     receipt that says what this session was actually told. The text to inject is `context`."""
     import hashlib
     import time as _time
+    no_restart_ride()              # a per-prompt hook answers now; it never waits on a deploy
     session = arguments.session or os.environ.get("HUB_SESSION_ID", "") or "default"
     state_path = _context_state_path(session)
     try:
@@ -2400,6 +2609,10 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
             inbox = _get(base, "inbox.json?" + urlencode(query), timeout=8)
             from .inbox import render_line
             for item in (inbox.get("data") or {}).get("items") or []:
+                if item.get("kind") == "attention" and item.get("actor") == "agent":
+                    # A condition an agent can clear is the UNATTENDED lane's (it reads it from
+                    # attention.json); listing it to the person asks them to do its work.
+                    continue
                 live_lines.append("- " + render_line(item) + "  [" + str(item.get("id")) + "]")
             if session != "default":
                 activity = _get(base, "activity.json?" + urlencode({"session": session}), timeout=8)
@@ -2414,11 +2627,23 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
 
     emitted, parts = {}, []
     now = _time.time()
+    from .prompt_context import _AGE_TOKEN
     for name in ("doctrine", "live", "nudge"):
         text = channels[name]
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        # A line that differs only in an elapsed time ("waited 4 h") is the same line: the live
+        # channel is fingerprinted with ages masked, so a ticking clock is not news.
+        basis = _AGE_TOKEN.sub("<age>", text) if name == "live" else text
+        digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
         prior = (state.get(name) or {}).get("sha")
-        send = bool(text) and (digest != prior or (name == "doctrine" and force))
+        send = bool(text) and (digest != prior or (name == "doctrine" and force)
+                               or (name == "live" and force))
+        if send and name == "live":
+            text = _live_delta(state, live_lines, reset=force)
+            send = bool(text)
+            if not send:
+                # Only removals (an item was answered): nothing new to say, and the fingerprint
+                # moves so the shrunk block is not re-sent on the next prompt either.
+                state[name] = {"sha": digest, "emitted_at": now, "chars": 0}
         if send:
             parts.append(text)
             state[name] = {"sha": digest, "emitted_at": now, "chars": len(text)}
@@ -2440,6 +2665,33 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
         raise SystemExit(0)
     return {"context": context, "channels": emitted, "session": session,
             "chars": len(context)}
+
+
+#: How many line digests one session's receipt keeps for the live channel. A long session errs
+#: toward REPEATING a line it was sent long ago, never toward withholding one it was not.
+LIVE_LINES_KEEP = 600
+
+
+def _live_delta(state: dict[str, Any], lines: list[str], *, reset: bool) -> str:
+    """The live channel as THIS session still needs it: every line on a session start (whose
+    context is fresh -- it holds nothing), otherwise only the lines not yet sent this session,
+    under the current count. Measured on the origin system: 53% of per-prompt hook output was
+    lines the same session had already received, because a block hashed as a whole re-sent every
+    item whenever one count flapped. Returns '' when nothing in it is new."""
+    import hashlib
+    from .prompt_context import _AGE_TOKEN
+    keys = [hashlib.sha1(_AGE_TOKEN.sub("<age>", line).encode("utf-8", "replace")).hexdigest()[:12]
+            for line in lines]
+    held = [] if reset else [str(k) for k in (state.get("live_lines") or [])]
+    seen = set(held)
+    fresh = [line for line, key in zip(lines, keys) if key not in seen]
+    state["live_lines"] = list(dict.fromkeys(held + keys))[-LIVE_LINES_KEEP:]
+    if not fresh:
+        return ""
+    if reset or len(fresh) == len(lines):
+        return "Addressed to you now:\n" + "\n".join(lines)
+    return ("Addressed to you now (%d; %d already shown in this session):\n" % (
+        len(lines), len(lines) - len(fresh))) + "\n".join(fresh)
 
 
 def _stream_age(seconds) -> str:
@@ -3291,11 +3543,27 @@ def _run_finish(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
 #   contract). `flush --dead` replays dead letters as their queuer and ARCHIVES what is refused
 #   again; `flush --dead-archive` archives one handled by hand. Nothing is ever deleted: a
 #   warning that rides every invocation and names nothing to run teaches people to read past it.
+# * A DEAD LETTER OF WORK REACHES THE BOARD. A refused replay of a report of work (a step, a
+#   completion, an ask, a create) is work the board never heard about, and the console that wrote
+#   it has usually ended; the local file is read only by somebody who runs `flush --dead`. Each
+#   one is posted to the operational stream (`report_dead_lettered`, severity error, so it is ON the
+#   queue, not below its bar), where any seat can take it.
+# * ONE DRAIN AT A TIME, AND A WRITE WAITS FOR IT. Two drains replaying the same entries send
+#   them twice; a write that gave up on another console's drain after a fraction of a second was
+#   queued behind it and its author told "NOT ON THE BOARD YET" -- measured on the origin system,
+#   a reply re-sent by hand that way reached its recipient twice. A drain holds a drain lock; a
+#   second one waits up to FLUSH_WAIT_S for it, then drains what is left itself.
 
 QUEUED_EXIT = 4
 OUTCOME_UNKNOWN_EXIT = 5
 QUEUEABLE = {"create", "complete", "ask", "answer", "directive", "ack", "app-error",
              "agent-error", "ack-error", "step", "record"}
+#: Reports of WORK, whose dead letter is posted to the board. An error report that is itself
+#: refused is not re-reported (that would loop on the very channel that refused it).
+WORK_REPORTS = QUEUEABLE - {"app-error", "agent-error", "ack-error"}
+#: How long a drain waits for ANOTHER process's drain before draining what is left itself. A
+#: drain is a handful of hub round trips; a fraction of a second was shorter than one of them.
+FLUSH_WAIT_S = 20
 
 
 def _queue_path():
@@ -3422,9 +3690,60 @@ def _replay(bases: list[str], entry: dict[str, Any]) -> dict[str, Any]:
         _REPLAY_ORIGIN = None
 
 
+def _surface_dead_letter(bases: list[str], entry: dict[str, Any], error: BaseException) -> None:
+    """Post a dead-lettered report of WORK to the operational stream, so it is a problem any seat
+    can take instead of a line in a file nobody reads. Never raises: a failed report must not
+    break the drain, and the dead letter itself is already kept locally."""
+    verb = str(entry.get("verb") or "")
+    if verb not in WORK_REPORTS or not bases:
+        return
+    args = entry.get("args") or {}
+    origin = entry.get("origin") or {}
+    subject = str(args.get("task_id") or args.get("title") or args.get("question_id")
+                  or args.get("question") or "")[:160]
+    payload = {"agent": origin.get("agent") or args.get("agent") or _agent(argparse.Namespace()),
+               "source": "client", "code": "report_dead_lettered", "severity": "error",
+               "message": ("a queued %s %s (queued %s) was refused on replay and is NOT on the "
+                           "board" % (verb, subject, entry.get("ts") or "?"))[:800],
+               "details": ("refusal: %s\nqueued by console %s on %s; replay it with "
+                           "`python -m hub_core.client flush --dead %s` on that machine, or redo "
+                           "the work's report by hand" % (
+                               str(error)[:600], str(origin.get("session") or "?")[:12],
+                               origin.get("machine") or "?", entry.get("id") or ""))[:2000]}
+    if origin.get("machine"):
+        payload["machine"] = origin["machine"]
+    _REPORTING["active"] = True
+    try:
+        _post(bases, "agent-error", payload, timeout=8)
+    except Exception:                                    # noqa: BLE001 - never break the drain
+        pass
+    finally:
+        _REPORTING["active"] = False
+
+
+def _flush_lock():
+    from .process_lock import ProcessFileLock
+    _state_dir().mkdir(parents=True, exist_ok=True)
+    return ProcessFileLock(_state_dir(), name=".queue.flush.lock", timeout=FLUSH_WAIT_S)
+
+
 def flush_queue(bases: list[str], verbose: bool = True) -> tuple[int, int]:
     """Replay queued writes in order. Returns (sent, still_queued). Stops at the first
-    unreachable hub; dead-letters refusals and continues."""
+    unreachable hub; dead-letters refusals and continues. One drain at a time: a second caller
+    waits for the running drain (FLUSH_WAIT_S), then drains what it left."""
+    from .process_lock import LockBusy
+    with _queue_lock():
+        if not _jsonl_load(_queue_path()):
+            return 0, 0                 # the common case: no lock, no wait
+    try:
+        with _flush_lock():
+            return _flush_queue_locked(bases, verbose)
+    except LockBusy:
+        with _queue_lock():
+            return 0, len(_jsonl_load(_queue_path()))
+
+
+def _flush_queue_locked(bases: list[str], verbose: bool) -> tuple[int, int]:
     with _queue_lock():
         entries = _jsonl_load(_queue_path())
     if not entries:
@@ -3450,12 +3769,14 @@ def flush_queue(bases: list[str], verbose: bool = True) -> tuple[int, int]:
         except HubRefused as error:
             _jsonl_append(_dead_path(), {**entry, "dead_error": str(error)[:400]})
             consumed.add(entry.get("id") or "")
+            _surface_dead_letter(bases, entry, error)
             if verbose:
                 print(f"DEAD-LETTER {label}: {str(error)[:200]}", file=sys.stderr)
         except Exception as error:                          # noqa: BLE001 - THE FLOOR
             _jsonl_append(_dead_path(), {**entry, "dead_error":
                                          f"unhandled while replaying: {type(error).__name__}: {error}"[:400]})
             consumed.add(entry.get("id") or "")
+            _surface_dead_letter(bases, entry, error)
     with _queue_lock():
         current = [e for e in _jsonl_load(_queue_path()) if (e.get("id") or "") not in consumed]
         _jsonl_write(_queue_path(), current)
