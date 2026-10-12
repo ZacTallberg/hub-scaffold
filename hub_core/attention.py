@@ -444,12 +444,14 @@ def detect_capped(ctx) -> list:
                        "finish over it is a false close." % str(deployed.get("sha") or "")[:12])
                       if deployed else ""),
             fix=("Read its checkpoints (python -m hub_core.client recall %s). Prove the outcome on "
-                 "the deployed surface the way the requester meets it and step \"SEEN: ...\"; "
-                 "then the deploy close lands it, or finish it on that evidence "
+                 "the deployed surface the way the requester meets it and record the verification "
+                 "(python -m hub_core.client verify %s --sha <the live commit> --artifact <what "
+                 "you read> --note \"SEEN: ...\"); then the deploy close lands it, or finish it "
+                 "on that evidence "
                  '(python -m hub_core.client finish %s --accept-note "<outcome>" --evidence '
                  "<sha|url>). If it needs a decision, make it on the task; if it should run again, "
                  "hand it to someone (python -m hub_core.client hand %s --to <agent>)."
-                 % (tid, tid, tid)),
+                 % (tid, tid, tid, tid)),
             evidence={"task": tid, "priority": prio, "handed_back": runs, "sha": sha[:40],
                       "needs_person": need, "auto_close": refused,
                       "deployed": deployed,
