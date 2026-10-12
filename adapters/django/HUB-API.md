@@ -664,6 +664,18 @@ state that has not moved for 2 minutes belongs to a dead process and is restarte
 stops at 10 minutes and says so. `GET /hub/deploy-reconcile.json` (member) reads its progress and
 result from `HUB_DIR/deploy-reconcile.json`, so every hub process answers the same.
 
+**Lifecycle history.** The claim, problem and run side files hold only the latest state, so each
+transition is also a ledger event on a log-only aggregate the fold skips (`hub/outcome_events.py`):
+`lease.claimed` / `lease.taken_over` (a NEW holder, never a renewal) / `lease.released` (`reason`:
+released, voided, expired), `problem.claimed` / `released` / `escalated` / `resolved` /
+`reopened` (a background sweep, once per resolution that recurred), `run.started` / `run.finished`
+(an item claim granted to a new machine; its release carrying an ending). Every event names who
+wrote it. A write that meets a busy ledger is spooled (`HUB_DIR/outcome-events.pending.jsonl`) and
+written by the background tick -- or, in a single process, by a throttled pass the board's read
+path starts -- and goes loud only after an hour; a missing required field goes loud at once.
+`GET /hub/outcomes.json?type=<t>[,<t>]&since=<seq>&limit=<n>` (member) pages the history
+(`metadata.next`, and this process's write counters in `metadata.stats`).
+
 **Client telemetry.** Every `hub_core.client` call sends `X-Hub-Client-Version` (a digest of the
 client); write responses carry `X-Hub-Client-Current`, and the attention list names each seat
 running a different client. A machine with a local memory layer also sends `X-Hub-Memory-Health: mode=<retrieval mode of its last recall>;age=<s>;feed=fresh|stale|absent[;hw_cores=;hw_ram_gb=;hw_gpu=]` (`hub_core/knowledge_mirror.py`); presence keeps it per machine and `distribution.json` grades it as `local_memory` -- only where reported, `stale` when recent recalls ran a mode outside `HUB_LOCAL_MEMORY_MODES` (default `hybrid`). `HUB_CLIENT_SELF_UPDATE=1` lets a stale client fast-forward its own

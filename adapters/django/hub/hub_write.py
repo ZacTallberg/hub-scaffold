@@ -1913,6 +1913,23 @@ def item_claim(request, b):
             status=409)
     hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
                               released=bool(row.get("released")))
+    try:
+        from . import outcome_events
+        agg = item_claims.aggregate_of(item)
+        if b.get("release") is True and ending:
+            outcome_events.emit("run.finished", "run", agg, {
+                "item": item, "aggregate": agg, "machine": machine, "outcome": ending.get("outcome"),
+                "tokens": ending.get("tokens"), "spent": bool(ending.get("spent"))},
+                agent=str(b.get("agent") or request.hub_auth.subject or ""), actor_kind="responder",
+                idem="run-finished:%s:%s:%d" % (item, machine, int(time.time())))
+        elif b.get("release") is not True and not row.get("renewed"):
+            outcome_events.emit("run.started", "run", agg, {
+                "item": item, "aggregate": agg, "machine": machine,
+                "took_over_from": (row.get("took_over_from") or {}).get("machine")},
+                agent=str(b.get("agent") or request.hub_auth.subject or ""), actor_kind="responder",
+                idem="run-started:%s:%s:%d" % (item, machine, int(time.time())))
+    except Exception:                                        # noqa: BLE001
+        pass
     return JsonResponse({"data": {"granted": True, **row}})
 
 
@@ -3415,6 +3432,16 @@ def _problem_actor(request, b):
             (request.headers.get("X-Hub-Console-Name") or b.get("name") or "")[:40])
 
 
+def _problem_outcome(etype, pid, payload, agent, idem):
+    """A problem transition as a ledger event (hub.outcome_events). Never fails the route."""
+    try:
+        from . import outcome_events
+        outcome_events.emit(etype, "problem", pid, dict(payload, problem=pid), agent=agent,
+                            idem=idem, actor_kind="agent")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 def _problem_or_404(pid):
     from hub_core import problems as _problems
     pid = str(pid or "").strip().lower()
@@ -3459,6 +3486,11 @@ def problem_claim(request, b):
     if refusal:
         return JsonResponse({"errors": [refusal]}, status=409)
     hub_app.errors_changed()
+    if float(entry.get("since") or 0) == float(entry.get("at") or -1):     # a NEW holder
+        _problem_outcome("problem.claimed", pid, {
+            "agent": agent, "machine": entry.get("machine"), "session": entry.get("session"),
+            "take": bool(b.get("take")), "from": entry.get("taken_from")},
+            agent, "pclaim:%s:%s:%.3f" % (pid, agent, float(entry.get("at") or 0)))
     data = {"problem": pid, "claim": entry, "title": found.get("title"),
             "rows": len(found.get("rows") or [])}
     # What the board already knows about THIS failure, above the relevance cut-off.
@@ -3499,6 +3531,13 @@ def problem_resolve(request, b):
                               note=note, evidence=str(b.get("evidence") or ""),
                               session=session, name=name)
     hub_app.errors_changed()
+    # The resolution as HISTORY: problem-resolved.json keeps only the newest per problem, so a
+    # second resolve erased the first and recurrence over time was unrecoverable.
+    _problem_outcome("problem.resolved", pid, {
+        "agent": agent, "rows": len(found.get("rows") or []),
+        "evidence": str(b.get("evidence") or "")[:300], "note_chars": len(note),
+        "session": session, "held_by": (found.get("holder") or {}).get("agent")},
+        agent, "presolve:%s:%s" % (pid, (entry or {}).get("epoch") or (entry or {}).get("at")))
     from . import fix_tasks as _fix_tasks
     return JsonResponse({"data": {"problem": pid, "resolved": entry,
                                   "task": _fix_tasks.sync_pid(pid)}})
@@ -3519,6 +3558,8 @@ def problem_release(request, b):
         return JsonResponse({"errors": [{"code": "not_held",
             "msg": "no claim (or presumed reopen) by %s to release" % agent}]}, status=409)
     hub_app.errors_changed()
+    _problem_outcome("problem.released", pid, {"agent": agent}, agent,
+                     "prelease:%s:%s:%d" % (pid, agent, int(time.time())))
     from . import fix_tasks as _fix_tasks
     _fix_tasks.sync_pid(pid)
     return JsonResponse({"data": {"problem": pid, "released": True}})
@@ -3565,6 +3606,10 @@ def problem_escalate(request, b):
     except Exception:                                        # noqa: BLE001
         pass
     hub_app.errors_changed()
+    _problem_outcome("problem.escalated", pid, {
+        "agent": agent, "blocked_on": blocked_on, "session": session,
+        "note_chars": len(str(b.get("note") or ""))},
+        agent, "pescalate:%s:%s:%d" % (pid, blocked_on, int(time.time())))
     from . import fix_tasks as _fix_tasks
     fix_task = _fix_tasks.sync_pid(pid)
     return JsonResponse({"data": {"problem": pid, "escalation": entry, "task": fix_task}},

@@ -1485,6 +1485,11 @@ def _sweep_leases():
     # A deploy close refused while a lease was held is retried on the same kind of throttle --
     # in ONE background thread, never on this read (deploy_close.sweep_async).
     try:
+        from . import outcome_events
+        outcome_events.kick()            # spool drain + recurrence sweep, no-op in the web role
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
         from . import deploy_close
         deploy_close.sweep_async()
     except Exception:                                        # noqa: BLE001

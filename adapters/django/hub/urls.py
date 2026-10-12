@@ -8,7 +8,7 @@ from django.urls import path
 
 from . import (app_services, candidates, deploy_close, evals_api, evidence_api, handoff_api, held,
                histories_api, hub_api, hub_write, hubsite, knowledge_api, knowledge_write, veil,
-               mcp_server, read_auth, run_api)
+               mcp_server, outcome_events, read_auth, run_api)
 
 R = read_auth.reader
 
@@ -81,6 +81,7 @@ urlpatterns = [
     path("ci-status.json", R(hub_api.ci_status_json), name="ci-status"),
     # The last deploy-close replay (state in a file: every hub process answers the same).
     path("deploy-reconcile.json", R(deploy_close.reconcile_json), name="deploy-reconcile"),
+    path("outcomes.json", R(outcome_events.outcomes_json), name="outcomes"),
     # Console chat histories: off unless HUB_HISTORIES_ENABLED; readable only with history:read
     # or the adopter's HUB_HISTORY_VIEWER predicate (404 to everyone else).
     path("history.json", R(histories_api.history_json), name="history"),
@@ -238,6 +239,8 @@ VISIBILITY = {
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "ci-status.json": "member",
     "deploy-reconcile.json": "member",
+    # Who claimed, released and resolved what, and when: operator history, members only.
+    "outcomes.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",
     # A stream cannot be scrubbed record by record, and the rest are operator diagnostics.

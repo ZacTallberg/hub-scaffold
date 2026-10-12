@@ -43,6 +43,10 @@ def tick() -> dict:
         # the ingest and read paths, because a single-process hub runs no tick at all.
         from . import fix_tasks
         report["fix_tasks"] = fix_tasks.reconcile().get("written", 0)
+        # Lifecycle history: write what a busy ledger spooled, and record recurrences
+        # (hub/outcome_events.py). Self-throttled; kicked from the read path in a single process.
+        from . import outcome_events
+        report["outcomes"] = outcome_events.tick()
     except Exception as exc:                                  # noqa: BLE001 - keep ticking
         report["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
     report["took_ms"] = round((time.perf_counter() - t0) * 1000, 1)

@@ -90,6 +90,18 @@ def sweep(force: bool = False, now: float | None = None) -> dict:
         if status == 200:
             done.append(task["id"])
             log.info("handed %s back to the queue: %s", task["id"], why[:120])
+            if lease and float(lease.get("expires") or 0) <= now:
+                # An EXPIRED lease ends here, as history (a live one this pass voided is
+                # recorded by the void itself).
+                try:
+                    from . import outcome_events
+                    outcome_events.emit("lease.released", "task", task["id"],
+                                        {"task": task["id"], "agent": lease.get("agent"),
+                                         "reason": "expired", "why": why[:200]},
+                                        agent=ACTOR, idem="lease-expired:%s:%s"
+                                        % (task["id"], lease.get("token")))
+                except Exception:                            # noqa: BLE001
+                    pass
         elif status == 0:
             log.info("%s is no longer due for a hand-back: %s", task["id"], why[:120])
         elif status == 503 and _BUSY_PASSES[task["id"]] < BUSY_PASSES_BEFORE_REPORT:
