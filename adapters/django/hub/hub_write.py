@@ -3802,6 +3802,66 @@ def problem_claim(request, b):
     return JsonResponse({"data": data}, status=201)
 
 
+class _HubRequest:
+    """The minimal request the hub's OWN act passes to a view body it reuses (never served):
+    the hub's internal identity, no console headers."""
+
+    method = "POST"
+
+    def __init__(self, path):
+        from hub_core import agent_auth
+        self.path = self.path_info = path
+        self.headers = {}
+        self.hub_auth = agent_auth.AuthContext(
+            subject=DEPLOY_ACTOR, credential_id="hub-internal", scopes=("*",),
+            actor_kind="hub", mode="hub-internal")
+
+
+def _answer_as_hub(question_id, text):
+    """Close an ask through THE answer path (reply + retire), as the hub. Returns the status."""
+    req = _HubRequest("/hub/api/answer")
+    marker = _AUTH.set(req.hub_auth)
+    try:
+        import inspect
+        # Past the authentication seam (csrf_exempt -> @writer -> the body): the hub IS the
+        # authenticated caller here.
+        resp = inspect.unwrap(answer)(req, {"question": question_id, "text": text,
+                                              "agent": DEPLOY_ACTOR})
+        status = getattr(resp, "status_code", 0)
+        if status >= 400:
+            try:
+                err = (json.loads(resp.content).get("errors") or [{}])[0]
+            except (ValueError, AttributeError):
+                err = {}
+            return "%s %s" % (status, err.get("code") or "")
+        return str(status)
+    finally:
+        _AUTH.reset(marker)
+
+
+def _close_escalated_ask(pid, escalation, note, evidence, agent):
+    """A problem escalated on an ASK leaves that ask open after the problem is fixed -- on the
+    instance this was lifted from, an ask that outlived its problem reached the operator hours
+    later asking a person to clear something nobody had any more. Resolving answers it with the
+    resolution, through the one answer path. Fail-soft: the resolve already stands."""
+    blocked = str((escalation or {}).get("blocked_on") or "")
+    if not blocked:
+        return ""
+    try:
+        state = hub_app.current_state()
+        ent = (state.get("entities") or {}).get(blocked) or {}
+        from hub_core import problems as _problems
+        if ent.get("type") != "note" or not _problems.blocker_open(blocked, state):
+            return ""
+        text = ("Resolved: problem %s was fixed by %s. Root cause: %s%s"
+                % (pid, agent or "?", note[:600], (" Evidence: %s" % evidence) if evidence else ""))
+        return "answered %s (%s)" % (blocked, _answer_as_hub(blocked, text))
+    except Exception:                                        # noqa: BLE001
+        logging.getLogger(__name__).warning("closing the ask %s escalated on %s failed",
+                                            blocked, pid, exc_info=True)
+        return ""
+
+
 @writer(scope="problem:resolve")
 def problem_resolve(request, b):
     """Acknowledge EVERY row behind a problem at once and record the root cause where the next
@@ -3820,13 +3880,18 @@ def problem_resolve(request, b):
     if stale is not None:
         return stale
     agent, _machine, session, name = _problem_actor(request, b)
+    # Read the escalation BEFORE the resolve: resolving clears it.
+    escalation = (_problems.read_escalations(hub_app.HUB_DIR, hub_app.current_state()) or {}).get(pid)
     entry = _problems.resolve(hub_app.HUB_DIR, pid, found.get("rows") or [], agent=agent,
                               note=note, evidence=str(b.get("evidence") or ""),
                               session=session, name=name)
     hub_app.errors_changed()
     from . import fix_tasks as _fix_tasks
-    return JsonResponse({"data": {"problem": pid, "resolved": entry,
-                                  "task": _fix_tasks.sync_pid(pid)}})
+    data = {"problem": pid, "resolved": entry, "task": _fix_tasks.sync_pid(pid)}
+    closed_ask = _close_escalated_ask(pid, escalation, note, str(b.get("evidence") or ""), agent)
+    if closed_ask:
+        data["escalated_ask"] = closed_ask
+    return JsonResponse({"data": data})
 
 
 @writer(scope="problem:claim")
