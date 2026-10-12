@@ -140,6 +140,7 @@ def detect_tasks(ctx) -> list:
               "hand it back to the queue"),
              ("orphaned", "it is in progress with no checkpoints and has not moved",
               "Claim it (python -m hub_core.client start %s) or hand it back to the queue"))
+    full = {x.get("id"): x for x in ctx.get("tasks") or [] if isinstance(x, dict)}
     out = []
     for bucket, why, fix in table:
         for t in summary.get(bucket) or []:
@@ -148,6 +149,28 @@ def detect_tasks(ctx) -> list:
             age = int(t.get("age_s") or 0)
             severity = ("warn" if bucket == "complete_unclosed" or age >= task_health.STALE_AFTER_S
                         else "info")
+            from . import task_rows
+            task = full.get(tid) or {}
+            live = task_rows.deployed(task) if bucket == "complete_unclosed" else None
+            if live:
+                # Its commit is already live and the deploy close is waiting on what its refusal
+                # names: "finish it" here is a false close over the hub's own refusal.
+                ac = task.get("auto_close") if isinstance(task.get("auto_close"), dict) else {}
+                why_live = ("its commit %s is live; the close is waiting: %s"
+                            % (str(live.get("sha") or "")[:12],
+                               ac.get("why") or "no verification on the deployed surface yet"))
+                out.append(item("task_" + bucket, "tasks", severity, agent=owner or operator,
+                                who=owner or "the operator", subject=tid,
+                                title="%s: %s — %s" % (tid, str(t.get("title") or "")[:90], why_live),
+                                detail=str(t.get("reason") or ""),
+                                fix=("Verify it on the deployed surface the way the requester meets "
+                                     "it and step \"SEEN: <what is there>\" (python -m "
+                                     "hub_core.client step %s --note \"SEEN: ...\"); the deploy close "
+                                     "then lands it. Never finish over its refusal." % tid),
+                                evidence={"task": tid, "age_s": age, "deployed": live,
+                                          "auto_close": ac or None},
+                                lanes=("task-health",)))
+                continue
             out.append(item("task_" + bucket, "tasks", severity, agent=owner or operator,
                             who=owner or "the operator", subject=tid,
                             title="%s: %s — %s" % (tid, str(t.get("title") or "")[:90], why),
