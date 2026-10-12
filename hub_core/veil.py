@@ -109,6 +109,8 @@ class Veil:
         self._tags = {t: f["id"] for f in self.hidden for t in f["tags"]}
         self.hidden_ids = {f["id"] for f in self.hidden}
         self.hidden_routes = {r for f in self.hidden for r in f["routes"]}
+        #: Lines of a document dropped because they named a hidden facet (fence drift).
+        self.omitted_lines = 0
 
     def hit(self, text) -> str | None:
         """The id of the first hidden facet this text (or JSON-able value) mentions, or None. A
@@ -166,10 +168,29 @@ class Veil:
                 if isinstance(v, str):
                     if self.hit(v) is None:
                         out[k] = v
+                    elif "\n" in v and not self.broken:
+                        kept = self._lines_kept(v)
+                        if kept:
+                            out[k] = kept
                 else:
                     out[k] = self.scrub(v)
             return out
         return obj
+
+    def _lines_kept(self, text: str) -> str:
+        """A DOCUMENT (a multi-line value) that still names a hidden facet after its fences were
+        resolved loses the LINES that name it, not the whole document: one line someone forgot
+        to fence otherwise took every contributor's copy of the doctrine with it. Each omitted
+        line is counted in ``omitted_lines`` (an audit reports it as fence drift for the author
+        to fence at the source -- not a leak, it never left). Fail closed: if what is left still
+        hits (a term split across lines), nothing of the value is kept."""
+        lines = text.splitlines(keepends=True)
+        kept = [ln for ln in lines if self.hit(ln) is None]
+        joined = "".join(kept)
+        if not kept or self.hit(joined) is not None:
+            return ""
+        self.omitted_lines += len(lines) - len(kept)
+        return joined
 
     def facets_visible(self, spec: str) -> bool:
         """Evaluate a fence spec: `a, b` (all visible), `!a` (a is hidden)."""

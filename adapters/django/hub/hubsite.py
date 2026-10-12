@@ -32,6 +32,13 @@ def hub(request):
     readable = not (getattr(settings, "CSRF_USE_SESSIONS", False)
                     or getattr(settings, "CSRF_COOKIE_HTTPONLY", False))
     cookie = getattr(settings, "CSRF_COOKIE_NAME", "csrftoken") if readable else ""
-    return HttpResponse(shell.render(_wire_snapshot(snap), f"{hub_app.BRAND} · Hub",
+    wire = _wire_snapshot(snap)
+    if not view.open:
+        # The veil is the LAST step before render, so anything added to the page payload after
+        # the snapshot (now or by a later change) is narrowed too: one route at a time was how a
+        # block attached after the scrub reached a contributor raw on the instance this was
+        # lifted from. The snapshot was scrubbed first as well, so the counts carry no hidden row.
+        wire = view.scrub(wire)
+    return HttpResponse(shell.render(wire, f"{hub_app.BRAND} · Hub",
                                      csrf_token=get_token(request), viewer_caps=caps,
                                      csrf_cookie=cookie))

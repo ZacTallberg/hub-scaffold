@@ -3078,6 +3078,10 @@ def veil_audit_json(request):
             pass
     return JsonResponse({"data": {
         "routes_checked": len(checked), "checked": checked, "skipped": skipped, "hits": hits,
+        # Lines a contributor's copy of a DOCUMENT lost because they still named a hidden facet
+        # after its fences resolved: not a leak (they never left), but each is a line its author
+        # should fence at the source.
+        "fence_drift_lines": veil_obj.omitted_lines,
         "verdict": ("LEAK: %d hidden term(s) reached a contributor" % len(hits)) if hits else
                    "no hidden term reached a contributor on %d route(s)" % len(checked)}})
 
