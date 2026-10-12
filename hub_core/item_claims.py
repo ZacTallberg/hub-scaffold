@@ -79,10 +79,15 @@ def aggregate_of(item: str) -> str:
 
     ``class:<x>`` -> x; ``attention:<kind>:<subject>[:<since>][:escalated]`` -> the TASK when the
     subject names one (a condition about a task is that task), else ``attention:<kind>:<subject>``;
-    anything else is its own aggregate (a task id, a question id, a problem)."""
+    ``problem:<pid>[:...]`` -> ``problem:<pid>`` and ``error:<fp>[:...]`` -> ``error:<fp>`` (a
+    reopened or escalated spelling is the same problem); anything else is its own aggregate (a
+    task id, a question id)."""
     i = str(item or "").strip()
     if i.startswith("class:"):
         i = i[len("class:"):]
+    for head in ("problem:", "error:"):
+        if i.startswith(head):
+            return head + i[len(head):].split(":", 1)[0]
     if i.startswith("attention:"):
         rest = i[len("attention:"):]
         for suffix in (":escalated", ":leader"):
@@ -199,9 +204,20 @@ def live(hub_dir, now: float | None = None, ttl_s: float = TTL_S, roster=None,
     return out
 
 
+class StaleEpoch(ValueError):
+    """The caller's ``expected_epoch`` is not the aggregate's current epoch: somebody claimed it
+    since the caller looked."""
+
+    def __init__(self, aggregate: str, expected: int, current: int):
+        super().__init__("%s is at epoch %d, not %d: somebody claimed it since you looked"
+                         % (aggregate, current, expected))
+        self.aggregate, self.expected, self.current = aggregate, expected, current
+
+
 def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = False,
           session: str = "", roster=None, now: float | None = None, ttl_s: float = TTL_S,
-          grace_s: float | None = None, cls: str = "", ending: dict | None = None) -> tuple:
+          grace_s: float | None = None, cls: str = "", ending: dict | None = None,
+          expected_epoch=None) -> tuple:
     """``(granted, row_or_holder)``. Atomic under a process-and-thread lock.
 
     release=True gives the claim back -- only the holding machine may. `roster` (a
@@ -209,7 +225,9 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
     without one, only the TTL frees a claim. A claim held on ANOTHER key of the same aggregate by
     another machine refuses this one. With `cls`, a grant or a refusal carries ``history`` (what
     earlier runs on the class concluded), and a release carrying `ending` ({outcome, final,
-    tokens, spent}) records this run's ending there."""
+    tokens, spent}) records this run's ending there. A grant that makes a NEW holder of the
+    aggregate bumps its fencing epoch (returned as ``epoch``; a same-machine refresh keeps it);
+    ``expected_epoch`` makes that a compare-and-set (``StaleEpoch``). Every refusal is an event."""
     item = str(item or "").strip()[:200]
     machine = str(machine or "").strip().lower()[:120]
     agent = str(agent or "").strip().lower()[:120]
@@ -240,6 +258,9 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
                                "frees_in_s": v["frees_in_s"]}
                         if cls:
                             out["history"] = history_for(hub_dir, cls, now)
+                        out["epoch"] = current_epoch(hub_dir, agg)
+                        fence_event(hub_dir, "lost_claim", aggregate=agg, item=item,
+                                    machine=machine, holder=row.get("machine"), held_as=key)
                         return False, out
         took_over = None
         if held and held.get("machine") != machine:
@@ -253,6 +274,11 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
                        "frees_in_s": v["frees_in_s"]}
                 if cls:
                     out["history"] = history_for(hub_dir, cls, now)
+                if not release:
+                    agg = aggregate_of(item)
+                    out.update(aggregate=agg, epoch=current_epoch(hub_dir, agg))
+                    fence_event(hub_dir, "lost_claim", aggregate=agg, item=item,
+                                machine=machine, holder=held.get("machine"))
                 return False, out
             took_over = {"machine": held.get("machine"), "session": held.get("session"),
                          "agent": held.get("agent"), "gone_s": v["gone_s"]}
@@ -268,7 +294,20 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
             # A re-claim by the same machine renews the TTL from now (and records the console
             # that renewed it, so liveness judges the console actually doing the work).
             granted_ttl = ttl_for(item, ttl_s)
-            entry = {"machine": machine, "agent": agent, "at": now, "ttl_s": granted_ttl}
+            agg = aggregate_of(item)
+            cur = current_epoch(hub_dir, agg)
+            if expected_epoch is not None and int(expected_epoch) != cur:
+                fence_event(hub_dir, "lost_cas", aggregate=agg, item=item, machine=machine,
+                            expected=int(expected_epoch), current=cur)
+                raise StaleEpoch(agg, int(expected_epoch), cur)
+            # A same-machine refresh keeps its token; a NEW holder gets the next one.
+            mine = [int(r.get("epoch") or 0) for k, r in claims.items()
+                    if r.get("machine") == machine and aggregate_of(k) == agg]
+            epoch = max(mine or [0])
+            if not mine or not epoch or epoch < cur:
+                epoch = bump_epoch(hub_dir, agg, "%s@%s" % (agent or "?", machine), now)
+            entry = {"machine": machine, "agent": agent, "at": now, "ttl_s": granted_ttl,
+                     "epoch": epoch}
             if session:
                 entry["session"] = session
             elif held and held.get("session"):
@@ -278,7 +317,8 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
                    "session": entry.get("session"), "renewed": bool(held), "ttl_s": granted_ttl}
             if took_over:
                 row["took_over_from"] = took_over
-            row["aggregate"] = aggregate_of(item)
+            row["aggregate"] = agg
+            row["epoch"] = epoch
             if cls:
                 row["history"] = history_for(hub_dir, cls, now)
         if len(claims) > MAX_CLAIMS:
@@ -288,3 +328,94 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
         tmp.write_text(json.dumps(claims, sort_keys=True), encoding="utf-8")
         os.replace(tmp, _path(hub_dir))
     return True, row
+
+
+# ---------------------------------------------------------------- fencing epochs (one holder per thing)
+#
+# A claim per ITEM KEY cannot stop two machines working one thing: the launcher spells the same
+# condition several ways (`attention:<kind>:<subject>:<since>`, the same with `:escalated`, a
+# class key beside the item), and on the instance this was lifted from one problem was worked on
+# one machine while another waited on the other spelling of it. So:
+#
+# * every claim belongs to an AGGREGATE (``aggregate_of``): the thing it is ON, whatever key it
+#   was taken under. A claim is refused while ANOTHER machine holds any key of the same aggregate;
+# * each aggregate has a monotonically increasing EPOCH. A claim that makes a NEW holder bumps it
+#   (a compare-and-set when the caller sends ``expected_epoch``); a same-machine refresh keeps it;
+# * a holder's WRITE that carries the epoch it was granted (``X-Hub-Claim-Aggregate`` +
+#   ``X-Hub-Claim-Epoch``, sent by the client from HUB_CLAIM_AGGREGATE / HUB_CLAIM_EPOCH, which the
+#   unattended launcher sets for the session it spawns) is refused ``409 stale_epoch`` once a newer
+#   holder has claimed since. A write without the headers (an attended console) is not fenced.
+#
+# Every refusal is an EVENT (``claim-fence-events.jsonl``), never silent. (Fencing tokens in the
+# sense of Kleppmann: a paused holder that wakes up cannot overwrite its successor.)
+
+EPOCHS_FILE = "claim-epochs.json"
+FENCE_EVENTS_FILE = "claim-fence-events.jsonl"
+MAX_EPOCHS = 5000
+
+
+def _epochs(hub_dir) -> dict:
+    try:
+        data = json.loads((Path(hub_dir) / EPOCHS_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def current_epoch(hub_dir, aggregate: str) -> int:
+    try:
+        return int((_epochs(hub_dir).get(aggregate) or {}).get("epoch") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def bump_epoch(hub_dir, aggregate: str, holder: str = "", now: float | None = None) -> int:
+    """Increment and return the aggregate's epoch -- the new holder's fencing token. Never
+    decreases; bounded to the newest ``MAX_EPOCHS`` aggregates."""
+    from . import atomic
+    now = time.time() if now is None else now
+    hub_dir = Path(hub_dir)
+    hub_dir.mkdir(parents=True, exist_ok=True)
+    with ProcessFileLock(hub_dir, name=".claim-epochs.lock", timeout=5):
+        rows = _epochs(hub_dir)
+        cur = rows.get(aggregate) if isinstance(rows.get(aggregate), dict) else {}
+        n = int(cur.get("epoch") or 0) + 1
+        rows[aggregate] = {"epoch": n, "at": now, "holder": str(holder or "")[:120]}
+        if len(rows) > MAX_EPOCHS:
+            rows = dict(sorted(rows.items(),
+                               key=lambda kv: float((kv[1] or {}).get("at") or 0))[-MAX_EPOCHS:])
+        atomic.write_json(hub_dir / EPOCHS_FILE, rows)
+    return n
+
+
+def fence_event(hub_dir, kind: str, **fields) -> None:
+    """One line per lost claim, lost compare-and-set or refused stale write. Never raises."""
+    try:
+        with open(Path(hub_dir) / FENCE_EVENTS_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(dict({"at": time.time(), "kind": kind}, **fields)) + "\n")
+    except OSError:
+        pass
+
+
+def check_epoch(hub_dir, carried_aggregate: str, carried_epoch, target: str, **context):
+    """None when the write may proceed; else the refusal (a dict for a 409 ``stale_epoch``) when
+    the writer carries an epoch for THIS target's aggregate that a newer claim has superseded. No
+    epoch, or an epoch for a different aggregate, is not fenced: the epoch a session carries is
+    for the item it was launched for, and elsewhere it writes as any console does."""
+    agg = aggregate_of(carried_aggregate or "")
+    raw = str(carried_epoch or "").strip()
+    if not raw or not agg or agg != aggregate_of(target):
+        return None
+    try:
+        carried = int(raw)
+    except ValueError:
+        return None
+    cur = current_epoch(hub_dir, agg)
+    if carried >= cur:
+        return None
+    fence_event(hub_dir, "stale_write", aggregate=agg, carried=carried, current=cur, **context)
+    return {"code": "stale_epoch",
+            "msg": "your claim on %s is epoch %d, but it was claimed again since (epoch %d): "
+                   "another holder owns it now, so this write is refused. Stop, and do not retry "
+                   "it." % (agg, carried, cur),
+            "aggregate": agg, "epoch": cur, "carried": carried}

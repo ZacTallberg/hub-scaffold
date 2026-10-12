@@ -838,6 +838,18 @@ def _unattended_headers() -> dict[str, str]:
     return {"X-Hub-Unattended": "1", "X-Hub-Hop": str(hop)}
 
 
+def _fence_headers() -> dict[str, str]:
+    """The fencing epoch a launcher-spawned session was granted (HUB_CLAIM_AGGREGATE +
+    HUB_CLAIM_EPOCH, set by the unattended launcher from its item claim). The hub refuses this
+    session's writes on that item ``409 stale_epoch`` once another holder has claimed it since,
+    so a run that woke up late cannot overwrite its successor. An attended console sends none."""
+    aggregate = os.environ.get("HUB_CLAIM_AGGREGATE", "").strip()
+    epoch = os.environ.get("HUB_CLAIM_EPOCH", "").strip()
+    if not aggregate or not epoch.isdigit():
+        return {}
+    return {"X-Hub-Claim-Aggregate": aggregate, "X-Hub-Claim-Epoch": epoch}
+
+
 def _local_fault(base: str, error: UnicodeError) -> RuntimeError:
     """A request this machine could not BUILD never reached the Hub: say so in its own words,
     never 'unreachable' -- that tells the caller its writes are queueing while the Hub is fine."""
@@ -872,7 +884,8 @@ def _post(base: Any, operation: str, payload: dict[str, Any],
     (`data.replayed` says so) instead of a failure for a write that happened, or a second copy
     of it. Only when every retry is spent does the outcome-unknown path apply."""
     headers = {"Content-Type": "application/json", **_common_headers(), **_auth_headers(),
-               **_telemetry_headers(), **_unattended_headers(), **_artifact_headers(),
+               **_telemetry_headers(), **_unattended_headers(), **_fence_headers(),
+               **_artifact_headers(),
                **(extra_headers or {})}
 
     def once(body: dict[str, Any]) -> dict[str, Any]:
@@ -1185,7 +1198,8 @@ def _artifact_headers() -> dict[str, str]:
 def _get(base: Any, path: str, timeout: int | None = None) -> dict[str, Any]:
     return _request(_bases_of(base), "GET", path, data=None,
                     headers={**_common_headers(), **_optional_auth_headers(),
-                             **_telemetry_headers(), **_unattended_headers()},
+                             **_telemetry_headers(), **_unattended_headers(),
+                             **_fence_headers()},
                     timeout=timeout)
 
 
@@ -2274,6 +2288,8 @@ def _payload_item_claim(arguments: argparse.Namespace) -> tuple[str, dict[str, A
         payload["session"] = session     # the console that holds it, so a GONE one can release
     if arguments.release:
         payload["release"] = True
+    if getattr(arguments, "expected_epoch", None) is not None:
+        payload["expected_epoch"] = arguments.expected_epoch   # compare-and-set on the epoch
     return "item-claim", payload
 
 
@@ -4010,6 +4026,8 @@ def _parser() -> argparse.ArgumentParser:
                                                         "machine (one responder per item)")
     item_claim.add_argument("item", help="the item id (a question note id, an error fingerprint)")
     item_claim.add_argument("--machine")
+    item_claim.add_argument("--expected-epoch", dest="expected_epoch", type=int,
+                            help="grant only if the item's fencing epoch is still this one")
     item_claim.add_argument("--release", action="store_true",
                             help="give the claim back (only the holding machine may)")
     item_claim.add_argument("--agent")

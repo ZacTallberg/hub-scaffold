@@ -524,13 +524,17 @@ def item_class(item_id: str) -> str:
 #: What the last claim's answer said earlier runs on the same class concluded.
 CLAIM_HISTORY: dict = {}
 
+#: item id -> (aggregate, epoch) of this launcher's newest grant, for the session it spawns.
+GRANTS: dict = {}
+
 
 def item_claim(item_id: str, release: bool = False, ending: dict | None = None) -> str:
     """``granted``, ``held:<machine>`` or ``unreachable``. The claim is on the item's CLASS too:
     another machine holding any key of the same class (the task itself, or an attention item
-    about it) refuses it. A grant leaves the class's history in ``CLAIM_HISTORY[item_id]``; a
-    release with ``ending`` records this run's. A same-machine re-claim is granted idempotently,
-    which is how a queued launcher keeps its claim alive."""
+    about it) refuses it. A grant leaves the class's history in ``CLAIM_HISTORY[item_id]`` and its
+    fencing epoch in ``GRANTS[item_id]``; a release with ``ending`` records this run's. A
+    same-machine re-claim is granted idempotently, which is how a queued launcher keeps its claim
+    alive."""
     payload = {"item": item_id, "agent": agent(), "machine": machine(),
                "class": item_class(item_id)}
     if release:
@@ -542,6 +546,11 @@ def item_claim(item_id: str, release: bool = False, ending: dict | None = None) 
     if isinstance(data.get("history"), list):
         CLAIM_HISTORY[item_id] = data["history"]
     if status == 200:
+        data = (body.get("data") if isinstance(body, dict) else None) or {}
+        if not release and data.get("aggregate") and data.get("epoch"):
+            # The fencing epoch the run's session carries (HUB_CLAIM_AGGREGATE/_EPOCH): its
+            # writes on this item are refused once another holder has claimed it since.
+            GRANTS[item_id] = (str(data["aggregate"]), int(data["epoch"]))
         return "released" if release else "granted"
     if status == 409:
         return "held:%s" % (data.get("holder") or "another machine")

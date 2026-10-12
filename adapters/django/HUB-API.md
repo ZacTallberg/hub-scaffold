@@ -318,13 +318,24 @@ reported IN FLIGHT on the rail and the error card, never as unclaimed; a gone ho
 
 A claim is on the THING, not the key: each item belongs to an aggregate (`aggregate` in the
 answer; an attention condition about a task is that task, a recurring condition keeps one
-aggregate across its ids), and a claim is refused while another machine holds ANY key of the same
-aggregate (`409` with `held_as`). The unattended launcher claims tasks this way too, beside their
-lease, so a task and an attention item about it never run on two machines at once. With `class`
-(the launcher sends the aggregate) a grant or a refusal carries `history`: the endings earlier
-runs left on that class, and a release carrying `{outcome, final, tokens, spent}` records this
-run's (`recorded`) -- the next session on a recurrence is told what the last one concluded
-(8 endings per class, 14 days, `HUB_DIR/item-claim-history.json`).
+aggregate across its ids; `problem:<pid>[:…]` is `problem:<pid>` and `error:<fp>[:…]` is
+`error:<fp>`), and a claim is refused while another machine holds ANY key of the same aggregate
+(`409` with `held_as`). The unattended launcher claims tasks this way too, beside their lease, so
+a task and an attention item about it never run on two machines at once. With `class` (the
+launcher sends the aggregate) a grant or a refusal carries `history`: the endings earlier runs left
+on that class, and a release carrying `{outcome, final, tokens, spent}` records this run's
+(`recorded`) -- the next session on a recurrence is told what the last one concluded (8 endings
+per class, 14 days, `HUB_DIR/item-claim-history.json`).
+
+**Fenced by an epoch.** Each aggregate carries a monotonically increasing `epoch`
+(`HUB_DIR/claim-epochs.json`): a grant that makes a NEW holder bumps it and returns it beside
+`aggregate`; a same-machine refresh keeps it; `expected_epoch` makes the grant a compare-and-set
+(`409 stale_epoch`). `POST /hub/api/problem/claim` bumps the same counter for `problem:<pid>` and
+returns it. A WRITE carrying `X-Hub-Claim-Aggregate` + `X-Hub-Claim-Epoch` for an aggregate claimed
+again since is refused `409 stale_epoch` (task update, complete, answer, problem resolve) -- the
+client sends them from `HUB_CLAIM_AGGREGATE` / `HUB_CLAIM_EPOCH`, which the unattended launcher sets
+for the session it spawns; a write without them (an attended console) is never fenced. Every lost
+claim, lost compare-and-set and refused stale write is a line in `HUB_DIR/claim-fence-events.jsonl`.
 
 ### The lineage ladder
 

@@ -579,6 +579,10 @@ def task(request, b):
     refusal = _outcome_forgery_guard(b, is_create)
     if refusal is not None:
         return refusal
+    if not is_create:
+        refusal = _stale_epoch(request, str(b.get("id") or ""))
+        if refusal is not None:
+            return refusal
     twins = []
     fixer_step = False
     if is_create:
@@ -652,6 +656,23 @@ def task(request, b):
 
 def _is_true(value) -> bool:
     return value in (True, 1, "1", "true")
+
+
+CLAIM_AGGREGATE_HEADER = "X-Hub-Claim-Aggregate"
+CLAIM_EPOCH_HEADER = "X-Hub-Claim-Epoch"
+
+
+def _stale_epoch(request, target):
+    """A 409 ``stale_epoch`` when this write carries a fencing epoch for ``target``'s aggregate
+    that a newer claim has superseded (hub_core.item_claims), else None. A write without the
+    headers -- an attended console -- is never fenced."""
+    from hub_core import item_claims
+    refusal = item_claims.check_epoch(
+        hub_app.HUB_DIR, request.headers.get(CLAIM_AGGREGATE_HEADER) or "",
+        request.headers.get(CLAIM_EPOCH_HEADER) or "", target,
+        path=str(request.path_info)[:200],
+        machine=str(request.headers.get("X-Hub-Machine") or "")[:60])
+    return JsonResponse({"errors": [refusal]}, status=409) if refusal else None
 
 
 def _outcome_forgery_guard(b, is_create):
@@ -730,6 +751,9 @@ def complete(request, b):
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
     if not isinstance(eid, str) or not eid.strip():
         return JsonResponse({"errors": [{"code": "missing_id"}]}, status=400)
+    stale = _stale_epoch(request, eid)
+    if stale is not None:
+        return stale
     # Doctrine: exactly one agent OWNS a task before completing it. Require a held, valid lease
     # (claim first) — not just "not held by someone else".
     cur = hub_app._read_lease(eid)
@@ -2157,6 +2181,12 @@ def item_claim(request, b):
         roster = hub_app.roster()
     except Exception:                                        # noqa: BLE001 - unprovable, not gone
         roster = None
+    expected = b.get("expected_epoch")
+    if expected is not None:
+        try:
+            expected = int(expected)
+        except (TypeError, ValueError):
+            return JsonResponse({"errors": [{"code": "bad_expected_epoch"}]}, status=400)
     try:
         ending = None
         if b.get("release") is True and b.get("outcome"):
@@ -2165,7 +2195,12 @@ def item_claim(request, b):
                                          b.get("agent") or request.hub_auth.subject,
                                          release=b.get("release") is True, session=session,
                                          roster=roster, grace_s=hub_app.gone_grace_s(),
-                                         cls=str(b.get("class") or ""), ending=ending)
+                                         cls=str(b.get("class") or ""), ending=ending,
+                                         expected_epoch=expected)
+    except item_claims.StaleEpoch as exc:
+        return JsonResponse({"errors": [{"code": "stale_epoch", "msg": str(exc)}],
+                             "data": {"aggregate": exc.aggregate, "epoch": exc.current}},
+                            status=409)
     except ValueError as exc:
         return JsonResponse({"errors": [{"code": "bad_claim", "msg": str(exc)}]}, status=400)
     if not granted:
@@ -2178,6 +2213,8 @@ def item_claim(request, b):
         else:
             msg = ("%s claimed it %ds ago; it releases in %ds unless renewed"
                    % (who, row.get("age_s") or 0, row.get("releases_in_s") or 0))
+        if row.get("held_as"):
+            msg += " (held as %s: the same %s)" % (row["held_as"], row.get("aggregate"))
         return JsonResponse({"errors": [{"code": "claimed_elsewhere", "msg": msg}],
             "data": {"holder": row.get("machine"), "holder_session": row.get("session"),
                      "agent": row.get("agent"), "age_s": row.get("age_s"),
@@ -2187,7 +2224,8 @@ def item_claim(request, b):
                                     else row.get("releases_in_s")),
                      **({"held_as": row["held_as"], "aggregate": row.get("aggregate")}
                         if row.get("held_as") else {}),
-                     **({"history": row["history"]} if "history" in row else {})}},
+                     **({"history": row["history"]} if "history" in row else {}),
+                     "aggregate": row.get("aggregate"), "epoch": row.get("epoch")}},
             status=409)
     hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
                               released=bool(row.get("released")))
@@ -2570,6 +2608,9 @@ def answer(request, b):
         return JsonResponse({"errors": [{"code": "need_question_and_text"}]}, status=400)
     if ":" not in question_id:
         question_id = ids.make_id(hub_app.PROJECT_KEY, "note", question_id)
+    stale = _stale_epoch(request, question_id)
+    if stale is not None:
+        return stale
 
     state = hub_app.current_state()
     note_ent = (state.get("entities") or {}).get(question_id)
@@ -3764,13 +3805,20 @@ def problem_claim(request, b):
     if refusal:
         return JsonResponse({"errors": [refusal]}, status=409)
     hub_app.errors_changed()
-    if float(entry.get("since") or 0) == float(entry.get("at") or -1):     # a NEW holder
+    # The problem's fencing epoch: a NEW holder (a fresh claim or a take-over) gets the next one,
+    # so a displaced holder's later resolve is refused stale_epoch; a renewal keeps it.
+    from hub_core import item_claims
+    agg = item_claims.aggregate_of("problem:" + pid)
+    fresh = float(entry.get("since") or 0) == float(entry.get("at") or -1)   # a NEW holder
+    epoch = (item_claims.bump_epoch(hub_app.HUB_DIR, agg, "%s@%s" % (agent, machine)) if fresh
+             else item_claims.current_epoch(hub_app.HUB_DIR, agg))
+    if fresh:
         _problem_outcome("problem.claimed", pid, {
             "agent": agent, "machine": entry.get("machine"), "session": entry.get("session"),
             "take": bool(b.get("take")), "from": entry.get("taken_from")},
             agent, "pclaim:%s:%s:%.3f" % (pid, agent, float(entry.get("at") or 0)))
     data = {"problem": pid, "claim": entry, "title": found.get("title"),
-            "rows": len(found.get("rows") or [])}
+            "rows": len(found.get("rows") or []), "aggregate": agg, "epoch": epoch}
     # What the board already knows about THIS failure, above the relevance cut-off.
     try:
         from .knowledge_api import event_knowledge
@@ -3804,6 +3852,9 @@ def problem_resolve(request, b):
         return JsonResponse({"errors": [{"code": "need_note",
             "msg": "resolve records the ROOT CAUSE; pass note (and evidence: a sha or URL)"}]},
             status=422)
+    stale = _stale_epoch(request, "problem:" + pid)
+    if stale is not None:
+        return stale
     agent, _machine, session, name = _problem_actor(request, b)
     entry = _problems.resolve(hub_app.HUB_DIR, pid, found.get("rows") or [], agent=agent,
                               note=note, evidence=str(b.get("evidence") or ""),

@@ -486,6 +486,11 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
                      "HUB_RESPONDER_HOP": escalation.next_hop(item),
                      "PYTHONPATH": os.pathsep.join(filter(None, [
                          str(Path(__file__).resolve().parents[2]), os.environ.get("PYTHONPATH")]))}
+        if claimed and item_id in board.GRANTS:
+            # The session writes as the holder of THIS epoch: if the item is claimed again
+            # elsewhere while it runs, its late writes are refused instead of landing.
+            env_extra["HUB_CLAIM_AGGREGATE"], epoch = board.GRANTS[item_id]
+            env_extra["HUB_CLAIM_EPOCH"] = str(epoch)
         if kind == "task":
             token, claim = board.claim(item_id, LEASE_TTL_S)
             if not token:
