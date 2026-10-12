@@ -476,18 +476,36 @@ def release_left(leases_file: str, note: str, skip: str = "", uncharged: bool = 
 
 # ---------------------------------------------------------------- per-item claims (non-task)
 
-def item_claim(item_id: str, release: bool = False) -> str:
-    """``granted``, ``held:<machine>`` or ``unreachable`` for a NON-task item (a task has its
-    lease). A same-machine re-claim is granted idempotently, which is how a queued launcher
-    keeps its claim alive."""
-    payload = {"item": item_id, "agent": agent(), "machine": machine()}
+def item_class(item_id: str) -> str:
+    """The thing an item is about (hub_core.item_claims.aggregate_of): an attention condition
+    about a task is that task, and a recurring condition keeps one class across its ids."""
+    from hub_core.item_claims import aggregate_of
+    return aggregate_of(item_id)
+
+
+#: What the last claim's answer said earlier runs on the same class concluded.
+CLAIM_HISTORY: dict = {}
+
+
+def item_claim(item_id: str, release: bool = False, ending: dict | None = None) -> str:
+    """``granted``, ``held:<machine>`` or ``unreachable``. The claim is on the item's CLASS too:
+    another machine holding any key of the same class (the task itself, or an attention item
+    about it) refuses it. A grant leaves the class's history in ``CLAIM_HISTORY[item_id]``; a
+    release with ``ending`` records this run's. A same-machine re-claim is granted idempotently,
+    which is how a queued launcher keeps its claim alive."""
+    payload = {"item": item_id, "agent": agent(), "machine": machine(),
+               "class": item_class(item_id)}
     if release:
         payload["release"] = True
+        if ending:
+            payload.update({k: v for k, v in ending.items() if v is not None})
     status, body = _write("item-claim", payload)
+    data = (body.get("data") if isinstance(body, dict) else None) or {}
+    if isinstance(data.get("history"), list):
+        CLAIM_HISTORY[item_id] = data["history"]
     if status == 200:
         return "released" if release else "granted"
     if status == 409:
-        data = (body.get("data") if isinstance(body, dict) else None) or {}
         return "held:%s" % (data.get("holder") or "another machine")
     return "unreachable"
 
