@@ -93,7 +93,9 @@ def component_file(request, name, filename):
     else:
         response = HttpResponse(body, content_type=content_type)
     response["ETag"] = etag
-    response["Cache-Control"] = "public, max-age=%d" % components.CACHE_SECONDS
+    # Fresh for minutes, then served stale at once while the hub is re-asked (and while it is
+    # down); a `?v=` fingerprint matching the version is immutable (hub_core.components).
+    response["Cache-Control"] = components.cache_control(request.GET.get("v", ""), version)
     response["X-Component-Version"] = version
     response["X-Content-Type-Options"] = "nosniff"
     return response
@@ -120,6 +122,48 @@ def component_file_pinned(request, rev, name, filename):
     response["X-Component-Version"] = component_releases.version_at(full, name) or full[:12]
     response["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+def component_versions(request):
+    """GET /hub/components/versions.json -- ``{versions: {name: measured version}}``: the cheap
+    answer an app FINGERPRINTS its links from (``?v=<version>``, immutable for a year). No
+    catalog, no adopters, no history: just the hash every file response already carries. An app
+    asks it off its own render path."""
+    response = JsonResponse({"versions": components.versions()})
+    response["Cache-Control"] = "public, max-age=60"
+    return response
+
+
+class ComponentFastPathMiddleware:
+    """Serve a component FILE before sessions, sign-in and route timing.
+
+    These bytes are public chrome, identical for everyone, linked render-blocking by every
+    adopting app -- yet on the ordinary path each request read a session and resolved a viewer
+    first, and picked up ``Vary: Cookie``, so a browser's cached copy missed whenever any cookie
+    on the origin changed: a slow session store became every app's slow page. Place it FIRST in
+    MIDDLEWARE. GET/HEAD only; it answers only what the URLconf resolves to a component FILE
+    view (``component-file``, and ``component-file-pinned`` where that route exists); props,
+    the index and everything else fall through to the full stack untouched."""
+
+    FILE_ROUTES = ("component-file", "component-file-pinned")
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method in ("GET", "HEAD") and "/components/" in (request.path_info or ""):
+            from django.urls import Resolver404, resolve
+            try:
+                match = resolve(request.path_info)
+            except Resolver404:
+                match = None
+            if match is not None and match.url_name in self.FILE_ROUTES:
+                try:
+                    return match.func(request, *match.args, **match.kwargs)
+                except Http404:
+                    from django.http import HttpResponseNotFound
+                    return HttpResponseNotFound("no such component file")
+        return self.get_response(request)
 
 
 def component_props(request, slug):

@@ -52,6 +52,10 @@ MIDDLEWARE = [
     # header can say how long a write waited BEFORE its view ran (set HUB_SERVER_THREADS to
     # the server's thread pool so the at-capacity share is computed).
     "hub.middleware.InFlightMiddleware",
+    # FIRST, before sessions and sign-in: a hosted component FILE (public chrome every app links
+    # render-blocking) is answered without a session read or a viewer lookup and without
+    # `Vary: Cookie`, so a slow session store never becomes every app's slow page.
+    "hub.app_services.ComponentFastPathMiddleware",
     # ... your middleware ...
     # Early, before any read gate: a busy ledger answers 503 + Retry-After on every hub path,
     # reads included, and records a WARNING row instead of a 5xx defect.
