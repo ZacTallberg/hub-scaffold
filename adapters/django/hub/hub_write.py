@@ -189,7 +189,9 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
         # board knows who is on it without anyone filing a report — and an unauthenticated
         # caller can never forge a seat. The label the write carries (or, for a scoped
         # credential, its immutable subject) names the seat. Fail-soft by construction.
-        if presence:
+        # A GRANTED verifier is automation by class (a post-deploy probe), never somebody's seat:
+        # on the roster it could never heartbeat and every console would read it "offline".
+        if presence and VERIFIER_SCOPE not in tuple(auth.scopes or ()):
             seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
             hub_app.observe_presence(seat, request.headers)
         request.hub_auth = auth
@@ -228,12 +230,32 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
     return w
 
 
+#: The event that CAUSED the writes made while it is set (the deploy record behind every receipt
+#: and close it drives): stamped as ``parent_event_id``, so "why did this task close?" is one hop.
+_CAUSE = ContextVar("hub_write_cause", default=None)
+
+
 def _event_identity(fallback_agent):
+    """WHO writes this event: the authenticated subject and credential, plus -- from the request
+    the client already decorates -- the MACHINE and CONSOLE it came from and whether an
+    UNATTENDED run wrote it, and the event that caused it. Without them a person, a console, an
+    unattended responder and the hub's own close all read as one subject."""
     auth = _AUTH.get()
     if not auth:
-        return {"agent_id": fallback_agent, "session_id": None, "actor_kind": "agent"}
-    return {"agent_id": auth.subject, "session_id": auth.credential_id,
-            "actor_kind": auth.actor_kind}
+        out = {"agent_id": fallback_agent, "session_id": None, "actor_kind": "agent"}
+    else:
+        out = {"agent_id": auth.subject, "session_id": auth.credential_id,
+               "actor_kind": auth.actor_kind}
+    req = _REQUEST.get()
+    if req is not None:
+        headers = getattr(req, "headers", {}) or {}
+        out["machine"] = (headers.get("X-Hub-Machine") or "").strip() or None
+        out["console"] = (headers.get("X-Hub-Session") or "").strip() or None
+        out["unattended"] = (headers.get("X-Hub-Unattended") or "").strip() in ("1", "true")
+    cause = _CAUSE.get()
+    if cause:
+        out["parent_event_id"] = cause
+    return out
 
 
 def _own_repo_name() -> str:
@@ -592,6 +614,7 @@ def task(request, b):
                 return JsonResponse({"errors": [{"code": "lease",
                     "msg": "mutating claimed work requires its current fenced lease and subject"}]},
                     status=409)
+    _stamp_push_authors(b, None if is_create else existing, request.hub_auth.subject)
     payload = {k: v for k, v in b.items()
                if k not in ("agent", "expected_version", "idem_key", "token")}
     payload["type"] = "task"
@@ -1158,7 +1181,8 @@ def deploy(request, b):
         # record failed and the close it would have driven was lost with it. The close runs on
         # its own thread; the record waits at most DEPLOY_CLOSE_INLINE_S for it and otherwise
         # answers `queued`.
-        outcome = run_deploy_close(eid, sha, wait_s=DEPLOY_CLOSE_INLINE_S)
+        outcome = run_deploy_close(eid, sha, wait_s=DEPLOY_CLOSE_INLINE_S,
+                                   cause=(resp.get("data") or {}).get("event"))
         if outcome.get("queued"):
             resp = dict(resp, tasks={"queued": True})
         elif any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
@@ -1177,12 +1201,13 @@ DEPLOY_CLOSE_INLINE_S = 3.0
 _DEPLOY_CLOSE_SERIAL = __import__("threading").Lock()
 
 
-def run_deploy_close(deploy_id, sha, *, wait_s=DEPLOY_CLOSE_INLINE_S) -> dict:
+def run_deploy_close(deploy_id, sha, *, wait_s=DEPLOY_CLOSE_INLINE_S, cause=None) -> dict:
     """Run close_deployed_tasks(deploy_id, sha) on its own daemon thread, serialized with every
     other deploy close, and wait at most ``wait_s`` for it. Returns its outcome, or
     ``{"queued": True}`` when it is still running (it finishes and records its own failure). A
     busy ledger is retried ``DEPLOY_CLOSE_BUSY_ATTEMPTS`` times, ``DEPLOY_CLOSE_BUSY_BACKOFF_S`` x
-    the try apart, instead of losing the close."""
+    the try apart, instead of losing the close. ``cause`` (the record's event) is stamped on
+    every write the close makes."""
     import threading
     box, done = {}, threading.Event()
 
@@ -1192,7 +1217,7 @@ def run_deploy_close(deploy_id, sha, *, wait_s=DEPLOY_CLOSE_INLINE_S) -> dict:
             for attempt in range(1, DEPLOY_CLOSE_BUSY_ATTEMPTS + 1):
                 try:
                     with _DEPLOY_CLOSE_SERIAL:
-                        box["outcome"] = close_deployed_tasks(deploy_id, sha)
+                        box["outcome"] = close_deployed_tasks(deploy_id, sha, cause=cause)
                     break
                 except StoreBusy:
                     # BUSY IS BACK-PRESSURE, NOT A VERDICT. The record is written once; a close
@@ -1263,10 +1288,20 @@ def _record_auto_close(eid, state, why, sha, deploy_id):
         idem="deploy-close-%s:%s:%s" % (state, eid, key), etype="task.updated", idem_exact=True)
 
 
-def close_deployed_tasks(deploy_id, deployed_sha):
-    """Step every open task whose recorded commit this verified release contains, and finish
-    the UNATTENDED ones through the one done path (a lease the hub holds, the deploy record as
-    evidence). A person's task is only stepped. Returns what happened for the record's answer."""
+def close_deployed_tasks(deploy_id, deployed_sha, cause=None):
+    """Step every open task whose recorded commit this verified release contains, and close the
+    ones whose deployed build a verification has already passed (the rest wait, `awaiting`).
+    Every write it makes names the deploy record's event as its cause (``parent_event_id``).
+    Returns what happened for the record's answer."""
+    marker = _CAUSE.set(cause) if cause else None
+    try:
+        return _close_deployed_tasks(deploy_id, deployed_sha)
+    finally:
+        if marker is not None:
+            _CAUSE.reset(marker)
+
+
+def _close_deployed_tasks(deploy_id, deployed_sha):
     from hub_core import task_completion
 
     from . import deploy_close
@@ -1376,6 +1411,39 @@ def _tell_verified_close(task, holder, note):
         logging.getLogger(__name__).warning("verified-close notice failed", exc_info=True)
 
 
+#: The GRANTED scope that makes a credential's verification independent. Granted, never declared:
+#: it must be listed on the credential by name (a ``*`` grant does not carry it), so no header,
+#: body field or agent name can make a check count as somebody else's.
+VERIFIER_SCOPE = "verify:independent"
+
+
+def _evidence_level(auth, task) -> str:
+    """``independent`` when a credential GRANTED ``verify:independent`` wrote the verification and
+    that subject recorded none of the task's pushes (it did not check its own work); otherwise
+    ``self-checked``. A label, never a refusal: a board that has not granted a verifier still
+    closes on its own checks, and says so."""
+    subject = str(getattr(auth, "subject", "") or "")
+    granted = VERIFIER_SCOPE in tuple(getattr(auth, "scopes", ()) or ())
+    implementers = {str(r.get("by") or "") for r in (task or {}).get("plan") or []
+                    if isinstance(r, dict) and r.get("kind") == "pushed"}
+    return "independent" if granted and subject and subject not in implementers else "self-checked"
+
+
+def _stamp_push_authors(b, existing, subject):
+    """A NEW `pushed` row is stamped with the subject that wrote it (``by``), so a later
+    verification can tell the implementer from an independent checker -- whatever the body
+    said, never trusted from it. Rows the task already carries keep what they have."""
+    plan = b.get("plan")
+    if not isinstance(plan, list) or not subject:
+        return
+    have = {(str(r.get("sha") or ""), str(r.get("note_at") or ""))
+            for r in (existing or {}).get("plan") or [] if isinstance(r, dict)}
+    for r in plan:
+        if (isinstance(r, dict) and r.get("kind") == "pushed"
+                and (str(r.get("sha") or ""), str(r.get("note_at") or "")) not in have):
+            r["by"] = str(subject)[:120]
+
+
 @writer(scope="task:write")
 def task_outcome(request, b):
     """POST /hub/api/task/outcome -- what the machine check (or the requester) says about a
@@ -1416,6 +1484,8 @@ def task_outcome(request, b):
                 facts=b.get("facts"), at=_utc_now())
         except ValueError as exc:
             return JsonResponse({"errors": [{"code": "bad_outcome", "msg": str(exc)}]}, status=422)
+        if kind == "verified":
+            row["evidence_level"] = _evidence_level(request.hub_auth, ent)
         plan = [dict(x) for x in (ent.get("plan") or []) if isinstance(x, dict)]
         plan.append(row)
         payload = {"type": "task", "plan": plan}
@@ -1432,7 +1502,12 @@ def task_outcome(request, b):
         return JsonResponse(resp, status=status)
     out = {"id": eid, "kind": kind, "row": row, "reopened": bool(reopen)}
     if kind == "verified" and row.get("result") == "pass":
-        out["close"] = deploy_close.close_if_deployed(eid) or {
+        marker = _CAUSE.set((resp.get("data") or {}).get("event"))   # the pass caused the close
+        try:
+            closed = deploy_close.close_if_deployed(eid)
+        finally:
+            _CAUSE.reset(marker)
+        out["close"] = closed or {
             "closed": False, "why": "no deployed receipt for this task yet: the deploy record "
                                     "closes it when it lands"}
     return JsonResponse({"data": out})
@@ -1447,6 +1522,15 @@ def hub_grant_done(tid, payload, *, credential_id, idem):
     auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id=credential_id,
                                   scopes=("task:complete",), actor_kind="hub",
                                   mode="hub-internal")
+    # The close is the HUB's act, whichever request triggered it: its events say so.
+    marker = _AUTH.set(auth)
+    try:
+        return _hub_grant_done(tid, payload, auth, idem)
+    finally:
+        _AUTH.reset(marker)
+
+
+def _hub_grant_done(tid, payload, auth, idem):
     res = hub_app.claim(tid, DEPLOY_ACTOR, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
                         credential_id=auth.credential_id, actor_kind=auth.actor_kind)
     if not res.get("ok"):
@@ -1910,8 +1994,12 @@ def fail(request, b):
                                   f"repair through {repair_id} before retry") if circuit else "",
                 "operator_attention": consequential,
             }
-            source_merged = {**ent, **source_payload, "version": ent.get("version", 0) + 1}
-            source_errors = validate(source_merged, "task", hub_app.registry())
+            registry = hub_app.registry()
+            source_merged, touched = project.write_candidate(
+                ent, source_payload, eid, "task",
+                ((registry.schema_for("task") or {}).get("properties") or {}).keys())
+            source_errors = [e for e in validate(source_merged, "task", registry)
+                             if project.error_field(e) in touched or not project.error_field(e)]
             if source_errors:
                 return JsonResponse({"errors": [{"code": "schema", "msg": error}
                                                   for error in source_errors]}, status=422)

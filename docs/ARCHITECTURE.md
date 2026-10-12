@@ -101,7 +101,12 @@ General HTTP writes pass through one gate:
    charged to an unrelated update). The fold's OUTPUT is held to the schema by `manage.py
    check` (`hub.E001` folds a real create + update and validates it), so an undeclared fold
    stamp fails the pipeline instead of every write;
-7. append with aggregate-scoped idempotency and optimistic concurrency, then publish the
+7. append with aggregate-scoped idempotency and optimistic concurrency -- the event names WHO
+   wrote it: the subject and credential, plus the `machine` and `console` the client's `X-Hub-*`
+   headers name, `unattended` for a launcher-spawned run, and `parent_event_id` for the event that
+   caused it (a deploy record behind every receipt and close it drives, a passing verification
+   behind the close it triggers; the hub's own close is written as `hub`). The three attribution
+   fields are hashed into the chain only when present, so every older event still verifies -- then publish the
    identity-only wake signal to connected cockpits.
 
 Task completion has additional steps: a live lease, an acceptance note, evidence, strict-mode

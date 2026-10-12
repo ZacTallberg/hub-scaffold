@@ -680,7 +680,12 @@ verified|rejected, sha, result: pass|fail, artifact, note, facts}` appends an ou
 not work -- no lease needed, `by` stamped from the authenticated caller, kept by the fold whatever a
 later plan write sends (so are `deployed` rows and a published hand-off's `pushed` row:
 `receipt: "handoff"`). A verification needs `sha` and the `artifact` it READ (`422 bad_outcome`
-otherwise); a pass closes a task already stepped `deployed` (`data.close`). A failed verification or a
+otherwise); a pass closes a task already stepped `deployed` (`data.close`). Every verification
+carries `evidence_level`: `independent` only when a credential GRANTED the `verify:independent`
+scope (by name -- a `*` grant does not carry it) wrote it and that subject recorded none of the
+task's pushes (every new `pushed` row is stamped `by` its writer, never from the body); else
+`self-checked`. A label, never a refusal. A verifier credential is automation and never appears on
+the roster. A failed verification or a
 rejection on a closed task REOPENS the same task (`reopened: true`), and every row written before a
 rejection stops counting. A rejection is the requester's: the task's creator or an operator-tier
 caller (`403 not_requester`). A whole-plan `POST /hub/api/task` that ADDS an outcome row is `409
