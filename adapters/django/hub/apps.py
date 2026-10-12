@@ -16,3 +16,4 @@ class HubConfig(AppConfig):
 
     def ready(self):
         connection_created.connect(_sqlite_pragmas)
+        from . import checks  # noqa: F401  (the fold/schema contract, run by `manage.py check`)
