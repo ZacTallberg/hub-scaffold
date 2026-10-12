@@ -2693,6 +2693,11 @@ def inbox_wait(request):
                                       "max_wait_s": inbox_core.MAX_WAIT_S}})
 
 
+def _warmup_stats():
+    from .middleware import WarmupHoldMiddleware
+    return WarmupHoldMiddleware.stats()
+
+
 @require_GET
 def perf_json(request):
     """Where the time goes: per-route latency (worst process window in the last hour), the
@@ -2756,6 +2761,8 @@ def perf_json(request):
         # what the startup prewarm cost -- a slow response is traced to a process, not "the hub".
         "process": dict(roles.process_info(hub_app.HUB_DIR), pid=_os.getpid()),
         "prewarm": prewarm.status(),
+        # How the warm-up treated reads that arrived during it (held then served, or shed).
+        "warmup": _warmup_stats(),
     }, "process": roles.process_info(hub_app.HUB_DIR), "prewarm": prewarm.status(),
         "metadata": {"window_s": 3600, "long_polls_exempt": ["/hub/inbox/wait", "/hub/live/events"],
                     "fields": "p50_worst_ms/p95_worst_ms are the worst single process window's "

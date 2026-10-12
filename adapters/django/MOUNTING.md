@@ -52,6 +52,12 @@ MIDDLEWARE = [
     # reads included, and records a WARNING row instead of a 5xx defect.
     "hub.middleware.RouteTimingMiddleware",   # per-route latency for /hub/perf.json + the rail
     "hub.middleware.LedgerBusyMiddleware",
+    # While a process started from wsgi/asgi (prewarm.start()) warms, a heavy GET /hub/* read
+    # SLEEPS until it is warm and is then served -- never a cold fold per thread, which queued
+    # the liveness probe behind every request and rolled a deploy back. Every hold ends at one
+    # deadline (HUB_WARMUP_HOLD_S, 20 s after start); past it or past HUB_WARMUP_HOLD_MAX holds
+    # the read is shed 503 + Retry-After. Counts on /hub/perf.json `warmup`.
+    "hub.middleware.WarmupHoldMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",   # optional: no-store on dynamic HTML after deploys
     # The visibility veil (after your auth middleware, so request.user is known). A no-op until
     # PROJECT/facets.json declares hidden facets; see HUB-API.md "Visibility".

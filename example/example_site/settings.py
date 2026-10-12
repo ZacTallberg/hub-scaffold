@@ -60,6 +60,9 @@ MIDDLEWARE = [
     # Per-route latency (worst process window, last hour) for /hub/perf.json and the rail.
     "hub.middleware.RouteTimingMiddleware",
     "hub.middleware.LedgerBusyMiddleware",
+    # While a freshly started process warms, a heavy hub read sleeps until it is warm (bounded)
+    # instead of computing a cold fold that queues the health probe behind it.
+    "hub.middleware.WarmupHoldMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",
     # The visibility veil: a no-op until PROJECT/facets.json declares hidden facets.
     "hub.veil.VeilMiddleware",
