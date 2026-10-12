@@ -228,6 +228,12 @@ bare "any schedule" rule fires on every unrelated nightly job) or on demand.
 - The deploy job waits for nothing it does not need. A check that genuinely guards the host — an
   undeclared destructive migration — runs as the deploy job's FIRST step, where it fails the
   deploy itself, instead of as a separate stage everything queues behind.
+- Back-to-back framework commands (migrate, collect static assets, checks) run in ONE process
+  of the framework's own command runner, in order, with each step's own output and failure
+  message: starting the interpreter and loading the application per command cost seconds each
+  on a loaded host, multiplied by every deploy. Logic that must sit between steps stays where it
+  is; only a run of consecutive commands is batched, and a batch that could not start falls back
+  to the separate calls.
 - Configuration the deploy re-applies (secrets merged into an environment file) can be skipped
   when a cheap fingerprint read says nothing changed AND every declared key is still present;
   stamp only what this run actually wrote, so losing the stamp costs one full sync, never a wrong
