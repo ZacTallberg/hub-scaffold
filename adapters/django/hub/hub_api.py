@@ -1041,7 +1041,13 @@ def _projected(store, cursor):
             and pending[-1].get("seq") == seq and pending[-1].get("hash", "") == head_hash
         )
 
-        stale = time.time() - float(_STATE_CACHE.get("full_at") or 0) >= FULL_REPLAY_S
+        # The periodic drift replay is the BACKGROUNDER's job when one is running: on a request
+        # thread it is a whole-ledger fold every reader arriving behind it waits on (measured on
+        # the instance this was lifted from: the worst state build in the web process). A chain
+        # break or a non-contiguous tail still replays here, in every role.
+        stale = (time.time() - float(_STATE_CACHE.get("full_at") or 0) >= FULL_REPLAY_S
+                 and (roles.runs_background_here()
+                      or not roles.backgrounder_fresh(hub_app.HUB_DIR)))
         if cached_seq is None or seq < cached_seq or (seq == cached_seq and head_hash != cached_hash) \
                 or (incremental and not contiguous) or stale:
             events = _events_through(store, 0, seq)
