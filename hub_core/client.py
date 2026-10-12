@@ -1397,6 +1397,7 @@ def _ack_any(base: str, item_id: str, agent: str, note: str = "",
         return {"routed": "overlap", "response": body}
     local = item_id.rsplit(":", 1)[-1]
     if local.startswith("m-") and (":note:" in item_id or ":" not in item_id):
+        _refuse_sibling_ack(base, item_id, agent)
         payload = {"agent": agent, "id": item_id}
         if via:
             payload["via"] = via
@@ -1426,6 +1427,57 @@ def _ack_any(base: str, item_id: str, agent: str, note: str = "",
     body = _post(base, "ack-error", {"agent": agent, "fingerprint": item_id.lower(),
                                      "note": note})
     return {"routed": "error-signature", "response": body}
+
+
+def _for_other_console(item: dict[str, Any], me: str | None = None) -> str:
+    """The console a message is addressed to when that is NOT this one, else ''. Mail the hub
+    REROUTED here from an ended console is this console's now. Without knowing our own console
+    nothing can be told apart, so '' (treat it as ours)."""
+    from .inbox import sid_match
+    target = str((item or {}).get("session") or "").strip()
+    mine = str(me if me is not None else os.environ.get("HUB_SESSION_ID", "")).strip()
+    if not target or not mine or item.get("rerouted_from") or sid_match(target, mine):
+        return ""
+    return target
+
+
+def _refuse_sibling_ack(base: Any, item_id: str, agent: str) -> None:
+    """Refuse to retire a message addressed to a DIFFERENT live console of the same agent.
+
+    Measured on the origin system: a message for one console was listed in a sibling console
+    with a ready-made retire line, and running it retired the message before the console it was
+    written for ever saw it. Decided by the hub's own routing: mail this console's inbox carries
+    (its own, or rerouted from an ended console) may be retired here; mail that appears only in
+    the agent-wide listing, pinned to another console, is that console's. FAILS OPEN on any read
+    error -- a refusal must come from the item itself, never from a hub blip."""
+    from urllib.parse import urlencode
+    me = os.environ.get("HUB_SESSION_ID", "").strip()
+    if not me:
+        return
+    want = item_id.rsplit(":", 1)[-1]
+
+    def listed(query: dict[str, Any]) -> dict[str, Any] | None:
+        data = _get(base, "inbox.json?" + urlencode(query), timeout=8).get("data") or {}
+        for item in (data.get("items") or []) + (data.get("expired") or []):
+            if isinstance(item, dict) and str(item.get("id") or "").rsplit(":", 1)[-1] == want:
+                return item
+        return None
+
+    try:
+        query: dict[str, Any] = {"agent": agent, "expired": 1}
+        if os.environ.get("HUB_MACHINE"):
+            query["machine"] = os.environ["HUB_MACHINE"]
+        if listed({**query, "session": me}) is not None:
+            return                                   # this console's (or rerouted to it)
+        item = listed(query)
+    except (RuntimeError, ValueError):
+        return
+    other = _for_other_console(item or {}, me)
+    if other:
+        raise HubRefused(409, {"errors": [{"code": "other_console",
+            "msg": "%s is addressed to console %s, not this one; only that console retires it "
+                   "(it expires on its own at %s)" % (item_id, other[:8],
+                                                      (item or {}).get("expires_at") or "its expiry")}]})
 
 
 def _run_ack(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
@@ -2169,6 +2221,16 @@ def _run_hand(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
 def _run_let_go(operation: str):
     def run(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
+        pid = _problem_id(arguments.task_id) if operation == "unclaim" else ""
+        if pid:
+            # Letting go of a PROBLEM is the problem's release, routed by the id's own type like
+            # `claim` and `release`. Sent as a task let-go it was looked up as a task, refused
+            # 404 and dead-lettered, and the problem kept showing a holder that had let go.
+            payload = {"problem": pid, "agent": _agent(arguments), **_console_fields()}
+            if arguments.note:
+                payload["note"] = arguments.note
+            return _post(base, "problem/release", payload,
+                         extra_headers=_presence_headers(arguments))
         payload: dict[str, Any] = {"id": arguments.task_id, "agent": _agent(arguments)}
         token = arguments.lease_token or os.environ.get("HUB_LEASE_TOKEN")
         if token:
