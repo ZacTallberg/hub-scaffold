@@ -731,7 +731,9 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
                                                             (": " + err[:200]) if err else "")}
         print("CODE_UNDER_TEST %s HEAD %s contains %s" % (code_dir, head, arguments.require_commit))
 
-    apply_writes, revert_run = bool(arguments.apply), (arguments.revert or "").strip()
+    triggers_only = bool(getattr(arguments, "apply_triggers", False))
+    apply_writes = bool(arguments.apply) or triggers_only
+    revert_run = (arguments.revert or "").strip()
     exclude = [x for x in (arguments.except_ids or "").split(",") if x]
     only = [x for x in (arguments.only or "").split(",") if x]
     apply_limit = arguments.apply_limit
@@ -752,6 +754,7 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
             return {"_exit": 4, "refused": "CONSOLIDATE_REFUSED the trigger line was not fully "
                     "understood (%s); nothing run" % error}
         apply_writes = spec["mode"] == "apply"
+        triggers_only = bool(spec.get("triggers_only"))
         revert_run = spec["run"]
         exclude, only = spec["exclude"], spec["only"]
         if spec["apply_limit"] is not None:
@@ -759,7 +762,8 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
     # A VERIFIER NAMES ITS SUBJECT: what was parsed, and which code parsed it.
     _hrc, head, _e = _git(code_dir, "rev-parse", "--short", "HEAD")
     print("PARSED mode=%s apply_limit=%s exclude=%s only=%s | code %s at %s"
-          % ("revert" if revert_run else ("apply" if apply_writes else "dry-run"), apply_limit,
+          % ("revert" if revert_run else (("apply-triggers" if triggers_only else "apply")
+                                          if apply_writes else "dry-run"), apply_limit,
              exclude, only, cons.__file__, head or "?"))
 
     def write(eid, fields, version, idem):
@@ -813,7 +817,8 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
         try:
             t = cons.run(records, {}, conn, write=write, log_dir=log_dir, apply_writes=apply_writes,
                          judge_limit=arguments.judge_limit, trigger_limit=arguments.trigger_limit,
-                         apply_limit=apply_limit, exclude=exclude, pairs=pairs)
+                         apply_limit=apply_limit, exclude=exclude, pairs=pairs,
+                         triggers_only=triggers_only)
         finally:
             conn.close()
         t.update(lookups=lookups, lookups_blind=blind)
@@ -838,7 +843,7 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
         vectors = {eid: have[s] for eid, s in shas.items() if s in have}
         t = cons.run(records, vectors, conn, write=write, log_dir=log_dir, apply_writes=apply_writes,
                      judge_limit=arguments.judge_limit, trigger_limit=arguments.trigger_limit,
-                     apply_limit=apply_limit, exclude=exclude)
+                     apply_limit=apply_limit, exclude=exclude, triggers_only=triggers_only)
     finally:
         conn.close()
     return _consolidate_exit(t, state, base, arguments)
@@ -1067,13 +1072,16 @@ def register(commands) -> None:
                               "derive applies_when (dry run unless --apply; judge + embedder on THIS machine)")
     con.add_argument("--apply", action="store_true",
                      help="write the plan an EARLIER dry run judged (an apply judges nothing new)")
+    con.add_argument("--apply-triggers", action="store_true", dest="apply_triggers",
+                     help="write ONLY the non-empty applies_when an earlier dry run derived "
+                          "(folds and supersedes stay for a person); logged and revertable")
     con.add_argument("--apply-limit", type=int, default=60, dest="apply_limit", help="max hub writes this run")
     con.add_argument("--except", dest="except_ids", default="",
                      help="comma-separated ids a reviewer held back: every action touching one is dropped")
     con.add_argument("--revert", default="", help="restore every record run <RUN> wrote")
     con.add_argument("--only", default="", help="with --revert: restore only these comma-separated ids")
     con.add_argument("--from-trigger", default="", dest="from_trigger",
-                     help="read the LAST non-comment line of FILE: 'apply [limit=N] [except <ids>]', "
+                     help="read the LAST non-comment line of FILE: 'apply [triggers] [limit=N] [except <ids>]', "
                           "'revert <run> [only <ids>]', anything else a dry run; a line the parse "
                           "does not fully understand refuses (exit 4)")
     con.add_argument("--scheduled", action="store_true",

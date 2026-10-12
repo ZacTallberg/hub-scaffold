@@ -270,10 +270,15 @@ def delivered_key(row) -> str:
 
 FEED_MAX = 500
 FEED_TEXT_CHARS = 8000
+#: The SHAPE of a `put`. A mirror's cursor carries the shape it was built with (`P<n>`); a cursor
+#: from an older shape is re-paged from the start, once, so every record a mirror already holds
+#: is re-sent in the current shape -- without this, a field added to `put` (the first writer as
+#: `author`) would reach only records that happen to change again.
+FEED_PROJECTION = 2
 
 
 def parse_cursor(raw) -> dict:
-    cur = {"L": 0, "C": ""}
+    cur = {"L": 0, "C": "", "P": 1}
     raw = str(raw or "").strip()
     if raw.isdigit():
         cur["L"] = int(raw)
@@ -286,11 +291,40 @@ def parse_cursor(raw) -> dict:
             cur["L"] = int(val)
         elif tag == "C":
             cur["C"] = re.sub(r"[^0-9a-f]", "", val)[:16]
+        elif tag == "P" and val.isdigit():
+            cur["P"] = int(val)
     return cur
 
 
 def cursor_str(cur) -> str:
-    return "L%d.C%s" % (int(cur.get("L") or 0), cur.get("C") or "-")
+    return "L%d.C%s.P%d" % (int(cur.get("L") or 0), cur.get("C") or "-",
+                            int(cur.get("P") or FEED_PROJECTION))
+
+
+def current_shape(cur) -> dict:
+    """The cursor to serve from: one built with an older ``put`` shape restarts the ledger part
+    at 0 (puts overwrite, so a re-page is idempotent for the mirror) and is stamped current."""
+    cur = dict(cur)
+    if int(cur.get("P") or 1) < FEED_PROJECTION:
+        cur["L"] = 0
+    cur["P"] = FEED_PROJECTION
+    return cur
+
+
+def trigger_coverage(state) -> dict:
+    """How many LIVE lessons there are and how many carry an ``applies_when``: a rule with no
+    trigger can only ever be delivered by relevance, never at the moment it applies."""
+    superseded = superseded_ids(state)
+    lessons = with_triggers = 0
+    for ent in (state.get("entities") or {}).values():
+        if not isinstance(ent, dict) or knowledge_kind(ent) != "lesson" or is_dead(ent, superseded):
+            continue
+        lessons += 1
+        when = ent.get("applies_when")
+        if isinstance(when, dict) and any(v for k, v in when.items()
+                                          if k not in ("from_sha", "derived_by", "derived_at")):
+            with_triggers += 1
+    return {"lessons": lessons, "with_triggers": with_triggers}
 
 
 def _sha(*parts) -> str:
@@ -321,7 +355,12 @@ def put_op(ent, kind) -> dict:
             "status": ent.get("status") or "", "tier": ent.get("tier") or "normal",
             "tags": list(ent.get("tags") or [])[:24],
             "written_at": prov.get("created_at") or "", "updated_at": prov.get("updated_at") or "",
-            "author": prov.get("agent") or "", "verified_as_of": ent.get("verified_as_of") or "",
+            # The AUTHOR is who wrote the record first. The last writer is often a maintenance
+            # pass (a re-check, a consolidation, an attestation) and naming it as the author
+            # credited the machinery with every rule it touched.
+            "author": prov.get("created_by") or prov.get("agent") or "",
+            "last_writer": prov.get("agent") or "",
+            "verified_as_of": ent.get("verified_as_of") or "",
             "verify": _redact(ent.get("verify"))[:400], "version": ent.get("version") or 0,
             "seq": int(prov.get("seq") or 0), "kind_rank": KIND_RANK.get(kind, 9),
             "text_sha": _sha(title, rule, why),

@@ -709,7 +709,9 @@ def knowledge_since(request):
     caller gets an empty page and, with its ETag sent back (If-None-Match, X-Hub-ETag or
     ?etag=), a 304: the same three carriers every conditional route reads, because a proxy on
     the path can drop If-None-Match and then a caught-up mirror is re-sent a full 200 forever."""
-    cur = knowledge.parse_cursor(request.GET.get("cursor"))
+    asked = knowledge.parse_cursor(request.GET.get("cursor"))
+    # A cursor built with an older `put` shape re-pages the ledger once (knowledge.current_shape).
+    cur = knowledge.current_shape(asked)
     try:
         limit = max(1, min(int(request.GET.get("limit") or knowledge.FEED_MAX), knowledge.FEED_MAX))
     except ValueError:
@@ -717,7 +719,7 @@ def knowledge_since(request):
     state, key = _state_and_key()
     head_seq = key[1]
     cat_sha, cat_items = _catalog_sha()
-    tag = '"k-%s"' % knowledge.cursor_str(cur)
+    tag = '"k-%s"' % knowledge.cursor_str(asked)
     # A narrowed reader is sent no revoke for a record it could never see (knowledge.ledger_ops).
     from . import veil as _veil
     reader = _veil.veil_for(request)

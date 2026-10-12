@@ -171,6 +171,60 @@ class LedgerBusyMiddleware:
         except Exception:                                    # noqa: BLE001
             pass                    # the refusal is served whether or not the row can be written
 
+class InFlightMiddleware:
+    """OUTERMOST: how many requests this process serves at once, and when each ENTERED the
+    Django stack (hub_core.write_timing). A write's Server-Timing then carries ``pre_view`` --
+    its time in middleware before the view -- and /hub/perf.json ``process_pressure`` the
+    concurrency at arrival, the routes holding threads right now and the interpreter's wake-up
+    lag: together they say where a write's wall time goes when its handler is fast (a server
+    whose every thread is held by a slow read queues every write behind it). Every path is
+    counted, not just /hub ones -- a host app's slow page holds a thread the hub waits for too.
+    Dual-capable; fail-soft: counting never breaks a request."""
+
+    sync_capable = True
+    async_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.is_async = iscoroutinefunction(get_response)
+        if self.is_async:
+            markcoroutinefunction(self)
+
+    def _enter(self, request) -> bool:
+        from hub_core import write_timing
+        try:
+            request._hub_entered, request._hub_in_flight = write_timing.enter(request.path_info)
+            return True
+        except Exception:                                    # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _leave():
+        from hub_core import write_timing
+        try:
+            write_timing.leave()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def __call__(self, request):
+        if self.is_async:
+            return self.__acall__(request)
+        if not self._enter(request):
+            return self.get_response(request)
+        try:
+            return self.get_response(request)
+        finally:
+            self._leave()
+
+    async def __acall__(self, request):
+        if not self._enter(request):
+            return await self.get_response(request)
+        try:
+            return await self.get_response(request)
+        finally:
+            self._leave()
+
+
 class RouteTimingMiddleware:
     """How long each /hub route takes, per process, so a slow route is a NUMBER on
     /hub/perf.json instead of a "hub unreachable" banner on every client.

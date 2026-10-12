@@ -215,7 +215,9 @@ def reconcile(progress=None, budget_s: float = RECONCILE_BUDGET_S) -> dict:
     newest = task_completion.newest_deploy(deploys)
     out = {"deploy": (newest or {}).get("id"), "sha": str((newest or {}).get("sha") or "")[:12]}
     if newest:
-        out["replay"] = hub_write.close_deployed_tasks(newest["id"], str(newest["sha"]))
+        # Serialized with every deploy record's own close (hub_write.run_deploy_close).
+        with hub_write._DEPLOY_CLOSE_SERIAL:
+            out["replay"] = hub_write.close_deployed_tasks(newest["id"], str(newest["sha"]))
     if progress is not None:
         progress({"step": "replayed newest deploy", "elapsed_s": int(time.time() - t0)})
     closed, refused = [], {}

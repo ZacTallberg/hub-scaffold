@@ -19,6 +19,8 @@ from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, textguard, validate
 from hub_core import errorlog as _errorlog
+from hub_core import inbox as inbox_core
+from hub_core import write_timing
 from hub_core.canonical import content_hash
 from hub_core.process_lock import LockBusy, ProcessFileLock
 from hub_core.store import ConflictError, StoreBusy
@@ -120,9 +122,33 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
+        # EVERY AUTHENTICATED CALL IS SPLIT INTO TIMED PHASES (hub_core.write_timing): served on
+        # /hub/perf.json `write_phases` and as this response's Server-Timing header, so a caller
+        # can subtract the server's own time from its wall clock.
+        write_timing.begin(request.path_info or "")
+        entered = getattr(request, "_hub_entered", None)
+        if entered is not None:
+            # Time in the middleware stack (and the server's queue as the stack saw it) before
+            # this view ran, and how many requests the process was serving when it arrived.
+            write_timing.add("pre_view", (time.perf_counter() - entered) * 1000.0)
+            write_timing.add("in_flight_at_entry", float(getattr(request, "_hub_in_flight", 0)))
+        resp = None
+        try:
+            resp = _w(request, *a, **k)
+            return resp
+        finally:
+            header = write_timing.end(getattr(resp, "status_code", 0))
+            try:
+                if header and resp is not None:
+                    resp["Server-Timing"] = header
+            except Exception:                                # noqa: BLE001 - timing never breaks a write
+                pass
+
+    def _w(request, *a, **k):
         if request.method not in methods:
             return HttpResponseNotAllowed(list(methods))
-        auth, problem = _authenticate(request)
+        with write_timing.phase("auth"):
+            auth, problem = _authenticate(request)
         if not auth:
             _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
@@ -137,7 +163,8 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
             return JsonResponse({"errors": [{"code": "insufficient_scope",
                                               "required": scopes[0] if len(scopes) == 1 else list(scopes),
                                               "subject": auth.subject}]}, status=403)
-        b = {} if request.method == "GET" else _body(request)
+        with write_timing.phase("body"):
+            b = {} if request.method == "GET" else _body(request)
         if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
         # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
@@ -145,7 +172,8 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
         # never be removed without destroying the tamper-evidence — and the highest-volume
         # risky behaviour on an agent board is pasting failing command output into a question
         # or note. Refuse at the door, in milliseconds, with instructions.
-        shape = secretscan.secret_problem(b)
+        with write_timing.phase("secret_scan"):
+            shape = secretscan.secret_problem(b)
         if shape:
             return JsonResponse({"errors": [{"code": "secret_shaped_payload",
                 "msg": f"refused: the payload looks like it contains {shape}. The hub ledger "
@@ -195,7 +223,8 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
         marker = _AUTH.set(auth)
         req_marker = _REQUEST.set(request)
         try:
-            response = fn(request, b, *a, **k)
+            with write_timing.phase("handler"):
+                response = fn(request, b, *a, **k)
         except ids.InvalidId as exc:
             # UNMINTABLE ID, answered once for every writer. Each writer composes its entity id
             # from caller-supplied input (a raw `local`, or a slug of a name), and make_id
@@ -367,7 +396,8 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     ``replayed: true`` — a retried create is not a new record."""
     # The entity this write is about, from its own aggregate's events -- never a fold of the
     # whole ledger (hub_app.entity_from_store).
-    existing = hub_app.entity_from_store(s, eid)
+    with write_timing.phase("append.entity_read"):
+        existing = hub_app.entity_from_store(s, eid)
     # OCC: updating an existing entity REQUIRES expected_version (else concurrent writes lose).
     # None is allowed only on first-create. (store.py also skips its head check on None.)
     if existing and expected_version is None:
@@ -376,16 +406,19 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
             "current": existing.get("version")}]}, 428)
     merged = {**existing, **payload, "id": eid, "type": type_}
     merged["version"] = (existing.get("version", 0) + 1) if existing else 1
-    errs = validate(merged, type_, hub_app.registry())
+    with write_timing.phase("append.validate"):
+        errs = validate(merged, type_, hub_app.registry())
     if errs:
         return ({"errors": [{"code": "schema", "msg": e} for e in errs]}, 422)
     try:
         before = s.latest_cursor().get("seq", 0)
-        ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(),
-                      idem_key=idem if idem_exact else _request_scoped_idem(idem, payload),
-                      idem_scope=idem_scope if idem else None, allocate=allocate,
-                      **_event_identity(agent))
+        with write_timing.phase("append.store"):
+            ev = s.append(aggregate=eid, type=etype, payload=payload,
+                          expected_version=expected_version, git_sha=hub_app._git_head(),
+                          idem_key=idem if idem_exact else _request_scoped_idem(idem, payload),
+                          idem_scope=idem_scope if idem else None, allocate=allocate,
+                          **_event_identity(agent))
+        write_timing.add_all("append.store.", getattr(s, "last_append_ms", None))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
     except StoreBusy as busy:
@@ -416,7 +449,9 @@ def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_s
     ``idem_exact`` keeps the key as given instead of salting it with the payload's hash: for a
     write whose key already names the FACT (one refusal per task and reason) while the payload
     carries a timestamp, salting minted a new key on every pass and nothing ever deduplicated."""
-    s = hub_app.store()
+    with write_timing.phase("append.open"):
+        s = hub_app.store()
+    write_timing.add_all("append.open.", getattr(s, "open_ms", None))
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
                                   agent=agent, idem=idem, etype=etype, idem_scope=idem_scope,
@@ -1088,17 +1123,60 @@ def deploy(request, b):
                            agent=b.get("agent", "agent"), idem=b.get("idem_key"),
                            etype="deploy.created")
     if status == 200:
-        # THE DEPLOY CLOSES THE LOOP (hub_core.task_completion). Fail-soft: the release record
-        # is already durable, and a task that could not be annotated must never 500 it.
+        # THE DEPLOY CLOSES THE LOOP (hub_core.task_completion) -- AFTER the record is durable,
+        # never as a condition of acknowledging it. The close walks every open task (and may ask
+        # a repository about ancestry), and run inline it once cost a deploy job its record: the
+        # job's HTTP client timed out while the hub was still closing, so the job reported the
+        # record failed and the close it would have driven was lost with it. The close runs on
+        # its own thread; the record waits at most DEPLOY_CLOSE_INLINE_S for it and otherwise
+        # answers `queued`.
+        outcome = run_deploy_close(eid, sha, wait_s=DEPLOY_CLOSE_INLINE_S)
+        if outcome.get("queued"):
+            resp = dict(resp, tasks={"queued": True})
+        elif any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
+            resp = dict(resp, tasks=outcome)
+    return JsonResponse(resp, status=status)
+
+
+#: How long a deploy record's answer waits for its own task close before answering `queued`.
+#: A deploy job posts one record per release and a hub that answers slowly is deploy time the
+#: whole job spends waiting; the close finishes in the background either way.
+DEPLOY_CLOSE_INLINE_S = 3.0
+#: Closes run ONE AT A TIME. Several records landing together (one per app of a multi-app
+#: deploy) each closing concurrently raced each other on the same task's version: one close
+#: was refused on a version conflict that another then closed a moment later, and the refusal
+#: was written onto the task as if the close had failed.
+_DEPLOY_CLOSE_SERIAL = __import__("threading").Lock()
+
+
+def run_deploy_close(deploy_id, sha, *, wait_s=DEPLOY_CLOSE_INLINE_S) -> dict:
+    """Run close_deployed_tasks(deploy_id, sha) on its own daemon thread, serialized with every
+    other deploy close, and wait at most ``wait_s`` for it. Returns its outcome, or
+    ``{"queued": True}`` when it is still running (it finishes and records its own failure)."""
+    import threading
+    box, done = {}, threading.Event()
+
+    def _run():
+        started = time.monotonic()
         try:
-            outcome = close_deployed_tasks(eid, sha)
-            if any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
-                resp = dict(resp, tasks=outcome)
-        except Exception as exc:                             # noqa: BLE001
+            with _DEPLOY_CLOSE_SERIAL:
+                box["outcome"] = close_deployed_tasks(deploy_id, sha)
+        except Exception as exc:                             # noqa: BLE001 - recorded, never raised
             hub_app.record_error("hub.deploy-close", "deploy-driven task closure failed: %s"
                                  % type(exc).__name__, severity="error",
-                                 context={"component": "hub-write", "deploy": eid})
-    return JsonResponse(resp, status=status)
+                                 context={"component": "hub-write", "deploy": deploy_id})
+            box["outcome"] = {}
+        finally:
+            done.set()
+            logging.getLogger("hub.deploy_close").info(
+                "deploy close %s finished in %.1fs: %s", deploy_id, time.monotonic() - started,
+                {k: len(v) if isinstance(v, list) else v
+                 for k, v in (box.get("outcome") or {}).items()})
+
+    threading.Thread(target=_run, name="hub-deploy-close", daemon=True).start()
+    if wait_s and done.wait(timeout=wait_s):
+        return box.get("outcome") or {}
+    return {"queued": True}
 
 
 DEPLOY_ACTOR = "hub"
@@ -1274,8 +1352,15 @@ def claim(request, b):
     # Serialize lease acquisition and the projected status transition as one claim flow. The
     # underlying helpers use this same re-entrant process/file lock, so another server process
     # cannot observe a newly granted lease and still race a second todo->in_progress transition.
+    # Only what the lock GUARDS runs under it: the knowledge lookup a start carries (a rank of
+    # the whole corpus, possibly an embedding call) runs after the release -- held inside, it
+    # made every other claim and every lease read wait on a search that protects nothing here.
+    know_subject = ""
+    lock_t0 = time.perf_counter()
     with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
-        state = hub_app.current_state()
+        write_timing.add("claim.lock_wait", (time.perf_counter() - lock_t0) * 1000.0)
+        with write_timing.phase("claim.state"):
+            state = hub_app.current_state()
         ent = state.get("entities", {}).get(eid)
         if not ent or ent.get("type") != "task":
             return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]}, status=404)
@@ -1329,16 +1414,20 @@ def claim(request, b):
                     error.update({"code": "taken_over", "msg": lost["msg"],
                                   "held_by": lost["held_by"], "taken_at": lost["taken_at"]})
             return JsonResponse({"errors": [error]}, status=409)
-        res = hub_app.claim(eid, agent, ttl_s=ttl,
-                            auth_subject=request.hub_auth.subject,
-                            credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind,
-                            session=_claim_session(request, b),
-                            machine=str(request.headers.get("X-Hub-Machine") or ""))
+        with write_timing.phase("claim.lease"):
+            res = hub_app.claim(eid, agent, ttl_s=ttl,
+                                auth_subject=request.hub_auth.subject,
+                                credential_id=request.hub_auth.credential_id,
+                                actor_kind=request.hub_auth.actor_kind,
+                                session=_claim_session(request, b),
+                                machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if res.get("took_over") and res.get("took_over_from"):
-            _notify_taken_over(eid, ent, agent, res)
+            # `took_over` is true ONLY on the call that performed the takeover; the persisted
+            # `took_over_from` rides every later renewal and must never re-fire the notice.
+            _notify_taken_over(eid, ent, agent, res,
+                               taker_session=_claim_session(request, b))
         if status != "in_progress":
             transition, transition_status = _append(
                 "task", eid, {"type": "task", "status": "in_progress"},
@@ -1361,60 +1450,98 @@ def claim(request, b):
                     hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=transition_status)
             res["version"] = transition["data"]["version"]
-            # A task START carries what the board already knows about THIS task (its title
-            # and acceptance as the query, above the relevance cut-off; nothing when nothing
-            # clears it). Only on the start: a renewal re-claims too, and learns nothing new.
-            try:
-                from .knowledge_api import event_knowledge
-                known = event_knowledge("%s %s" % (ent.get("title") or "",
-                                                   str(ent.get("acceptance") or "")[:200]))
-                if known:
-                    res["knowledge"] = known
-            except Exception:                                # noqa: BLE001 - a hint, never a failure
-                pass
+            know_subject = "%s %s" % (ent.get("title") or "",
+                                      str(ent.get("acceptance") or "")[:200])
         else:
             res["version"] = ent.get("version")
+    if know_subject.strip():
+        # A task START carries what the board already knows about THIS task (its title and
+        # acceptance as the query, above the relevance cut-off; nothing when nothing clears it).
+        # Only on the start: a renewal re-claims too, and learns nothing new. AFTER the lock.
+        try:
+            from .knowledge_api import event_knowledge
+            with write_timing.phase("claim.knowledge"):
+                known = event_knowledge(know_subject)
+            if known:
+                res["knowledge"] = known
+        except Exception:                                    # noqa: BLE001 - a hint, never a failure
+            pass
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
-def _notify_taken_over(eid, ent, agent, lease) -> None:
+def _notify_taken_over(eid, ent, agent, lease, *, taker_session="") -> None:
     """Tell the console whose lease was just taken over that it lost the task.
 
     Its own step/finish is refused with reason ``taken_over``; this message reaches it even if
     it never tries either -- a console whose machine only dropped off the network may still be
-    editing, and must learn the task is someone else's before it pushes. Pinned to the previous
-    holder's machine and console. Never raises: a missed notice must not undo a granted claim."""
+    editing, and must learn the task is someone else's before it pushes. Never raises: a missed
+    notice must not undo a granted claim.
+
+    WHO IS TOLD depends on whose lease it was. On the instance this was lifted from, one
+    person's console received several "stop work, hand it over" notices in an hour for tasks it
+    never held, each offering a reply the hub refused as "that is you":
+
+    * ANOTHER AGENT's lease: that agent, pinned to its console while the console may still be
+      there, else to the agent on its machine (the inbox reroutes a dead console's mail).
+    * A SIBLING console of the SAME agent going stale: only that console is told, tagged
+      ``session-only`` so the inbox never readdresses it to the agent's other consoles (they
+      never held the task, and the work is already in the agent's own hands). An ENDED sibling
+      is told nothing.
+
+    The notice names the taker's console (``from_session``) so its reply is addressable."""
     try:
         prev = lease.get("took_over_from") or {}
         old = str(prev.get("agent") or "").strip().lower()
         if not old or not _valid_agent_name(old):
             return
+        same_agent = old == str(agent or "").strip().lower()
+        old_session = str(prev.get("session") or "").strip()
+        if same_agent and (prev.get("ended") or not _SESSION_ID.fullmatch(old_session)):
+            return
+        taker_session = str(taker_session or "").strip()
+        if not _SESSION_ID.fullmatch(taker_session):
+            taker_session = ""
         if prev.get("ended"):
-            why = "the console holding it (%s) had ended" % prev.get("session")
+            why = "the console holding it (%s) had ended" % (old_session or "?")
         elif prev.get("machine_silent"):
             why = "its machine (%s) had gone silent" % (prev.get("machine") or "?")
+        elif prev.get("console"):
+            why = ("its console (%s) was no longer live and had not renewed the lease for %d "
+                   "minutes" % (old_session or "?", int(int(prev.get("stale_s") or 0) // 60)))
         else:
-            why = "its console (%s) was %s" % (prev.get("session") or "?",
-                                               prev.get("state") or "gone")
+            why = "its console (%s) was %s" % (old_session or "?", prev.get("state") or "gone")
+        taker = (("your console %s" % taker_session[:8]) if same_agent and taker_session
+                 else agent)
+        reply = "python -m hub_core.client msg %s%s --note \"<branch, sha or patch>\"" % (
+            agent, (" --session " + taker_session) if taker_session else "")
         body = ("%s (%s) was taken over by %s%s because %s. Stop work on it: hand anything you "
-                "changed for it to %s (a message naming your branch, sha or patch) rather than "
-                "pushing -- they are working the same outcome now.\n\n%s"
-                % (eid, ent.get("title") or "", agent,
-                   (" on " + lease["machine"]) if lease.get("machine") else "", why, agent,
-                   board_link(eid)))
+                "changed for it to %s (%s) rather than pushing -- they are working the same "
+                "outcome now.\n\n%s"
+                % (eid, ent.get("title") or "", taker,
+                   (" on " + lease["machine"]) if lease.get("machine") else "", why, taker,
+                   reply, board_link(eid)))
         local = "m-takeover-%s" % hashlib.sha256(
             ("%s|%s|%s" % (eid, prev.get("claimed"), agent)).encode("utf-8")).hexdigest()[:12]
+        tags = ["message", "open"]
+        if same_agent:
+            tags.append(inbox_core.SESSION_ONLY_TAG)
         note = {"type": "note", "category": "context", "status": "standing",
-                "title": "%s was taken over by %s" % (eid, agent), "tags": ["message", "open"],
+                "title": "%s was taken over by %s" % (eid, taker), "tags": tags,
                 "to": old, "from_agent": str(agent), "body_md": body}
+        if taker_session:
+            note["from_session"] = taker_session
         if prev.get("machine"):
             note["machine"] = str(prev["machine"])[:60]
-        # Pinned to the old console only while it may still be there: a console the hub proved
-        # ended, gone or silent reads nothing, so the notice goes to the AGENT on its MACHINE
-        # (the inbox also reroutes a dead console's mail to a live one on the same machine).
-        gone = prev.get("ended") or prev.get("machine_silent") or prev.get("gone_s") is not None             or str(prev.get("state") or "") == "gone"
-        if not gone and prev.get("session") and _SESSION_ID.fullmatch(str(prev["session"])):
-            note["session"] = str(prev["session"])
+        if same_agent:
+            note["session"] = old_session
+        else:
+            # Pinned to the old console only while it may still be there: a console the hub
+            # proved ended, gone or silent reads nothing, so the notice goes to the AGENT on its
+            # MACHINE (the inbox also reroutes a dead console's mail to a live one there).
+            gone = (prev.get("ended") or prev.get("machine_silent")
+                    or prev.get("gone_s") is not None or str(prev.get("state") or "") == "gone")
+            if not gone and _SESSION_ID.fullmatch(old_session):
+                note["session"] = old_session
         _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), note,
                 expected_version=None, agent=agent, idem="takeover:" + local,
                 etype="note.created")
@@ -3729,15 +3856,8 @@ def _deploy_job_closes(body) -> str:
             return ""                    # a verified release record exists; it closes its tasks
         deploy_id = "ci-job:%s:%s" % (ev.get("project") or "project", sha[:12])
 
-        def _run():
-            try:
-                close_deployed_tasks(deploy_id, sha)
-            except Exception as exc:                         # noqa: BLE001
-                hub_app.record_error("hub.deploy-close", "deploy-job task closure failed: %s"
-                                     % type(exc).__name__, severity="error",
-                                     context={"component": "hub-write", "deploy": deploy_id})
-        import threading
-        threading.Thread(target=_run, name="hub-ci-deploy-close", daemon=True).start()
+        # Off the delivery's request and serialized with every other deploy close.
+        run_deploy_close(deploy_id, sha, wait_s=0)
         return deploy_id
     except Exception:                                        # noqa: BLE001 - never break intake
         return ""

@@ -19,6 +19,11 @@ urlpatterns = [
     path("audit.json", R(hub_api.audit_json)),
     path("graph.json", R(hub_api.graph_json)),
     path("next.json", R(hub_api.next_json)),
+    # The unattended dispatch wake: a hash of the responder-eligible todo tasks, cheap enough to
+    # ask every few seconds (above the catch-all, which would read it as an entity type).
+    path("task_wake.json", R(hub_api.task_wake_json), name="task-wake"),
+    # The cross-machine run ledger: every machine's ended unattended runs (hub_core.run_ledger).
+    path("run-ledger.json", R(run_api.run_ledger_json), name="run-ledger"),
     # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
     # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
     path("live/events", R(hub_api.live_events), name="live-events"),
@@ -93,12 +98,16 @@ urlpatterns = [
     path("components/", app_services.component_index, name="component-index"),
     path("components/props/<str:slug>.json", app_services.component_props,
          name="component-props"),
+    path("components/@<str:rev>/<str:name>/<str:filename>", app_services.component_file_pinned,
+         name="component-file-pinned"),
     path("components/<str:name>/<str:filename>", app_services.component_file,
          name="component-file"),
     path("app-feed.json", R(app_services.app_feed_json), name="app-feed"),
     # The Fixes panel of every app's banner: its errors and how their fixes are going
     # (hub_core/fix_tasks.py). Conditional on the same three ETag carriers as hub.json.
     path("app-fixes.json", R(app_services.app_fixes_json), name="app-fixes"),
+    # What CI says already shipped for one task (a default-branch commit whose subject names it).
+    path("task/<str:local>/shipped.json", R(hub_api.task_shipped_json), name="task-shipped"),
     path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
     path("<str:type>.json", R(hub_api.type_json)),
     path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
@@ -208,6 +217,7 @@ urlpatterns = [
     path("api/history", histories_api.upload, name="history-upload"),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
+    path("api/run-ledger", run_api.run_ledger_post),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP
     # client can discover the board, pull ready work, spec a stub, and finish with a receipt. It
     # never touches the ledger directly — every mutation goes through the /hub/api/* write seam
@@ -230,6 +240,7 @@ VISIBILITY = {
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "app-fixes.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
     "components/<str:name>/<str:filename>": "open",
+    "components/@<str:rev>/<str:name>/<str:filename>": "open",
     "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
     "related.json": "veiled", "triggers.json": "veiled", "guidance.json": "veiled",
     "knowledge/since": "veiled",
@@ -237,7 +248,8 @@ VISIBILITY = {
     # Candidates are unreviewed model output about internal systems: members only.
     "knowledge-candidates.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
-    "ci-status.json": "member",
+    "ci-status.json": "member", "task_wake.json": "member", "run-ledger.json": "member",
+    "task/<str:local>/shipped.json": "member",
     "deploy-reconcile.json": "member",
     # Who claimed, released and resolved what, and when: operator history, members only.
     "outcomes.json": "member",

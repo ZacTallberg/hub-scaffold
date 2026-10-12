@@ -53,6 +53,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # OUTERMOST: requests in flight at arrival and each one's time before its view, for the
+    # write phases on /hub/perf.json and every write's Server-Timing header.
+    "hub.middleware.InFlightMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",

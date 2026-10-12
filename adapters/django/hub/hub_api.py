@@ -6,6 +6,7 @@ projection the HTML and JSON API serve. Signals are wake-ups, never a second sou
 reconnect cursor reconciliation closes the only interval in which a client could miss one.
 """
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -24,7 +25,7 @@ from hub_core import (activity as activity_core, adherence, app_health,
                       failure_taxonomy, flow, liveness, inbox as inbox_core, offer, overlap,
                       plan as plan_rows, presence as _presence, problems as problems_core,
                       project, projections, task_health, task_rows, telemetry, upcast,
-                      updates, wip)
+                      updates, wip, write_timing)
 from hub_core import overlap as overlap_core
 from hub_core import record_state as _record_state
 from hub_core.canonical import content_hash
@@ -1376,6 +1377,11 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "messages": [e for e in state.get("by_type", {}).get("note", [])
                         if "message" in (e.get("tags") or []) and "open" in (e.get("tags") or [])],
            "hub_client": hub_client_version()}
+    try:
+        from hub_core import knowledge as _knowledge
+        ctx["knowledge"] = _knowledge.trigger_coverage(state)
+    except Exception as exc:                                 # noqa: BLE001 - one source, not the list
+        ctx["sources"]["knowledge"] = "unreadable: %s" % type(exc).__name__
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
                        ("retired", lambda: _presence.retired_rows(hub_app.HUB_DIR)),
                        ("credentials", lambda: agent_auth.CredentialRegistry(
@@ -1770,7 +1776,7 @@ def _wire_snapshot(snap):
 # Two rules keep it honest. A build is remembered only if its inputs did not move WHILE it ran --
 # otherwise the bytes describe a state that no longer matches the key. And any stamp that cannot
 # be read yields None, which means "build", never "assume unchanged".
-MEMO_REUSE_S = {"hub": 5.0, "next": 10.0}
+MEMO_REUSE_S = {"hub": 5.0, "next": 10.0, "task_wake": 2.0}
 _VIEW_MEMO: dict = {}
 _VIEW_MEMO_LOCK = threading.Lock()
 
@@ -1907,6 +1913,8 @@ def entity_json(request, type, local):
     if type not in _COLLECTION:
         raise Http404("unknown type")
     eid = f"{hub_app.PROJECT_KEY}:{type}:{local}"
+    if type == "task" and str(request.GET.get("raw") or "").strip().lower() in ("1", "true", "yes"):
+        return _task_raw(request, eid)
     state, _ = _snapshot()
     ent = state["entities"].get(eid)
     if not ent:
@@ -1935,6 +1943,34 @@ def entity_json(request, type, local):
             data["lineage"] = {"hops": [], "complete": False,
                                "error": "%s: %s" % (exc.__class__.__name__, str(exc)[:160])}
     return JsonResponse({"data": data})
+
+
+def _task_raw(request, eid):
+    """``task/<local>.json?raw=1`` -- the WRITER's read: the task folded from its own aggregate's
+    events (version, status, plan -- exactly what a write merges and checks) plus its ``holder``
+    from the lease file, without the board snapshot.
+
+    A worker reads a task before every checkpoint and around every claim, and the ordinary read
+    built (or waited for) the whole board snapshot to answer with one record: on a busy board
+    the snapshot is what a verb's latency was made of. The lease file is cheap and is kept: a
+    writer must be able to tell its own claim from somebody else's. Flags, readiness and the
+    annotated rows (responder, deployed, ci_problem) are the snapshot's, so they are absent
+    here, and ``raw: true`` says so. The fencing token never leaves the claims directory. An
+    older hub ignores the flag and answers the ordinary read, which carries every field used."""
+    ent = hub_app.entity(eid)
+    if not ent:
+        raise Http404("no entity %s" % eid)
+    from . import veil
+    if not veil.veil_for(request).visible(ent):
+        raise Http404("no entity %s" % eid)      # omission: exactly the unknown-entity answer
+    now = time.time()
+    lease = hub_app._read_lease(eid)
+    holder = None
+    if isinstance(lease, dict) and float(lease.get("expires") or 0) > now:
+        holder = {"agent": lease.get("agent"), "session": lease.get("session") or None,
+                  "machine": lease.get("machine") or None, "claimed": lease.get("claimed"),
+                  "expires_in_s": max(0, int(float(lease.get("expires") or 0) - now))}
+    return JsonResponse({"data": {**ent, "holder": holder, "raw": True}})
 
 
 def _annotated_tasks(state, tasks):
@@ -2190,31 +2226,136 @@ def live_events(request):
 
 
 def next_json(request):
-    """DISCOVER -- built once per input state and reused for at most MEMO_REUSE_S["next"].
+    """DISCOVER -- built ONCE per task generation and reused for at most NEXT_REUSE_S.
 
-    A supervisor or a fleet of worker beacons asks this same question every heartbeat, and each
-    ask replayed the whole ledger. A lease that EXPIRES moves no file, so the reuse cap is what
-    bounds how late a stale reclaim appears; a claim or release rewrites the claims directory
-    and invalidates the memo at once. A 429 (saturated) answer is never remembered."""
+    A supervisor or a fleet of worker beacons asks this same question every heartbeat. Keyed on
+    the ledger file, the memo almost never hit on a busy board (notes, CI rows and deploy records
+    move the ledger every few seconds while no task changes), and identical builds ran side by
+    side, each holding a server thread -- the queue every write then waited in. The key is now
+    what the answer depends on: every task's (id, version, status) and the lease directory
+    (``_next_inputs``), the same generation ``task_wake.json`` is computed from, so a wake and
+    the list it sends a watcher to can never disagree. A request arriving while an identical
+    build runs WAITS for it instead of starting another. A lease that EXPIRES moves no file, so
+    the reuse cap bounds how late a stale reclaim appears. A 429 answer is never remembered.
+
+    The lease and deploy-close sweeps are kicked on every ask (each throttled and single-flight
+    in its own thread, never on this request), so a memo hit does not starve them."""
     try:
         n = max(1, min(int(request.GET.get("n", "1")), 50))
     except ValueError:
         n = 1
+    _sweep_leases()        # an abandoned in-progress task is re-offered with its reason
     # WHO IS ASKING is part of the answer (work given to somebody else, machine affinity, the
     # unattended lane), so it is part of the memo key: one caller's filtered rail is never
     # served to another.
     who = offer.caller(request.GET, request.headers)
     lane = request.GET.get("unattended") in ("1", "true")
-    hit, key = _memo_hit("next", (n, who.get("agent"), who.get("machine"),
-                                  bool(who.get("unattended")), lane))
+    extra = (n, who.get("agent"), who.get("machine"), bool(who.get("unattended")), lane)
+    state = _folded_state()
+    return _next_memo(extra, _next_inputs(state), lambda: _next_json_build(n, who, lane, state))
+
+
+#: How long a next.json answer is reused while the TASKS and the LEASES are unchanged.
+NEXT_REUSE_S = 10.0
+_NEXT_MEMO: dict = {}          # extra -> (built_at, key, bytes)
+_NEXT_BUILDING: dict = {}      # extra -> (key, threading.Event) of the build in flight
+_NEXT_LOCK = threading.Lock()
+
+
+def _folded_state():
+    """The board's fold at the ledger head, through the incremental read model (``_projected``):
+    a replay of only what landed since the last fold, never the whole ledger per ask."""
+    st = hub_app.store()
+    try:
+        _events, state = _projected(st, st.latest_cursor())
+    finally:
+        st.close()
+    return state
+
+
+def _next_inputs(state):
+    """What a next.json answer depends on: every task's (id, version, status) -- the same
+    generation the task wake reads -- and the lease directory (names, mtimes, sizes). None when
+    either cannot be read, which means build, never assume unchanged."""
+    import os as _os
+    try:
+        seed = "|".join(sorted("%s:%s:%s" % (t.get("id"), t.get("version"), t.get("status"))
+                               for t in (state.get("by_type") or {}).get("task", [])))
+        claims = ()
+        if hub_app.CLAIMS.exists():
+            claims = tuple(sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size)
+                                  for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")))
+        return (hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20], claims)
+    except Exception:                                        # noqa: BLE001 - build, never assume
+        return None
+
+
+def _next_memo(extra, key, build):
+    """Serve next.json from the memo when its inputs are unchanged and it is younger than
+    NEXT_REUSE_S; otherwise build it ONCE. A request arriving while an identical build (same
+    caller, same inputs) runs waits for that build instead of starting another, so a burst of
+    beacons costs one build, not one each. A build stuck past 60 s never blocks a waiter."""
+    if key is None:
+        return build()
+    while True:
+        with _NEXT_LOCK:
+            hit = _NEXT_MEMO.get(extra)
+            if hit is not None and hit[1] == key and time.monotonic() - hit[0] < NEXT_REUSE_S:
+                resp = HttpResponse(hit[2], content_type="application/json")
+                resp["X-Hub-Memo"] = "hit"
+                return resp
+            running = _NEXT_BUILDING.get(extra)
+            if running is None or running[0] != key:
+                done = threading.Event()
+                _NEXT_BUILDING[extra] = (key, done)
+                break
+        if not running[1].wait(timeout=60):
+            return build()
+    try:
+        resp = build()
+        if getattr(resp, "status_code", 0) == 200 and _next_inputs(_folded_state()) == key:
+            with _NEXT_LOCK:
+                if len(_NEXT_MEMO) >= 64:
+                    _NEXT_MEMO.clear()
+                _NEXT_MEMO[extra] = (time.monotonic(), key, resp.content)
+        return resp
+    finally:
+        with _NEXT_LOCK:
+            if _NEXT_BUILDING.get(extra, (None, None))[1] is done:
+                _NEXT_BUILDING.pop(extra, None)
+        done.set()
+
+
+def task_wake_json(request):
+    """GET /hub/task_wake.json -- ``{task_wake}``: a 16-hex signature of the responder-eligible
+    TODO tasks ("" when none; hub_core.inbox.task_wake).
+
+    A supervisor that dispatches unattended responders asks this every few seconds and acts when
+    it moves. A long-poll can carry the same wake, but each held wait costs a server thread and
+    is capped per process, so with many watchers most waits degrade to an immediate answer and
+    the wake rides a slow poll anyway. This answer holds no thread: a few dozen bytes, built
+    from the incremental fold and reused for two seconds per ledger state."""
+    hit, key = _memo_hit("task_wake", 0)
     if hit is not None:
         return hit
-    resp = _next_json_build(n, who, lane)
+    resp = JsonResponse({"data": {"task_wake": inbox_core.task_wake(_folded_state())}})
     _memo_store(key, resp)
     return resp
 
 
-def _next_json_build(n, who, unattended_lane=False):
+def _next_json_build(n, who, unattended_lane=False, state=None):
+    """The timed build (hub_core.write_timing): its phases ride /hub/perf.json under
+    ``/hub/next.json [build]``."""
+    write_timing.begin("/hub/next.json [build]")
+    resp = None
+    try:
+        resp = _next_json_build_timed(n, who, unattended_lane, state)
+        return resp
+    finally:
+        write_timing.end(getattr(resp, "status_code", 0))
+
+
+def _next_json_build_timed(n, who, unattended_lane=False, state=None):
     """DISCOVER: ranked unblocked tasks without a live lease, including stale reclaims.
 
     A worker's entrypoint — pull the top task, claim it, and complete the real operation. A receipt
@@ -2222,17 +2363,14 @@ def _next_json_build(n, who, unattended_lane=False):
     sequences the fleet by readiness and priority; there is no dedicated leader. Non-ready todos
     are returned SEPARATELY with the reason, never silently withheld: a worker handed a stub
     stalls trying to write its own acceptance."""
-    # A CLI worker is a fresh process for every pull, so the snapshot memo is cold every time.
-    # DISCOVER needs only the folded task graph — building the audit, telemetry, cost and DAG
-    # blocks here would put the whole cockpit on the critical path of every claim.
-    _sweep_leases()        # an abandoned in-progress task is re-offered with its reason
-    s = hub_app.store()
-    try:
-        events = s.events()
-    finally:
-        s.close()
-    state = project.state(events)
-    live_leases = hub_app.leases()
+    # DISCOVER needs only the folded task graph -- building the audit, telemetry, cost and DAG
+    # blocks here would put the whole cockpit on the critical path of every claim -- and the
+    # fold comes from the incremental read model, never a replay of the whole ledger.
+    if state is None:
+        with write_timing.phase("state"):
+            state = _folded_state()
+    with write_timing.phase("leases"):
+        live_leases = hub_app.leases()
     wip_st = hub_app.wip_status(len(live_leases))
     if wip_st["saturated"]:
         # At saturation the rail answers 429 rather than handing out work the claim seam would
@@ -2248,7 +2386,13 @@ def _next_json_build(n, who, unattended_lane=False):
     # unattended run's escalation that is a person's. A withheld row is COUNTED by reason in
     # the metadata, never silently dropped -- a rail that hides work reads as an empty one.
     now_s = time.time()
-    for t in tasks:
+    if unattended_lane:
+        # The cheap lane filter FIRST: a responder's ask never classifies person-held work.
+        tasks_seen = [t for t in tasks if task_health.unattended_eligible(t)]
+    else:
+        tasks_seen = tasks
+    candidates_t0 = time.perf_counter()
+    for t in tasks_seen:
         cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]))
         if cls["available"]:
             why = offer.withheld(t, agent=who["agent"], machine=who["machine"],
@@ -2273,9 +2417,8 @@ def _next_json_build(n, who, unattended_lane=False):
         # re-offered here like any other; one a live run is on is not.
         running = task_health.live_run_subjects(state["by_type"].get("run", []))
         ready = [t for t in ready
-                 if task_health.is_unattended(t) and not task_health.is_decision(t)
-                 and str(t.get("priority") or "") in ("P0", "P1", "P2")
-                 and t["id"] not in running]
+                 if task_health.unattended_eligible(t) and t["id"] not in running]
+    write_timing.add("candidates", (time.perf_counter() - candidates_t0) * 1000.0)
 
     # BLOCKED-ON-DANGLING: an unmet dep referencing NO entity can never be satisfied by work
     # completing — it is a spec defect, not a wait. Without this rail such a task appears NOWHERE.
@@ -2291,7 +2434,8 @@ def _next_json_build(n, who, unattended_lane=False):
                       for t in tasks
                       if t.get("status") == "todo" and flags.get(t["id"], {}).get("snoozed_until")),
                      key=lambda t: (t.get("not_before") or "", t["id"]))
-    rows = [dict(t, available=True) for t in _annotated_tasks(state, ready[:n])]
+    with write_timing.phase("annotate"):
+        rows = [dict(t, available=True) for t in _annotated_tasks(state, ready[:n])]
     return JsonResponse({"data": rows, "needs_spec": needs_spec[:n], "snoozed": snoozed[:n],
                          "metadata": {"available": len(ready), "unblocked": len(ready),
                                       "ready": len(ready), "needs_spec": len(needs_spec),
@@ -2755,6 +2899,11 @@ def perf_json(request):
         "snapshot": {"last_ms": dict(_SNAP_TIMINGS["last"]),
                      "worst_ms": dict(_SNAP_TIMINGS["worst"]),
                      "builds": int(_SNAP_TIMINGS["count"])},
+        # Every authenticated call split into named phases (hub_core.write_timing) -- the same
+        # split each write's Server-Timing header carries -- and what happens BEFORE a view
+        # runs: in-flight requests at arrival, the routes holding threads now, interpreter lag.
+        "write_phases": write_timing.summary(),
+        "process_pressure": write_timing.process_pressure(),
         # Which process answered, in which role, how fresh the backgrounder's clock is, and
         # what the startup prewarm cost -- a slow response is traced to a process, not "the hub".
         "process": dict(roles.process_info(hub_app.HUB_DIR), pid=_os.getpid()),
@@ -2776,6 +2925,28 @@ def tiers_json(request):
         "facets": [{"id": f["id"], "label": f["label"], "tiers": f["tiers"]}
                    for f in doc.get("facets") or []],
         **({"broken": doc["broken"]} if doc.get("broken") else {})}})
+
+
+def _audit_subjects(state) -> tuple:
+    """(an app slug, a project slug) that exist on this board, for rendering a route that needs
+    a subject: the first configured app (HUB_APPS), else an app an error row names; the first
+    project a task names. ("", "") when the board has none."""
+    app = ""
+    for row in hub_app._dj_setting("HUB_APPS", None) or []:
+        slug = str((row or {}).get("slug") or "").strip().lower() if isinstance(row, dict) else ""
+        if slug:
+            app = slug
+            break
+    if not app:
+        try:
+            rows, _meta = errorlog.read(hub_app.HUB_DIR)
+            app = next((str((r.get("context") or {}).get("app") or "").strip().lower()
+                        for r in rows if (r.get("context") or {}).get("app")), "")
+        except Exception:                                    # noqa: BLE001
+            app = ""
+    project = next((str(t.get("project") or "").strip().lower()
+                    for t in (state.get("by_type") or {}).get("task", []) if t.get("project")), "")
+    return app, project
 
 
 @require_GET
@@ -2807,6 +2978,16 @@ def veil_audit_json(request):
     sample_agent = next(iter(veil.core.read_tiers(hub_app.HUB_DIR)), "contributor")
     samples = {"<str:type>.json": ("tasks.json", {"type": "task"}),
                "<str:type>/<str:local>.json": None}
+    # A ROUTE THAT NEEDS A SUBJECT IS RENDERED WITH A REAL ONE. Called bare, an app's slice
+    # answers "name the app" -- the audit then scanned a refusal, reported the route checked,
+    # and never saw what that route serves to every tier (it is the read every app's banner
+    # makes for everybody). The subject is a real app and a real project on this board.
+    subject_app, subject_project = _audit_subjects(state)
+    subject_query = {"app-feed.json": {"app": subject_app}, "app-fixes.json": {"app": subject_app},
+                     "doctor.json": {"app": subject_app}}
+    if subject_project:
+        samples["project/<str:slug>/tasks.json"] = ("project/%s/tasks.json" % subject_project,
+                                                    {"slug": subject_project})
     checked, hits, skipped = [], [], []
     for route, entry in patterns:
         callback = entry.callback
@@ -2820,9 +3001,17 @@ def veil_audit_json(request):
         if tail in samples and sample is None:
             skipped.append(tail)
             continue
-        path = "/" + route.replace("<str:type>.json", sample[0]) if sample else "/" + route
+        if sample:
+            path = "/" + route.replace(tail, sample[0]) if tail else "/" + route
+        else:
+            path = "/" + route
         kwargs = sample[1] if sample else {}
         query = {"agent": sample_agent, "wait": "0", "q": "the"}
+        if tail in subject_query:
+            if not all(subject_query[tail].values()):
+                skipped.append("%s (no real subject on this board to render it with)" % tail)
+                continue
+            query.update(subject_query[tail])
         request = factory.get(path, query)
         request.hub_tier = "contributor"
         try:
@@ -2830,10 +3019,17 @@ def veil_audit_json(request):
             if getattr(response, "streaming", False):
                 skipped.append(tail)
                 continue
+            if int(getattr(response, "status_code", 200)) >= 400:
+                # A refusal is not the route's payload: never reported as "checked".
+                skipped.append("%s (answered %s)" % (tail, response.status_code))
+                continue
             body = response.content
             if str(response.get("Content-Type", "")).startswith("application/json"):
                 body = veil.scrub_response(veil_obj, response).content
             text = body.decode("utf-8", "replace")
+        except Http404:
+            skipped.append("%s (answered 404)" % tail)
+            continue
         except Exception as exc:                             # noqa: BLE001
             skipped.append("%s (%s)" % (tail, type(exc).__name__))
             continue
@@ -2927,6 +3123,52 @@ def ci_status_json(request):
                                           "msg": "name a commit: 7 to 40 hex characters"}]},
                             status=400)
     return JsonResponse({"data": _ci.sha_status(hub_app.HUB_DIR, sha)})
+
+
+@require_GET
+def task_shipped_json(request, local):
+    """GET /hub/task/<local>/shipped.json[?since=<epoch>] -- what CI says already shipped for this
+    task, so a launcher never spends a session on work a person already pushed:
+
+      commit   the newest default-branch pipeline whose commit SUBJECT names the task id,
+               delivered after ``since`` (default: the task's filing) -- {sha, title, project,
+               pipeline, status, active, at} -- or null (hub_core.ci_events.shipped_for);
+      pushed   the task's own recorded push (its ``pushed`` checkpoint) with what CI last said
+               about THAT commit (ci-status), or null;
+      checked  false when no CI delivery store could be read: an unknown is never a "no".
+
+    From the retained webhook deliveries, so it needs no CI-provider credential anywhere."""
+    from hub_core import ci_events as _ci
+    eid = f"{hub_app.PROJECT_KEY}:task:{local}"
+    ent = hub_app.entity(eid)
+    if not ent:
+        raise Http404("no entity %s" % eid)
+    from . import veil
+    if not veil.veil_for(request).visible(ent):
+        raise Http404("no entity %s" % eid)
+    try:
+        since = float(request.GET.get("since") or 0)
+    except ValueError:
+        since = 0.0
+    if not since:
+        try:
+            from datetime import datetime
+            since = datetime.fromisoformat(str((ent.get("provenance") or {}).get("created_at")
+                                               or "").replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            since = 0.0
+    out = _ci.shipped_for(hub_app.HUB_DIR, eid, since)
+    push = task_rows.pushed(ent)
+    if push and push.get("sha"):
+        seen = _ci.sha_status(hub_app.HUB_DIR, push["sha"])
+        # A recorded sha CI has never reported on is found=false -- not a failed check.
+        out["pushed"] = {"sha": push["sha"], "at": push.get("at"), "found": seen.get("found"),
+                         "status": seen.get("status"), "active": seen.get("active"),
+                         "pipeline": seen.get("pipeline")}
+    else:
+        out["pushed"] = None
+    out["since"] = since or None
+    return JsonResponse({"data": out})
 
 
 @require_GET

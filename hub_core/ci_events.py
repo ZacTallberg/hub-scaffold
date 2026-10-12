@@ -475,6 +475,91 @@ def sha_status(hub_dir, sha: str) -> dict:
     return out
 
 
+#: Refs a "what already shipped" answer reads as the default branch when the delivery does
+#: not say which branch is the default (a GitLab body names it; the generic shape may).
+DEFAULT_REFS = ("main", "master")
+
+
+def _subject(body: dict) -> str:
+    """The commit's SUBJECT line, from whichever shape the delivery has: GitLab's ``commit``
+    (title or message), or the generic ``title``/``message``."""
+    if not isinstance(body, dict):
+        return ""
+    commit = body.get("commit") if isinstance(body.get("commit"), dict) else {}
+    text = commit.get("title") or commit.get("message") or body.get("title") or body.get("message")
+    return str(text or "").strip().splitlines()[0][:300] if text else ""
+
+
+def _default_ref(body: dict) -> str:
+    if not isinstance(body, dict):
+        return ""
+    project = body.get("project") if isinstance(body.get("project"), dict) else {}
+    return slug(project.get("default_branch") or body.get("default_branch") or "", 40)
+
+
+def shipped_for(hub_dir, task_id: str, since: float = 0.0) -> dict:
+    """What CI says already SHIPPED for one task, from the retained deliveries.
+
+    ``{"checked", "why", "commit"}``: ``commit`` is the newest pipeline delivery on a default
+    branch whose commit SUBJECT names the task id (as a whole token), delivered at or after
+    ``since`` -- ``{sha, title, project, pipeline, status, active, at}`` -- or None. Only the
+    subject line counts: a commit that cites the task in its BODY as context (the probe that
+    found a bug, a related task) did not do the task's work, and attributing it would mark
+    unshipped work shipped. ``checked`` is False when no delivery store could be read at all
+    (``why`` says so): an unknown is never a "no".
+
+    The reader this exists for is an unattended launcher about to spend a session on a task: a
+    person may already have pushed the change by hand, and its pipeline may be running. Asked
+    here, it needs no CI-provider credential on the launcher's machine."""
+    out = {"checked": False, "why": "", "commit": None}
+    want = str(task_id or "").strip().lower()
+    if not want:
+        out["why"] = "no task id"
+        return out
+    token = re.compile(r"(?<![\w:.-])" + re.escape(want) + r"(?![\w:-]|\.\w)", re.I)
+    cur, prev = _log_paths(hub_dir)
+    readable, newest = False, None
+    for path in (cur, prev):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        readable = True
+        for line in lines:
+            if want not in line.lower():
+                continue                       # cheap pre-filter before parsing
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("kind") != "pipeline":
+                continue
+            if float(rec.get("at") or 0) < float(since or 0):
+                continue
+            body = rec.get("body") if isinstance(rec.get("body"), dict) else {}
+            ref = str(rec.get("ref") or "")
+            default = _default_ref(body)
+            if (default and ref != default) or (not default and ref not in DEFAULT_REFS):
+                continue
+            subject = _subject(body)
+            if not subject or not token.search(subject):
+                continue
+            if newest is None or float(rec.get("at") or 0) >= float(newest[0].get("at") or 0):
+                newest = (rec, subject)
+    if not readable:
+        out["why"] = "no CI deliveries are kept on this hub (nothing has been received)"
+        return out
+    out["checked"] = True
+    if newest is not None:
+        rec, subject = newest
+        status = str(rec.get("status") or "")
+        out["commit"] = {"sha": str(rec.get("sha") or ""), "title": subject,
+                         "project": str(rec.get("project") or ""),
+                         "pipeline": str(rec.get("pipeline") or ""), "status": status,
+                         "active": status in ACTIVE, "at": rec.get("at")}
+    return out
+
+
 def retained(hub_dir, *, pipeline="", job="", project="", limit=20) -> tuple[list, dict]:
     """(deliveries newest first, a description of the store). The store names its own path,
     size and writability, so an empty answer says WHY it is empty."""

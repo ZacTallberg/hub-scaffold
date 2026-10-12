@@ -6,6 +6,10 @@
     respond <item-id>             one bounded session for exactly this task, question or
                                   needs-attention item, then gone
     publish                       one publish pass: push at most one waiting hand-off, then exit
+    watch [--max N] [--interval S] [--minutes M]
+                                  stay up and run `scan --launch` the moment the board's task
+                                  wake moves (GET /hub/task_wake.json every HUB_WAKE_POLL_S,
+                                  default 3 s), and at least every --interval seconds
     sweep                         hand back leases left by runs whose launcher died
     status                        lanes, pauses, the auth disarm, attempt records and recent runs
     lanes                         the lane slots and how the long lane was sized
@@ -269,6 +273,14 @@ def _prompt(item: dict, bound_s: int, tree: dict) -> str:
                      ("plan so far:\n" + item["plan_text"] + "\n") if item.get("plan_text") else "",
                      "RESUMING: a run already worked this task and left it in progress; start "
                      "from what its plan records.\n" if item.get("resume") else ""))
+        landed = item.get("shipped") or {}
+        if landed.get("sha"):
+            block += ("ALREADY ON THE DEFAULT BRANCH: commit %s (%s) names this task and its "
+                      "pipeline is %s. Do not build it again: verify that commit against the "
+                      "acceptance on the deployed system, and finish with it as evidence -- or, "
+                      "if it falls short, build only what is missing.\n"
+                      % (landed["sha"][:12], landed.get("title") or "",
+                         landed.get("status") or "unknown"))
     elif item["kind"] == "attention":
         block = ("\nTHE ITEM (needs attention):\nid: %s\n%s\n" % (item["id"], item.get("body") or "")
                  + ATTENTION_BRIEF.replace("{ATTENTION_KIND}", item.get("attention_kind") or "?"))
@@ -407,6 +419,14 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
         if item.get("pipeline_wait"):
             # A hand-back whose pushed commit still has a pipeline running: nothing new to read.
             return {"item": item_id, "outcome": "waiting", "why": item["pipeline_wait"]}
+        landed = item.get("shipped") or {}
+        if landed.get("active"):
+            # A commit naming this task is on the default branch and its pipeline is still
+            # running: a session now would build the same change a second time.
+            return {"item": item_id, "outcome": "waiting",
+                    "why": "%s (%s) is on %s with its pipeline %s" % (
+                        str(landed.get("sha") or "")[:12], landed.get("title") or "",
+                        landed.get("project") or "the default branch", landed.get("status"))}
 
     # CLAIM FIRST, before a run is queued, so a machine that loses the race writes no ledger row
     # and spends nothing. A task claims too (beside its fenced lease): the claim is on the item's
@@ -647,6 +667,8 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
                                pruned=pruned, fault=verdict["kind"] if lane_fault else "",
                                superseded=superseded or None, idle=bool(idle_task),
                                push=publisher.push_state())
+        # The run is measurable from every machine, not only this one (hub_core.run_ledger).
+        run = board.record_run(run_id, ledger_post="sent" if board.post_run(run) else "failed")
         if dirty and result not in ("cleared", "superseded"):
             board.report_fault("unattended_left_uncommitted_work",
                                "an unattended run ended with uncommitted work",
@@ -701,6 +723,62 @@ def scan(launch: bool, limit: int, workspace: str) -> dict:
     return found
 
 
+#: How often `watch` asks the board whether responder-eligible work appeared.
+WAKE_POLL_S = 3.0
+
+
+def _wake_poll_s() -> float:
+    try:
+        return max(1.0, float(os.environ.get("HUB_WAKE_POLL_S") or WAKE_POLL_S))
+    except ValueError:
+        return WAKE_POLL_S
+
+
+def task_wake() -> tuple[str | None, str]:
+    """``(wake, why_not)`` from GET /hub/task_wake.json. ``wake`` is None when it could not be
+    read; ``why_not`` is "unsupported" for a hub that does not serve the route (404) -- the
+    watcher then falls back to its interval -- else the error."""
+    from .. import client as _client
+    try:
+        data = board._read("task_wake.json").get("data") or {}
+        return str(data.get("task_wake") or ""), ""
+    except _client.HubRefused as refused:
+        return None, "unsupported" if refused.status == 404 else "refused %s" % refused.status
+    except Exception as exc:  # noqa: BLE001 - an unreadable wake is a missed poll, never a crash
+        return None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+
+def watch(limit: int, workspace: str, interval_s: float, minutes: float) -> dict:
+    """Run ``scan --launch`` when the board's task wake MOVES, and at least every ``interval_s``.
+
+    A scan on a timer leaves a task filed just after a tick waiting out the rest of the interval.
+    The wake is a hash of the responder-eligible todo tasks, cheap to ask every few seconds, so
+    a new or handed-back task is dispatched within one poll. A long-poll could carry the same
+    signal, but each held wait costs the hub a server thread and is capped, so most waits
+    degrade to an immediate answer anyway. A hub without the route (404) is watched on the
+    interval alone; an unreadable wake is a missed poll, never a scan storm."""
+    deadline = time.time() + minutes * 60 if minutes > 0 else None
+    poll = _wake_poll_s()
+    last_wake, last_scan, scans, unsupported = None, 0.0, [], False
+    while deadline is None or time.time() < deadline:
+        wake, why = (None, "unsupported") if unsupported else task_wake()
+        if why == "unsupported":
+            unsupported = True
+        moved = wake is not None and last_wake is not None and wake != last_wake
+        due = time.time() - last_scan >= interval_s
+        if wake is not None:
+            last_wake = wake
+        if moved or due:
+            found = scan(True, limit, workspace)
+            last_scan = time.time()
+            scans.append({"at": last_scan, "why": "wake" if moved else "interval",
+                          "launched": [r.get("id") for r in found.get("launched") or []]})
+            del scans[:-20]
+            log("watch: scan (%s) launched %d" % (scans[-1]["why"], len(scans[-1]["launched"])))
+        time.sleep(interval_s if unsupported else poll)
+    return {"watched_s": int(minutes * 60), "wake_supported": not unsupported, "scans": scans}
+
+
 def status() -> dict:
     recent = sorted(board.runs().values(), key=lambda r: r.get("created", 0))[-12:]
     return {"agent": agent(), "machine": machine(), "runtime": runtime.selected(),
@@ -729,6 +807,12 @@ def main(argv=None) -> int:
     r.add_argument("--repo", default="", help="clone URL or path of the task's repository")
     p = sub.add_parser("publish")
     p.add_argument("--workspace", default=os.getcwd())
+    w = sub.add_parser("watch")
+    w.add_argument("--max", type=int, default=3)
+    w.add_argument("--workspace", default=os.getcwd())
+    w.add_argument("--interval", type=float, default=300.0,
+                   help="scan at least this often (seconds), wake or not")
+    w.add_argument("--minutes", type=float, default=0.0, help="stop after this long (0 = never)")
     sub.add_parser("sweep")
     sub.add_parser("status")
     sub.add_parser("lanes")
@@ -743,6 +827,8 @@ def main(argv=None) -> int:
             result = respond(args.item_id.strip(), args.workspace, args.repo)
         elif args.command == "publish":
             result = publisher.publish(args.workspace)
+        elif args.command == "watch":
+            result = watch(args.max, args.workspace, max(5.0, args.interval), args.minutes)
         elif args.command == "sweep":
             result = {"swept": board.sweep_orphans()}
         elif args.command == "lanes":

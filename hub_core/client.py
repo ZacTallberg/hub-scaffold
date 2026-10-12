@@ -860,7 +860,7 @@ def _note_refused_finish(base: str, arguments: argparse.Namespace, error: Except
     import datetime as _dt
     reason = str(error).replace("\n", " ")
     try:
-        entity = _fetch_task(base, arguments.task_id)
+        entity = _fetch_task(base, arguments.task_id, raw=True)
         plan = [dict(s) for s in (entity.get("plan") or []) if isinstance(s, dict)]
         plan.append({"step": "finish REFUSED -- task still in progress", "done": False,
                      "note": "the hub refused the completion, so this task is NOT done: " + reason,
@@ -2869,8 +2869,11 @@ def _task_local(task_id: str) -> str:
     return str(task_id).rsplit(":", 1)[-1]
 
 
-def _fetch_task(base: str, task_id: str) -> dict[str, Any]:
-    payload = _get(base, f"task/{_task_local(task_id)}.json")
+def _fetch_task(base: str, task_id: str, *, raw: bool = False) -> dict[str, Any]:
+    """The task entity. ``raw=True`` is the WRITER's read (``?raw=1``): the record a write merges
+    and checks, plus its holder, without the board snapshot -- what every verb that reads only
+    to write uses. An older hub ignores the flag and answers the full read."""
+    payload = _get(base, f"task/{_task_local(task_id)}.json" + ("?raw=1" if raw else ""))
     entity = payload.get("data")
     if not isinstance(entity, dict):
         raise RuntimeError(f"no task entity came back for {task_id}")
@@ -2913,7 +2916,7 @@ def _run_start(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     # tells a reader of the roster nothing), unless the caller declared a focus of its own.
     if not getattr(arguments, "focus", None):
         try:
-            title = str(_fetch_task(base, arguments.task_id).get("title") or "")
+            title = str(_fetch_task(base, arguments.task_id, raw=True).get("title") or "")
         except RuntimeError:
             title = ""
         if title:
@@ -2921,7 +2924,7 @@ def _run_start(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     claim = _post(base, "claim", payload, extra_headers=headers)
     _journal_lease(arguments.task_id, claim)
     token = claim.get("token") or (claim.get("data") or {}).get("token") or ""
-    entity = _fetch_task(base, arguments.task_id)
+    entity = _fetch_task(base, arguments.task_id, raw=True)
     sha = _charter_sha()
     return {"claim": claim, "lease_token": token, "task": entity,
             "charter": ({"sha256": sha, "carry": "pass to `finish --charter-sha`"} if sha else
@@ -2954,7 +2957,7 @@ def _task_write(base: str, task_id: str, mutate, arguments: argparse.Namespace,
     blind. Returns (write_result, delta)."""
     last: RuntimeError | None = None
     for _attempt in range(max(1, attempts)):
-        entity = _fetch_task(base, task_id)
+        entity = _fetch_task(base, task_id, raw=True)
         delta = mutate(entity)
         body: dict[str, Any] = {"id": entity["id"], "agent": _agent(arguments),
                                 "expected_version": entity.get("version"), **delta}
@@ -3124,6 +3127,30 @@ def _run_ci_status(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "ci-status.json?" + urlencode({"sha": arguments.sha}))
 
 
+def _run_shipped(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """What CI says already shipped for a task (GET /hub/task/<n>/shipped.json): the newest
+    default-branch commit whose subject names it, and the task's own recorded push."""
+    path = f"task/{_task_local(arguments.task_id)}/shipped.json"
+    if arguments.since:
+        path += f"?since={int(arguments.since)}"
+    return _get(base, path)
+
+
+def _run_run_ledger(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """Every machine's ended unattended runs (GET /hub/run-ledger.json): per-machine run counts,
+    median duration, outcomes and phase shares over a rolling window."""
+    from urllib.parse import urlencode
+    query = {"days": arguments.days}
+    if arguments.machine:
+        query["machine"] = arguments.machine
+    if arguments.item:
+        query["item"] = arguments.item
+    data = _get(base, "run-ledger.json?" + urlencode(query)).get("data") or {}
+    if not arguments.rows:
+        data = {k: v for k, v in data.items() if k != "rows"}
+    return data
+
+
 def _run_ci_events(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     from urllib.parse import urlencode
     query = {k: v for k, v in (("pipeline", arguments.pipeline), ("job", arguments.job),
@@ -3170,7 +3197,7 @@ def _run_finish(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("evidence is a reference (a URL, a commit sha, a path), so it is one "
                          "token with no spaces; put prose in --accept-note. Not a reference: "
                          + "; ".join(repr(item) for item in malformed))
-    entity = _fetch_task(base, arguments.task_id)
+    entity = _fetch_task(base, arguments.task_id, raw=True)
     current = _charter_sha()
     charter_note = ""
     if current is not None:
@@ -4320,6 +4347,21 @@ def _parser() -> argparse.ArgumentParser:
                                     help="what CI last said about one commit (found/status/active)")
     ci_status.add_argument("sha")
     ci_status.set_defaults(runner=_run_ci_status)
+    shipped = commands.add_parser("shipped",
+                                  help="what CI says already shipped for a task (a default-branch "
+                                       "commit whose subject names it, and its recorded push)")
+    shipped.add_argument("task_id")
+    shipped.add_argument("--since", type=float, default=0.0,
+                         help="epoch seconds (default: the task's filing)")
+    shipped.set_defaults(runner=_run_shipped)
+    run_ledger = commands.add_parser("run-ledger",
+                                     help="every machine's unattended runs: counts, medians, "
+                                          "outcomes, phase shares (rolling window)")
+    run_ledger.add_argument("--days", type=int, default=7)
+    run_ledger.add_argument("--machine", default="")
+    run_ledger.add_argument("--item", default="", help="only runs whose item ends with this")
+    run_ledger.add_argument("--rows", action="store_true", help="include the rows themselves")
+    run_ledger.set_defaults(runner=_run_run_ledger)
 
     # Knowledge: share/finding/method/review/gap, recall, related, capabilities, the per-prompt
     # knowledge block, the local mirror, and overlap adjudication (hub_core/client_knowledge.py).

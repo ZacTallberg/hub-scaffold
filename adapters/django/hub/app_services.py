@@ -58,10 +58,14 @@ def _no_store(response):
 def component_index(request):
     """GET /hub/components/ -- every hosted component, its measured version, files, how to link
     it, and the apps observed loading it."""
+    from hub_core import component_releases
     rows = components.index(components.adopters(hub_app.HUB_DIR))
     base = request.build_absolute_uri(request.path)
     for row in rows:
         row["base"] = base + row["name"] + "/"
+        # Every shipped release, newest first (measured from git history; empty without one).
+        # An app pinned to one links base + "@<commit>/" + name + "/" + file.
+        row["versions"] = component_releases.versions(row["name"])
     response = JsonResponse({"data": rows, "metadata": {
         "count": len(rows),
         "how_to_use": ("Link the files; never copy them. The copy served here is the master, so "
@@ -69,6 +73,9 @@ def component_index(request):
                        "app's settings for these components are at props/<slug>.json beside "
                        "them, and are changed with POST /hub/api/component-props."),
         "props": "props/<slug>.json",
+        "pinned": ("@<commit>/<name>/<file> serves a component as it was at a shipped commit "
+                   "(each row's `versions`), immutable: pin an app to roll it back while the "
+                   "master moves on. An unshipped or unknown commit is a 404, never the latest."),
     }})
     response["Cache-Control"] = "public, max-age=60"
     return response
@@ -88,6 +95,29 @@ def component_file(request, name, filename):
     response["ETag"] = etag
     response["Cache-Control"] = "public, max-age=%d" % components.CACHE_SECONDS
     response["X-Component-Version"] = version
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def component_file_pinned(request, rev, name, filename):
+    """GET /hub/components/@<commit>/<name>/<file> -- one file of one component AS IT WAS at a
+    shipped commit (hub_core.component_releases): what a pinned app wears. Immutable, so cached
+    for a year. An unknown, unshipped or unreadable commit is a 404 -- never the latest bytes,
+    which would un-pin the app without telling it."""
+    from hub_core import component_releases
+    found = component_releases.file_at(rev, name, filename)
+    if found is None:
+        raise Http404("no such pinned component file")
+    body, full = found
+    import mimetypes
+    suffix = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+    content_type = (components.CONTENT_TYPES.get(suffix) or mimetypes.guess_type(filename)[0]
+                    or "application/octet-stream")
+    response = HttpResponse(body, content_type=content_type)
+    response["ETag"] = '"%s-%s"' % (full[:12], filename)
+    response["Cache-Control"] = "public, max-age=31536000, immutable"
+    response["X-Component-Commit"] = full
+    response["X-Component-Version"] = component_releases.version_at(full, name) or full[:12]
     response["X-Content-Type-Options"] = "nosniff"
     return response
 
@@ -411,5 +441,5 @@ def menu_rank_view(request, b):
 # Presentation for other apps' pages (CSS/JS/manifests and the properties they draw): declared
 # public, exactly as the route table says, so the read gate never sits between a page and the
 # files it links. Nothing here is a board record or an identity.
-for _view in (component_index, component_file, component_props):
+for _view in (component_index, component_file, component_file_pinned, component_props):
     _view._hub_public_discovery = True
