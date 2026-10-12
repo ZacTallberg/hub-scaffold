@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -1204,15 +1205,20 @@ def designed_degradation(log_record) -> str:
 
 
 class HubErrorHandler(logging.Handler):
-    """Logging handler that records ERROR+ without exposing args or request bodies. Wire it
-    on django.request (or any logger) with the hub dir:
+    """Logging handler that records ERROR+ -- and a WARNING that carries a traceback -- without
+    exposing args or request bodies. Wire it on django.request (or any logger) with the hub dir:
 
         LOGGING["handlers"]["hub_errors"] = {
             "()": "hub_core.errorlog.HubErrorHandler", "hub_dir": str(HUB_DIR),
-            "level": "ERROR"}
+            "level": "WARNING"}
+
+    A background loop that catches a failure and logs ``warning(..., exc_info=True)`` so it can
+    keep going was below an ERROR handler: the failure existed only in the service's stderr. Such
+    a record is kept at severity ``warning`` (counted and visible, not queued as a defect); a plain
+    warning without a traceback stays out, so ordinary chatter never reaches the board.
     """
 
-    def __init__(self, hub_dir, level=logging.ERROR):
+    def __init__(self, hub_dir, level=logging.WARNING):
         super().__init__(level=level)
         self.hub_dir = str(hub_dir)
 
@@ -1220,13 +1226,15 @@ class HubErrorHandler(logging.Handler):
         try:
             if log_record.name == __name__:
                 return
+            if log_record.levelno < logging.ERROR and not log_record.exc_info:
+                return
             details = ""
             if log_record.exc_info:
                 details = "".join(traceback.format_exception(*log_record.exc_info))
             degraded = designed_degradation(log_record)
             record(
                 self.hub_dir, log_record.name, log_record.getMessage(),
-                severity=("warning" if degraded else
+                severity=("warning" if degraded or log_record.levelno < logging.ERROR else
                           "critical" if log_record.levelno >= logging.CRITICAL else "error"),
                 code=getattr(log_record, "code", None) or log_record.levelname.lower(),
                 details=details,
@@ -1235,3 +1243,54 @@ class HubErrorHandler(logging.Handler):
             )
         except Exception:
             self.handleError(log_record)
+
+
+# ---------------------------------------------------------------- the process's own dying threads
+
+_HOOK_STATE = {"armed": None}
+_IN_HOOK = threading.local()
+
+
+def install_excepthooks(hub_dir) -> bool:
+    """Route a thread or the process dying of an exception into the operational stream.
+
+    A thread that dies of an exception (a background clock, a sweep, a close running off the
+    request) prints its traceback to the service's stderr and nowhere else: a whole class of
+    failure that could only be debugged from a shell on the host. ``threading.excepthook`` and
+    ``sys.excepthook`` now record a ``hub.thread`` / ``hub.process`` row with the traceback. The
+    previous hook still runs; a re-entrancy guard stops a failure inside the recorder from looping
+    through it; ``record`` never raises. Idempotent per hub dir. Returns whether it armed."""
+    import sys
+
+    key = str(hub_dir)
+    if _HOOK_STATE["armed"] == key:
+        return False
+    prev_thread, prev_sys = threading.excepthook, sys.excepthook
+
+    def _record(source, title, exc_type, exc, tb):
+        if getattr(_IN_HOOK, "busy", False) or exc_type is None or issubclass(exc_type, SystemExit):
+            return
+        _IN_HOOK.busy = True
+        try:
+            record(key, source, "%s: %s" % (title, exc_type.__name__),
+                   severity="error", code="thread_died" if source == "hub.thread" else "process_died",
+                   details="".join(traceback.format_exception(exc_type, exc, tb)),
+                   context={"component": "excepthook"})
+        except Exception:                                    # noqa: BLE001 - the hook must not fail
+            pass
+        finally:
+            _IN_HOOK.busy = False
+
+    def thread_hook(args):
+        name = getattr(getattr(args, "thread", None), "name", "") or "thread"
+        _record("hub.thread", "%s died" % name, args.exc_type, args.exc_value, args.exc_traceback)
+        prev_thread(args)
+
+    def sys_hook(exc_type, exc, tb):
+        _record("hub.process", "uncaught exception", exc_type, exc, tb)
+        prev_sys(exc_type, exc, tb)
+
+    threading.excepthook = thread_hook
+    sys.excepthook = sys_hook
+    _HOOK_STATE["armed"] = key
+    return True

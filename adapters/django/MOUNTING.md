@@ -132,8 +132,12 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # this channel either way):
 # LOGGING = {..., "handlers": {"hub_errors": {
 #     "()": "hub_core.errorlog.HubErrorHandler", "hub_dir": str(BASE_DIR / "PROJECT" / ".hub"),
-#     "level": "ERROR"}},
-#     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"}}}
+#     "level": "WARNING"}},
+#     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"},
+#                 "hub": {"handlers": ["hub_errors"], "level": "WARNING"}}}
+# The handler keeps every ERROR and a WARNING that carries a traceback (a background loop that
+# caught a failure to keep going); a plain warning stays out. The hub app also arms thread and
+# process excepthooks at start, so a thread that dies of an exception is a `hub.thread` row.
 
 # Optional: CI results as board rows (POST /hub/api/ci-event). The secret is what a CI webhook
 # or pipeline step presents; with it unset the ingest refuses everything. From the environment.
