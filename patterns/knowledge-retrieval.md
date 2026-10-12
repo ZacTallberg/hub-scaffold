@@ -139,10 +139,14 @@ console is not for.
    unjudged and counted — never coerced.
 3. **Plan** — duplicates fold (union-find, clusters over five are reported, not folded) into ONE
    canonical lesson, the most foundational then the oldest, which gains `reinforced_by` (who else
-   learned it, when, their story); a folded lesson becomes `superseded` with `superseded_by`, a
-   folded finding keeps standing and is tagged `folded-into:<id>`. A correction supersedes the
-   rule it corrects. A contradiction is written onto the lesson's `related` as a settled verdict,
-   where `recall` prints it for a person.
+   learned it, when, their story); every folded member, lesson or finding, becomes `superseded`
+   with `superseded_by` and is tagged `folded-into:<id>` — a finding left standing was found,
+   proposed and re-tagged again by every later run. A correction supersedes the rule it corrects.
+   A contradiction is written onto the lesson's `related` as a settled verdict, where `recall`
+   prints it for a person. The printed plan holds only what an apply would write (`ACTION`);
+   what needs a person's eyes and no write — a correction across kinds, an oversized cluster, a
+   contradiction with no room left on the lesson — prints as `REPORT`, and a contradiction
+   already recorded is not proposed again, so the proposal count drains as applies land.
 4. **`applies_when`** — for every live lesson, the literal strings whose appearance means the rule
    applies NOW: `errors` (text as the tool prints it), `commands`, `paths`, `systems`. This is what
    a tool-time hook matches; similarity over a failed command's output rarely returns the record
