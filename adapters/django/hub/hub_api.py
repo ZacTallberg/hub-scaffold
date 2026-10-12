@@ -255,8 +255,35 @@ _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 
 def _error_bar(row):
     """(on_bar, reason). One shared predicate for the board, the JSON API, the problem fold
-    and the rail."""
-    return errorlog.passes_bar(row)
+    and the rail. A browser gateway failure that lies wholly inside a deploy of a project that
+    serves its app (hub_core.deploy_windows) is held below the bar with the window named."""
+    from hub_core import deploy_windows
+    return deploy_windows.bar(hub_app.HUB_DIR, errorlog.passes_bar, _serving_projects)(row)
+
+
+def _serving_projects(row) -> set:
+    """The CI projects whose deploy restarts the app a row came from: the app's own slug, its
+    declared `project`, and the app it is `hosted_in` (and that app's project)."""
+    app = _row_app(row)
+    if not app:
+        src = str(row.get("source") or "")
+        app = src.split(".")[1] if src.startswith("app.") and src.count(".") >= 2 else ""
+    out = {app} if app else set()
+    cfg = hub_app.apps_config()
+    for name in list(out):
+        entry = cfg.get(name) or {}
+        for key in ("project", "hosted_in"):
+            if entry.get(key):
+                out.add(str(entry[key]).strip().lower())
+        host = cfg.get(str(entry.get("hosted_in") or "").lower()) or {}
+        if host.get("project"):
+            out.add(str(host["project"]).strip().lower())
+    return out
+
+
+# The problem fold (hub_core.problems) applies the same deploy-window hold with the same
+# serving-project map, so the queue and every other surface agree.
+problems_core.SERVING_PROJECTS = _serving_projects
 
 
 def _row_app(row):
