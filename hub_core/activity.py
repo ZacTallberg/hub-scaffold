@@ -111,6 +111,10 @@ def rows(live_sessions: list, leases: list, tasks: list) -> list:
             row["has_task"] = bool(tid)
             row["task_id"] = tid
             row["task_title"] = str((by_id.get(tid) or {}).get("title") or "")[:160]
+            # EVERY task this console holds (focus first): the hub refuses a peer's write on
+            # each of them, so the listing must name each of them.
+            holds = mine + ([t for t, lsid in candidates if not lsid] if len(consoles) == 1 else [])
+            row["tasks"] = list(dict.fromkeys(([tid] if tid else []) + holds))
     return out
 
 

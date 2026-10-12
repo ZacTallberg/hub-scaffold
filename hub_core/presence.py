@@ -772,12 +772,17 @@ def attribute_leases(sessions: list, leases: list) -> list:
         mine = held.get(agent, [])
         for s in rows_:
             sid = str(s.get("session") or "")[:8]
-            tid = next((lease["task"] for lease in mine
-                        if sid and str(lease.get("session") or "")[:8] == sid), "")
-            if not tid and len(rows_) == 1:
-                tid = next((lease["task"] for lease in mine if not lease.get("session")), "")
+            held_here = [lease["task"] for lease in mine
+                         if sid and str(lease.get("session") or "")[:8] == sid]
+            if len(rows_) == 1:
+                held_here += [lease["task"] for lease in mine if not lease.get("session")]
+            tid = held_here[0] if held_here else ""
             row = dict(s)
-            row.update({"task_id": tid, "has_task": bool(tid)})
+            # EVERY task this console holds, not only the one shown as its focus: the hub refuses
+            # a peer's write on any of them (held_by_console), and a listing that named one let a
+            # verifying agent walk into refusals it could not have predicted.
+            row.update({"task_id": tid, "has_task": bool(tid),
+                        "tasks": list(dict.fromkeys(held_here))})
             out.append(row)
     out.sort(key=lambda x: x.get("age_s") if x.get("age_s") is not None else 10 ** 9)
     return out
