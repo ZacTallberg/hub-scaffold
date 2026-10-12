@@ -447,7 +447,7 @@ def _id_allocator(type_, first_guess):
     return allocate
 
 
-def _append_create(type_, payload, *, agent, idem, etype):
+def _append_create(type_, payload, *, agent, idem, etype, idem_exact=False):
     """Create a record under a SERVER-numbered id, allocated under the store's write lock.
 
     Deriving the id from one read and appending it later is a check-then-act: a concurrent
@@ -461,14 +461,16 @@ def _append_create(type_, payload, *, agent, idem, etype):
 
     The idempotency key is scoped to the type's id prefix, so a client retry of a create whose
     response was lost replays the ORIGINAL record (under its original id) instead of minting a
-    twin under a freshly allocated one."""
+    twin under a freshly allocated one. ``idem_exact`` (a key that names the RECORD, such as one
+    fix task per problem) keeps the key unsalted, so a later create with a different body -- the
+    problem has recurred since -- still replays the first record instead of minting a twin."""
     scope = "%s:%s:" % (hub_app.PROJECT_KEY, type_)
     state = hub_app.current_state()
     first = ids.high_water(state["entities"], hub_app.PROJECT_KEY, type_) + 1
     guess = "%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, first)
     return _append(type_, guess, payload, expected_version=0, agent=agent, idem=idem,
                    etype=etype, idem_scope=scope if idem else None,
-                   allocate=_id_allocator(type_, first))
+                   allocate=_id_allocator(type_, first), idem_exact=idem_exact)
 
 
 #: How many fresh reads a server-side read-then-append gets before it gives up.
@@ -2118,6 +2120,9 @@ def _already_covered(state, text):
 
 
 _AGENT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+#: Ids of board RECORDS that also fit the agent-name shape: a problem (p-<12 hex>) or a question
+#: (q-<asker>-<8 hex>). Task and record ids carry ':' and never pass the agent check at all.
+_RECORD_SHAPED = re.compile(r"p-[0-9a-f]{12}|q-[a-z0-9._-]+-[0-9a-f]{8}")
 
 
 def _valid_agent_name(name) -> bool:
@@ -2711,6 +2716,14 @@ def message(request, b):
     if not _valid_agent_name(str(agent)) or not _valid_agent_name(to):
         return JsonResponse({"errors": [{"code": "need_sender_and_recipient",
             "msg": "message needs a valid sender (agent) and recipient (to)"}]}, status=422)
+    if _RECORD_SHAPED.fullmatch(to):
+        # A board RECORD is not a reader: mail to a problem or question id is accepted, never
+        # delivered, and expires unread -- found as real messages addressed to ids that no
+        # console could ever be.
+        return JsonResponse({"errors": [{"code": "recipient_is_a_record",
+            "msg": "%r is a board record (a problem or question id), not an agent: message the "
+                   "agent who holds it (problems.json / inbox name them), or step the task" % to}]},
+            status=422)
     if not note_text:
         return JsonResponse({"errors": [{"code": "need_note"}]}, status=400)
     target_session = str(b.get("session") or "").strip()
@@ -3403,7 +3416,16 @@ def _problem_or_404(pid):
             "msg": "a problem id looks like p-<12 hex>; read /hub/problems.json"}]}, status=422)
     found = _problems.find(hub_app.HUB_DIR, pid, hub_app.current_state())
     if not found:
-        return pid, None, JsonResponse({"errors": [{"code": "no_such_problem", "id": pid}]}, status=404)
+        # Say WHY and what to do: a bare 404 left a holder with a fix task it could neither
+        # resolve nor release. A problem leaves the board when its rows age out of the retained
+        # error window; its mirror task (if any) is handed back to the task lane as todo.
+        return pid, None, JsonResponse({"errors": [{
+            "code": "no_such_problem", "id": pid,
+            "msg": ("%s is not on the board: its rows have aged out of the retained error window "
+                    "(or it never existed). There is nothing left to claim, release or resolve here; "
+                    "if a fix task mirrors it, that task is handed back to todo -- finish or drop "
+                    "the TASK on the work's own evidence (/hub/problems.json?include=all lists "
+                    "what is still readable)." % pid)}]}, status=404)
     return pid, found, None
 
 
