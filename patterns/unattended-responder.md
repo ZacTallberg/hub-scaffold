@@ -138,7 +138,10 @@ fleet's task tokens. It waits until the pipeline is terminal — green means the
 and finishes, red means it fixes — and never forever: 10 minutes when no pipeline has reported for
 the sha, 25 when the hub's CI status is unreadable. A run that pushed nothing waits for nothing.
 This needs CI deliveries reaching the hub (`patterns/ci-evidence.md`); without them every
-hand-back simply waits the no-pipeline window once.
+hand-back simply waits the no-pipeline window once. The same hold applies to a task LEFT in
+progress -- its hand-back refused, its lease expired, its holder gone -- anchored on the push
+itself (within 6 hours) instead of a hand-back: one such task was relaunched 26 seconds after its
+run stopped, against the still-running pipeline of the commit that run had pushed.
 
 A launcher killed so hard that it died too is swept by the next launcher (`sweep`, and at the start
 of every `respond`): its journal names the leases, its pid is gone, and the same proof applies.

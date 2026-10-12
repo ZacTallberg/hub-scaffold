@@ -133,6 +133,10 @@ def is_unattended(data: dict) -> bool:
 HANDBACK_PUSH_WINDOW_S = 5400        # a push older than one task run is not this run's
 HANDBACK_NO_PIPELINE_WAIT_S = 600    # pushed, and no pipeline delivery has arrived for it yet
 HANDBACK_UNKNOWN_WAIT_S = 1500       # the hub's CI status could not be read
+#: A task LEFT IN PROGRESS (a refused hand-back, an expired lease, a run that ended) waits on its
+#: own push the same way, anchored on the push; a push older than this is not what a resume
+#: would be waiting on.
+LEFT_ACTIVE_PUSH_WINDOW_S = 6 * 3600
 
 
 def _iso_epoch(value) -> float:
@@ -144,18 +148,32 @@ def _iso_epoch(value) -> float:
 
 
 def pipeline_wait(data: dict, now: float | None = None) -> str:
-    """Non-empty (the reason) while a handed-back task's pushed commit still has a pipeline
-    running, so the resume waits until there is something new to read: green (the next run
-    verifies and finishes) or red (it fixes). '' when the run pushed nothing."""
+    """Non-empty (the reason) while a task's pushed commit still has a pipeline running, so the
+    next run waits until there is something new to read: green (it verifies and finishes) or red
+    (it fixes). '' when the run pushed nothing.
+
+    Anchored on the hand-back when there is one, else on the PUSH: a task left in progress -- its
+    hand-back refused, its lease expired, its run ended -- is offered again as a resume, and on
+    the origin system one was relaunched 26 s after its run stopped, with the pipeline of the
+    commit that run pushed still running. Every offer of a task is held the same way."""
     from hub_core import task_rows
     now = time.time() if now is None else now
     back = task_rows.handed_back(data) or {}
     back_at = _iso_epoch(back.get("at"))
     push = task_rows.pushed(data) or {}
     sha = str(push.get("sha") or "")
-    if not back_at or not sha or _iso_epoch(push.get("at")) < back_at - HANDBACK_PUSH_WINDOW_S:
+    push_at = _iso_epoch(push.get("at"))
+    if not sha or not push_at:
         return ""
-    age = now - back_at
+    if back_at and back_at >= push_at:
+        anchor = back_at
+        if push_at < back_at - HANDBACK_PUSH_WINDOW_S:
+            return ""                       # that push was not the handed-back run's
+    else:
+        anchor = push_at                    # left in progress: the push itself
+        if now - push_at > LEFT_ACTIVE_PUSH_WINDOW_S:
+            return ""
+    age = now - anchor
     try:
         seen = _read("ci-status.json?sha=%s" % quote(sha)).get("data") or {}
     except RuntimeError:
@@ -203,8 +221,10 @@ def resolve(item_id: str) -> dict | None:
                 "resume": bool(readiness.get("stale_reclaim")) or abandoned,
                 "abandoned_by": str(holder.get("agent") or "") if abandoned else "",
                 "handed_back": charged, "handed_back_idle": idle,
-                # A hand-back whose pushed commit still has a pipeline running waits for it.
-                "pipeline_wait": pipeline_wait(data) if (charged or idle) else "",
+                # A hand-back -- or a task left in progress -- whose pushed commit still has a
+                # pipeline running waits for it.
+                "pipeline_wait": pipeline_wait(data) if (charged or idle or abandoned
+                                                         or readiness.get("stale_reclaim")) else "",
                 "from": str((data.get("provenance") or {}).get("agent") or "")}
     if item_id.startswith(ATTENTION_PREFIX):
         return resolve_attention(item_id)
@@ -254,7 +274,9 @@ def scan() -> dict:
                 continue
             if item.get("pipeline_wait"):
                 out["waiting"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
-                                       "why": "handed back; " + item["pipeline_wait"]})
+                                       "why": ("handed back; " if item["handed_back"]
+                                               or item["handed_back_idle"] else "left in "
+                                               "progress; ") + item["pipeline_wait"]})
                 continue
             out["workable"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
                                     "resume": item["resume"], "handed_back": item["handed_back"],
