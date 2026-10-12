@@ -18,13 +18,12 @@
       "description": "Agent names, or the single element 'all'. Auto-retire on full ack applies only to explicitly named targets — 'all' has no closed roster to check off."
     },
     "machine": { "type": "string", "maxLength": 120, "description": "Pin delivery to ONE computer: only an inbox read that names this machine receives it. An unpinned client cannot claim to be the pinned place." },
-    "session": { "type": "string", "maxLength": 64, "description": "Pin delivery to ONE console (its session id). The write path resolves a console NAME to the live session it addresses and refuses a console that is not live, so a message never lands in a window nobody has open." },
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
     "unattended": { "type": "boolean", "description": "True when an UNATTENDED run wrote this (an answer from an automated responder). The asker is told which kind of answer they got: it calibrates how much to double-check, and nobody should discover later that the operator who answered them was a machine." },
     "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
-    "session": { "type": "string", "description": "Deliver to one console only. An answer carries the asking console's session so the reply lands where the question was asked, never broadcast." },
+    "session": { "type": "string", "description": "Pin delivery to ONE console (its session id): only that console receives it, never a broadcast. The write path resolves a console NAME to the live session it addresses and refuses a console that is not live, so a message never lands in a window nobody has open; an answer carries the asking console's session so the reply lands where the question was asked." },
     "delivery_revision": { "type": "integer", "minimum": 1, "description": "Bumped each time an answer is corrected. An ack must name the revision it read; an ack of an older revision never closes a corrected answer." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }

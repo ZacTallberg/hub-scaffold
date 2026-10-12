@@ -817,7 +817,7 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
         finally:
             conn.close()
         t.update(lookups=lookups, lookups_blind=blind)
-        return _consolidate_exit(t, state)
+        return _consolidate_exit(t, state, base, arguments)
     label = "%s|%s" % (semantic.embed_url(), os.environ.get("HUB_EMBED_MODEL", "").strip())
     conn = cons.open_cache(state / "cache.sqlite3")
     try:
@@ -841,20 +841,34 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
                      apply_limit=apply_limit, exclude=exclude)
     finally:
         conn.close()
-    return _consolidate_exit(t, state)
+    return _consolidate_exit(t, state, base, arguments)
 
 
-def _consolidate_exit(t: dict, state) -> dict:
-    # The re-learn count has no served scoreboard in this scaffold: it is printed (RELEARN) and
-    # returned here, for an adopter to post wherever their trend store lives.
+def _consolidate_exit(t: dict, state, base=None, arguments=None) -> dict:
+    # The re-learn count is printed (RELEARN) and returned; with --post it is also one run of the
+    # board's standing-eval trend (suite knowledge-loop, /hub/eval.json), and what the hub
+    # STORED is printed, so a post that did not land never reads as recorded.
     t["state_dir"] = str(state)
+    if arguments is not None and getattr(arguments, "post", False):
+        from . import consolidate as cons
+        run = cons.trend_run(t)
+        if run is None:
+            t["trend"] = {"skipped": "no week has a lesson: nothing to post"}
+        else:
+            try:
+                stored = _c._post(base, "eval", run).get("data")
+                t["trend"] = {"posted": stored}
+                print("TREND POSTED " + json.dumps(stored, sort_keys=True)[:600])
+            except (RuntimeError, ValueError) as error:
+                t["trend"] = {"refused": str(error)[:300]}
+                print("TREND REFUSED " + str(error)[:300])
     if t.get("mode") == "dry-run":
         t["next"] = ("DRY RUN: nothing was written. Read the proposals above, then run again with "
                      "--apply and the same --state-dir (undo a run with --revert %s)" % t.get("run"))
     if t.get("needs_model"):
         t["_exit"] = 2
         t["msg"] = "judging or trigger derivation left undone: no judge model (HUB_JUDGE_URL/_MODEL)"
-    elif (t.get("apply") or {}).get("refused"):
+    elif (t.get("apply") or {}).get("refused") or (t.get("trend") or {}).get("refused"):
         t["_exit"] = 3
     return t
 
@@ -1078,5 +1092,8 @@ def register(commands) -> None:
     con.add_argument("--state-dir", default="", dest="state_dir",
                      help="verdict/trigger/vector cache and run logs (default <client state>/consolidate); "
                           "an apply or revert must use the dry run's state dir")
+    con.add_argument("--post", action="store_true",
+                     help="record the re-learn count on the standing-eval trend (suite knowledge-loop; "
+                          "needs eval:write); a refused post exits 3")
     con.add_argument("--agent")
     con.set_defaults(runner=_run_consolidate)

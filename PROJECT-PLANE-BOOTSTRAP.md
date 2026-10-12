@@ -340,7 +340,6 @@ project key are renameable bindings; the rules are not.
       "description": "Persisted, resumable checklist."
     },
     "unattended": { "type": "boolean", "description": "Offered to unattended workers (GET /hub/next.json?unattended=1) in priority order, P0-P2 only. Never true on a decision: a decision is a person's call, and asking for it is refused." },
-    "project": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$", "description": "The consuming app or component this task is about; its annotated feed is GET /hub/project/<project>/tasks.json." },
     "decision": { "type": "object", "additionalProperties": false, "description": "What a PERSON decided on a work_kind=decision task (POST /hub/api/task/decide). Absent while the decision is still waiting.", "properties": {
       "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
       "decided_by": { "type": "string", "minLength": 1 },
@@ -385,7 +384,7 @@ project key are renameable bindings; the rules are not.
     "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
     "machine": { "type": "string", "maxLength": 120, "pattern": "^$|^[a-z0-9][a-z0-9._-]{0,119}$", "description": "MACHINE AFFINITY: the only machine that can do this task, because its input is there (a file in a person's downloads, a host-only share). A task with one is offered (next.json, take) only to a caller that declares that machine; a task without one is offered everywhere. Empty string clears it." },
     "hop": { "type": "integer", "minimum": 0, "maximum": 9, "description": "ESCALATION DEPTH: how many unattended runs deep this task was raised (0/absent = a person or an attended session). An unattended caller may take a hop-1 task once more after a cooldown; hop 2 and beyond is a person's (hub_core.offer). Bounds agent-to-agent escalation chains." },
-    "project": { "type": "string", "maxLength": 81, "pattern": "^[a-z0-9][a-z0-9._-]{0,80}$", "description": "The project this task is ABOUT, when it is not the Hub's own repository. A commit sha offered as evidence, and a task's lineage, are resolved against this project's repository as well as the Hub's (HUB_PROJECT_REPOS / HUB_COMMIT_RESOLVER)." },
+    "project": { "type": "string", "maxLength": 81, "pattern": "^[a-z0-9][a-z0-9._-]{0,80}$", "description": "The project (consuming app or component) this task is ABOUT, when it is not the Hub's own repository; its annotated feed is GET /hub/project/<project>/tasks.json. A commit sha offered as evidence, and a task's lineage, are resolved against this project's repository as well as the Hub's (HUB_PROJECT_REPOS / HUB_COMMIT_RESOLVER)." },
     "assigned_to": { "type": "string", "maxLength": 64, "pattern": "^$|^[a-z0-9][a-z0-9._-]{0,63}$", "description": "AGENT AFFINITY: the agent this task was GIVEN to (POST /hub/api/hand). Until they claim it, the board shows them as its owner, their inbox carries it, and atomic pull (take) never hands it to anyone else. The lease still wins once somebody holds it: who is holding a task beats who was given it. Empty string clears the assignment." },
     "surfaced_by": { "$ref": "hub:common#/$defs/idref", "description": "The task/work during which this was scouted." },
     "source": { "type": "string", "description": "Where it came from, e.g. REVIEW-G3, CHARTER, RESEARCH-HISTORY." },
@@ -841,13 +840,12 @@ project key are renameable bindings; the rules are not.
       "description": "Agent names, or the single element 'all'. Auto-retire on full ack applies only to explicitly named targets — 'all' has no closed roster to check off."
     },
     "machine": { "type": "string", "maxLength": 120, "description": "Pin delivery to ONE computer: only an inbox read that names this machine receives it. An unpinned client cannot claim to be the pinned place." },
-    "session": { "type": "string", "maxLength": 64, "description": "Pin delivery to ONE console (its session id). The write path resolves a console NAME to the live session it addresses and refuses a console that is not live, so a message never lands in a window nobody has open." },
     "deadline": { "$ref": "hub:common#/$defs/isoDate", "description": "Informational; overdue is surfaced, never enforced — a directive must not be able to block a worker mechanically." },
     "status": { "enum": ["active", "superseded", "fulfilled", "expired"] },
     "supersedes": { "$ref": "hub:common#/$defs/idref" },
     "unattended": { "type": "boolean", "description": "True when an UNATTENDED run wrote this (an answer from an automated responder). The asker is told which kind of answer they got: it calibrates how much to double-check, and nobody should discover later that the operator who answered them was a machine." },
     "answers": { "$ref": "hub:common#/$defs/idref", "description": "The question note this directive replies to. Set by the answer endpoint, which also retires the question — an answer that leaves its question tagged `open` is how a board's question count only ever grows." },
-    "session": { "type": "string", "description": "Deliver to one console only. An answer carries the asking console's session so the reply lands where the question was asked, never broadcast." },
+    "session": { "type": "string", "description": "Pin delivery to ONE console (its session id): only that console receives it, never a broadcast. The write path resolves a console NAME to the live session it addresses and refuses a console that is not live, so a message never lands in a window nobody has open; an answer carries the asking console's session so the reply lands where the question was asked." },
     "delivery_revision": { "type": "integer", "minimum": 1, "description": "Bumped each time an answer is corrected. An ack must name the revision it read; an ack of an older revision never closes a corrected answer." },
     "version": { "type": "integer", "minimum": 0 },
     "provenance": { "$ref": "hub:common#/$defs/provenance" }

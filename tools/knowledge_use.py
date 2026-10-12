@@ -19,7 +19,14 @@ the event being worked (a task start, a problem claim).
 It also reports the HAND-OFF per prompt: how many prompts carried a knowledge block, how many
 carried a block with no memory rows (a repeated focus), and how many carried none.
 
-    python tools/knowledge_use.py [--hours 24] [--root <transcripts dir>] [--json]
+    python tools/knowledge_use.py [--hours 24] [--root <transcripts dir>] [--json] [--post]
+
+``--post`` records the reading as one run of the board's standing-eval trend (suite
+``knowledge-use``, read back at /hub/eval.json) through ``hub_core.client`` (HUB_API_BASE and a
+credential holding ``eval:write``), and prints the row the hub STORED -- a post that did not land
+must never read as recorded. Beside ``consolidate --post`` (suite ``knowledge-loop``, the
+re-learn rate) the trend carries both halves of "is the board's knowledge used, and is it
+learning": use should rise while re-learning falls.
 
 ``--root`` defaults to Claude Code's per-project transcript folder (~/.claude/projects);
 adapt ``_hook_text`` / ``_agent_text`` for another harness's transcript shape. Read-only.
@@ -33,6 +40,7 @@ import collections
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -126,23 +134,53 @@ def measure(root, hours) -> dict:
             "prompts": dict(prompts)}
 
 
+def trend_run(r) -> dict:
+    """The reading as one standing-eval run: the use rate over every delivered record, and the
+    hand-off (how many prompts carried rows, an empty block, or no block)."""
+    p = r["prompts"]
+    paths = {"all": {"n": r["delivered"], "delivered": r["delivered"], "used": r["used"]},
+             "hand-off": {"n": sum(p.values()), "with_rows": p.get("with_rows", 0),
+                          "block_no_rows": p.get("block_no_rows", 0), "no_block": p.get("no_block", 0)}}
+    if r["used_pct"] is not None:
+        paths["all"]["used_pct"] = r["used_pct"]
+    return {"suite": "knowledge-use", "pairs": r["sessions"], "paths": paths,
+            "notes": "last %gh of this machine's transcripts; a FLOOR (ids named after delivery)"
+                     % r["hours"]}
+
+
+def post(r) -> int:
+    """POST the reading through the hub client and print what the hub stored. 0 stored, 3 refused."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from hub_core import client as _c
+    try:
+        stored = _c._post(_c._base_urls(None), "eval", trend_run(r)).get("data")
+    except (RuntimeError, ValueError) as error:
+        print("posted: REFUSED %s" % str(error)[:300])
+        return 3
+    print("posted: %s" % json.dumps(stored, sort_keys=True)[:600])
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--root", default=os.path.join(os.path.expanduser("~"), ".claude", "projects"))
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--post", action="store_true",
+                    help="record the reading on the board's standing-eval trend (suite knowledge-use)")
     a = ap.parse_args()
     r = measure(a.root, a.hours)
+    rc = post(r) if a.post else 0
     if a.json:
         print(json.dumps(r, indent=1))
-        return 0
+        return rc
     print("last %gh: %d sessions received %d distinct board records; the agent referred to %d of "
           "them by id (%s%%) -- a FLOOR: knowledge can shape a reply unnamed"
           % (a.hours, r["sessions"], r["delivered"], r["used"], r["used_pct"]))
     p = r["prompts"]
     print("hook deliveries: %d with rows, %d with a block but no new rows, %d with no block"
           % (p.get("with_rows", 0), p.get("block_no_rows", 0), p.get("no_block", 0)))
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

@@ -95,7 +95,9 @@ General HTTP writes pass through one gate:
 3. refresh the caller's observed presence from the optional `X-Hub-*` headers (fail-soft);
 4. merge an update with the current aggregate;
 5. require `expected_version` for updates;
-6. validate the merged entity against its schema;
+6. validate the merged entity against its schema (the registry refuses to load a schema file
+   that declares one key twice in an object: JSON keeps the last silently, so two edits to one
+   property would otherwise decide the write contract by whichever landed second);
 7. append with aggregate-scoped idempotency and optimistic concurrency, then publish the
    identity-only wake signal to connected cockpits.
 

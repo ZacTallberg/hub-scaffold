@@ -54,7 +54,8 @@ served, both ranked. **Consolidation** (§1a) is the half that acts on it.
 `python tools/knowledge_use.py [--hours 24]` measures whether delivered knowledge is USED: of
 the records a `<hub-knowledge>` block delivered in a session, how many the agent later named in
 its own replies or tool calls (a floor, stated as one), and how many prompts carried rows, an
-empty block, or none.
+empty block, or none. `--post` records the reading on the standing-eval trend (suite
+`knowledge-use`) so the rate is watched over time, not read once.
 
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
@@ -139,10 +140,14 @@ console is not for.
    unjudged and counted — never coerced.
 3. **Plan** — duplicates fold (union-find, clusters over five are reported, not folded) into ONE
    canonical lesson, the most foundational then the oldest, which gains `reinforced_by` (who else
-   learned it, when, their story); a folded lesson becomes `superseded` with `superseded_by`, a
-   folded finding keeps standing and is tagged `folded-into:<id>`. A correction supersedes the
-   rule it corrects. A contradiction is written onto the lesson's `related` as a settled verdict,
-   where `recall` prints it for a person.
+   learned it, when, their story); every folded member, lesson or finding, becomes `superseded`
+   with `superseded_by` and is tagged `folded-into:<id>` — a finding left standing was found,
+   proposed and re-tagged again by every later run. A correction supersedes the rule it corrects.
+   A contradiction is written onto the lesson's `related` as a settled verdict, where `recall`
+   prints it for a person. The printed plan holds only what an apply would write (`ACTION`);
+   what needs a person's eyes and no write — a correction across kinds, an oversized cluster, a
+   contradiction with no room left on the lesson — prints as `REPORT`, and a contradiction
+   already recorded is not proposed again, so the proposal count drains as applies land.
 4. **`applies_when`** — for every live lesson, the literal strings whose appearance means the rule
    applies NOW: `errors` (text as the tool prints it), `commands`, `paths`, `systems`. This is what
    a tool-time hook matches; similarity over a failed command's output rarely returns the record
@@ -160,7 +165,10 @@ console is not for.
    these at tool time is adopter wiring; the field is the contract.
 5. **Re-learn count** — per ISO week, lessons filed and how many restated an older record
    (`relearned`: another author or more than a day later; `double_filed`: same author within a
-   day). The scaffold has no served trend store: the run prints it (`RELEARN`) and returns it.
+   day). The run prints it (`RELEARN`) and returns it; `--post` records it as one run of the
+   standing-eval trend (suite `knowledge-loop`, `/hub/eval.json`, one path per week) and prints
+   what the hub stored. `tools/knowledge_use.py --post` records the other half (suite
+   `knowledge-use`): the loop is working when use rises while re-learning falls.
 
 **The review-first apply contract.**
 
@@ -232,7 +240,12 @@ five splits, and ranks ties pessimistically. Move `CONVEX_ALPHA` only to a value
 reported. It needs at least ten answered asks.
 
 The same run scores the **delivered** path — the answer's rank in the per-prompt memory index
-(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25. Its query is the ask's
+(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25, and at **@cut**: whether
+the answer is among the rows the client's own relevance or word cut keeps
+(`prompt_context.delivered_cut`, the one function the prompt hook renders from), with the mean
+number of rows that cut delivered. A top-k the client never renders is not in front of the model;
+on a small board the @5 figure can read 90% while the cut delivers almost nothing, and only @cut
+says so. Its query is the ask's
 CONTEXT with the question removed: every answer restates its question verbatim, and a question
 scored against its own echo reads far better than any real prompt will. Sentences sharing 60% of
 the question's words go too, asks left with fewer than 60 characters are excluded and counted,

@@ -1,7 +1,7 @@
 # CI pipeline rules for a forward-only deploy
 
 `deploy-contract.md` says what must be true before anyone may say "deployed"; `deploy-runbook.md`
-is how an agent satisfies it by hand. When an adopter drives the same laws from a CI system, seven
+is how an agent satisfies it by hand. When an adopter drives the same laws from a CI system, eight
 pipeline-level rules decide whether deploys land at all. Each was learned from a pipeline that was
 green, or quiet, while nothing shipped. Examples use GitLab CI syntax because it is compact; every
 rule has an equivalent in other CI systems.
@@ -24,10 +24,17 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "api"'
       auto_cancel:
         on_new_commit: none
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      auto_cancel:
+        on_new_commit: none
     - when: always          # every other source keeps the platform default
 ```
 
 An operator's API-triggered pipeline is never redundant with a push either, so it survives too.
+So does a **scheduled** one, and it needs saying separately: a rule that names only push and API
+leaves schedules on the platform default, and long maintenance jobs are usually interruptible —
+on the origin system a push cancelled the nightly index job eleven minutes in, the second the
+push pipeline started. A schedule is never superseded by a commit; it does work no push does.
 
 Only do this once the deploy step is genuinely forward-only; without that property, a surviving
 older pipeline IS a rollback.
@@ -118,6 +125,25 @@ non-zero with a named marker when it does not. And a schedule never re-reads an 
 file meant for one deliberate push: a nightly run that re-applied the file's last "apply" line
 would repeat it every night and never do its own work — only a pushed trigger applies; a
 schedule always runs the safe default.
+
+## 8. The host's deploy slot is for jobs that need the host
+
+A serialized deploy slot (a resource group on the app host) is the narrowest resource in the
+pipeline: every job in it delays every deploy behind it, and every job that runs ON the app host
+takes cores from the services it serves. Put in it only what must be there:
+
+- **Read-only measurements get a slot of their own.** An evaluation that reads the board and
+  writes nothing (a retrieval eval, a model eval) held the deploy slot for its whole budget on
+  the origin system while five deploys waited behind it and the web process starved for CPU.
+  Give measurements their own resource group. Jobs that WRITE the host's data keep the deploy
+  group, because they must not interleave with a checkout reset.
+- **Checks that only read the checkout run off the app host.** Framework checks, migration
+  checks and similar need a checkout, not the host; run them on a general runner.
+- **Verification that needs nothing the deploy job does not already hold runs at the end of the
+  deploy job**, not as a second host job: each separate job pays its own queue wait, fetch and
+  shell start (rule 3), and a second job per push doubles the host's CI load for no new
+  information. Keep a standalone verify job only for an explicit re-check without a deploy, and
+  grow the deploy job's timeout by what verification takes.
 
 ## Reporting a failed job
 
