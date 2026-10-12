@@ -857,7 +857,17 @@ _STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None, "full_
 # under a running process, a projection bug fixed by a hot reload) can survive in memory.
 FULL_REPLAY_S = 15 * 60
 _STATE_LOCK = threading.RLock()
-_SNAP_CACHE = {"key": None, "value": None}
+_SNAP_CACHE = {"key": None, "value": None, "built_at": 0.0, "served": None}
+#: A board snapshot younger than this is reused WHATEVER moved since. Its inputs (the error
+#: stamp, the presence bucket, the leases, the ledger head) move every few seconds on a busy
+#: board, and on the instance this was lifted from that meant dozens of full snapshot builds a
+#: minute on the request threads. The push stream carries every change exactly (delta path),
+#: and a writer reads the record itself, never the snapshot, so 5 s of lag on a re-read is the
+#: whole cost.
+SNAPSHOT_MIN_REBUILD_S = float(os.environ.get("HUB_SNAPSHOT_MIN_REBUILD_S") or 5)
+#: ONE snapshot build at a time: a reader arriving during a build waits for it and reuses it
+#: instead of building the same thing again in parallel under one interpreter.
+_SNAP_BUILD_LOCK = threading.Lock()
 # Per-phase build timings of the snapshot: the last build and the worst seen per phase in this
 # process, so "the board is slow" names a phase instead of a feeling.
 _SNAP_TIMINGS = {"last": {}, "worst": {}, "count": 0}
@@ -1499,7 +1509,28 @@ def _sweep_leases():
         logging.getLogger("hub.deploy_close").warning("close sweep did not start", exc_info=True)
 
 
+def _snapshot_fresh(served):
+    value = _SNAP_CACHE["value"]
+    return (value if value is not None and _SNAP_CACHE["served"] == served
+            and time.monotonic() - _SNAP_CACHE["built_at"] < SNAPSHOT_MIN_REBUILD_S else None)
+
+
 def _snapshot(served=None):
+    """``(state, snap)`` -- reused within SNAPSHOT_MIN_REBUILD_S whatever moved, otherwise
+    rebuilt (or reused when its inputs are unchanged), one build at a time."""
+    hit = _snapshot_fresh(served)
+    if hit is not None:
+        return hit
+    with _SNAP_BUILD_LOCK:
+        hit = _snapshot_fresh(served)
+        if hit is not None:
+            return hit
+        out = _snapshot_build(served)
+        _SNAP_CACHE.update(built_at=time.monotonic(), served=served)
+        return out
+
+
+def _snapshot_build(served=None):
     _sweep_leases()
     s = hub_app.store()
     try:
@@ -1630,6 +1661,7 @@ def _snapshot(served=None):
             }
         else:
             snap["worker_launch"] = {"enabled": False}
+        snap["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _SNAP_CACHE["value"] = (state, snap)
         _SNAP_CACHE["key"] = key
         return _SNAP_CACHE["value"]
@@ -2891,7 +2923,7 @@ def perf_json(request):
         import pstats
         import profile as thread_profile
         from pathlib import Path
-        _SNAP_CACHE["key"] = None                  # profile a real build, not a memo hit
+        _SNAP_CACHE.update(key=None, built_at=0.0)  # profile a real build, not a memo hit
         profiler = thread_profile.Profile(timer=time.perf_counter)
         wall, cpu = time.perf_counter(), time.thread_time()
         _, snap = profiler.runcall(_snapshot, request.GET.get("served"))
