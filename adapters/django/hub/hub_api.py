@@ -2705,6 +2705,10 @@ def _veil_visible(request):
     return None if view.open else view.visible
 
 
+INBOX_REUSE_S = 30.0
+_INBOX_MEMO: dict = {}
+
+
 @require_GET
 def inbox_json(request):
     """What is addressed to ?agent= right now: messages to it, the questions it should see
@@ -2716,9 +2720,26 @@ def inbox_json(request):
     agent, machine, session = _inbox_reader(request)
     if not agent:
         return JsonResponse({"errors": [{"code": "need_agent", "msg": "pass ?agent="}]}, status=400)
-    state, snap = _snapshot()
-    data = _addressed(state, snap, agent, **_inbox_kwargs(request, machine, session))
+    # REUSED WHILE NOTHING IT DEPENDS ON MOVED: the long-poll already keys its projection on
+    # _inbox_change_signal (ledger head, presence bucket, leases, error stream, minute); a poll of
+    # inbox.json rebuilt the whole addressed set on every call -- on the instance this was lifted
+    # from, the top consumer of request-thread CPU. Same signal, same reader -> same body, for at
+    # most INBOX_REUSE_S.
+    signal = _inbox_change_signal()
+    memo_key = (agent, machine, session, getattr(request, "hub_tier", "") or "",
+                _inbox_kwargs_synthetic(request))
+    hit = _INBOX_MEMO.get(memo_key)
+    if signal and hit and hit[0] == signal and time.monotonic() - hit[1] < INBOX_REUSE_S:
+        data = hit[2]
+    else:
+        state, snap = _snapshot()
+        data = _addressed(state, snap, agent, **_inbox_kwargs(request, machine, session))
+        if signal:
+            if len(_INBOX_MEMO) >= 256:
+                _INBOX_MEMO.clear()
+            _INBOX_MEMO[memo_key] = (signal, time.monotonic(), data)
     if request.GET.get("expired") in ("1", "true", "yes"):
+        state, _snap = _snapshot()
         # LISTED, NOT DELIVERED: expired mail rides beside the addressed set, outside anything
         # a waiter fingerprints, so asking to see it can never push it into a console.
         try:
@@ -2833,6 +2854,37 @@ def _crossovers(state):
     return rows, overlap_core.signals(rows, titles=titles, claims=claims), titles
 
 
+def _inbox_change_signal():
+    # The cheap fingerprint of everything the snapshot depends on — the wait loop must
+    # not fold the whole ledger per poll tick. The presence stamp rides it BUCKETED
+    # (session routing, crossovers and attention read presence, and presence moves on
+    # every request), leases ride it because a claim moves no ledger head, and problems and
+    # crossovers change with NO ledger event, so the error stream's stamp and a minute bucket
+    # (problem freshness) ride it too. "" on error
+    # never equals a real signal, so a failed read degrades to always-fold rather than
+    # skipping a real change.
+    try:
+        s = hub_app.store()
+        try:
+            seq = s.latest_cursor().get("seq") or 0
+        finally:
+            s.close()
+    except Exception:                                    # noqa: BLE001
+        return ""
+    try:
+        stamp = hub_app.presence_stamp()
+    except Exception:                                    # noqa: BLE001
+        stamp = None
+    try:
+        leases_fp = _leases_fp()
+    except Exception:                                    # noqa: BLE001
+        leases_fp = ""
+    try:
+        errors_stamp = errorlog.stamp(hub_app.HUB_DIR)
+    except Exception:                                    # noqa: BLE001
+        errors_stamp = ""
+    return inbox_core.change_signal(seq, stamp, leases_fp, errors_stamp,
+                                    int(time.time() // 60))
 
 
 @require_GET
@@ -2859,37 +2911,7 @@ def inbox_wait(request):
         state, snap = _snapshot()
         return _addressed(state, snap, who, **_inbox_kwargs(request, machine, session))
 
-    def signal_fn():
-        # The cheap fingerprint of everything the snapshot depends on — the wait loop must
-        # not fold the whole ledger per poll tick. The presence stamp rides it BUCKETED
-        # (session routing, crossovers and attention read presence, and presence moves on
-        # every request), leases ride it because a claim moves no ledger head, and problems and
-        # crossovers change with NO ledger event, so the error stream's stamp and a minute bucket
-        # (problem freshness) ride it too. "" on error
-        # never equals a real signal, so a failed read degrades to always-fold rather than
-        # skipping a real change.
-        try:
-            s = hub_app.store()
-            try:
-                seq = s.latest_cursor().get("seq") or 0
-            finally:
-                s.close()
-        except Exception:                                    # noqa: BLE001
-            return ""
-        try:
-            stamp = hub_app.presence_stamp()
-        except Exception:                                    # noqa: BLE001
-            stamp = None
-        try:
-            leases_fp = _leases_fp()
-        except Exception:                                    # noqa: BLE001
-            leases_fp = ""
-        try:
-            errors_stamp = errorlog.stamp(hub_app.HUB_DIR)
-        except Exception:                                    # noqa: BLE001
-            errors_stamp = ""
-        return inbox_core.change_signal(seq, stamp, leases_fp, errors_stamp,
-                                        int(time.time() // 60))
+    signal_fn = _inbox_change_signal
 
     payload = inbox_core.wait(agent, known, timeout, snapshot_fn=snapshot_fn,
                               signal_fn=signal_fn,
