@@ -24,8 +24,8 @@ from hub_core import (activity as activity_core, adherence, app_health,
                       attention as attention_core, checkpoints, cost, dag, errorlog,
                       failure_taxonomy, flow, liveness, inbox as inbox_core, offer, overlap,
                       plan as plan_rows, presence as _presence, problems as problems_core,
-                      project, projections, task_health, task_rows, telemetry, upcast,
-                      updates, wip, write_timing)
+                      project, projections, task_completion, task_health, task_rows,
+                      telemetry, upcast, updates, wip, write_timing)
 from hub_core import overlap as overlap_core
 from hub_core import record_state as _record_state
 from hub_core.canonical import content_hash
@@ -1601,6 +1601,10 @@ def _snapshot(served=None):
             # The adaptive WIP ceiling the claim seam enforces, so the cockpit shows the fleet's
             # own concurrency budget rather than the operator guessing at it.
             "wip": hub_app.wip_status(len(inflight)),
+            # Done is the machine check: per app, "N of M closed requests verified live, F
+            # failed", over the FULL task collection (a head of it is a truncated denominator).
+            "verified_live": task_completion.verified_live_by_app(
+                state.get("by_type", {}).get("task", [])),
         }
         _tick("live_blocks")
         snap = projections.hub_snapshot(state, build=build, audit=audit, live=live)
@@ -1989,9 +1993,14 @@ def project_tasks_json(request, slug):
     last 14 days, each annotated, for a consuming app to poll. Answers 304 on a matching
     If-None-Match: the validator moves only when something a reader shows moves."""
     state, _ = _snapshot()
-    rows = _annotated_tasks(state, state.get("by_type", {}).get("task", []))
+    tasks = state.get("by_type", {}).get("task", [])
+    rows = _annotated_tasks(state, tasks)
     payload = task_rows.feed(rows, slug)
-    tag = '"%s"' % payload.pop("etag")
+    rate = task_completion.verified_live_by_app(tasks).get(payload["project"]) or {
+        "app": payload["project"], "closed": 0, "verified_live": 0, "failed": 0}
+    payload["verified_live"] = rate
+    tag = '"%s-%d-%d-%d"' % (payload.pop("etag"), rate["closed"], rate["verified_live"],
+                             rate["failed"])
     if request.headers.get("If-None-Match") == tag:
         resp = HttpResponse(status=304)
     else:

@@ -647,11 +647,19 @@ acknowledged. A CI problem item carries `knowledge` when a record clears the rel
 
 **A verified deploy closes the loop.** After `POST /hub/api/deploy` records a release, every open
 task whose structured commit (`plan[].sha`) is an ANCESTOR of the deployed sha gets exactly one
-`deployed` checkpoint (once per commit, however many later builds contain it). An `unattended` task
-is then finished by the hub through the same done path — a short lease it holds (never when anyone
-else holds the task), the deploy record and the commit as evidence; a person's task is only stepped.
-A `todo` task qualifies only with a recorded commit; prose never counts. The response adds
-`tasks: {closed, stepped, refused, unchecked}` when anything happened; a refused close is written
+`deployed` checkpoint (once per commit, however many later builds contain it). **A deploy proves
+the commit is live, not that the request was met, so that is all it does.** The task -- unattended
+or a person's -- closes through the same done path once a `verified` row with `result: pass` names
+the deployed commit (or a build containing it), written AFTER the `deployed` receipt and after the
+newest `rejected` row, with no failure standing after it (a failure is answered only by a LATER pass
+on the same build or one containing it). Until then `auto_close.state` is `awaiting` and says what
+is missing. An unattended task another live run holds is refused and retried; a person's task is
+closed over its lease and the holder is told in its inbox. A `todo` task qualifies only with a
+recorded commit; prose never counts (the client's `step` no longer lifts a sha out of a note: it
+warns and records a plain checkpoint). The response adds `tasks: {closed, stepped,
+awaiting_verification, refused, unchecked}` when anything happened; a close that meets a busy
+ledger is retried on its own thread (every step is idempotent) instead of being lost. A refused
+close is written
 onto the task as `auto_close`. Ancestry is asked of the repository at `HUB_WORK_ROOT`
 (`HUB_VCS_ANCESTRY=none` when the image carries none); a question it could not answer is reported
 as `unchecked`, never read as "no". The closure is fail-soft and never a condition of the
@@ -661,23 +669,39 @@ carries `tasks: {queued: true}` and the close finishes in the background (a fail
 error stream). Closes run one at a time (the record's, a CI deploy job's and the reconcile
 replay's), so records landing together never race each other on one task's version.
 
-A refused close is **retried, not final**. An unattended task already stepped `deployed` but not
-done is offered to the close again on every later deploy (never stepped twice), on the hand-back,
-release or lease sweep that frees its lease, and by a sweep started from the board's read path at
-most once a minute -- always in ONE single-flight background thread, never on the request. A task
-whose NEWEST work checkpoint says it is not finished ("not done", "active on purpose", "not pushed",
-"branch-only", "waiting on the operator's yes") is refused with the quote in `auto_close.why`; the
-sweep re-reads the task's words every pass, so a later checkpoint lifts the refusal, and the
-client's own echo of a refused finish (`finish REFUSED ...`) never counts as the task's word. **A
-deploy alone never closes a task:** until a work checkpoint carries `SEEN: <what is on the real
-surface and in the saved state>` after the change, the close is refused with that reason and the
-next run resumes the task with the look as its first job. A refusal is written once per (task,
-reason) -- `auto_close.reason_key` is the reason with ids, counts and ages normalised out -- never
-once per retry. A sha written in a checkpoint's prose counts only when the task recorded no commit
-of its own and a deploy record served exactly that commit. The sweep also replays a deploy record
-whose served sha is a task's newest recorded push but which was written BEFORE that push was
-recorded (at most 3 a pass, once per record and task), so a push recorded seconds after its own
-release is stamped without waiting for the next one.
+A refused close is **retried, not final**. A task already stepped `deployed` but not done is
+offered to the close again on every later deploy (never stepped twice), on the hand-back, release
+or lease sweep that frees its lease, on the passing verification that lets it close, and by a sweep
+started from the board's read path at most once a minute -- always in ONE single-flight background
+thread, never on the request. A task whose NEWEST work checkpoint says it is not finished ("not
+done", "active on purpose", "not pushed", "branch-only", "waiting on the operator's yes") is refused
+with the quote in `auto_close.why`; the sweep re-reads the task's words every pass, so a later
+checkpoint lifts the refusal, and the client's own echo of a refused finish (`finish REFUSED ...`)
+never counts as the task's word. **A deploy alone never closes a task:** it waits (`auto_close.state:
+awaiting`) for a `verified` pass of the deployed build (below) -- a row tied to the deployed sha and
+written after the deploy, never a `SEEN:` line that could have been written while reproducing,
+before the fix. A refusal is written once per (task, reason) -- `auto_close.reason_key` is the
+reason with ids, counts and ages normalised out -- never once per retry. A sha written in a
+checkpoint's prose counts only when the task recorded no commit of its own and a deploy record
+served exactly that commit. The sweep also replays a deploy record whose served sha is a task's
+newest recorded push but which was written BEFORE that push was recorded (at most 3 a pass, once
+per record and task), so a push recorded seconds after its own release is stamped without waiting
+for the next one.
+
+**Outcomes: done is the machine check.** `POST /hub/api/task/outcome` (`task:write`) `{id, kind:
+verified|rejected, sha, result: pass|fail, artifact, note, facts}` appends an outcome row: a RECEIPT,
+not work -- no lease needed, `by` stamped from the authenticated caller, kept by the fold whatever a
+later plan write sends (so are `deployed` rows and a published hand-off's `pushed` row:
+`receipt: "handoff"`). A verification needs `sha` and the `artifact` it READ (`422 bad_outcome`
+otherwise); a pass closes a task already stepped `deployed` (`data.close`). A failed verification or a
+rejection on a closed task REOPENS the same task (`reopened: true`), and every row written before a
+rejection stops counting. A rejection is the requester's: the task's creator or an operator-tier
+caller (`403 not_requester`). A whole-plan `POST /hub/api/task` that ADDS an outcome row is `409
+use_outcome`. Client: `verify <task> --sha --artifact [--failed] [--note] [--facts JSON]`, `reject
+<task> --note`. `live.verified_live` on hub.json and `verified_live` on
+`/hub/project/<slug>/tasks.json` give, per app over EVERY closed task, "N of M closed requests verified
+live, F failed"; the board's task view lists every outcome in full with that rate.
+
 `POST /hub/api/deploy/reconcile` (`deploy:write`) replays the newest deploy record and retries
 every stepped close in a thread (202; 200 with the running state if one is going); a `running`
 state that has not moved for 2 minutes belongs to a dead process and is restarted, and a replay

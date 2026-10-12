@@ -9,6 +9,7 @@ detection, and counts/phases/coverage. Everything the hub renders (state.json, .
 import datetime as _dt
 import re
 
+from . import checkpoints as _checkpoints
 from . import upcast as _upcast
 
 # Entity types that fold into the projected state (everything else, e.g. decision/claim, is a
@@ -104,6 +105,11 @@ def _advance(entities, events):
         first_by = first_by.get("created_by") if isinstance(first_by, dict) else None
         for k, v in payload.items():
             ent[k] = v
+        # A plan write never removes a system receipt (deployed, an outcome, a hand-off push):
+        # writers send the whole plan, and one landing on a receipt's slot used to erase it.
+        prior_plan = entities.get(agg, {}).get("plan")
+        if isinstance(payload.get("plan"), list) and isinstance(prior_plan, list):
+            ent["plan"] = _checkpoints.keep_receipts(prior_plan, payload["plan"])
         ent["version"] = ev.get("result_version", ent.get("version", 0))
         # COPY before stamping: a payload that carries its own provenance dict arrives ALIASED
         # into ent (the k/v merge is by reference), and stamping through the alias mutates the

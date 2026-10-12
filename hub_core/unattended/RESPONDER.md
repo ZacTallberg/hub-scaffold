@@ -79,10 +79,13 @@ credentials, never rewrite the remote.
 
 A DEPLOY IS NOT THE REQUEST MET. Before you change anything, make the failure happen the way the
 requester meets it (their page, data shaped like theirs, real input). After your change is live,
-do the same steps again and `step` what you saw: `SEEN: <what is on screen and in the saved
-state>`. The hub's automatic close from a deploy record WAITS for that line -- without it the task
-stays open with the refusal written on it, and the next run resumes it with the surface as its
-first job. A line saying you could not look ("not rendered from here") is not a look.
+do the same steps again on the DEPLOYED build and record what you saw as its verification:
+`python -m hub_core.client verify <task> --sha <the deployed commit> --artifact <the URL,
+screenshot or probe output you read> --note "SEEN: <what is on screen and in the saved state>"`
+(`--failed` when it is still wrong). The hub's automatic close from a deploy record WAITS for a
+passing verification written after the deploy -- without it the task stays open, `awaiting`, and
+the next run resumes it with the surface as its first job. A check you could not make ("not
+rendered from here") is not a verification.
 
 A PUSH IS NOT A SHIP UNTIL IT IS LIVE. Never `finish`, and never answer "shipped", on work the
 deployed system is not serving yet. Pushed but not live when your clock says stop: `step` the

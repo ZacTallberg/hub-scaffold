@@ -330,13 +330,18 @@ project key are renameable bindings; the rules are not.
         "note": { "type": "string", "description": "What the worker reported at this checkpoint, whole (surfaces that must fit a line show a preview ending in an ellipsis) — the context that turns 'working on X' into 'working on X, last did Y'." },
         "note_at": { "type": "string", "description": "ISO timestamp the checkpoint note was written." },
         "due_at": { "type": "string", "maxLength": 40, "description": "On an OPEN checkpoint (client `step --due`): the UTC time before which it cannot be done, e.g. an acceptance window. task_health reads the task as waiting, not stalled, until then; a time already passed, unparseable, or more than 7 days out is ignored." },
-        "kind": { "enum": ["checkpoint", "pushed", "deployed", "handed_back", "lease_released", "reaped", "launcher_timeout", "claim_expired", "lifecycle"], "description": "What this checkpoint IS, so no reader parses prose: pushed (names the commit in `sha`, optionally its pipeline), deployed (a verified deploy made that commit live), and the lifecycle kinds a SCHEDULER writes about its own run (handed_back, lease_released, reaped, launcher_timeout, claim_expired, lifecycle) — shown, but never counted toward 'N of N done'." },
+        "kind": { "enum": ["checkpoint", "pushed", "deployed", "verified", "rejected", "handed_back", "lease_released", "reaped", "launcher_timeout", "claim_expired", "lifecycle"], "description": "What this checkpoint IS, so no reader parses prose: pushed (names the commit in `sha`, optionally its pipeline), deployed (a verified deploy made that commit live), verified (the machine check of a deployed build: `result` pass|fail on `sha`, the `artifact` it read), rejected (the requester says the deployed work does not meet the request; it reopens the task and voids every receipt before it), and the lifecycle kinds a SCHEDULER writes about its own run (handed_back, lease_released, reaped, launcher_timeout, claim_expired, lifecycle) — shown, but never counted toward 'N of N done'." },
         "lifecycle": { "type": "boolean", "description": "True on a row a scheduler wrote about its own run, never about the work; counters leave it out of completeness." },
         "times": { "type": "integer", "minimum": 1, "description": "How many times this one lifecycle row happened (a recurring hand-back is ONE row counting itself)." },
         "auto": { "type": "boolean", "description": "A placeholder grown to reach a numbered step nobody declared; excluded from the plan's denominator until somebody reports on it." },
         "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$", "description": "The commit this checkpoint is about." },
         "pipeline_id": { "type": "string", "pattern": "^[0-9]{1,12}$", "description": "The CI pipeline that built `sha`." },
-        "pipeline_url": { "type": "string", "maxLength": 300 }
+        "pipeline_url": { "type": "string", "maxLength": 300 },
+        "result": { "enum": ["pass", "fail"], "description": "On a `verified` row: what the check of the deployed build found." },
+        "artifact": { "type": "string", "maxLength": 500, "description": "On an outcome row: what the check READ (a URL, a screenshot path, a probe's output reference)." },
+        "by": { "type": "string", "maxLength": 120, "description": "On an outcome row: who wrote it (stamped by the hub from the caller, never trusted from the body)." },
+        "facts": { "type": "object", "description": "On an outcome row: the structured readings behind it (counts, statuses), shown in full." },
+        "receipt": { "enum": ["handoff"], "description": "Marks a `pushed` row the SYSTEM wrote (a published hand-off), so a plan write can never remove it, like any other receipt." }
       }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
@@ -349,7 +354,7 @@ project key are renameable bindings; the rules are not.
       "followup": { "$ref": "hub:common#/$defs/idref" } }, "required": ["text", "decided_by", "decided_at", "then"] },
     "needs_person": { "type": "object", "additionalProperties": false, "description": "Set by an unattended launcher that gave up on this task at its run cap: a PERSON must take it from here. The attention list delivers it to the task's owner (at once for P0) and names the pushed commit when there is one, because the queue alone shows it as ordinary todo.", "properties": { "reason": { "type": "string", "maxLength": 600 }, "sha": { "type": "string", "maxLength": 40 }, "at": { "type": "string" }, "by": { "type": "string", "maxLength": 120 } } },
     "auto_close": { "type": "object", "additionalProperties": false, "description": "What a verified deploy's automatic close did with this task: closed, or refused and why — so a task waiting on a close that cannot fire says so.", "properties": {
-      "state": { "enum": ["closed", "refused"] },
+      "state": { "enum": ["closed", "refused", "awaiting"], "description": "awaiting: the commit is live but no verification of the deployed build has passed after the deploy yet." },
       "why": { "type": "string", "maxLength": 200 },
       "reason_key": { "type": "string", "maxLength": 40, "description": "The refusal's reason with commit ids, counts and ages normalised out: one refusal is recorded once per reason, not once per retry." },
       "sha": { "type": "string", "maxLength": 40 },

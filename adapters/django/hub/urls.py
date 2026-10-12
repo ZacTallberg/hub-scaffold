@@ -112,6 +112,7 @@ urlpatterns = [
     path("<str:type>.json", R(hub_api.type_json)),
     path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
     path("api/task", hub_write.task),
+    path("api/task/outcome", hub_write.task_outcome),
     path("api/complete", hub_write.complete),
     path("api/adr", hub_write.adr),
     path("api/capability", hub_write.capability),

@@ -5,9 +5,12 @@ checkpoint) and then runs out of time while the pipeline is still queued cannot 
 honestly — a push is not a ship until it is verified live — and nobody is left to finish when it
 does go live. The deploy record closes that loop: it names the sha the front door now serves,
 and every open task whose structured checkpoint commit is CONTAINED in that build gets exactly
-one ``deployed`` checkpoint. An UNATTENDED task is then finished by the hub with the deploy
-record as evidence, through the same completion path every other ``done`` takes; a person's
-task is only stepped — finishing it is theirs.
+one ``deployed`` checkpoint. A deploy proves the commit is LIVE, not that the request was met,
+so that is all it does: the task closes -- unattended or a person's, through the same
+completion path every other ``done`` takes -- once a ``verified`` row with result=pass names the
+deployed commit, written after the receipt and after the newest ``rejected`` row, with no
+failure standing after it (see "outcomes" below). Until then the task says it is awaiting
+verification.
 
 What makes this safe, each rule paid for once:
 
@@ -37,11 +40,12 @@ What makes this safe, each rule paid for once:
   quotes it. Only the newest checkpoint speaks for the task -- an early "NOT DONE" written
   before the work that finished it must not refuse every close for the task's whole life -- and
   the client's own echo of a refused finish is the gate's words, never the task's.
-* A deploy proves the bytes are on the host, never that the request was met. An unattended
-  task closes from its deploy only once a work checkpoint says what was SEEN on the real surface
-  after the change (``not_seen``); on the origin system two requests were closed "deployed and
-  verified" the moment their commit went live while neither run had opened the page, and the
-  page was still wrong.
+* A deploy proves the bytes are on the host, never that the request was met. A task closes from
+  its deploy only once a ``verified`` pass of the DEPLOYED commit was written after the deploy
+  (``verification_after_deploy``); on the origin system requests were closed "deployed and
+  verified" the moment their commit went live while nobody had opened the page, and a "SEEN:"
+  line anywhere in the plan was not enough either -- one written while reproducing, BEFORE the
+  fix, satisfied it.
 * A sha written in a checkpoint's PROSE counts only when the task recorded no commit of its own
   AND a verified deploy record served exactly that commit. A note that says "rebased on main
   <base>" names the BASE: with the task's own push recorded beside it, the served base once
@@ -165,28 +169,6 @@ def unfinished_by_its_own_word(task: dict) -> str:
     return ""
 
 
-#: The marker a worker's checkpoint carries when it LOOKED at the change on the real surface,
-#: the way the requester meets it (hub_core/unattended/RESPONDER.md tells every run to write it).
-_SEEN = re.compile(r"\bSEEN:\s*\S")
-
-
-def not_seen(task: dict) -> str:
-    """Why a task may not be closed by its deploy alone: '' when a work checkpoint says what was
-    SEEN on the real surface after the change; else the reason, phrased as the next run's job.
-
-    A deploy proves the commit is on the host; it never proved the request was met. Without a
-    look the close waits, the refusal is written on the task, and the next run resumes it with
-    the surface as its first job. Deploy receipts and lifecycle rows never count as a look."""
-    for s in _work_rows(task):
-        if refusal_echo(s):
-            continue
-        if _SEEN.search(str(s.get("note") or "")):
-            return ""
-    return ("no checkpoint says what was SEEN on the real surface after the change: a deploy "
-            "proves the commit is live, not that the request was met (open it, do what the "
-            "requester did, and step \"SEEN: <what is on screen and in the saved state>\")")
-
-
 def already_stepped(task: dict, sha: str) -> bool:
     want = str(sha or "").strip().lower()
     if not want:
@@ -254,8 +236,7 @@ def plan_matches(tasks, deployed: str, is_ancestor=None, served=None) -> tuple:
         if not hit:
             continue
         if already_stepped(t, hit):
-            if is_unattended(t):
-                matches.append((t, hit, True))
+            matches.append((t, hit, True))
             continue
         matches.append((t, hit, False))
     return matches, sorted(set(unchecked))
@@ -270,17 +251,22 @@ def deployed_row(task: dict) -> dict | None:
 
 
 def retry_candidates(tasks) -> list:
-    """Unattended, open tasks already stepped ``deployed`` whose close has not landed, unless
-    their own words STILL say the work is unfinished (that one is a person's now).
+    """Open tasks stepped ``deployed`` (after their newest rejection) whose close has not landed,
+    that a passing verification has since checked, unless their own words STILL say the work is
+    unfinished (that one is a person's now). A task still waiting on its verification is not
+    retried: there is nothing new for the close to read until one lands, and the outcome write
+    closes it then.
 
     The task's words are re-read every pass, never the stored refusal: a later checkpoint
     supersedes them, and a quote that was only the client's refusal echo never counted. Trusting
     the stored "not finished" skipped such a task for ever."""
     out = []
     for t in tasks or []:
-        if not isinstance(t, dict) or t.get("type", "task") != "task" or not is_unattended(t):
+        if not isinstance(t, dict) or t.get("type", "task") != "task":
             continue
-        if str(t.get("status") or "") not in OPEN_STATES or deployed_row(t) is None:
+        if str(t.get("status") or "") not in OPEN_STATES or deployed_after_floor(t) is None:
+            continue
+        if outcome_after_deploy(t) != "verified":
             continue
         ac = t.get("auto_close") if isinstance(t.get("auto_close"), dict) else {}
         if "not finished" in str(ac.get("why") or "") and unfinished_by_its_own_word(t):
@@ -373,3 +359,188 @@ def newest_deploy(deploys) -> dict | None:
 def is_unattended(task: dict) -> bool:
     return (task or {}).get("unattended") in (True, 1, "1", "true")
 
+
+
+# ---------------------------------------------------------------- outcomes: done is the machine check
+#
+# A deploy proves a commit is LIVE, not that the request was met. On the instance this was lifted
+# from, tasks closed on a deploy of another task's commit, on their rebase base, while the cells a
+# person asked for were still blank, and while the post-deploy job was red -- every one "deployed
+# and verified". So a deploy only STEPS a task (`deployed`); the task closes once a `verified` row
+# with result=pass names that deployed commit, written AFTER the deployed receipt and after the
+# newest rejection, and no `verified` failure stands after it. A person should never have to
+# confirm: the check is a machine reading of the deployed build (a post-deploy probe, or a worker's
+# `verify` with the artifact it read), and the per-app rate the board shows is that reading.
+
+
+def _iso_epoch(value) -> float:
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sha_eq(a, b) -> bool:
+    a, b = str(a or "").strip().lower(), str(b or "").strip().lower()
+    return bool(a and b) and (a.startswith(b) or b.startswith(a))
+
+
+def _positions(task: dict) -> list:
+    """``[(row, (epoch, index))]``: WHEN each row was written, its plan position breaking a tie.
+    Receipts are stamped to the second, so a deploy, its verification and a rejection can share
+    one; the row written later is the one further down the plan (receipts are only appended)."""
+    return [(s, (_iso_epoch(s.get("note_at")), i))
+            for i, s in enumerate((task or {}).get("plan") or []) if isinstance(s, dict)]
+
+
+def _rejection_pos(task: dict) -> tuple:
+    """WHEN the newest `rejected` row was written. A rejection reopens the SAME task, and every
+    receipt written before it described the attempt the requester just said does not work: only
+    rows written after it count."""
+    return max([p for s, p in _positions(task) if s.get("kind") == "rejected"] or [(0.0, -1)])
+
+
+def deployed_after_floor(task: dict, sha: str = "") -> dict | None:
+    """The newest `deployed` row (for `sha` when given) written after the newest rejection."""
+    floor = _rejection_pos(task)
+    for s, pos in reversed(_positions(task)):
+        if (s.get("kind") == "deployed" and s.get("sha")
+                and (not sha or _sha_eq(s.get("sha"), sha)) and pos > floor):
+            return s
+    return None
+
+
+_FAILED_PREFIX = "a verification after the deploy FAILED"
+
+
+def verification_after_deploy(task: dict, sha: str, deployed: dict, is_ancestor=None) -> str:
+    """'' when a `verified` pass names `sha` (or a build that contains it), written after the
+    `deployed` receipt and after the newest rejection, and no unanswered failure stands; else why
+    not. A failure is superseded only by a LATER pass on the same build or one that contains it
+    (a fix that landed in a later commit, verified on the build carrying it); a failure newer than
+    every pass still refuses. ``is_ancestor(a, b) -> bool | None`` is the adapter's VCS seam; None
+    means only exact shas match."""
+    sha = str(sha or "").strip().lower()
+    rows = _positions(task)
+    dep_pos = next((p for s, p in rows if s is deployed),
+                   (_iso_epoch((deployed or {}).get("note_at")), -1))
+    after = max(dep_pos, _rejection_pos(task))
+
+    def covers(vsha: str, target: str) -> bool:
+        if _sha_eq(vsha, target):
+            return True
+        if is_ancestor is None or not _HEX.match(vsha or "") or not _HEX.match(target or ""):
+            return False
+        return bool(is_ancestor(target, vsha))
+
+    passes, fails = [], []
+    for s, at in rows:
+        if s.get("kind") != "verified" or at <= after:
+            continue
+        vsha = str(s.get("sha") or "").strip().lower()
+        if not covers(vsha, sha):
+            continue
+        (passes if str(s.get("result") or "").lower() == "pass" else fails).append((at, vsha, s))
+    for f_at, f_sha, f_row in sorted(fails, key=lambda x: x[0], reverse=True):
+        if not any(p_at > f_at and covers(p_sha, f_sha) for p_at, p_sha, _ in passes):
+            return (_FAILED_PREFIX + " (%s): %s"
+                    % (f_row.get("note_at"),
+                       str(f_row.get("note") or f_row.get("artifact") or "")[:120]))
+    if not passes:
+        return ("no verification of the deployed %s after the deploy: a deploy proves the commit is "
+                "live, not that the request was met (open it as the requester would, then record "
+                "`verify <task> --sha %s --artifact <what you read> --note \"SEEN: ...\"`)"
+                % (sha[:12], sha[:12]))
+    return ""
+
+
+def verification_row(task: dict, sha: str) -> dict | None:
+    """The newest passing `verified` row naming `sha`, else None (what a close cites)."""
+    for s in reversed((task or {}).get("plan") or []):
+        if (isinstance(s, dict) and s.get("kind") == "verified" and _sha_eq(s.get("sha"), sha)
+                and str(s.get("result") or "").lower() == "pass"):
+            return s
+    return None
+
+
+def outcome_after_deploy(task: dict) -> str:
+    """'verified' | 'failed' | '' -- what the machine check said about a task's deployed build,
+    read from the task's own rows only (no VCS call): the newest `deployed` row after the newest
+    rejection, judged by the same rule the close uses -- a failure stands unless a later pass on
+    the same build answered it ('failed'); a pass with no standing failure is 'verified'; nothing
+    checked after the deploy is ''."""
+    dep = deployed_after_floor(task)
+    if dep is None:
+        return ""
+    why = verification_after_deploy(task, str(dep.get("sha") or ""), dep)
+    if not why:
+        return "verified"
+    return "failed" if why.startswith(_FAILED_PREFIX) else ""
+
+
+_APP_PREFIX = re.compile(r"^([a-z0-9][a-z0-9-]{1,60}):")
+
+
+def task_app(task: dict) -> str:
+    """The app (or component) a task is about, for the per-app outcome rate: its `project`, else
+    the title's ``slug:`` prefix, else ''."""
+    project = str((task or {}).get("project") or "").strip().lower()
+    if project:
+        return project
+    m = _APP_PREFIX.match(str((task or {}).get("title") or "").strip().lower())
+    return m.group(1) if m else ""
+
+
+def verified_live_by_app(tasks) -> dict:
+    """``{app: {app, closed, verified_live, failed}}`` over EVERY closed task: "N of M closed
+    requests verified live, F failed". The rest of M closed with no machine check of the deployed
+    build at all. Callers pass the FULL collection -- a head of it is a truncated denominator."""
+    out: dict = {}
+    for t in tasks or []:
+        if not isinstance(t, dict) or t.get("status") != "done":
+            continue
+        app = task_app(t)
+        if not app:
+            continue
+        row = out.setdefault(app, {"app": app, "closed": 0, "verified_live": 0, "failed": 0})
+        row["closed"] += 1
+        state = outcome_after_deploy(t)
+        if state == "verified":
+            row["verified_live"] += 1
+        elif state == "failed":
+            row["failed"] += 1
+    return out
+
+
+def outcome_row(kind: str, *, sha: str = "", result: str = "", artifact: str = "", note: str = "",
+                by: str = "", facts=None, at: str = "") -> dict:
+    """The one shape an outcome row takes. Raises ValueError with a sentence a caller can act on."""
+    if kind not in ("verified", "rejected"):
+        raise ValueError("kind must be verified or rejected")
+    sha = str(sha or "").strip().lower()
+    if sha and not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        raise ValueError("sha must be a 7..40 character hexadecimal commit id")
+    note = str(note or "").strip()
+    row = {"done": True, "kind": kind, "note": note, "note_at": at, "by": str(by or "")[:120]}
+    if kind == "verified":
+        result = str(result or "").strip().lower()
+        if result not in ("pass", "fail"):
+            raise ValueError("a verification's result is pass or fail")
+        if not sha:
+            raise ValueError("a verification names the deployed commit it checked (--sha)")
+        if not str(artifact or "").strip():
+            raise ValueError("a verification names what it READ (--artifact: a URL, a screenshot, "
+                             "a probe's output) -- a verdict with nothing behind it is not a check")
+        row.update(step=("Verified %s: %s" % (sha[:12], result))[:80], sha=sha, result=result)
+    else:
+        if not note:
+            raise ValueError("a rejection says what is still wrong (--note)")
+        row["step"] = ("Rejected: " + note.splitlines()[0])[:80]
+        if sha:
+            row["sha"] = sha
+    if str(artifact or "").strip():
+        row["artifact"] = str(artifact).strip()[:500]
+    if isinstance(facts, dict) and facts:
+        row["facts"] = facts
+    return row
