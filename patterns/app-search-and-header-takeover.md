@@ -30,6 +30,11 @@ A companion to the banner for apps that already had a header when they adopted i
 
 - `data-replaces="<selector>"` on `#app-banner` hides (never removes) the named header and names
   the reachable controls that went dark with it; `data-replaces=""` means nothing to replace.
+  Link `header-takeover.js` right after the mount and NOT deferred: it then adds a stylesheet rule
+  naming exactly the declared selectors while the page is still parsing, so the old header never
+  paints first (deferred, it paints once and is then hidden). The rule is removed once the real
+  nodes are marked, or at `DOMContentLoaded` if the banner never drew — a failed banner leaves the
+  app's own header on screen, never a page with no header.
 - With `data-replaces` absent, a visible header near the top holding controls is WARNED about;
   nothing is hidden. A detector's failure mode must be doing nothing.
 - `data-ab-superseded` on an app element hides it once the banner has really drawn.
