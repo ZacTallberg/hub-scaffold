@@ -95,7 +95,12 @@ General HTTP writes pass through one gate:
 3. refresh the caller's observed presence from the optional `X-Hub-*` headers (fail-soft);
 4. merge an update with the current aggregate;
 5. require `expected_version` for updates;
-6. validate the merged entity against its schema (the registry refuses to load a schema file
+6. validate what the event WRITES against its schema -- the existing record's written fields
+   (never the fold's own stamps, never fields the schema has since dropped) plus the payload --
+   and refuse only errors under fields this payload sent (an old record's drift is logged, not
+   charged to an unrelated update). The fold's OUTPUT is held to the schema by `manage.py
+   check` (`hub.E001` folds a real create + update and validates it), so an undeclared fold
+   stamp fails the pipeline instead of every write (the registry refuses to load a schema file
    that declares one key twice in an object: JSON keeps the last silently, so two edits to one
    property would otherwise decide the write contract by whichever landed second);
 7. append with aggregate-scoped idempotency and optimistic concurrency, then publish the

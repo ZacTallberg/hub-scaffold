@@ -17,7 +17,8 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, textguard, validate
+from hub_core import (agent_auth, collision, flow, ids, offer, project, schedule, secretscan,
+                      textguard, validate)
 from hub_core import errorlog as _errorlog
 from hub_core import inbox as inbox_core
 from hub_core import write_timing
@@ -404,10 +405,23 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
         return ({"errors": [{"code": "precondition_required",
             "msg": "expected_version required to update an existing entity (optimistic concurrency)",
             "current": existing.get("version")}]}, 428)
-    merged = {**existing, **payload, "id": eid, "type": type_}
-    merged["version"] = (existing.get("version", 0) + 1) if existing else 1
+    # Validate what this event WRITES, never the fold's output: a fold stamp the schema does not
+    # list must not refuse every later update of every entity (hub_core.project.write_candidate).
+    registry = hub_app.registry()
+    schema = registry.schema_for(type_) or {}
+    merged, touched = project.write_candidate(existing, payload, eid, type_,
+                                              (schema.get("properties") or {}).keys())
     with write_timing.phase("append.validate"):
-        errs = validate(merged, type_, hub_app.registry())
+        errs = validate(merged, type_, registry)
+    if errs and existing:
+        # An error under a field this payload did not send is the old record's, not this
+        # write's: logged so the drift is seen, never a refusal of an unrelated update.
+        own = [e for e in errs if project.error_field(e) in touched or not project.error_field(e)]
+        if len(own) < len(errs):
+            logging.getLogger(__name__).warning(
+                "write %s: old fields fail the schema (not refused): %s", eid,
+                "; ".join(e for e in errs if e not in own)[:300])
+        errs = own
     if errs:
         return ({"errors": [{"code": "schema", "msg": e} for e in errs]}, 422)
     try:
