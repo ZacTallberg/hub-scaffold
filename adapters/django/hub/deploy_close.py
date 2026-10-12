@@ -7,9 +7,15 @@ away moments later when the run hands the task back. Without a retry the task th
 "deployed and verified" on it until a person notices. Three more entrances close that gap:
 
 * the hand-back / release / lease-sweep that frees the lease kicks the close sweep;
-* the board's own read path kicks it on a throttle (``SWEEP_INTERVAL_S``);
+* the board's own read path kicks it on a throttle (``SWEEP_INTERVAL_S``, a minute: at five the
+  throttle alone put up to five minutes between "live" and "closed");
 * ``POST /hub/api/deploy/reconcile`` replays the newest deploy record through the matcher, for
   tasks stranded before a matcher change.
+
+The sweep also replays a deploy record a LATE-RECORDED push missed (``task_completion.late_pushes``):
+the record matches tasks once, when it lands, so a push recorded seconds after its own deploy
+record was never stamped until the next release. At most ``LATE_REPLAYS_PER_SWEEP`` per pass, once
+per (record, task).
 
 NEVER ON THE REQUEST. A close claims a lease and appends to the ledger per task; on a board read
 that is latency the reader pays for somebody else's close. Every entrance only starts ONE
@@ -36,13 +42,15 @@ from .hub_write import writer
 
 log = logging.getLogger("hub.deploy_close")
 
-SWEEP_INTERVAL_S = 300
+SWEEP_INTERVAL_S = 60
 SWEEP_LIMIT = 10
 RECONCILE_DEAD_S = 120
 RECONCILE_BUDGET_S = 600
 _LAST = {"at": 0.0}
 _SWEEP_LOCK = threading.Lock()
 _DEPLOY_REF = re.compile(r"\(([^()\s]+)\)\.?\s*$")
+LATE_REPLAYS_PER_SWEEP = 3
+_LATE_REPLAYED: set = set()
 
 
 def _deploy_id_of(row: dict) -> str:
@@ -75,8 +83,9 @@ def close_if_deployed(tid: str) -> dict:
 
 def close_one(task: dict, commit: str, deployed_sha: str, deploy_id: str) -> dict:
     """The close itself, shared by the deploy record and every retry: refuse on the task's own
-    word, else the hub's finish (refused while anyone else holds the lease). Every refusal is
-    written onto the task; none is silent."""
+    word, refuse until a checkpoint says what was SEEN on the real surface, else the hub's finish
+    (refused while anyone else holds the lease). Every refusal is written onto the task, once
+    per reason; none is silent."""
     from . import hub_write
     tid = task["id"]
     unfinished = task_completion.unfinished_by_its_own_word(task)
@@ -84,6 +93,10 @@ def close_one(task: dict, commit: str, deployed_sha: str, deploy_id: str) -> dic
         why = 'its own checkpoint says the work is not finished: "%s"' % unfinished[:150]
         hub_write._record_auto_close(tid, "refused", why, commit, deploy_id)
         return {"closed": False, "why": why}
+    unseen = task_completion.not_seen(task)
+    if unseen:
+        hub_write._record_auto_close(tid, "refused", unseen, commit, deploy_id)
+        return {"closed": False, "why": unseen}
     why = hub_write._hub_finish(tid, commit, deployed_sha, deploy_id)
     if why and why != "gone or already done":
         hub_write._record_auto_close(tid, "refused", why, commit, deploy_id)
@@ -99,9 +112,17 @@ def sweep(force: bool = False, now: float | None = None, limit: int = SWEEP_LIMI
     _LAST["at"] = now
     closed, refused = [], {}
     try:
-        tasks = hub_app.current_state().get("by_type", {}).get("task", [])
+        state = hub_app.current_state()
+        tasks = state.get("by_type", {}).get("task", [])
     except Exception:                                        # noqa: BLE001
         return {"skipped": "unreadable"}
+    try:
+        late = replay_late_pushes(tasks, state.get("by_type", {}).get("deploy", []))
+    except Exception:                                        # noqa: BLE001 - never stops the retries
+        log.warning("late-push replay failed", exc_info=True)
+        late = {}
+    if late:
+        tasks = hub_app.current_state().get("by_type", {}).get("task", [])
     for task in task_completion.retry_candidates(tasks):
         if len(closed) + len(refused) >= limit:
             break
@@ -112,7 +133,29 @@ def sweep(force: bool = False, now: float | None = None, limit: int = SWEEP_LIMI
             refused[task["id"]] = out["why"]
     if closed or refused:
         log.info("deploy-close sweep: closed %s, refused %s", closed, refused)
-    return {"closed": closed, "refused": refused}
+    out = {"closed": closed, "refused": refused}
+    if late:
+        out["late_push_replays"] = late
+    return out
+
+
+def replay_late_pushes(tasks, deploys, limit: int = LATE_REPLAYS_PER_SWEEP) -> dict:
+    """Replay the deploy record that serves a push recorded AFTER that record landed, through the
+    ordinary matcher (every rule unchanged), once per (record, task), at most ``limit`` a pass."""
+    from . import hub_write
+    out = {}
+    for task, record in task_completion.late_pushes(tasks, deploys):
+        key = (str(record.get("id") or record.get("sha")), task["id"])
+        if key in _LATE_REPLAYED:
+            continue
+        _LATE_REPLAYED.add(key)
+        res = hub_write.close_deployed_tasks(str(record.get("id") or ""), str(record.get("sha") or ""))
+        out[task["id"]] = {"deploy": record.get("id"), "sha": str(record.get("sha") or "")[:12],
+                           "stepped": res.get("stepped"), "closed": res.get("closed"),
+                           "refused": res.get("refused")}
+        if len(out) >= limit:
+            break
+    return out
 
 
 def sweep_async(force: bool = False) -> bool:

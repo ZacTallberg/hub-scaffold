@@ -351,6 +351,7 @@ project key are renameable bindings; the rules are not.
     "auto_close": { "type": "object", "additionalProperties": false, "description": "What a verified deploy's automatic close did with this task: closed, or refused and why — so a task waiting on a close that cannot fire says so.", "properties": {
       "state": { "enum": ["closed", "refused"] },
       "why": { "type": "string", "maxLength": 200 },
+      "reason_key": { "type": "string", "maxLength": 40, "description": "The refusal's reason with commit ids, counts and ages normalised out: one refusal is recorded once per reason, not once per retry." },
       "sha": { "type": "string", "maxLength": 40 },
       "deploy": { "type": "string" },
       "at": { "type": "string" } }, "required": ["state"] },

@@ -629,11 +629,21 @@ durable.
 
 A refused close is **retried, not final**. An unattended task already stepped `deployed` but not
 done is offered to the close again on every later deploy (never stepped twice), on the hand-back,
-release or lease sweep that frees its lease, and by a throttled sweep started from the board's
-read path -- always in ONE single-flight background thread, never on the request. A task whose own
-checkpoint says it is NOT finished ("NOT DONE", "active on purpose") is refused with the quote in
-`auto_close.why` and is not retried; the attention list takes it to a person. A sha written in a
-checkpoint's prose counts only when a deploy record served exactly that commit.
+release or lease sweep that frees its lease, and by a sweep started from the board's read path at
+most once a minute -- always in ONE single-flight background thread, never on the request. A task
+whose NEWEST work checkpoint says it is not finished ("not done", "active on purpose", "not pushed",
+"branch-only", "waiting on the operator's yes") is refused with the quote in `auto_close.why`; the
+sweep re-reads the task's words every pass, so a later checkpoint lifts the refusal, and the
+client's own echo of a refused finish (`finish REFUSED ...`) never counts as the task's word. **A
+deploy alone never closes a task:** until a work checkpoint carries `SEEN: <what is on the real
+surface and in the saved state>` after the change, the close is refused with that reason and the
+next run resumes the task with the look as its first job. A refusal is written once per (task,
+reason) -- `auto_close.reason_key` is the reason with ids, counts and ages normalised out -- never
+once per retry. A sha written in a checkpoint's prose counts only when the task recorded no commit
+of its own and a deploy record served exactly that commit. The sweep also replays a deploy record
+whose served sha is a task's newest recorded push but which was written BEFORE that push was
+recorded (at most 3 a pass, once per record and task), so a push recorded seconds after its own
+release is stamped without waiting for the next one.
 `POST /hub/api/deploy/reconcile` (`deploy:write`) replays the newest deploy record and retries
 every stepped close in a thread (202; 200 with the running state if one is going); a `running`
 state that has not moved for 2 minutes belongs to a dead process and is restarted, and a replay
