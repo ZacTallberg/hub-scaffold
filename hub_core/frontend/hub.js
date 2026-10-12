@@ -590,15 +590,28 @@
   function capsSignature() {
     return (D.caps || []).map(function (c) { return c.id + "@" + c.version; }).join(",");
   }
+  /* A FAILED READ BACKS OFF. Every live snapshot re-renders the tabs, and a failure clears the
+     signature so a later change retries -- so without a wait, a board whose components.json is
+     failing re-fetched it on every event, as fast as events arrived. After a failure the next
+     automatic read waits 60 s, doubling to 15 min, and nothing is read automatically while the
+     page is hidden; a success resets it, and the Retry button always reads at once. */
+  var CATALOG_RETRY_MS = 60000, CATALOG_RETRY_MAX_MS = 15 * 60000;
   function refreshCatalog(tab, force) {
     if (!tab._catalog) return;
     var sig = capsSignature();
     if (!force && sig === tab._catalogSig) return;
+    var fail = tab._catalogFail;
+    if (!force && fail) {
+      var wait = Math.min(CATALOG_RETRY_MS * Math.pow(2, fail.n - 1), CATALOG_RETRY_MAX_MS);
+      if (doc.hidden || Date.now() - fail.at < wait) return;
+    }
     tab._catalogSig = sig;
     getJSON("components.json").then(function (payload) {
+      tab._catalogFail = null;
       renderCatalog(tab._catalog, (payload && payload.data) || {});
     }, function (error) {
-      tab._catalogSig = null;                               // the next change retries
+      tab._catalogSig = null;                               // a later change retries, after the wait
+      tab._catalogFail = { n: ((tab._catalogFail && tab._catalogFail.n) || 0) + 1, at: Date.now() };
       var retry = el("button", { class: "text-action", type: "button", text: "Retry" });
       retry.addEventListener("click", function () { refreshCatalog(tab, true); });
       tab._catalog.textContent = "";
