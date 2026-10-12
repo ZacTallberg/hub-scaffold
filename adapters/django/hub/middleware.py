@@ -394,3 +394,178 @@ def slow_routes(timings=None, threshold_ms=None) -> list:
     return [route for route, v in timings.items()
             if v.get("p95_worst_ms", 0) >= threshold_ms
             and not any(route.endswith(lp) for lp in LONG_POLL_ROUTES)]
+
+
+class WarmupHoldMiddleware:
+    """While THIS process is still warming (``prewarm``), a heavy ``GET /hub/*`` read WAITS for
+    the warm-up instead of computing a cold fold -- and past a shared deadline it is shed 503.
+
+    Measured on the instance this was lifted from: a deploy rolled back because the trivial
+    liveness probe waited in the server's queue behind every request thread, each parked in the
+    cold fold or a cold board snapshot that every reconnecting client asked for at once while
+    the prewarm held the interpreter. A thread that computes a cold read costs the whole
+    warm-up; a thread that SLEEPS costs nothing and leaves the interpreter to the prewarm.
+
+    So a read that arrives while the process warms sleeps in 0.1 s steps (never folding,
+    never building a snapshot) and is served warm once ``prewarm`` reports done. Every hold ends
+    at ONE deadline, ``HUB_WARMUP_HOLD_S`` (20 s) after the process started, so nothing -- a
+    probe included -- waits behind the holds longer than that; at most ``HUB_WARMUP_HOLD_MAX``
+    reads hold at once (default the server's pool, ``HUB_WAITRESS_THREADS``, else 16: a request
+    that finds every thread holding waits in the queue and is served warm). A read past the
+    deadline or the cap is SHED: 503 + Retry-After, a short self-refreshing page for a browser,
+    marked as already logged (back-pressure, never a defect). Writes, ``/hub/perf.json`` and
+    everything outside ``/hub/`` are never held. ``HUB_WARMUP_HOLD_S=0`` sheds at once;
+    ``HUB_WARMUP_SHED=0`` turns it off. A process that never prewarms (tests, management
+    commands, ``runserver``) is open from the start. Counts ride ``/hub/perf.json`` as
+    ``warmup``. Dual-capable: an ASGI deployment holds with ``asyncio.sleep``."""
+
+    PASS = ("/hub/perf.json",)
+    MAX_S = 180.0
+    HOLD_S = 20.0
+    STATS = {"held": 0, "held_now": 0, "served_after_hold": 0, "hold_ms_max": 0.0,
+             "shed": 0, "shed_hold_full": 0, "shed_hold_expired": 0}
+    _STATS_LOCK = threading.Lock()
+    sync_capable = True
+    async_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.is_async = iscoroutinefunction(get_response)
+        if self.is_async:
+            markcoroutinefunction(self)
+        self.born = time.monotonic()
+        self.on = str(os.environ.get("HUB_WARMUP_SHED", "1")).strip().lower() not in (
+            "0", "false", "no", "off")
+        self.open = not self.on
+        try:
+            self.hold_s = max(0.0, float(os.environ.get("HUB_WARMUP_HOLD_S", self.HOLD_S)))
+        except ValueError:
+            self.hold_s = self.HOLD_S
+        try:
+            pool = max(1, int(os.environ.get("HUB_WAITRESS_THREADS") or 16))
+        except ValueError:
+            pool = 16
+        try:
+            self.hold_max = max(0, int(os.environ.get("HUB_WARMUP_HOLD_MAX", pool)))
+        except ValueError:
+            self.hold_max = pool
+
+    @classmethod
+    def stats(cls) -> dict:
+        with cls._STATS_LOCK:
+            return dict(cls.STATS)
+
+    def _warming(self) -> bool:
+        if self.open:
+            return False
+        from . import prewarm
+        state = prewarm.status().get("state")
+        if state not in ("queued", "running") or time.monotonic() - self.born > self.MAX_S:
+            self.open = True              # once open, never held or shed again in this process
+            return False
+        return True
+
+    def _applies(self, request) -> bool:
+        path = request.path_info or ""
+        return (request.method == "GET" and path.startswith("/hub/") and path not in self.PASS
+                and self._warming())
+
+    def _count(self, key, add=1):
+        with self._STATS_LOCK:
+            self.STATS[key] += add
+
+    def _enter(self) -> bool:
+        if time.monotonic() >= self.born + self.hold_s:
+            self._count("shed_hold_expired")
+            return False
+        with self._STATS_LOCK:
+            if self.STATS["held_now"] >= self.hold_max:
+                self.STATS["shed_hold_full"] += 1
+                return False
+            self.STATS["held_now"] += 1
+            self.STATS["held"] += 1
+        return True
+
+    def _leave(self, t0, served):
+        with self._STATS_LOCK:
+            self.STATS["held_now"] -= 1
+            if served:
+                self.STATS["served_after_hold"] += 1
+                self.STATS["hold_ms_max"] = max(self.STATS["hold_ms_max"],
+                                                round((time.monotonic() - t0) * 1000.0, 1))
+            else:
+                self.STATS["shed_hold_expired"] += 1
+
+    def _hold(self) -> bool:
+        if not self._enter():
+            return False
+        t0, deadline, served = time.monotonic(), self.born + self.hold_s, False
+        try:
+            while self._warming():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                time.sleep(min(0.1, left))
+            served = True
+            return True
+        finally:
+            self._leave(t0, served)
+
+    async def _ahold(self) -> bool:
+        import asyncio
+        if not self._enter():
+            return False
+        t0, deadline, served = time.monotonic(), self.born + self.hold_s, False
+        try:
+            while self._warming():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                await asyncio.sleep(min(0.1, left))
+            served = True
+            return True
+        finally:
+            self._leave(t0, served)
+
+    def _shed(self, request):
+        from django.http import HttpResponse
+        self._count("shed")
+        if "text/html" in (request.headers.get("Accept") or ""):
+            # A PERSON gets a page that reloads itself, not a JSON envelope; same status, so a
+            # proxy and an agent read it exactly as before.
+            resp = HttpResponse(_WARMING_HTML, status=503, content_type="text/html; charset=utf-8")
+            resp["Retry-After"] = "5"
+        else:
+            resp = JsonResponse({"errors": [{"code": "warming",
+                                             "msg": "this hub process started moments ago and is "
+                                                    "warming its fold; ask again shortly"}]},
+                                status=503)
+            resp["Retry-After"] = "15"
+        resp._has_been_logged = True        # back-pressure, never a defect
+        return resp
+
+    def __call__(self, request):
+        if self.is_async:
+            return self.__acall__(request)
+        if self._applies(request) and not self._hold():
+            return self._shed(request)
+        return self.get_response(request)
+
+    async def __acall__(self, request):
+        if self._applies(request) and not await self._ahold():
+            return self._shed(request)
+        return await self.get_response(request)
+
+
+_WARMING_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="5"><title>Hub starting</title>
+<style>:root{--bg:#f6f7f9;--fg:#1d2430;--mut:#5b6575}
+@media (prefers-color-scheme:dark){:root{--bg:#12161c;--fg:#e6e9ee;--mut:#9aa4b2}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;
+display:grid;place-items:center;min-height:100vh;padding:0 16px}
+main{max-width:34rem}h1{font-size:1.25rem;margin:0 0 .5rem}p{margin:.25rem 0;color:var(--mut)}</style>
+</head><body><main><h1>The hub restarted and is loading the board</h1>
+<p>This process started moments ago and is warming its view of the ledger. Nothing is lost: this
+page reloads itself every 5 seconds and shows the board as soon as it is ready.</p>
+</main></body></html>"""
