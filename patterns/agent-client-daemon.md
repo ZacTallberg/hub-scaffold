@@ -14,8 +14,10 @@ API (`hub_core.client` is the reference caller) and prove each part by its real 
 - Hold `GET /hub/inbox/wait?agent=&session=&fp=` in place of a sleep; round-trip the fingerprint
   so unrelated board traffic never wakes you. Name the console (`session`) so each console gets
   its own mail. Mail addressed to a console that has ENDED on this machine is re-routed by the Hub
-  to the agent's most recently active live console (`rerouted_from` names the original) — land it
-  there, once per cooldown window, rather than nowhere.
+  to ONE live console of the agent (`rerouted_from` names the original): the one on the same
+  subject, then the same repository / app / project (read from the ended console's presence
+  record), then the same machine, then the freshest — report `subject` and `project` with your
+  presence so this works. Land it there, once per cooldown window, rather than nowhere.
 - Retire what you delivered (`POST /hub/api/message/ack`, `ack --revision` for an answer) only
   AFTER the console actually accepted the text. "Queued" is not "delivered": a receipt written at
   enqueue time reports success for mail that a crashed console never saw.

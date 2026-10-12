@@ -700,6 +700,20 @@ def session_row(agent: str, machine: str, s: dict, now: float) -> dict:
     }
 
 
+def session_records(hub_dir) -> dict:
+    """{session id: {subject, repo, app, project}} for EVERY console presence still stores, live
+    or ended: what an ended console was working on, so its mail can follow that work."""
+    out = {}
+    for agent, seen in read(hub_dir).items():
+        for m in seen.get("machines") or []:
+            for s in m.get("sessions") or []:
+                sid = str(s.get("id") or "")[:64]
+                if sid:
+                    out[sid] = {k: str(s.get(k) or "")[:200]
+                                for k in ("subject", "repo", "app", "project")}
+    return out
+
+
 def live_sessions(hub_dir, now: float | None = None) -> list:
     """Every ACTIVE console across the fleet, newest first, in the uniform session_row shape.
     The per-agent roll-up keeps one focus per name and turns the rest into a count; this is

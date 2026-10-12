@@ -357,7 +357,20 @@ def stuck_summary(questions) -> dict:
 
 # ── session routing ─────────────────────────────────────────────────────────────────────────
 
-def _route(item, agent: str, session: str, live) -> dict | None:
+_AFFINITY_KEYS = ("subject", "repo", "app", "project")
+
+
+def _affinity_rank(want: dict, row: dict) -> tuple:
+    """How close a live console is to the work an ended one was on: the same subject (a task, a
+    problem, an ask), then the same repository / app / project. Unknown on either side is 0."""
+    def same(key):
+        a, b = str(want.get(key) or "").strip().lower(), str(row.get(key) or "").strip().lower()
+        return bool(a) and a == b
+    return (1 if same("subject") else 0,
+            1 if (same("repo") or same("app") or same("project")) else 0)
+
+
+def _route(item, agent: str, session: str, live, affinity=None) -> dict | None:
     """Session routing for one item addressed to `agent`. Returns the item (possibly annotated)
     or None when it belongs to a different live console.
 
@@ -365,9 +378,13 @@ def _route(item, agent: str, session: str, live) -> dict | None:
       view — the CLI, the board, an older client — sees all of its agent's mail).
     * The item's console is the reader: delivered.
     * The item's console is LIVE elsewhere: not this reader's.
-    * The item's console has ENDED: it falls through to the agent's most recently active live
-      console, with `rerouted_from` naming the original — mail for a closed window must reach
-      the box, not nobody."""
+    * The item's console has ENDED: it falls through to ONE live console of the agent, with
+      `rerouted_from` naming the original — mail for a closed window must reach the box, not
+      nobody. Which one is AFFINITY before freshness: the console on the same subject, then the
+      same repository / app / project (read from the ended console's own presence record in
+      `affinity`: {session8: {subject, repo, app, project}}), then the same machine, then the
+      freshest. Freshest alone sent an answer about one task into whichever console was typed in
+      last -- often another project -- which read it as noise and acknowledged it."""
     target = str(item.get("session") or "").strip()
     me = str(session or "").strip()
     if not target or not me or sid_match(target, me):
@@ -379,9 +396,14 @@ def _route(item, agent: str, session: str, live) -> dict | None:
     # so when the console ends, another console on the same machine is the natural reader;
     # only with none live there does it fall to the agent's freshest console anywhere.
     pinned = _norm(item.get("machine"))
-    pool = [row for row in mine if pinned and _norm(row.get("machine")) == pinned] or mine
-    freshest = min(pool, key=lambda row: row.get("age_s") if row.get("age_s") is not None
-                   else 10 ** 9, default=None)
+    want = {}
+    for sid, rec in (affinity or {}).items():
+        if sid and sid_match(sid, target):
+            want = {k: (rec or {}).get(k) for k in _AFFINITY_KEYS}
+            break
+    freshest = max(mine, key=lambda row: _affinity_rank(want, row) + (
+        1 if pinned and _norm(row.get("machine")) == pinned else 0,
+        -(row.get("age_s") if row.get("age_s") is not None else 10 ** 9)), default=None)
     if freshest is not None and sid_match(freshest.get("session_id") or freshest.get("session"), me):
         return dict(item, rerouted_from=target[:8],
                     reroute_note="addressed to console %s, which is no longer live" % target[:8])
@@ -700,7 +722,7 @@ def fold_gates(items: list) -> list:
 
 def items_for(state, agent: str, operator: str, operator_extra=None, *, machine: str = "",
               session: str = "", live=None, human_gate=None, gate_satisfied=None, visible=None,
-              synthetic=False, now=None, problem_states=None) -> list:
+              synthetic=False, now=None, problem_states=None, affinity=None) -> list:
     """Everything currently addressed to `agent` (and, when `session` is named, to that console).
 
     Order: a message from a teammate leads (somebody reached out to THIS agent directly), then
@@ -728,7 +750,7 @@ def items_for(state, agent: str, operator: str, operator_extra=None, *, machine:
         items += list(operator_extra or [])
     routed = []
     for item in items:
-        kept = _route(item, agent, session, live)
+        kept = _route(item, agent, session, live, affinity)
         if kept is not None:
             routed.append(kept)
     if visible is not None:

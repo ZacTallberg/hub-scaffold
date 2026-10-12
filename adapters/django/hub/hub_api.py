@@ -2464,7 +2464,13 @@ def _inbox_kwargs(request, machine, session):
         live = hub_app.live_sessions() if session else None
     except Exception:                                        # noqa: BLE001 - never break delivery
         live = None
-    return {"machine": machine, "session": session, "live": live,
+    try:
+        # What each stored console (an ended one included) was on, so mail for a console that
+        # ended follows its work rather than the freshest window.
+        affinity = _presence.session_records(hub_app.HUB_DIR) if session else None
+    except Exception:                                        # noqa: BLE001
+        affinity = None
+    return {"machine": machine, "session": session, "live": live, "affinity": affinity,
             "human_gate": hub_app.human_gate(), "gate_satisfied": hub_app.gate_satisfied(),
             "visible": _veil_visible(request), "problem_states": _ProblemStates(),
             # Self-test asks reach only a reader that asks for them (the responder).
