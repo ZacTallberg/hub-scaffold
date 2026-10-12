@@ -1373,6 +1373,8 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "runs": state.get("by_type", {}).get("run", []), "sessions": consoles,
            "questions": asks, "errors_unclaimed": error_unclaimed,
            "answers": _unread_answers(state),
+           "messages": [e for e in state.get("by_type", {}).get("note", [])
+                        if "message" in (e.get("tags") or []) and "open" in (e.get("tags") or [])],
            "hub_client": hub_client_version()}
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
                        ("retired", lambda: _presence.retired_rows(hub_app.HUB_DIR)),

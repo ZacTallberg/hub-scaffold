@@ -361,9 +361,12 @@ def attention_offered(it: dict) -> tuple[bool, str]:
                        else "the hub does not say an agent can clear it (no actor field)")
     if it.get("severity") == "info":
         return False, "informational: shown on the card, never worked"
+    # AN ITEM THAT NAMES ONE MACHINE IS ITS MACHINE'S, flagged on_its_machine or not: a queue
+    # only that machine drains, a login only that machine renews. Offered elsewhere it spends a
+    # session that can only conclude "not here".
     target = str(it.get("machine") or "").strip().lower()
-    if it.get("on_its_machine") and target and target != machine():
-        return False, "can only be cleared on %s" % target
+    if target and target != machine():
+        return False, "names %s: only that machine can clear it" % target
     return True, "needs attention, and an agent can clear it"
 
 

@@ -612,8 +612,12 @@ themselves: `decision` to the deciders, `task-stall` (unclosed, stalled or unsta
 operator, `attention` items to their owner after 30 minutes (critical at once) and to the operator
 after 24 hours, and `overlap` crossovers to each attended console's agent, once per side. Every
 attention item names who can clear it (`actor`: `agent` or `person`); an AGENT item reaches its
-owner at any severity and an unattended responder may take it (`on_its_machine` items only on the
-machine they name). A CI problem item carries `knowledge` when a record clears the relevance cut.
+owner at any severity and an unattended responder may take it (an item naming a machine only on
+that machine). A task at the responder cap that a live console holds reads `in flight · <holder>`
+at info (`evidence.held_by`), and one whose commit a deploy already stepped live says to verify it
+on the deployed surface, never to finish over the close's refusal. An open message past its
+expiry raises `message_undelivered` to its SENDER (person-only) for three days, until it is
+acknowledged. A CI problem item carries `knowledge` when a record clears the relevance cut.
 
 **A verified deploy closes the loop.** After `POST /hub/api/deploy` records a release, every open
 task whose structured commit (`plan[].sha`) is an ANCESTOR of the deployed sha gets exactly one

@@ -37,8 +37,9 @@ contains `unattended`. An unmarked task belongs to whoever made it. A **question
 this launcher's agent is the operator identity and the escalation rule below allows it.
 
 A **needs-attention condition** (`GET /hub/attention.json`) is workable when the hub marks it
-`actor: agent` and it is not informational; one the hub says only its own machine can clear
-(`on_its_machine`) is offered only there. A list without the `actor` field says nothing about who
+`actor: agent` and it is not informational; one that names a machine (`machine`, whether or not
+the hub flags it `on_its_machine`) is offered only on that machine -- a queue only that machine
+drains is never worked from another. A list without the `actor` field says nothing about who
 can clear a condition, so nothing is offered from it — a guess would put a session on something
 only a person can do. The id is `attention:<the hub item's id>`.
 
