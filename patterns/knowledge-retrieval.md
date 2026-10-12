@@ -54,7 +54,8 @@ served, both ranked. **Consolidation** (§1a) is the half that acts on it.
 `python tools/knowledge_use.py [--hours 24]` measures whether delivered knowledge is USED: of
 the records a `<hub-knowledge>` block delivered in a session, how many the agent later named in
 its own replies or tool calls (a floor, stated as one), and how many prompts carried rows, an
-empty block, or none.
+empty block, or none. `--post` records the reading on the standing-eval trend (suite
+`knowledge-use`) so the rate is watched over time, not read once.
 
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
@@ -164,7 +165,10 @@ console is not for.
    these at tool time is adopter wiring; the field is the contract.
 5. **Re-learn count** — per ISO week, lessons filed and how many restated an older record
    (`relearned`: another author or more than a day later; `double_filed`: same author within a
-   day). The scaffold has no served trend store: the run prints it (`RELEARN`) and returns it.
+   day). The run prints it (`RELEARN`) and returns it; `--post` records it as one run of the
+   standing-eval trend (suite `knowledge-loop`, `/hub/eval.json`, one path per week) and prints
+   what the hub stored. `tools/knowledge_use.py --post` records the other half (suite
+   `knowledge-use`): the loop is working when use rises while re-learning falls.
 
 **The review-first apply contract.**
 

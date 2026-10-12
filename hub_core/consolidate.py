@@ -565,6 +565,28 @@ def relearn_stats(records, judged) -> dict:
     return dict(sorted(weeks.items()))
 
 
+def trend_run(t, *, weeks=8):
+    """The re-learn count as one run of the standing-eval trend (suite `knowledge-loop`), or
+    None when no week has a lesson. One path per ISO week -- lessons filed, how many re-learned
+    an older record, how many were double-filed -- so the trend shows the rate falling (the loop
+    working) or not. Beside the knowledge-use reading (`tools/knowledge_use.py --post`) it is
+    the other half of "is the board's knowledge used, and is it learning"."""
+    rows = list((t.get("relearn") or {}).items())[-weeks:]
+    paths = {}
+    for week, v in rows:
+        n = v.get("lessons") or 0
+        cell = {"n": n, "relearned": v.get("relearned", 0), "double_filed": v.get("double_filed", 0)}
+        if n:
+            cell["relearn_pct"] = round(100.0 * v.get("relearned", 0) / n, 1)
+        paths[week] = cell
+    if not paths:
+        return None
+    return {"suite": "knowledge-loop", "pairs": t.get("pairs", 0), "paths": paths,
+            "notes": json.dumps({k: t.get(k) for k in ("run", "mode", "basis", "verdicts", "actions",
+                                                       "reports", "judged_now", "triggers_now")},
+                                sort_keys=True)[:600]}
+
+
 # --------------------------------------------------------------------------- #
 # 5. Apply / revert
 # --------------------------------------------------------------------------- #
