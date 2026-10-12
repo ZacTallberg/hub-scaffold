@@ -29,6 +29,7 @@ from hub_core import (activity as activity_core, adherence, app_health,
 from hub_core import overlap as overlap_core
 from hub_core import record_state as _record_state
 from hub_core.canonical import content_hash
+from hub_core.store import StoreBusy
 from hub_core.text import preview
 
 from . import delivery, hub_app, prewarm, realtime, roles
@@ -2133,16 +2134,26 @@ def live_events(request):
         finally:
             _LIVE_SLOTS.release()
 
-    def busy_frame():
+    def busy_frame(reason="live_streams_saturated"):
+        # A busy LEDGER (StoreBusy: another writer held the lock past the open's budget) gets
+        # the same planned answer as a full slot. The response already left Django, so the
+        # middleware's 503 can never apply here, and a raise would reach the server as an
+        # unhandled error. Nothing was read or sent for the failed step; the browser retries
+        # from its Last-Event-ID.
         retry_ms = int(random.uniform(8000, 20000))
-        body = {"reason": "live_streams_saturated", "limit": LIVE_STREAMS_MAX,
-                "retry_ms": retry_ms}
+        body = {"reason": reason, "retry_ms": retry_ms}
+        if reason == "live_streams_saturated":
+            body["limit"] = LIVE_STREAMS_MAX
         return (f"retry: {retry_ms}\nevent: busy\n"
                 f"data: {json.dumps(body, separators=(',', ':'))}\n\n")
 
     def held_stream():
         subscription = realtime.subscribe(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
-        cursor, head = initial_cursor()
+        try:
+            cursor, head = initial_cursor()
+        except StoreBusy:
+            yield busy_frame("ledger")
+            return
         try:
             yield "retry: 1500\n\n"
             yield ready_frame(cursor, head)
@@ -2160,12 +2171,19 @@ def live_events(request):
                 else:
                     yield (f"id: {cursor}\nevent: heartbeat\n"
                            f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
+        except StoreBusy:
+            yield busy_frame("ledger")
         except GeneratorExit:
             return
 
     async def async_stream():
         subscription = realtime.subscribe_async(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
-        cursor, head = await asyncio.to_thread(initial_cursor)
+        try:
+            cursor, head = await asyncio.to_thread(initial_cursor)
+        except StoreBusy:
+            subscription.close()
+            yield busy_frame("ledger")
+            return
         try:
             yield "retry: 1500\n\n"
             yield ready_frame(cursor, head)
@@ -2181,6 +2199,8 @@ def live_events(request):
                 else:
                     yield (f"id: {cursor}\nevent: heartbeat\n"
                            f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
+        except StoreBusy:
+            yield busy_frame("ledger")
         finally:
             subscription.close()
 
