@@ -1340,8 +1340,8 @@ def distribution_files():
 def distribution_pins():
     """{artifact: pinned version} for artifacts released by moving a pin rather than by
     publishing bytes (HUB_DISTRIBUTION_PINS, {name: sha-or-version}). A seat reports
-    ``<name>=<running version>``, ``<name>.pin=<pin it received>`` and ``<name>.inst=<install
-    result>`` through HUB_ARTIFACTS."""
+    ``<name>=<running version>``, ``<name>.pin=<pin it received>``, ``<name>.inst=<install
+    result>`` and ``<name>.rel=<ancestry of a tree off the pin>`` through HUB_ARTIFACTS."""
     pins = _dj_setting("HUB_DISTRIBUTION_PINS") or os.environ.get("HUB_DISTRIBUTION_PINS") or {}
     if isinstance(pins, str):
         try:

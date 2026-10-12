@@ -1148,7 +1148,8 @@ def _artifact_headers() -> dict[str, str]:
             continue
         if path.startswith("@"):
             # A PINNED artifact reports a VERSION, not a file hash: `name=@<running version>`,
-            # `name.pin=@<pin received>`, `name.inst=@<install result>` (HUB_DISTRIBUTION_PINS).
+            # `name.pin=@<pin received>`, `name.inst=@<install result>` and, for a tree off the
+            # pin, `name.rel=@ahead|behind|dirty|diverged|pin-unknown` (HUB_DISTRIBUTION_PINS).
             value = re.sub(r"[^0-9A-Za-z._+-]", "", path[1:])[:40]
             if value:
                 pairs[name] = value
