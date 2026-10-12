@@ -15,7 +15,10 @@ the WHOLE record (`<type>/<local>.json`) and renders every field it carries — 
 as structure, record ids as links that open in place, only http(s) as external links, never
 record text as HTML — and a live change patches the attached DOM by record identity
 (`data-entity-id`, `data-record-version`) instead of rebuilding it, so focus, scroll, open
-sections and filters survive. Reads of one URL already in flight share one request. Any record
+sections and filters survive. An element that carries `data-hub-keep="<signature>"` owns its
+children (a chart a script drew, a framed page): reconcile leaves it untouched while the
+signature is unchanged, so a redraw never strips what a script built; change the signature when
+its inputs change. Reads of one URL already in flight share one request. Any record
 has an address (`?tab=<view>#<type>-<local>`) that resolves even when the snapshot does not
 carry it; a failed read says so with a retry.
 

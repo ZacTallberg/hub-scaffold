@@ -1,5 +1,5 @@
 /* =============================================================================
-   TABLE — table behaviours any app links.  v1.3.0
+   TABLE — table behaviours any app links.  v1.5.0
 
    A hosted component: an app LINKS this file from the hub and never copies it,
    so a change here reaches every adopting app's tables on their next page load,
@@ -26,11 +26,15 @@
       measured with its own filter, the URL that opens it. The component draws
       them. It never calls a model and never names one. A slow lane may answer
       202 and be polled.
+      With an agent component on the page, Suggest also offers "Ask the agent":
+      the same words, with the table's columns and the cut it shows, put to the
+      agent instead -- and a failed or unconfigured Suggest offers it as the way on.
    5. REQUEST IT (optional, only where the app declares a request lane). When
       the table cannot do what the person needs, the APP's endpoint files the
       person's words as work on the hub board; the component shows what it filed.
    6. EVERY COLUMN CAN BE SIZED. A handle on each heading's right edge: drag,
-      double-click to fit the content, or arrow keys. A drag moves one thing (the
+      double-click (or Enter / F on a focused handle) to fit the column to its
+      content, or arrow keys. A drag moves one thing (the
       table is frozen at its drawn widths first), and a column is never narrower
       than its own heading needs. The stylesheet draws TWO TIERS of faint line: a
       whisper between every column, the same line a step more present where the
@@ -67,7 +71,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.3.0";
+  var VERSION = "1.5.0";
   var doc = document;
   var mounts = Array.prototype.slice.call(doc.querySelectorAll("[data-hub-table]"));
 
@@ -106,6 +110,24 @@
      then THIS app's own cookie by exact name (<slug>_csrftoken), Django's default,
      and only last any name ending in csrftoken -- apps that share one host see each
      other's cookies, and a suffix match alone would send somebody else's secret. */
+  /* THE AGENT ON THIS PAGE, if there is one: the agent component's mount. Nothing is
+     offered where it is absent -- a button that asks nobody is worse than none. */
+  function agentHere() { return !!doc.querySelector("[data-hub-agent]"); }
+  function composed(thing) {
+    try {
+      if (window.HubMenu && typeof window.HubMenu.questionAbout === "function") return window.HubMenu.questionAbout(thing) || "";
+    } catch (e) { report(e); }
+    return "";
+  }
+  // hub:agent-ask is cancelable: the agent cancels it once it has taken the question.
+  function askAgentEvent(question, thing) {
+    var ev;
+    try { ev = new CustomEvent("hub:agent-ask", { cancelable: true, detail: { question: question, about: thing } }); }
+    catch (e) { return false; }
+    doc.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }
+
   function csrf(app) {
     var body = doc.body && doc.body.getAttribute("data-csrf");
     if (body) return body;
@@ -539,13 +561,14 @@
       // A click on the handle never sorts the column and never reaches the pin.
       grip.addEventListener("click", function (ev) { ev.preventDefault(); ev.stopPropagation(); });
       grip.addEventListener("dragstart", function (ev) { ev.preventDefault(); ev.stopPropagation(); });
+      /* DOUBLE-CLICK FITS THE COLUMN TO WHAT IS IN IT (1.4.0). It used to delete the
+         width and unfreeze the table, which hands the column to auto layout -- and auto
+         layout under an app's own caps (a cell clamped at 12rem with an ellipsis) is not
+         the width of the content, so a clipped column stayed clipped. Measure instead. */
       grip.addEventListener("dblclick", function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
-        delete self.widths[field];
-        self.unfreeze();
-        self.paintWidths();
-        self.commitWidth(field);
+        self.fit(th);
       });
       grip.addEventListener("keydown", function (ev) {
         var step = ev.shiftKey ? 64 : 16;
@@ -563,10 +586,93 @@
           self.unfreeze();
           self.paintWidths();
           later();
+        } else if (ev.key === "Enter" || ev.key === "f" || ev.key === "F") {
+          ev.preventDefault();
+          self.fit(th);
         }
       });
     });
     this.paintWidths();
+  };
+
+  /* WHAT A COLUMN'S CONTENT NEEDS (1.4.0). Every body cell of the column is copied
+     into a measuring table that carries the real table's classes -- so the app's own
+     fonts, padding and chips apply -- but no id (so no width rule keyed on the table's
+     id reaches it) and no caps: every max-width is lifted and nothing wraps. The
+     widest cell, never narrower than the heading needs and never wider than W_MAX, is
+     the fit. A row whose cells span columns (a group heading, an opened row) says
+     nothing about one column and is skipped. */
+  Table.prototype.fitWidthFor = function (th) {
+    var idx = Array.prototype.indexOf.call(this.headRow.cells, th);
+    if (idx < 0) return null;
+    var probe = el("table");
+    probe.className = this.table.className + " ht-measure";
+    probe.setAttribute("aria-hidden", "true");
+    var body = doc.createElement("tbody");
+    probe.appendChild(body);
+    var widest = 0, seen = 0;
+    Array.prototype.forEach.call(this.table.tBodies, function (tb) {
+      Array.prototype.forEach.call(tb.rows, function (tr) {
+        if (tr.hidden || tr.querySelector(":scope > [colspan]")) return;
+        var cell = tr.cells[idx];
+        if (!cell) return;
+        var row = tr.cloneNode(false);
+        row.removeAttribute("id");
+        row.appendChild(cell.cloneNode(true));
+        body.appendChild(row);
+        seen++;
+      });
+    });
+    if (!seen) return this.minWidthFor(th);
+    (this.table.parentNode || doc.body).appendChild(probe);
+    try {
+      Array.prototype.forEach.call(body.rows, function (tr) {
+        var w = tr.cells[0].getBoundingClientRect().width;
+        if (w > widest) widest = w;
+      });
+    } finally {
+      probe.remove();
+    }
+    return Math.max(this.minWidthFor(th), Math.min(W_MAX, Math.ceil(widest) + 2));
+  };
+
+  /* Fit one column (a heading or a field name) to its content, or every column. Each
+     fitted width is the person's own, announced (hub-table:resize) and saved exactly
+     like a drag. */
+  Table.prototype.fit = function (thOrField) {
+    var th = thOrField;
+    if (typeof thOrField === "string") {
+      th = null;
+      Array.prototype.forEach.call(this.headRow.cells, function (h) { if (fieldOf(h) === thOrField) th = h; });
+    }
+    var field = th && fieldOf(th);
+    if (!field) return null;
+    this.freeze();
+    var px = this.fitWidthFor(th);
+    if (!px) return null;
+    this.widths[field] = px;
+    this.setLive(th, px);
+    this.paintWidths();
+    this.commitWidth(field);
+    return px;
+  };
+  Table.prototype.fitAll = function () {
+    var self = this, done = {};
+    this.freeze();
+    // Measure everything FIRST, then apply: painting between measurements costs a
+    // layout per column and changes nothing about the next column's content.
+    Array.prototype.forEach.call(this.headRow.cells, function (th) {
+      var field = fieldOf(th);
+      if (field) done[field] = { th: th, px: self.fitWidthFor(th) };
+    });
+    Object.keys(done).forEach(function (f) {
+      if (!done[f].px) return;
+      self.widths[f] = done[f].px;
+      self.setLive(done[f].th, done[f].px);
+    });
+    this.paintWidths();
+    Object.keys(done).forEach(function (f) { if (done[f].px) self.commitWidth(f); });
+    return done;
   };
 
   Table.prototype.paintWidths = function () {
@@ -854,6 +960,16 @@
     go.type = "submit";
     form.appendChild(input);
     form.appendChild(go);
+    // ASK THE AGENT (1.5.0): the same words put to the agent on this page instead of the
+    // cut-suggester -- it answers from the app, not only this table's rows. Offered only
+    // where the page has an agent component to take the question.
+    if (agentHere()) {
+      var askB = el("button", "ht-btn ht-shape__agent", "Ask the agent");
+      askB.type = "button";
+      askB.title = "Ask the agent on this page about this table instead";
+      askB.addEventListener("click", function () { self.askAgent(input.value); });
+      form.appendChild(askB);
+    }
     form.addEventListener("submit", function (ev) { ev.preventDefault(); self.suggest(input.value); });
 
     var examples = [];
@@ -927,6 +1043,32 @@
     return out;
   };
 
+  /* The question, written by the page's shared composer when the context menu is on the
+     page (HubMenu.questionAbout knows the page's name and the app's), else here: what
+     the person typed, the table's columns and the cut it is showing now. */
+  Table.prototype.askAgent = function (goal) {
+    var heads = Array.prototype.map.call(this.headRow ? this.headRow.cells : [], function (th) {
+      var c = th.cloneNode(true);
+      c.querySelectorAll(".ht-resize, button, svg, [aria-hidden=true]").forEach(function (x) { x.remove(); });
+      return String(th.getAttribute("data-label") || c.textContent || "").replace(/\s+/g, " ").trim();
+    }).filter(Boolean).slice(0, 14);
+    var cut = this.currentFilters(), cutText = Object.keys(cut).map(function (k) { return k + "=" + cut[k]; }).join(", ");
+    var words = String(goal || "").trim() || "what is worth a look in this table";
+    var thing = { kind: "table", intent: "table", text: words,
+                  facts: "a table with columns " + heads.join(", ") + (cutText ? "; showing " + cutText : "") };
+    var question = composed(thing);
+    if (!question) question = "In " + (this.mount.dataset.appName || this.app) + ", about " + thing.facts + ": " + words;
+    if (askAgentEvent(question, thing)) { this.closeShape(); return true; }
+    return false;
+  };
+  Table.prototype.askInstead = function (goal) {
+    if (!agentHere()) return null;
+    var self = this, b = el("button", "ht-btn", "Ask the agent instead");
+    b.type = "button";
+    b.addEventListener("click", function () { self.askAgent(goal); });
+    return b;
+  };
+
   Table.prototype.suggest = function (goal) {
     var self = this, D = this.mount.dataset;
     if (!this.panel) this.buildPanel();
@@ -960,7 +1102,8 @@
       .then(function (answer) {
         if (!answer.ok) {
           self.state(answer.code === "unconfigured" ? "off" : "failed",
-                      answer.reason || "The suggestion lane failed (HTTP " + answer.__status + ").");
+                      answer.reason || "The suggestion lane failed (HTTP " + answer.__status + ").",
+                      self.askInstead(goal));
           return;
         }
         self.lastAnswer = answer;
@@ -974,7 +1117,8 @@
           return;
         }
         report(err);
-        self.state("failed", "Could not get suggestions: " + (err && err.message || err) + ". It has been reported.");
+        self.state("failed", "Could not get suggestions: " + (err && err.message || err) + ". It has been reported.",
+                   self.askInstead(goal));
       })
       .then(function () {
         clearInterval(tick);
@@ -1138,6 +1282,9 @@
        no -- so a page whose hub link failed still works exactly as before. */
     claims: function (node, feature) { var t = node && find(node); return !!(t && t.claims(feature)); },
     showAnswer: function (node, answer) { var t = find(typeof node === "string" ? doc.querySelector(node) : node); if (t) t.showAnswer(answer); },
-    relayout: function (node) { var t = find(node); if (t && t.relayout) t.relayout(); }
+    relayout: function (node) { var t = find(node); if (t && t.relayout) t.relayout(); },
+    /* 1.4.0: size a column (field name) to its content, or every column. */
+    fit: function (node, field) { var t = find(node); return t && t.claims("resize") ? t.fit(field) : null; },
+    fitAll: function (node) { var t = find(node); return t && t.claims("resize") ? t.fitAll() : null; }
   };
 })();

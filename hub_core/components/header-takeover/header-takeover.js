@@ -43,18 +43,61 @@
    Every outcome is reported once: console.warn/info, and `app-banner:duplicate` on document
    (detail {kind, control, action, reason}) so an app's error visibility can carry it.
 
-     <script src="/hub/components/header-takeover/header-takeover.js" defer></script>   (after banner.js)
+     <script src="/hub/components/header-takeover/header-takeover.js"></script>
+       -- right AFTER the #app-banner mount and NOT deferred, so a declared data-replaces header is
+          hidden as it is parsed (see earlyHide). Linked deferred it still works; the old header
+          then paints once before it is hidden.
 
    Standard browser APIs only; no framework, no build step. */
 (function () {
   "use strict";
-  var VERSION = "1.0.0";
+  var VERSION = "1.1.0";
   var doc = document, win = window;
   var LOG = "[header-takeover] ";
   var reported = {};
   var hideCustom = [];
 
   function banner() { return doc.getElementById("app-banner"); }
+
+  /* THE HEADER THE BANNER REPLACES NEVER PAINTS FIRST. An app's own header usually comes AFTER
+     the banner's mount in the document, and the pass below can only hide it once the banner has
+     drawn -- one paint too late, so every load showed the old header and then took it away.
+     Linked right after the mount WITHOUT defer, this file runs while the page is still being
+     parsed, and adds a stylesheet rule naming exactly the selectors the app DECLARED in
+     data-replaces, so each is hidden as it is parsed. Nothing is guessed: no declaration, no
+     rule; a selector that is invalid, names html/body, or matches the banner or anything holding
+     it is left to the pass, which reports it. The rule is removed once the pass has marked the
+     real nodes -- and also at DOMContentLoaded when the banner never drew, so a banner that fails
+     to load leaves the app's own header on screen rather than a page with no header at all. */
+  var early = null;
+  (function earlyHide() {
+    var mount = banner();
+    if (!mount || doc.readyState !== "loading") return;
+    var declared = mount.getAttribute("data-replaces");
+    if (!declared) return;
+    var rules = [];
+    declared.split(",").forEach(function (sel) {
+      sel = sel.trim();
+      if (!sel || /^(html|body|:root)$/i.test(sel)) return;
+      var found;
+      try { found = doc.querySelectorAll(sel); } catch (e) { return; }
+      if ([].some.call(found, function (n) { return n === mount || n.contains(mount) || mount.contains(n); })) return;
+      rules.push(sel + ":not([data-ab-replaced]){display:none!important}");
+    });
+    if (!rules.length) return;
+    early = doc.createElement("style");
+    early.setAttribute("data-header-takeover-early", "");
+    early.textContent = rules.join("\n");
+    (doc.head || doc.documentElement).appendChild(early);
+    doc.addEventListener("DOMContentLoaded", function () {
+      var m = banner();
+      if (!m || !m.getAttribute("data-ab-ready")) dropEarly();
+    }, { once: true });
+  })();
+  function dropEarly() {
+    if (early && early.parentNode) early.parentNode.removeChild(early);
+    early = null;
+  }
 
   function report(kind, control, action, reason, level) {
     var key = kind + "|" + control + "|" + action;
@@ -180,6 +223,7 @@
           }
         });
       });
+      dropEarly();                     // the real nodes are marked now; the parse-time rule is done
     } else if (declared === null) {
       [].forEach.call(doc.querySelectorAll("header, [role=banner]"), function (node) {
         if (node === mount || node.contains(mount) || mount.contains(node) || !visible(node)) return;

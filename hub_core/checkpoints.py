@@ -21,6 +21,8 @@ did, because history cannot be re-stamped. Stdlib only.
 from __future__ import annotations
 
 import re
+import time
+from datetime import datetime, timezone
 
 #: Kinds a SCHEDULER writes about its own run. Declared here so the next lifecycle event has
 #: somewhere to be named instead of quietly becoming a work checkpoint.
@@ -128,17 +130,65 @@ def recorded_shas(task_or_plan) -> list:
     return out
 
 
+#: A checkpoint `due_at` further out than this is refused on write and ignored on read: a wait
+#: that long is a task to hand back, not one to hold while the board looks away.
+MAX_DUE_AHEAD_S = 7 * 86400
+
+
+def due_epoch(ts):
+    """A checkpoint's `due_at` as an epoch, or None when absent or not an ISO time (no zone =
+    UTC)."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def normalize_due(text, now=None) -> str:
+    """`step --due` as a canonical UTC time ('...Z'), REFUSED (ValueError) unless it parses, is
+    ahead of now, and is at most MAX_DUE_AHEAD_S out. A passed time means the checkpoint is
+    owed now, so it is never accepted as a reason to wait."""
+    raw = str(text or "").strip()
+    epoch = due_epoch(raw)
+    if epoch is None:
+        raise ValueError("due must be an ISO time in UTC, e.g. 2030-01-08T18:00Z (got %r)" % raw)
+    ahead = epoch - (time.time() if now is None else now)
+    if ahead <= 0:
+        raise ValueError("due %s has already passed: the checkpoint is owed now -- do it, or "
+                         "step what stops it" % raw)
+    if ahead > MAX_DUE_AHEAD_S:
+        raise ValueError("due %s is more than %d days out; the board does not honour a wait that "
+                         "long -- hand the task back instead" % (raw, MAX_DUE_AHEAD_S // 86400))
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_id="",
-               pipeline_url="", at="") -> tuple:
+               pipeline_url="", at="", due="") -> tuple:
     """Record one checkpoint on a COPY of `plan`; return ``(new_plan, target_row)``.
 
     The one implementation behind the client's `step` verb and the MCP `step_task` tool, so
     both land identical rows. Targeting: an integer-like `step` (1-based) or a text fragment;
     default = the first undone WORK step. A number past the end grows `auto` placeholders; a
     plan with nothing left (or no plan) takes a report carrying a note as a NEW checkpoint.
+
+    `due` says the checkpoint is NOT done and cannot be before that time (an acceptance window,
+    a read after an overnight run): the note is recorded, the row stays OPEN with `due_at`, and
+    `task_health` reads the task as waiting rather than stalled until then. Without it such a
+    task was indistinguishable from abandoned work, and the stall alarm paged its owner (or
+    launched a run) every hour of the window, each able only to re-read the same wait. A due
+    step names no commit: a push is a done checkpoint, so the two are refused together.
     Raises ValueError with a sentence a worker can act on."""
     if kind not in KINDS:
         raise ValueError("kind must be one of %s" % sorted(KINDS))
+    due = normalize_due(due) if str(due or "").strip() else ""
+    if due and (sha or pipeline_id or pipeline_url or kind == "pushed"):
+        raise ValueError("due marks a checkpoint NOT done yet; a pushed commit is a done "
+                         "checkpoint -- record them as two steps")
     sha = str(sha or "").strip().lower()
     if sha and not re.fullmatch(r"[0-9a-f]{7,40}", sha):
         raise ValueError("sha must be a 7..40 character hexadecimal commit id")
@@ -166,7 +216,7 @@ def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_
                              "note to record a new checkpoint, or finish the task")
         target = {"step": str(note).strip().splitlines()[0][:120] or "checkpoint"}
         rows.append(target)
-    target["done"] = True
+    target["done"] = not due
     target.pop("auto", None)
     if note and str(note) != str(target.get("note") or "") and not (sha or pipeline_id
                                                                    or pipeline_url):
@@ -177,6 +227,10 @@ def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_
             target.pop(key, None)
         if target.get("kind") in ("pushed", "deployed"):
             target["kind"] = kind
+    if due:
+        target["due_at"] = due
+    else:
+        target.pop("due_at", None)
     if note:
         # Whole: the next reader acts on it; a surface that must fit a line shows a preview.
         target["note"] = str(note)

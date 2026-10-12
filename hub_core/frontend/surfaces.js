@@ -16,6 +16,8 @@
  *      (data-entity-id / data-task-id / data-live-key / id), keeps every unchanged node
  *      attached, patches changed attributes and text in place, and briefly outlines a keyed node
  *      whose data-record-version moved (skipped under prefers-reduced-motion or a hidden tab).
+ *      An element carrying data-hub-keep="<signature>" owns its children and is left alone
+ *      while the signature holds, so a redraw never strips what a script built inside it.
  */
 (function (global) {
   "use strict";
@@ -192,6 +194,11 @@
   function patch(target, source, animate) {
     if (target.nodeType !== 1) { if (target.nodeValue !== source.nodeValue) target.nodeValue = source.nodeValue; return target; }
     if (target.isEqualNode(source)) return target;
+    // KEPT ELEMENTS: an element that names a keep-signature (data-hub-keep) owns its children --
+    // a chart a script drew, a framed page -- and is left exactly as it is while the signature
+    // is unchanged. A redraw would otherwise strip what the script built (and reload a frame).
+    // Change the signature when what it was built from changes.
+    if (target.dataset && target.dataset.hubKeep && target.dataset.hubKeep === (source.dataset || {}).hubKeep) return target;
     // An unkeyed control carries a closure built for the fresh render; take the fresh one
     // unless the reader is on it right now.
     if (!key(target) && target.matches("button,a,input,textarea,select,[role=\"button\"]")) {

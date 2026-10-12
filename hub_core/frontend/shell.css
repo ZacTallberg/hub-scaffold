@@ -2035,13 +2035,15 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .ask-item:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
 .ask-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
 .ask-item:disabled { cursor: default; }
-.ask-head { display: flex; align-items: baseline; gap: 8px; }
+/* The copy gets the width: the head line (who, hop, state, age) wraps under itself at a narrow
+   width instead of a no-wrap status column squeezing the question to a word per line. */
+.ask-head { display: flex; align-items: baseline; gap: 4px 8px; flex-wrap: wrap; min-width: 0; }
 .ask-from { font-weight: 700; font-size: 12px; }
 .ask-hop { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap;
   padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .ask-age { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.ask-title { font-size: 12.5px; font-weight: 600; }
-.ask-body { font-size: 11.5px; color: var(--muted); }
+.ask-title { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.ask-body { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 
 /* ============ Operational errors: the queue the audit cannot see ============ */
 .err-item {
@@ -2055,7 +2057,7 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 .err-age { color: var(--muted); font-size: 11px; }
 .err-claim { margin-left: auto; flex: none; white-space: nowrap; font-size: 10.5px; color: var(--muted); letter-spacing: .03em; text-transform: uppercase; }
 .err-item:not(.is-acked) .err-claim { color: var(--fail-solid, #e5484d); font-weight: 700; }
-.err-msg { font-size: 12.5px; }
+.err-msg { font-size: 12.5px; overflow-wrap: anywhere; }
 .err-meta { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .err-shape { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
 .err-spark { flex: none; }

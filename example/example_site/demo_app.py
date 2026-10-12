@@ -135,10 +135,10 @@ PAGE = """<!doctype html>
 <body>
 <header><h1>Budget app</h1><div class="slot"><span data-hub-agent-header></span><span class="mark" id="mark" title="">?</span></div></header>
 <main>
-  <section><h2>Being built for this app</h2><div id="checklist" class="empty">Loading&hellip;</div></section>
-  <section><h2>Built because you asked</h2><div id="announcements" class="empty">Loading&hellip;</div></section>
+  <section data-card><h2>Being built for this app</h2><div id="checklist" class="empty">Loading&hellip;</div></section>
+  <section data-card><h2>Built because you asked</h2><div id="announcements" class="empty">Loading&hellip;</div></section>
   <section class="wide" data-hub-table data-app="budget-app" data-table="#ledger">
-    <h2>Ledger</h2>
+    <h2 id="ledger-head">Ledger <button type="button" class="info" aria-label="What the ledger holds">i</button></h2>
     <div class="bar" data-ht-toolbar>
       <button type="button" data-ht-overflow="20">Export</button>
       <button type="button" data-ht-overflow="10">New line</button>
@@ -180,7 +180,18 @@ PAGE = """<!doctype html>
 <div data-hub-agent data-app="budget-app" data-title="Budget assistant"
      data-ask="/demo-app/agent/ask" data-history="/demo-app/agent/history"
      data-conversation="/demo-app/agent/conversation" data-profile="/demo-app/profile.json"
-     data-props="/hub/components/props/budget-app.json"></div>
+     data-props="/hub/components/props/budget-app.json">
+  <script type="application/json" data-agent-guide>{"title": "Budget overview",
+    "summary": "What each part of this page is, and who fills it in.",
+    "sections": [
+      {"name": "Being built for this app", "kind": "system", "target": "#checklist",
+       "text": "Open board tasks that name this app, read from the hub."},
+      {"name": "Built because you asked", "kind": "system", "target": "#announcements",
+       "text": "Work finished on a request from someone using this app."},
+      {"name": "Ledger", "kind": "mixed", "target": "#ledger",
+       "text": "Lines are entered by people; status and the late flag are set by the app.",
+       "who": "Members add lines; the owner column is whoever claimed it."}]}</script>
+</div>
 <script>
 (function () {
   function list(id, rows, empty, matched) {

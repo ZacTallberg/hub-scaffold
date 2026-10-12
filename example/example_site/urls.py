@@ -37,4 +37,5 @@ urlpatterns = [
     path("demo/<slug:slug>/suggest.json", demo.suggest),
     path("demo/<slug:slug>/fixes.json", demo.fixes_json),
     path("demo/<slug:slug>/", demo.page),
+    path("demo/<slug:slug>/<slug:sub>/", demo.page),
 ]

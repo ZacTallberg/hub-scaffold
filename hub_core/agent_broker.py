@@ -51,6 +51,10 @@ import urllib.request
 
 THREAD_TURNS = 6
 MAX_QUESTION_CHARS = 4000
+#: What the reader's screen showed, as the agent component read it (one thread item with role
+#: "page"). The component sends at most 7,000 characters; this bound holds whatever an older or
+#: altered client sends, so the composed query stays far below an upstream body cap.
+PAGE_MAX_CHARS = 8000
 MAX_RESPONSE_BYTES = 4_000_000
 
 _PERSON_RE = re.compile(r"^[a-z0-9][a-z0-9._@-]{0,99}$")
@@ -104,19 +108,37 @@ def uuid(raw) -> str:
 
 def compose(question: str, thread) -> str:
     """One prompt: the upstream takes a question, not a chat. Earlier turns ride as plainly
-    labelled context (never pretending to be a history the far side had), question last."""
+    labelled context (never pretending to be a history the far side had), question last.
+
+    THE PAGE THE PERSON IS LOOKING AT rides inside `thread` as ONE item with role "page" --
+    inside the thread because every app's bridge already forwards it untouched, so every
+    adopter gains it with no change of its own. It is lifted out here BEFORE the turns are
+    counted (a page is not a turn, and must not push a real turn out of the window), capped,
+    and stated first as what is on the person's screen. The last page item wins."""
+    page, conversation = "", []
+    for entry in (thread if isinstance(thread, list) else []):
+        if isinstance(entry, dict) and str(entry.get("role")) == "page":
+            page = str(entry.get("text") or "").strip()[:PAGE_MAX_CHARS]
+        else:
+            conversation.append(entry)
     turns = []
-    for entry in (thread if isinstance(thread, list) else [])[-THREAD_TURNS:]:
+    for entry in conversation[-THREAD_TURNS:]:
         if not isinstance(entry, dict):
             continue
         text = str(entry.get("text") or "").strip()
         if text:
             who = "Person" if str(entry.get("role")) == "you" else "You (the assistant)"
             turns.append("%s: %s" % (who, text))
-    if not turns:
+    parts = []
+    if page:
+        parts.append("The person is looking at this page right now. This is what is on their "
+                     "screen, read by the agent panel; use it to answer about what they are "
+                     "looking at, and say so when the answer comes from it:\n" + page)
+    if turns:
+        parts.append("Earlier in this conversation:\n" + "\n".join(turns))
+    if not parts:
         return question
-    return ("Earlier in this conversation:\n" + "\n".join(turns)
-            + "\n\nThe person now asks: " + question)
+    return "\n\n".join(parts) + "\n\nThe person now asks: " + question
 
 
 def _context(lane: Lane):
