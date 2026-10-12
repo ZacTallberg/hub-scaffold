@@ -12,6 +12,7 @@ schedule it.
 ```
 python -m hub_core.unattended scan              # what could be taken here, and what may not, with why
 python -m hub_core.unattended scan --launch     # spawn one `respond` per workable item (--max N)
+python -m hub_core.unattended watch            # stay up: scan --launch the moment the task wake moves
 python -m hub_core.unattended respond <item-id> # one bounded session for exactly this item
 python -m hub_core.unattended publish           # push at most one waiting hand-off, then exit
 python -m hub_core.unattended sweep             # hand back leases left by a launcher that died
@@ -356,6 +357,11 @@ clock, outcome checks and fault classification.
 Any scheduler that runs a command every few minutes will do (cron, a systemd timer, Windows Task
 Scheduler: `adapters/windows/register-responder.ps1 -Launcher unattended -HomeDir <dir> -Workspace
 <dir>`, which gives the tick a twenty-minute limit because it may run one publish pass first). Run
-`scan --launch` from a directory that holds the checkouts the tasks name. For a long
+`scan --launch` from a directory that holds the checkouts the tasks name. A timer alone leaves
+a task filed just after a tick waiting out the rest of the interval: `watch` (one long-lived
+process instead of the timer) asks `GET /hub/task_wake.json` every `HUB_WAKE_POLL_S` (3 s) -- a
+hash of the responder-eligible todo tasks that holds no server thread -- and scans the moment it
+moves, plus at least every `--interval` seconds; against a hub without the route it falls back
+to the interval. An unreadable wake is a missed poll, never a scan. For a long
 unattended window on a laptop, `adapters/windows/keep_awake.py` holds a wake lock for the whole
 window; each run already holds one for its own length.

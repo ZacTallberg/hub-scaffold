@@ -758,6 +758,30 @@ def fingerprint(items) -> str:
     return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+_LAST_WAKE = [""]
+
+
+def task_wake(state) -> str:
+    """A 16-hex signature of the responder-eligible TODO tasks on the board, "" when none.
+
+    What an unattended supervisor watches to dispatch a responder the moment work it may take
+    appears (a task filed or handed back), instead of on its next heartbeat. Ids feed a hash
+    and nothing else: no task content rides the answer. A failed read keeps the
+    LAST answer, never "": a value that flips on failure would turn every watcher's wake into
+    a spin. Ids only: an edit to a task already in the set is not new work. Never raises."""
+    from .task_health import unattended_eligible
+    try:
+        rows = sorted(str(t.get("id"))
+                      for t in (state.get("entities") or {}).values()
+                      if isinstance(t, dict) and t.get("type") == "task"
+                      and t.get("status") == "todo" and unattended_eligible(t))
+    except Exception:                                        # noqa: BLE001
+        return _LAST_WAKE[0]
+    wake = hashlib.sha256("|".join(rows).encode("utf-8")).hexdigest()[:16] if rows else ""
+    _LAST_WAKE[0] = wake
+    return wake
+
+
 def snapshot(state, agent: str, operator: str, operator_extra=None, *, hub_dir=None,
              **kwargs) -> dict:
     """The addressed set + its fingerprint. With `hub_dir`, an OFFER receipt is written for

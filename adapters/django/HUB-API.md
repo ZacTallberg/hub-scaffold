@@ -122,6 +122,7 @@ INTEGRITY (the server re-runs its board audit inside complete; a critical violat
 | `GET /hub/search.json?q=…` | ranked search over every live, non-chatter record (inter-agent messages and restated questions are excluded; a question's resolution lives in its answer) and the published capability catalog. BM25F (title 3 > tags 2 > body 1, IDF + length-normalized), fused convexly with dense retrieval when an embedder is configured. `metadata.fusion` says which halves ran, `metadata.partial` is a `<memory-partial>` block present ONLY when something could not be seen (keyword-only, unembedded records, uncountable catalog), `metadata.hint` appears when nothing matched (a fact about the words used, not about the board), `metadata.timing_ms` gives each stage, and `metadata.scored` (every record either half ranked — the denominator of what is shown) sits beside `metadata.matched` (records sharing a word with the query). `?limit=` 1–50; `?mode=fused\|lexical\|semantic` and `?alpha=` exist for measurement. Ties break by id. The corpus is built once per ledger head and catalog revision. A knowledge hit carries `label` — the record's ONE standing line (`hub_core/staleness.py`): `as of <date>`, `STATE as of … · verify before acting: <check>`, `STATE … · UNVERIFIED`, with ` · CHECK FAILED … — NEEDS REVIEW` or ` · check answered …` from the re-check; the per-prompt index (`guidance.json` memory rows) and the mirror feed (`knowledge/since` puts, which also carry raw `recheck`) render the same label. |
 | `GET /hub/triggers.json?error=…\|command=…\|path=…[&context=]` | which live knowledge record's `applies_when` names this moment — deterministic, literal matching (`<...>` is ONE non-space value; errors match tool output, commands the command, paths a file path at a segment boundary; `systems` only order records that already matched). A trigger carried by more than 6 live records, or with under 4 literal characters, is ignored and listed in `metadata.rejected` with why. Built from the mirror feed's own put ops at the ledger head, so a retired record never matches. The workstation hook (`client lesson-trigger --hook`) adds what only a machine has: a corpus guard over its own tool calls and a once-per-session receipt. MCP: `match_lesson_triggers`; client: `trigger-match`. See `patterns/agent-memory.md`. |
 | `GET /hub/perf.json` | the ANSWERING process: `process{role, pid, uptime_s, background_clock{status, age_s, tick report}}` and `prewarm{state, steps}`. See `docs/OPERATIONS.md` → Process roles. |
+| `GET /hub/perf.json` → `write_phases`, `process_pressure` | Every authenticated call is split into named phases (`hub_core/write_timing.py`): `auth`, `body`, `secret_scan`, `handler`, `append.open[.lock\|.init\|.reconcile]`, `append.entity_read`, `append.validate`, `append.store[.lock\|.locked]`, a claim's `claim.lock_wait`/`claim.state`/`claim.lease`/`claim.knowledge`, and `pre_view` (time in middleware before the view). `write_phases` is per route over the last hour: `count`, `p50_ms`/`p95_ms`/`max_ms`, `unattributed_share_pct`, and per phase `p50_ms`/`p95_ms`/`max_ms`/`share_pct`; `next.json`'s build is timed as `/hub/next.json [build]` (`state`, `leases`, `candidates`, `annotate`). `process_pressure` (needs `hub.middleware.InFlightMiddleware` first in `MIDDLEWARE`): `in_flight_now`, `in_flight_routes` (the routes holding threads right now, with the oldest age), `in_flight_at_arrival` (p50/p95/max, and `at_or_over_cap_pct` when `HUB_SERVER_THREADS` names the pool) and `interpreter_wake_lag_ms` (how late a 50 ms sleep wakes: time the interpreter was held by other threads). The same split rides every authenticated response as a `Server-Timing` header (`total;dur=...` first), so a caller can subtract the server's time from its own wall clock: the rest is the queue and the network. |
 | `GET /hub/history.json` | **Opt-in, operator-only.** With `agent` + `session` (`machine` optional, `limit` ≤ 3000): one console's stored turns oldest to newest (`turns[]` of `{ts, role: user\|assistant\|tool\|event, text}`, `turn_count`, `served`, `earlier_not_served`), ETag + 304 on the sidecar's size/mtime; with no session: the stored consoles, newest first. Readable with `history:read` or the adopter's `HUB_HISTORY_VIEWER` predicate; 404 to everyone else and while `HUB_HISTORIES_ENABLED` is off. |
 | `GET /hub/evidence.json[?q=&repo=&commit=&limit=]` | **Members only** (a narrowed reader gets 404: a reading can name internal systems). What the team already measured: readings ranked by subject + summary (BM25F) when `q` is given, else newest first; `commit` matches as a prefix either way. `{data[], metadata{count, stored, keep}}`, ETag/304 on all three carriers. Client: `evidence put|find`; MCP: `post_evidence`, `find_evidence`. |
 | `GET /hub/whoami.json` | what the hub actually received on THIS request: the presented credential's `mode` and `subject` (or why it is invalid), its scopes, and which `X-Hub-*` headers survived any proxy. Never echoes tokens. |
@@ -157,13 +158,23 @@ The head exists only on the wire: every server-side derivation — the attention
 search, the MCP tools — reads the whole cached snapshot, so no derived number is computed over a
 head. A client of `hub.json` that needs a whole collection reads `partial` and fetches it.
 
-`hub.json` and `next.json` are **built once per input state**. A stats-only fingerprint of what
-they are built from (ledger size, the lease directory, presence, the error sidecars, telemetry) is
-taken before anything is opened; while it holds and the build is younger than the view's reuse cap
-(`hub.json` 5 s, matching the snapshot's own time bucket; `next.json` 10 s, which bounds how late
-an expired lease reappears as a stale reclaim), the cached bytes or a 304 are served without
-building a snapshot. Such responses carry `X-Hub-Memo: hit`. A build is remembered only if its
-inputs did not move while it ran, and an unreadable stamp always builds.
+`hub.json` and `next.json` are **built once per input state**. For `hub.json` a stats-only
+fingerprint of what it is built from (ledger size, the lease directory, presence, the error
+sidecars, telemetry) is taken before anything is opened; while it holds and the build is younger
+than 5 s (the snapshot's own time bucket) the cached bytes or a 304 are served. `next.json` is keyed
+on what its answer depends on -- every task's `(id, version, status)` from the incremental fold,
+plus the lease directory -- not on the ledger, which notes, CI rows and deploy records move every
+few seconds while no task changes; it is reused for at most 10 s (which bounds how late an expired
+lease reappears as a stale reclaim), and a request that arrives while an identical build runs
+waits for that build instead of starting another. Such responses carry `X-Hub-Memo: hit`. A build
+is remembered only if its inputs did not move while it ran, and an unreadable stamp always builds.
+
+`GET /hub/task_wake.json` (member) answers `{"data": {"task_wake": "<16 hex>"}}`: a hash of the
+ids of the responder-eligible `todo` tasks (unattended, P0-P2, never a decision; `""` when none).
+It holds no thread and is reused for 2 s per ledger state, so an unattended supervisor can ask it
+every few seconds and dispatch the moment it moves -- `python -m hub_core.unattended watch` does
+exactly that (`HUB_WAKE_POLL_S`, default 3 s), with a scan at least every `--interval` seconds
+and the interval alone against a hub that answers 404.
 
 ### The `live` block — what the cockpit reads
 
@@ -624,8 +635,12 @@ A `todo` task qualifies only with a recorded commit; prose never counts. The res
 `tasks: {closed, stepped, refused, unchecked}` when anything happened; a refused close is written
 onto the task as `auto_close`. Ancestry is asked of the repository at `HUB_WORK_ROOT`
 (`HUB_VCS_ANCESTRY=none` when the image carries none); a question it could not answer is reported
-as `unchecked`, never read as "no". The closure is fail-soft: the release record is already
-durable.
+as `unchecked`, never read as "no". The closure is fail-soft and never a condition of the
+record's answer: the release record is durable when it is appended, the close runs on its own
+thread, and the record waits for it at most 3 s (`DEPLOY_CLOSE_INLINE_S`) -- after that the answer
+carries `tasks: {queued: true}` and the close finishes in the background (a failure lands on the
+error stream). Closes run one at a time (the record's, a CI deploy job's and the reconcile
+replay's), so records landing together never race each other on one task's version.
 
 A refused close is **retried, not final**. An unattended task already stepped `deployed` but not
 done is offered to the close again on every later deploy (never stepped twice), on the hand-back,

@@ -19,6 +19,9 @@ urlpatterns = [
     path("audit.json", R(hub_api.audit_json)),
     path("graph.json", R(hub_api.graph_json)),
     path("next.json", R(hub_api.next_json)),
+    # The unattended dispatch wake: a hash of the responder-eligible todo tasks, cheap enough to
+    # ask every few seconds (above the catch-all, which would read it as an entity type).
+    path("task_wake.json", R(hub_api.task_wake_json), name="task-wake"),
     # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
     # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
     path("live/events", R(hub_api.live_events), name="live-events"),
@@ -236,7 +239,7 @@ VISIBILITY = {
     # Candidates are unreviewed model output about internal systems: members only.
     "knowledge-candidates.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
-    "ci-status.json": "member",
+    "ci-status.json": "member", "task_wake.json": "member",
     "deploy-reconcile.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

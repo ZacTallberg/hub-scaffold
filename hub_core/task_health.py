@@ -128,6 +128,17 @@ def is_unattended(task) -> bool:
     return (task or {}).get("unattended") in (True, 1, "1", "true")
 
 
+#: What an unattended responder may take: P0-P2 (P3 is a wish list).
+UNATTENDED_PRIORITIES = ("P0", "P1", "P2")
+
+
+def unattended_eligible(task) -> bool:
+    """Marked unattended, P0-P2, and never a person's decision -- the one rule the unattended
+    lane of next.json and the task wake (hub_core.inbox.task_wake) both apply."""
+    return (isinstance(task, dict) and is_unattended(task) and not is_decision(task)
+            and str(task.get("priority") or "").strip().upper() in UNATTENDED_PRIORITIES)
+
+
 def owner_of(task) -> str:
     """The task's explicit owner, else whoever CREATED it -- never its last writer (a deploy
     actor stamping a deployed step is not the task's owner)."""

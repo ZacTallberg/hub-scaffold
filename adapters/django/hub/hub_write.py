@@ -20,6 +20,7 @@ from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, textguard, validate
 from hub_core import errorlog as _errorlog
 from hub_core import inbox as inbox_core
+from hub_core import write_timing
 from hub_core.canonical import content_hash
 from hub_core.process_lock import LockBusy, ProcessFileLock
 from hub_core.store import ConflictError, StoreBusy
@@ -121,9 +122,33 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
+        # EVERY AUTHENTICATED CALL IS SPLIT INTO TIMED PHASES (hub_core.write_timing): served on
+        # /hub/perf.json `write_phases` and as this response's Server-Timing header, so a caller
+        # can subtract the server's own time from its wall clock.
+        write_timing.begin(request.path_info or "")
+        entered = getattr(request, "_hub_entered", None)
+        if entered is not None:
+            # Time in the middleware stack (and the server's queue as the stack saw it) before
+            # this view ran, and how many requests the process was serving when it arrived.
+            write_timing.add("pre_view", (time.perf_counter() - entered) * 1000.0)
+            write_timing.add("in_flight_at_entry", float(getattr(request, "_hub_in_flight", 0)))
+        resp = None
+        try:
+            resp = _w(request, *a, **k)
+            return resp
+        finally:
+            header = write_timing.end(getattr(resp, "status_code", 0))
+            try:
+                if header and resp is not None:
+                    resp["Server-Timing"] = header
+            except Exception:                                # noqa: BLE001 - timing never breaks a write
+                pass
+
+    def _w(request, *a, **k):
         if request.method not in methods:
             return HttpResponseNotAllowed(list(methods))
-        auth, problem = _authenticate(request)
+        with write_timing.phase("auth"):
+            auth, problem = _authenticate(request)
         if not auth:
             _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
@@ -138,7 +163,8 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
             return JsonResponse({"errors": [{"code": "insufficient_scope",
                                               "required": scopes[0] if len(scopes) == 1 else list(scopes),
                                               "subject": auth.subject}]}, status=403)
-        b = {} if request.method == "GET" else _body(request)
+        with write_timing.phase("body"):
+            b = {} if request.method == "GET" else _body(request)
         if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
         # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
@@ -146,7 +172,8 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
         # never be removed without destroying the tamper-evidence — and the highest-volume
         # risky behaviour on an agent board is pasting failing command output into a question
         # or note. Refuse at the door, in milliseconds, with instructions.
-        shape = secretscan.secret_problem(b)
+        with write_timing.phase("secret_scan"):
+            shape = secretscan.secret_problem(b)
         if shape:
             return JsonResponse({"errors": [{"code": "secret_shaped_payload",
                 "msg": f"refused: the payload looks like it contains {shape}. The hub ledger "
@@ -196,7 +223,8 @@ def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
         marker = _AUTH.set(auth)
         req_marker = _REQUEST.set(request)
         try:
-            response = fn(request, b, *a, **k)
+            with write_timing.phase("handler"):
+                response = fn(request, b, *a, **k)
         except ids.InvalidId as exc:
             # UNMINTABLE ID, answered once for every writer. Each writer composes its entity id
             # from caller-supplied input (a raw `local`, or a slug of a name), and make_id
@@ -368,7 +396,8 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     ``replayed: true`` — a retried create is not a new record."""
     # The entity this write is about, from its own aggregate's events -- never a fold of the
     # whole ledger (hub_app.entity_from_store).
-    existing = hub_app.entity_from_store(s, eid)
+    with write_timing.phase("append.entity_read"):
+        existing = hub_app.entity_from_store(s, eid)
     # OCC: updating an existing entity REQUIRES expected_version (else concurrent writes lose).
     # None is allowed only on first-create. (store.py also skips its head check on None.)
     if existing and expected_version is None:
@@ -377,15 +406,19 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
             "current": existing.get("version")}]}, 428)
     merged = {**existing, **payload, "id": eid, "type": type_}
     merged["version"] = (existing.get("version", 0) + 1) if existing else 1
-    errs = validate(merged, type_, hub_app.registry())
+    with write_timing.phase("append.validate"):
+        errs = validate(merged, type_, hub_app.registry())
     if errs:
         return ({"errors": [{"code": "schema", "msg": e} for e in errs]}, 422)
     try:
         before = s.latest_cursor().get("seq", 0)
-        ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(), idem_key=_request_scoped_idem(idem, payload),
-                      idem_scope=idem_scope if idem else None, allocate=allocate,
-                      **_event_identity(agent))
+        with write_timing.phase("append.store"):
+            ev = s.append(aggregate=eid, type=etype, payload=payload,
+                          expected_version=expected_version, git_sha=hub_app._git_head(),
+                          idem_key=_request_scoped_idem(idem, payload),
+                          idem_scope=idem_scope if idem else None, allocate=allocate,
+                          **_event_identity(agent))
+        write_timing.add_all("append.store.", getattr(s, "last_append_ms", None))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
     except StoreBusy as busy:
@@ -412,7 +445,9 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
 def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_scope=None,
             allocate=None):
     """Append using a request-owned store and always release its database handle."""
-    s = hub_app.store()
+    with write_timing.phase("append.open"):
+        s = hub_app.store()
+    write_timing.add_all("append.open.", getattr(s, "open_ms", None))
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
                                   agent=agent, idem=idem, etype=etype, idem_scope=idem_scope,
@@ -1291,8 +1326,15 @@ def claim(request, b):
     # Serialize lease acquisition and the projected status transition as one claim flow. The
     # underlying helpers use this same re-entrant process/file lock, so another server process
     # cannot observe a newly granted lease and still race a second todo->in_progress transition.
+    # Only what the lock GUARDS runs under it: the knowledge lookup a start carries (a rank of
+    # the whole corpus, possibly an embedding call) runs after the release -- held inside, it
+    # made every other claim and every lease read wait on a search that protects nothing here.
+    know_subject = ""
+    lock_t0 = time.perf_counter()
     with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
-        state = hub_app.current_state()
+        write_timing.add("claim.lock_wait", (time.perf_counter() - lock_t0) * 1000.0)
+        with write_timing.phase("claim.state"):
+            state = hub_app.current_state()
         ent = state.get("entities", {}).get(eid)
         if not ent or ent.get("type") != "task":
             return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]}, status=404)
@@ -1346,12 +1388,13 @@ def claim(request, b):
                     error.update({"code": "taken_over", "msg": lost["msg"],
                                   "held_by": lost["held_by"], "taken_at": lost["taken_at"]})
             return JsonResponse({"errors": [error]}, status=409)
-        res = hub_app.claim(eid, agent, ttl_s=ttl,
-                            auth_subject=request.hub_auth.subject,
-                            credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind,
-                            session=_claim_session(request, b),
-                            machine=str(request.headers.get("X-Hub-Machine") or ""))
+        with write_timing.phase("claim.lease"):
+            res = hub_app.claim(eid, agent, ttl_s=ttl,
+                                auth_subject=request.hub_auth.subject,
+                                credential_id=request.hub_auth.credential_id,
+                                actor_kind=request.hub_auth.actor_kind,
+                                session=_claim_session(request, b),
+                                machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if res.get("took_over") and res.get("took_over_from"):
@@ -1381,19 +1424,22 @@ def claim(request, b):
                     hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=transition_status)
             res["version"] = transition["data"]["version"]
-            # A task START carries what the board already knows about THIS task (its title
-            # and acceptance as the query, above the relevance cut-off; nothing when nothing
-            # clears it). Only on the start: a renewal re-claims too, and learns nothing new.
-            try:
-                from .knowledge_api import event_knowledge
-                known = event_knowledge("%s %s" % (ent.get("title") or "",
-                                                   str(ent.get("acceptance") or "")[:200]))
-                if known:
-                    res["knowledge"] = known
-            except Exception:                                # noqa: BLE001 - a hint, never a failure
-                pass
+            know_subject = "%s %s" % (ent.get("title") or "",
+                                      str(ent.get("acceptance") or "")[:200])
         else:
             res["version"] = ent.get("version")
+    if know_subject.strip():
+        # A task START carries what the board already knows about THIS task (its title and
+        # acceptance as the query, above the relevance cut-off; nothing when nothing clears it).
+        # Only on the start: a renewal re-claims too, and learns nothing new. AFTER the lock.
+        try:
+            from .knowledge_api import event_knowledge
+            with write_timing.phase("claim.knowledge"):
+                known = event_knowledge(know_subject)
+            if known:
+                res["knowledge"] = known
+        except Exception:                                    # noqa: BLE001 - a hint, never a failure
+            pass
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 

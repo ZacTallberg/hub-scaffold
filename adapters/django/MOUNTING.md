@@ -47,6 +47,11 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # FIRST of all: counts the requests in flight at each arrival and stamps when each entered,
+    # so /hub/perf.json `write_phases` / `process_pressure` and every write's Server-Timing
+    # header can say how long a write waited BEFORE its view ran (set HUB_SERVER_THREADS to
+    # the server's thread pool so the at-capacity share is computed).
+    "hub.middleware.InFlightMiddleware",
     # ... your middleware ...
     # Early, before any read gate: a busy ledger answers 503 + Retry-After on every hub path,
     # reads included, and records a WARNING row instead of a 5xx defect.

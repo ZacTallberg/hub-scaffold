@@ -286,9 +286,18 @@ class EventStore:
         # path: an earlier attempt to remove the drop entirely (rebuild into side tables and swap by
         # DDL) lost an acked event, and serializing the window is worth far more than a cleverer
         # rebuild that cannot be trusted with the ledger.
+        # Where an open spent its time (lock wait, schema, reconcile), read by a caller that
+        # times its writes (hub_core.write_timing); never consulted by the store itself.
+        t0 = time.perf_counter()
         with LedgerLock(self.root, timeout=self._lock_timeout):
+            t1 = time.perf_counter()
             self._init_db()
+            t2 = time.perf_counter()
             self._reconcile()
+            t3 = time.perf_counter()
+        self.open_ms = {"lock": (t1 - t0) * 1000.0, "init": (t2 - t1) * 1000.0,
+                        "reconcile": (t3 - t2) * 1000.0}
+        self.last_append_ms = {}
 
     def close(self):
         self._db.close()
@@ -715,14 +724,20 @@ class EventStore:
         replace clobbers the acked line an appender just fsynced, and seq/prev_hash get
         allocated against a SQLite head the file has already moved past.
         """
-        import json
+        t0 = time.perf_counter()
         with LedgerLock(self.root, timeout=self._lock_timeout):
-            return self._append_locked(
-                aggregate=aggregate, type=type, payload=payload,
-                expected_version=expected_version, agent_id=agent_id, session_id=session_id,
-                parent_event_id=parent_event_id, actor_kind=actor_kind,
-                model_version=model_version, repo_build=repo_build, git_sha=git_sha,
-                idem_key=idem_key, idem_scope=idem_scope, allocate=allocate)
+            t1 = time.perf_counter()
+            try:
+                return self._append_locked(
+                    aggregate=aggregate, type=type, payload=payload,
+                    expected_version=expected_version, agent_id=agent_id, session_id=session_id,
+                    parent_event_id=parent_event_id, actor_kind=actor_kind,
+                    model_version=model_version, repo_build=repo_build, git_sha=git_sha,
+                    idem_key=idem_key, idem_scope=idem_scope, allocate=allocate)
+            finally:
+                # The lock wait and the locked write (index + line + commit) of THIS append.
+                self.last_append_ms = {"lock": (t1 - t0) * 1000.0,
+                                       "locked": (time.perf_counter() - t1) * 1000.0}
 
     def append_batch(self, operations) -> list[dict]:
         """Commit multiple aggregate events at one canonical-file boundary.
