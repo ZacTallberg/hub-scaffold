@@ -359,7 +359,7 @@ def _request_scoped_idem(idem, payload):
 
 
 def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype,
-                       idem_scope=None, allocate=None):
+                       idem_scope=None, allocate=None, idem_exact=False):
     """Validate the MERGED entity, then append. Returns (response_dict, http_status).
 
     With ``idem_scope`` (creates only) a key already recorded under that id prefix replays the
@@ -382,7 +382,8 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     try:
         before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(), idem_key=_request_scoped_idem(idem, payload),
+                      git_sha=hub_app._git_head(),
+                      idem_key=idem if idem_exact else _request_scoped_idem(idem, payload),
                       idem_scope=idem_scope if idem else None, allocate=allocate,
                       **_event_identity(agent))
     except ConflictError as c:
@@ -409,13 +410,17 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
 
 
 def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_scope=None,
-            allocate=None):
-    """Append using a request-owned store and always release its database handle."""
+            allocate=None, idem_exact=False):
+    """Append using a request-owned store and always release its database handle.
+
+    ``idem_exact`` keeps the key as given instead of salting it with the payload's hash: for a
+    write whose key already names the FACT (one refusal per task and reason) while the payload
+    carries a timestamp, salting minted a new key on every pass and nothing ever deduplicated."""
     s = hub_app.store()
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
                                   agent=agent, idem=idem, etype=etype, idem_scope=idem_scope,
-                                  allocate=allocate)
+                                  allocate=allocate, idem_exact=idem_exact)
     finally:
         s.close()
 
@@ -1102,17 +1107,37 @@ def _utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_VARIABLE = re.compile(r"\b[0-9a-f]{7,40}\b|\d+")
+
+
+def refusal_reason_key(why) -> str:
+    """The REASON a close was refused, with what varies between passes taken out (commit ids,
+    counts, ages): two refusals with the same key are the same fact."""
+    text = _VARIABLE.sub("#", str(why or "").strip().lower())
+    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:12]
+
+
 def _record_auto_close(eid, state, why, sha, deploy_id):
     """Write what the automatic close did onto the task, so a task waiting on a close that
-    cannot fire SAYS so instead of looking untouched."""
+    cannot fire SAYS so instead of looking untouched -- ONCE per (task, reason).
+
+    The close is retried every sweep, and every refusal used to be a new ledger event: the
+    payload carries ``at``, so the salted idempotency key was new on every pass. On the origin
+    system one task collected over a thousand identical refusal events in a day. The current
+    ``auto_close`` is checked first (no write lock for the common case), and the key is exact."""
     ent = (hub_app.current_state().get("entities") or {}).get(eid)
     if not ent or ent.get("status") == "done":
         return
+    key = refusal_reason_key(why)
+    cur = ent.get("auto_close") if isinstance(ent.get("auto_close"), dict) else {}
+    if cur.get("state") == state and (cur.get("reason_key") == key
+                                      or refusal_reason_key(cur.get("why")) == key):
+        return
     _append("task", eid, {"type": "task", "auto_close": {
-        "state": state, "why": str(why or "")[:200], "sha": str(sha or "")[:40],
+        "state": state, "why": str(why or "")[:200], "reason_key": key, "sha": str(sha or "")[:40],
         "deploy": deploy_id, "at": _utc_now()}},
         expected_version=ent.get("version"), agent=DEPLOY_ACTOR,
-        idem="deploy-close-%s:%s:%s" % (state, eid, str(sha or "")[:12]), etype="task.updated")
+        idem="deploy-close-%s:%s:%s" % (state, eid, key), etype="task.updated", idem_exact=True)
 
 
 def close_deployed_tasks(deploy_id, deployed_sha):
