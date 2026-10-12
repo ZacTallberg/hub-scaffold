@@ -1089,10 +1089,6 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         payload["work_kind"] = arguments.work_kind
     if arguments.unattended:
         payload["unattended"] = True
-    # ONE KEY PER INTENT: stamped once here and sent on every retry of THIS create, so a retried
-    # request (a response that timed out) replays the first record instead of minting a twin.
-    import uuid
-    payload["idem_key"] = arguments.idem_key or ("create-" + uuid.uuid4().hex)
     if arguments.touch:
         payload["touches"] = arguments.touch
     if arguments.plan_item:
@@ -1112,7 +1108,30 @@ def _payload_create(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]
         # one the event-driven responder (hub_core.responder) takes, so an attended worker
         # that never declared it is never handed the task by `next`.
         payload["routing"] = {"required_capabilities": required}
+    # ONE KEY PER INTENT, derived from WHAT is created -- never a fresh uuid per process. A uuid
+    # covers retries inside one invocation only: on the origin system a create run under a
+    # timeout was killed after the hub wrote the task and before the id was printed, the agent
+    # ran the same create again, and the new process's new uuid made a twin. Keyed on the
+    # writer, the task's words, the flags that shape it and the UTC day, a re-run replays the
+    # first record (the hub answers a repeated key with the record it already made). The key is
+    # written back onto the arguments, so a create that is queued offline replays with the key
+    # of the attempt that failed even if the day has turned.
+    if not arguments.idem_key:
+        arguments.idem_key = create_intent_key(payload, arguments)
+    payload["idem_key"] = arguments.idem_key
     return "task", payload
+
+
+def create_intent_key(payload: dict[str, Any], arguments: argparse.Namespace | None = None) -> str:
+    """The idempotency key of one create INTENT: the same writer asking for the same task (every
+    field the create sends -- title, acceptance, priority, kind, placement, plan, routing) on the
+    same UTC day is the same create. A genuinely second task with identical words on the same
+    day is the same task."""
+    import hashlib
+    shape = {k: v for k, v in payload.items() if k != "idem_key"}
+    shape["day"] = time.strftime("%Y-%m-%d", time.gmtime())
+    return "create-" + hashlib.sha256(json.dumps(shape, sort_keys=True, default=str)
+                                      .encode("utf-8")).hexdigest()[:32]
 
 
 _PROBLEM_ID = re.compile(r"(?:problem:)?(p-[0-9a-f]{12})")
