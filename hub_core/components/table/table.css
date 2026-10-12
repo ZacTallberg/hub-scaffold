@@ -323,3 +323,13 @@
 .ht-resizing, .ht-resizing * { cursor: col-resize !important; user-select: none !important; }
 @media (prefers-reduced-motion: reduce) { .ht-resize::after { transition: none; } }
 @media print { .ht-resize { display: none !important; } }
+
+/* THE MEASURING TABLE (1.4.0): fit() copies a column's cells here to read what they
+   need with every cap lifted. Never seen, never in the reading order. */
+table.ht-measure { position: absolute !important; left: -100000px !important; top: 0 !important;
+  visibility: hidden !important; width: auto !important; min-width: 0 !important; table-layout: auto !important;
+  pointer-events: none !important; contain: layout style; }
+table.ht-measure td, table.ht-measure th { width: auto !important; min-width: 0 !important; max-width: none !important;
+  white-space: nowrap !important; position: static !important; }
+table.ht-measure td *, table.ht-measure th * { max-width: none !important; white-space: nowrap !important;
+  -webkit-line-clamp: unset !important; }

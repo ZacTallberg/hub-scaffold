@@ -253,5 +253,9 @@ cancelable `hub-table:*` event on the mount, so an app that saves layouts saves 
 without that, the viewer's layout is kept in their browser. Where the app declares its own lanes,
 a Suggest panel draws the app's model-shaped cuts of the table (the counts are the app's own
 measurement; a slow lane answers 202 and is polled) and a Request button files what the table
-cannot do as board work through the app's own credential. The contract is the component's
-`manifest.json`.
+cannot do as board work through the app's own credential. Double-clicking a column's resize handle
+(or Enter / F on it) fits the column to its content -- measured on an uncapped off-screen copy of
+its cells, so an app's own ellipsis caps do not stop it -- and is announced like a drag. With an
+agent component on the page, Suggest also offers "Ask the agent" (and a failed or unconfigured
+Suggest offers it instead), carrying the person's words, the table's columns and the cut it shows.
+The contract is the component's `manifest.json`.
