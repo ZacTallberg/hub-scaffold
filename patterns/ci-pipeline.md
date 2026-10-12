@@ -131,6 +131,24 @@ timeout or an unreadable range all let the push go: a lint outage must never sto
 lint endpoint wants an API-scoped token; read it from where credentials live and cache it, refreshed
 in the background, never inline (one credential read took 33 s), and give the hook a kill switch.
 
+## 9. Read a pipeline's verdict from its jobs, not its status word
+
+- **Cancelled is not red.** A pipeline is cancelled when the next push supersedes it, usually
+  after its deploy job already succeeded. Read its jobs: a cancelled pipeline whose deploy job
+  succeeded and in which no job FAILED is settled (the work's own verification still has to pass on
+  that commit); reading the pipeline-level "canceled" as red kept finished work open across
+  several closes. Unreadable jobs fail closed (not settled).
+- **Only the verifying job's own terminal result is a verdict.** A cancelled, skipped or manual job
+  says nothing either way, and another job failing in the same pipeline (a probe missing its
+  credential) is that job's verdict, never the one you were waiting for. A verdict row a lane
+  wrote on such a non-result is withdrawn with ONE marker row, never by rewriting the row: a
+  receipt is restored on every write, and rewriting it appended a fresh "withdrawn" row on every
+  pass (one task carried 45).
+- **A refused forge call logs what was SENT.** A 400 is a bad request, so the request (API base and
+  path, never the token) and the forge's own error body are the evidence: when every call from one
+  host answered 400 while the same URL answered 200 from a workstation, a log that said only "HTTP
+  400" could not say why.
+
 ## Reporting a failed job
 
 Post the failing job's log tail to the Hub (`python -m hub_core.client ci-failure --project …
