@@ -895,21 +895,27 @@ def _audit_path():
 
 def _audit_load_disk():
     """One cache per ledger directory: a process pointed at another HUB_DIR is never served
-    another ledger's audit."""
+    another ledger's audit. The file is RE-READ whenever it moves (not once per process): with a
+    backgrounder writing it for every head, a web process that read it once and then audited
+    every new head itself paid for the same audit twice, on the request interpreter."""
     here = str(hub_app.HUB_DIR)
+    try:
+        mtime = _audit_path().stat().st_mtime_ns
+    except OSError:
+        mtime = None
     with _AUDIT_LOCK:
         if _AUDIT_CACHE["dir"] != here:
             _AUDIT_CACHE.update(key=None, value=None, at=0.0, dir=here, loaded=None)
-        if _AUDIT_CACHE["loaded"] == here:
+        if mtime is None or _AUDIT_CACHE["loaded"] == (here, mtime):
             return
-        _AUDIT_CACHE["loaded"] = here
+        _AUDIT_CACHE["loaded"] = (here, mtime)
     try:
         doc = json.loads(_audit_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     if isinstance(doc, dict) and isinstance(doc.get("audit"), dict):
         with _AUDIT_LOCK:
-            if _AUDIT_CACHE["value"] is None:
+            if _AUDIT_CACHE["value"] is None or float(doc.get("at") or 0) > _AUDIT_CACHE["at"]:
                 _AUDIT_CACHE.update(key=tuple(doc.get("key") or ()) or None, value=doc["audit"],
                                     at=float(doc.get("at") or 0))
 
@@ -962,7 +968,9 @@ def board_audit(key, served=None) -> dict:
         return have
     if have is None:
         return _audit_compute(key, served)
-    _audit_refresh_async(key, served)
+    if roles.runs_background_here() or not roles.backgrounder_fresh(hub_app.HUB_DIR):
+        # Only a process with no live backgrounder to do it audits a new head itself.
+        _audit_refresh_async(key, served)
     out = dict(have)
     out["served_from"] = {"stale": True, "head_seq": (list(have_key or []) + [None])[0],
                           "age_s": int(max(0.0, time.time() - at)),
