@@ -119,6 +119,18 @@ file meant for one deliberate push: a nightly run that re-applied the file's las
 would repeat it every night and never do its own work — only a pushed trigger applies; a
 schedule always runs the safe default.
 
+## 8. Lint the pipeline file with the forge BEFORE the push leaves the machine
+
+A pipeline file the forge rejects (one script item of the wrong shape) makes every later push an
+empty failed pipeline, and nothing deploys until a person edits the file -- the forge says so only
+after the push. A pre-push hook on the agent's shell tool closes that: for a `git push` whose range
+changes the pipeline file (or a file it includes), POST the file to the forge's own lint endpoint
+and deny the push with the forge's errors and the job's line. Everything else fails OPEN -- a
+command that is not a push exits before anything is imported, and no token, an HTTP error, an 8 s
+timeout or an unreadable range all let the push go: a lint outage must never stop shipping. The
+lint endpoint wants an API-scoped token; read it from where credentials live and cache it, refreshed
+in the background, never inline (one credential read took 33 s), and give the hook a kill switch.
+
 ## Reporting a failed job
 
 Post the failing job's log tail to the Hub (`python -m hub_core.client ci-failure --project …
