@@ -4121,6 +4121,14 @@
       post("promise", describe(reason), "promise");
     });
 
+    // A Content-Security-Policy refusal is an element that silently never ran or loaded; the
+    // browser fires its own event for it, which no error listener sees.
+    doc.addEventListener("securitypolicyviolation", function (e) {
+      var url = String(e.blockedURI || "").split("?")[0];
+      post("csp", "blocked by the content security policy: " + (e.violatedDirective || "?") +
+           (url ? " " + url : ""), "csp");
+    });
+
     return { post: post, describe: describe };
   })();
   global.reportBoardProblem = function (message, code) { boardErrors.post(code || "handled", message, code || "handled"); };

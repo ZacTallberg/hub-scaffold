@@ -134,9 +134,12 @@ LOGGING = {
     "disable_existing_loggers": False,
     "handlers": {"hub_errors": {"()": "hub_core.errorlog.HubErrorHandler",
                                 "hub_dir": os.environ.get("HUB_DIR") or str(BASE_DIR / "PROJECT" / ".hub"),
-                                "level": "ERROR"}},
+                                "level": "WARNING"}},
+    # `hub`: the hub's own background loops log a caught failure as a WARNING with its
+    # traceback so they can keep going; the handler keeps exactly those (and every ERROR).
     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR",
-                                   "propagate": True}},
+                                   "propagate": True},
+                "hub": {"handlers": ["hub_errors"], "level": "WARNING", "propagate": True}},
 }
 
 # Console chat histories are OFF by default: turn them on only after the people whose consoles
