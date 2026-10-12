@@ -2609,6 +2609,10 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
             inbox = _get(base, "inbox.json?" + urlencode(query), timeout=8)
             from .inbox import render_line
             for item in (inbox.get("data") or {}).get("items") or []:
+                if item.get("kind") == "attention" and item.get("actor") == "agent":
+                    # A condition an agent can clear is the UNATTENDED lane's (it reads it from
+                    # attention.json); listing it to the person asks them to do its work.
+                    continue
                 live_lines.append("- " + render_line(item) + "  [" + str(item.get("id")) + "]")
             if session != "default":
                 activity = _get(base, "activity.json?" + urlencode({"session": session}), timeout=8)
