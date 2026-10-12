@@ -2203,6 +2203,15 @@
            : (r.closeable ? "all " + r.total + " checkpoints recorded · has a commit/URL/path to verify"
                           : "all " + r.total + " checkpoints recorded · nothing to verify against");
     });
+    // An open checkpoint whose due time is still ahead (client `step --due`): not moving, not
+    // stalled either -- listed apart, soonest first, so a scheduled wait never reads as abandoned.
+    group("Waiting on a scheduled checkpoint", (th.waiting || []).slice().sort(function (a, b) {
+      return String(a.due_at || "").localeCompare(String(b.due_at || ""));
+    }), "info", function (r) {
+      var at = Date.parse(r.due_at || ""), left = isNaN(at) ? null : Math.round((at - Date.now()) / 1000);
+      return r.done + "/" + r.total + " checkpoints recorded · next due " + String(r.due_at || "?") +
+        (left != null && left > 0 ? " (in " + fmtAge(left) + ")" : "");
+    });
     group("Stalled", th.stalled, "fail", function (r) { return r.reason; });
     group("Orphaned", th.orphaned, "fail", function (r) { return r.reason; });
     group("Unattended requests nobody started", th.unstarted, "warn", function (r) { return r.body; });

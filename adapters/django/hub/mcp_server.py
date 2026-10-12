@@ -259,7 +259,10 @@ TOOLS = [
      "description": "Record a checkpoint on a task: mark a plan step done with what actually happened. "
                     "Pass `sha` (+ `pipeline_id`/`pipeline_url`) to record a typed `pushed` checkpoint naming "
                     "the commit — the record a verified deploy later closes the task against. A planless task "
-                    "takes the note as a new checkpoint; a number past the end grows uncounted placeholders.",
+                    "takes the note as a new checkpoint; a number past the end grows uncounted placeholders. "
+                    "Pass `due_at` (a UTC time at most 7 days ahead) when the checkpoint cannot be done "
+                    "before then: the note is recorded, the step stays open, and the task reads as waiting, "
+                    "not stalled, until that time.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "agent": {"type": "string"},
          "lease_token": {"type": "string", "description": "required while the task is leased"},
@@ -267,7 +270,8 @@ TOOLS = [
          "note": {"type": "string"},
          "kind": {"type": "string", "description": "checkpoint (default), pushed, deployed, or a lifecycle kind"},
          "sha": {"type": "string"}, "pipeline_id": {"type": "string"},
-         "pipeline_url": {"type": "string"}},
+         "pipeline_url": {"type": "string"},
+         "due_at": {"type": "string", "description": "UTC ISO time; the step stays open until then"}},
          "required": ["id", "agent"]}},
     {"name": "plan_task",
      "description": "Declare or extend a task's checklist; existing steps keep their state.",
@@ -1074,7 +1078,7 @@ def _call_tool(name, args, auth_headers):
         status, body = _plan_write(args, auth_headers, lambda plan: _cp.apply_step(
             plan, step=args.get("step"), note=args.get("note") or "", kind=kind,
             sha=args.get("sha") or "", pipeline_id=args.get("pipeline_id") or "",
-            pipeline_url=args.get("pipeline_url") or "", at=at)[0])
+            pipeline_url=args.get("pipeline_url") or "", at=at, due=args.get("due_at") or "")[0])
     elif name == "plan_task":
         steps = [str(x).strip() for x in (args.get("steps") or []) if str(x).strip()]
 

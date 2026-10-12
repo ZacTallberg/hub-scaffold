@@ -3008,7 +3008,10 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
 
     Structured fields ride the checkpoint so no reader parses prose: `--sha` (+ `--pipeline`,
     `--pipeline-url`) records a `pushed` checkpoint naming the commit; `--kind` sets any other
-    schema kind. The write is a minimal delta under OCC, re-applied on a version race."""
+    schema kind. `--due <UTC time>` records the note but leaves the checkpoint OPEN until that time
+    (at most 7 days out; a passed time is refused): the board reads the task as waiting, not
+    stalled, and nothing pages it until the time passes. The write is a minimal delta under OCC,
+    re-applied on a version race."""
     from . import checkpoints as _cp
     lifted = _lift_note_sha(arguments, "step")
     kind = arguments.kind or ("pushed" if arguments.sha else "checkpoint")
@@ -3019,7 +3022,8 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
             plan, target = _cp.apply_step(
                 entity.get("plan") or [], step=arguments.step, note=arguments.note or "",
                 kind=kind, sha=arguments.sha or "", pipeline_id=arguments.pipeline or "",
-                pipeline_url=arguments.pipeline_url or "", at=_now_iso())
+                pipeline_url=arguments.pipeline_url or "", at=_now_iso(),
+                due=getattr(arguments, "due", None) or "")
         except ValueError as error:
             raise RuntimeError(str(error)) from error
         picked.clear()
@@ -3031,6 +3035,9 @@ def _run_step(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
     out: dict[str, Any] = {"updated": result, "step": picked.get("step"),
                            "kind": picked.get("kind") or "checkpoint",
                            "progress": f"{counts['done']}/{counts['total']}"}
+    if picked.get("due_at"):
+        out["due_at"] = picked["due_at"]
+        out["open"] = True
     if lifted:
         out["sha_from_note"] = lifted
     if counts["lifecycle"] or counts["placeholders"]:
@@ -4232,6 +4239,10 @@ def _parser() -> argparse.ArgumentParser:
     step.add_argument("--pipeline", help="the numeric id of the pipeline that built --sha")
     step.add_argument("--pipeline-url", dest="pipeline_url")
     step.add_argument("--kind", help="checkpoint kind (default checkpoint, or pushed with --sha)")
+    step.add_argument("--due", help="this checkpoint is NOT done and cannot be before this UTC time "
+                                    "(e.g. 2030-01-08T18:00Z, at most 7 days out): the note is "
+                                    "recorded, the checkpoint stays open, and the board reads the "
+                                    "task as waiting, not stalled, until then")
     step.add_argument("--lease-token", dest="lease_token",
                       help="the held lease's fencing token (or HUB_LEASE_TOKEN)")
     step.add_argument("--machine")
