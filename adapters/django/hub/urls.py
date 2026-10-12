@@ -90,6 +90,8 @@ urlpatterns = [
     # one app's slice of the board. Above the catch-alls, which would read
     # "components/props/<slug>.json" as an entity.
     path("components/", app_services.component_index, name="component-index"),
+    path("components/versions.json", app_services.component_versions,
+         name="component-versions"),
     path("components/props/<str:slug>.json", app_services.component_props,
          name="component-props"),
     path("components/<str:name>/<str:filename>", app_services.component_file,
@@ -229,6 +231,7 @@ VISIBILITY = {
     "problems.json": "veiled", "app_health.json": "veiled", "doctor.json": "veiled",
     "overlap.json": "veiled", "enroll/status.json": "veiled",
     "app-feed.json": "veiled", "app-fixes.json": "veiled", "components/": "open", "components/props/<str:slug>.json": "open",
+    "components/versions.json": "open",
     "components/<str:name>/<str:filename>": "open",
     "history.json": "member", "doctrine.json": "veiled", "evidence.json": "member",
     "related.json": "veiled", "triggers.json": "veiled", "guidance.json": "veiled",

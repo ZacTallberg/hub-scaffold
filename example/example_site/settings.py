@@ -53,6 +53,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # FIRST: a hosted component FILE is public chrome every app links; it is answered before any
+    # session or sign-in, so an app's page never waits on those.
+    "hub.app_services.ComponentFastPathMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
