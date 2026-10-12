@@ -1,4 +1,4 @@
-"""BM25F over the board's knowledge: stdlib, fielded, full scan.
+"""BM25F over the board's knowledge: stdlib, fielded, exhaustive over the query's postings.
 
 WHY THIS AND NOT TERM FREQUENCY. The first scorer was `3.0 * title.count(term) +
 body.count(term)`. Two things are missing from that and both are fatal on a real board:
@@ -32,10 +32,28 @@ K1 = 1.2
 B = 0.75
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9._-]*")
+_PART = re.compile(r"[._-]+")
 
 
 def tokens(text) -> list:
-    return _WORD.findall(str(text or "").lower())
+    """Words, with two repairs measured on a few hundred real answered questions:
+
+    * a trailing ``.``/``-``/``_`` is punctuation, not part of the word: the pattern keeps ``.``
+      for ``settings.json`` and ``0.29``, so every sentence-final word was indexed as ``today.``
+      and never matched ``today``;
+    * a compound (``allowed_hosts.json``, ``export-service``, ``verify_deploy``) is ALSO indexed
+      as its parts, so ``allowed_hosts`` finds ``allowed_hosts.json``. The whole compound stays
+      a token, so an exact identifier still outscores a record that only shares its pieces."""
+    out = []
+    for w in _WORD.findall(str(text or "").lower()):
+        w = w.rstrip("._-")
+        if not w:
+            continue
+        out.append(w)
+        parts = _PART.split(w)
+        if len(parts) > 1:
+            out.extend(p for p in parts if p)
+    return out
 
 
 class Bm25F:
@@ -66,23 +84,37 @@ class Bm25F:
         df = self.df.get(term, 0)
         return max(0.0, math.log((self.n - df + 0.5) / (df + 0.5) + 1.0))
 
+    def _postings(self) -> dict:
+        """term -> [(id, weighted tf, length factor)], built on first query. Scoring walks only
+        the records that contain a query term instead of every record for every term -- the
+        same sums in the same per-term order, so the ranking is unchanged and a long question
+        stays cheap."""
+        post = getattr(self, "_post", None)
+        if post is None:
+            post = {}
+            avg = self.avg_len or 1.0
+            for eid, counts in self.tf.items():
+                norm = K1 * (1 - B + B * self.length[eid] / avg)
+                for t, f in counts.items():
+                    post.setdefault(t, []).append((eid, f, norm))
+            self._post = post
+        return post
+
     def score(self, query, *, limit: int = 0) -> list:
-        """`[(score, id)]` descending, ties broken by id. Full scan; nothing prefiltered."""
-        qterms = [t for t in dict.fromkeys(tokens(query)) if self.df.get(t)]
+        """`[(score, id)]` descending, ties broken by id. Exhaustive over every record that
+        shares a term; nothing truncated or prefiltered. Every occurrence of a query term
+        counts (a term the asker repeats is one they mean): measured, de-duplicating the
+        query's terms was no better and reads less of the question."""
+        qterms = [t for t in tokens(query) if self.df.get(t)]
         if not qterms:
             return []
-        avg = self.avg_len or 1.0
-        out = []
-        for eid, counts in self.tf.items():
-            s = 0.0
-            for t in qterms:
-                f = counts.get(t)
-                if not f:
-                    continue
-                denom = f + K1 * (1 - B + B * self.length[eid] / avg)
-                s += self.idf(t) * (f * (K1 + 1)) / denom
-            if s:
-                out.append((s, eid))
+        post = self._postings()
+        acc: dict = {}
+        for t in qterms:
+            w = self.idf(t) * (K1 + 1)
+            for eid, f, norm in post[t]:
+                acc[eid] = acc.get(eid, 0.0) + w * f / (f + norm)
+        out = [(s, eid) for eid, s in acc.items() if s]
         out.sort(key=lambda pair: (-pair[0], pair[1]))
         return out[:limit] if limit else out
 
@@ -90,18 +122,44 @@ class Bm25F:
 # One index per corpus revision. Building costs ~10x a query, so it is memoized on a key the
 # CALLER supplies -- the ledger head plus anything else that decides which records exist for
 # this reader. A None key is never cached: an unkeyable corpus must not freeze the index.
-_CACHE: dict = {"key": None, "index": None}
+#
+# A KEY MISS IS NOT A TEXT CHANGE. The ledger head moves on every append (claims, starts, CI and
+# deploy events, acks), so a busy board rebuilt the index on about every other search -- seconds
+# of request-thread CPU each time -- while the indexed TEXT had not changed at all. A miss now
+# fingerprints the corpus (one digest over every id and weighted field) and reuses the built
+# index when the text is identical. Any change to a record's title, body or tags, or a record
+# entering or leaving the corpus, still rebuilds, so it can never serve a stale index.
+_CACHE: dict = {"key": None, "index": None, "fingerprint": None}
 _LOCK = threading.Lock()
 
 
+def fingerprint(docs: dict) -> str:
+    """One digest of everything the index is built from: each id and its weighted fields."""
+    import hashlib
+    h = hashlib.sha256()
+    for eid in sorted(docs):
+        fields = docs[eid] or {}
+        h.update(str(eid).encode("utf-8", "replace"))
+        for field in FIELD_WEIGHTS:
+            h.update(b"\x1f")
+            h.update(str(fields.get(field) or "").encode("utf-8", "replace"))
+        h.update(b"\x1e")
+    return h.hexdigest()
+
+
 def index_for(docs: dict, key):
-    """The BM25F index for this corpus revision, built once per key."""
-    if key is not None:
-        with _LOCK:
-            if _CACHE["key"] == key and _CACHE["index"] is not None:
-                return _CACHE["index"]
+    """The BM25F index for this corpus, built once per distinct corpus TEXT."""
+    if key is None:
+        return Bm25F(docs)
+    with _LOCK:
+        if _CACHE["key"] == key and _CACHE["index"] is not None:
+            return _CACHE["index"]
+    fp = fingerprint(docs)
+    with _LOCK:
+        if _CACHE["fingerprint"] == fp and _CACHE["index"] is not None:
+            _CACHE["key"] = key
+            return _CACHE["index"]
     idx = Bm25F(docs)
-    if key is not None:
-        with _LOCK:
-            _CACHE.update(key=key, index=idx)
+    with _LOCK:
+        _CACHE.update(key=key, index=idx, fingerprint=fp)
     return idx
