@@ -164,9 +164,11 @@ def detect_tasks(ctx) -> list:
                                 title="%s: %s — %s" % (tid, str(t.get("title") or "")[:90], why_live),
                                 detail=str(t.get("reason") or ""),
                                 fix=("Verify it on the deployed surface the way the requester meets "
-                                     "it and step \"SEEN: <what is there>\" (python -m "
-                                     "hub_core.client step %s --note \"SEEN: ...\"); the deploy close "
-                                     "then lands it. Never finish over its refusal." % tid),
+                                     "it and record the verification (python -m hub_core.client "
+                                     "verify %s --sha %s --artifact <what you read> --note "
+                                     "\"SEEN: ...\"); the deploy close then lands it. Never "
+                                     "finish over its refusal."
+                                     % (tid, str(live.get("sha") or "<the live commit>")[:12])),
                                 evidence={"task": tid, "age_s": age, "deployed": live,
                                           "auto_close": ac or None},
                                 lanes=("task-health",)))
