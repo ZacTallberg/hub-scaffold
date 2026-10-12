@@ -2914,6 +2914,28 @@ def tiers_json(request):
         **({"broken": doc["broken"]} if doc.get("broken") else {})}})
 
 
+def _audit_subjects(state) -> tuple:
+    """(an app slug, a project slug) that exist on this board, for rendering a route that needs
+    a subject: the first configured app (HUB_APPS), else an app an error row names; the first
+    project a task names. ("", "") when the board has none."""
+    app = ""
+    for row in hub_app._dj_setting("HUB_APPS", None) or []:
+        slug = str((row or {}).get("slug") or "").strip().lower() if isinstance(row, dict) else ""
+        if slug:
+            app = slug
+            break
+    if not app:
+        try:
+            rows, _meta = errorlog.read(hub_app.HUB_DIR)
+            app = next((str((r.get("context") or {}).get("app") or "").strip().lower()
+                        for r in rows if (r.get("context") or {}).get("app")), "")
+        except Exception:                                    # noqa: BLE001
+            app = ""
+    project = next((str(t.get("project") or "").strip().lower()
+                    for t in (state.get("by_type") or {}).get("task", []) if t.get("project")), "")
+    return app, project
+
+
 @require_GET
 def veil_audit_json(request):
     """Render every veiled read route AS A CONTRIBUTOR, in process, and scan what would be
@@ -2943,6 +2965,16 @@ def veil_audit_json(request):
     sample_agent = next(iter(veil.core.read_tiers(hub_app.HUB_DIR)), "contributor")
     samples = {"<str:type>.json": ("tasks.json", {"type": "task"}),
                "<str:type>/<str:local>.json": None}
+    # A ROUTE THAT NEEDS A SUBJECT IS RENDERED WITH A REAL ONE. Called bare, an app's slice
+    # answers "name the app" -- the audit then scanned a refusal, reported the route checked,
+    # and never saw what that route serves to every tier (it is the read every app's banner
+    # makes for everybody). The subject is a real app and a real project on this board.
+    subject_app, subject_project = _audit_subjects(state)
+    subject_query = {"app-feed.json": {"app": subject_app}, "app-fixes.json": {"app": subject_app},
+                     "doctor.json": {"app": subject_app}}
+    if subject_project:
+        samples["project/<str:slug>/tasks.json"] = ("project/%s/tasks.json" % subject_project,
+                                                    {"slug": subject_project})
     checked, hits, skipped = [], [], []
     for route, entry in patterns:
         callback = entry.callback
@@ -2956,9 +2988,17 @@ def veil_audit_json(request):
         if tail in samples and sample is None:
             skipped.append(tail)
             continue
-        path = "/" + route.replace("<str:type>.json", sample[0]) if sample else "/" + route
+        if sample:
+            path = "/" + route.replace(tail, sample[0]) if tail else "/" + route
+        else:
+            path = "/" + route
         kwargs = sample[1] if sample else {}
         query = {"agent": sample_agent, "wait": "0", "q": "the"}
+        if tail in subject_query:
+            if not all(subject_query[tail].values()):
+                skipped.append("%s (no real subject on this board to render it with)" % tail)
+                continue
+            query.update(subject_query[tail])
         request = factory.get(path, query)
         request.hub_tier = "contributor"
         try:
@@ -2966,10 +3006,17 @@ def veil_audit_json(request):
             if getattr(response, "streaming", False):
                 skipped.append(tail)
                 continue
+            if int(getattr(response, "status_code", 200)) >= 400:
+                # A refusal is not the route's payload: never reported as "checked".
+                skipped.append("%s (answered %s)" % (tail, response.status_code))
+                continue
             body = response.content
             if str(response.get("Content-Type", "")).startswith("application/json"):
                 body = veil.scrub_response(veil_obj, response).content
             text = body.decode("utf-8", "replace")
+        except Http404:
+            skipped.append("%s (answered 404)" % tail)
+            continue
         except Exception as exc:                             # noqa: BLE001
             skipped.append("%s (%s)" % (tail, type(exc).__name__))
             continue
