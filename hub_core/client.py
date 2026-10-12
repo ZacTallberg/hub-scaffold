@@ -1609,6 +1609,10 @@ def _run_deploy(base: str, arguments: argparse.Namespace) -> dict[str, Any]:
                            timeout=timeout)
             if attempt > 1:
                 result = {**result, "attempts": attempt}
+            # The line a CI log keeps: a job the runner kills at its ceiling AFTER this line
+            # verified its deploy (hub_core.ci_trace: verified_then_killed), not a failed one.
+            print(f"DEPLOY_RECORD_POSTED sha={sha[:40]} result=ok attempts={attempt}",
+                  file=sys.stderr)
             return result
         except RuntimeError as error:
             if not _transient(error):
