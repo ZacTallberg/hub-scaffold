@@ -3461,6 +3461,13 @@ def ci_failure(request, b):
                                 deployless=bool(b.get("deployless")))
     ref = str(b.get("ref") or "")[:120]
     sha = str(b.get("sha") or "")[:64]
+    rec = str(verdict.get("record_sha") or "")
+    if (verdict["verdict"] == "verified_then_killed" and rec and sha
+            and not (sha.lower().startswith(rec) or rec.startswith(sha.lower()))):
+        # The record that verified named ANOTHER commit: this job's own commit is UNVERIFIED.
+        verdict = dict(verdict, severity="critical",
+                       note="UNVERIFIED: the release record this job posted names %s, not %s, and "
+                            "the runner then killed the job at its ceiling" % (rec[:12], sha[:12]))
     row = hub_app.record_error(
         "ci.%s.%s" % (project, re.sub(r"[^a-z0-9_-]", "-", job.lower())[:60]),
         ("%s failed%s: %s" % (job, (" on " + ref) if ref else "", verdict["note"]))[:800],
