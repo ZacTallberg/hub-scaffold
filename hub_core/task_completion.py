@@ -488,7 +488,12 @@ def task_app(task: dict) -> str:
     project = str((task or {}).get("project") or "").strip().lower()
     if project:
         return project
-    m = _APP_PREFIX.match(str((task or {}).get("title") or "").strip().lower())
+    title = str((task or {}).get("title") or "").strip().lower()
+    # A problem's mirror task is titled "Fix <app>: <message>" (hub_core.fix_tasks): the app is
+    # the word after "Fix", never "fix" itself -- read as a slug, every mirror named no app.
+    if title.startswith("fix "):
+        title = title[4:]
+    m = _APP_PREFIX.match(title)
     return m.group(1) if m else ""
 
 
