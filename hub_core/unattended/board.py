@@ -167,6 +167,18 @@ def pipeline_wait(data: dict, now: float | None = None) -> str:
             if seen.get("active") else "")
 
 
+def shipped(task_id: str) -> dict:
+    """What CI says already shipped for this task (GET /hub/task/<n>/shipped.json): a commit on
+    the default branch whose subject names the task. ``{}`` when the hub cannot say (an older
+    hub, an unreadable store, nothing kept) -- never read as "nothing shipped" by a caller that
+    would act on it, only as "no reason to wait"."""
+    try:
+        data = _read("task/%s/shipped.json" % quote(task_id.rsplit(":", 1)[-1])).get("data") or {}
+    except (RuntimeError, ValueError):
+        return {}
+    return data if data.get("checked") else {}
+
+
 def resolve(item_id: str) -> dict | None:
     """The item, live — never trusted from the spawn argument. None when it is no longer offered
     here (somebody else took it, it closed, it was un-marked); ``{"kind": "unavailable"}`` when
@@ -205,6 +217,10 @@ def resolve(item_id: str) -> dict | None:
                 "handed_back": charged, "handed_back_idle": idle,
                 # A hand-back whose pushed commit still has a pipeline running waits for it.
                 "pipeline_wait": pipeline_wait(data) if (charged or idle) else "",
+                # A change for this task already on the default branch (a person pushed it by
+                # hand, or an earlier run's push landed): wait for its pipeline, then verify it
+                # rather than build the same change again.
+                "shipped": (shipped(item_id).get("commit") or {}),
                 "from": str((data.get("provenance") or {}).get("agent") or "")}
     if item_id.startswith(ATTENTION_PREFIX):
         return resolve_attention(item_id)

@@ -103,6 +103,8 @@ urlpatterns = [
     # The Fixes panel of every app's banner: its errors and how their fixes are going
     # (hub_core/fix_tasks.py). Conditional on the same three ETag carriers as hub.json.
     path("app-fixes.json", R(app_services.app_fixes_json), name="app-fixes"),
+    # What CI says already shipped for one task (a default-branch commit whose subject names it).
+    path("task/<str:local>/shipped.json", R(hub_api.task_shipped_json), name="task-shipped"),
     path("schema/<str:type>.schema.json", R(hub_api.schema_json)),
     path("<str:type>.json", R(hub_api.type_json)),
     path("<str:type>/<str:local>.json", R(hub_api.entity_json)),
@@ -243,6 +245,7 @@ VISIBILITY = {
     "knowledge-candidates.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
     "ci-status.json": "member", "task_wake.json": "member", "run-ledger.json": "member",
+    "task/<str:local>/shipped.json": "member",
     "deploy-reconcile.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

@@ -3127,6 +3127,15 @@ def _run_ci_status(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     return _get(base, "ci-status.json?" + urlencode({"sha": arguments.sha}))
 
 
+def _run_shipped(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
+    """What CI says already shipped for a task (GET /hub/task/<n>/shipped.json): the newest
+    default-branch commit whose subject names it, and the task's own recorded push."""
+    path = f"task/{_task_local(arguments.task_id)}/shipped.json"
+    if arguments.since:
+        path += f"?since={int(arguments.since)}"
+    return _get(base, path)
+
+
 def _run_run_ledger(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
     """Every machine's ended unattended runs (GET /hub/run-ledger.json): per-machine run counts,
     median duration, outcomes and phase shares over a rolling window."""
@@ -4338,6 +4347,13 @@ def _parser() -> argparse.ArgumentParser:
                                     help="what CI last said about one commit (found/status/active)")
     ci_status.add_argument("sha")
     ci_status.set_defaults(runner=_run_ci_status)
+    shipped = commands.add_parser("shipped",
+                                  help="what CI says already shipped for a task (a default-branch "
+                                       "commit whose subject names it, and its recorded push)")
+    shipped.add_argument("task_id")
+    shipped.add_argument("--since", type=float, default=0.0,
+                         help="epoch seconds (default: the task's filing)")
+    shipped.set_defaults(runner=_run_shipped)
     run_ledger = commands.add_parser("run-ledger",
                                      help="every machine's unattended runs: counts, medians, "
                                           "outcomes, phase shares (rolling window)")

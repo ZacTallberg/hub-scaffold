@@ -51,6 +51,13 @@ holder it can prove gone — so a refusal is a cheap stand-down, never a session
 `scan` and `respond` use the same predicates. A scan that counts items the responder will then
 refuse launches sessions that are killed at the ceiling with nothing to show.
 
+A task whose change is ALREADY on the default branch is not built twice. Before a task is
+launched the launcher asks `GET /hub/task/<n>/shipped.json` (from the hub's retained CI
+deliveries, so the machine needs no CI credential): while a commit whose SUBJECT names the task
+has its pipeline running, the run waits; once it has finished, the session is told the commit is
+there and to verify it against the acceptance instead of rebuilding it. A commit that only cites
+the task in its body is context, never the task's work.
+
 ## A refusal is a response; one run per item, one machine per item
 
 - **Deferrals.** A stand-down behind another machine's claim (re-checked in 15 minutes, not the

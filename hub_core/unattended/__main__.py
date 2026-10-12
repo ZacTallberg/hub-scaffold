@@ -273,6 +273,14 @@ def _prompt(item: dict, bound_s: int, tree: dict) -> str:
                      ("plan so far:\n" + item["plan_text"] + "\n") if item.get("plan_text") else "",
                      "RESUMING: a run already worked this task and left it in progress; start "
                      "from what its plan records.\n" if item.get("resume") else ""))
+        landed = item.get("shipped") or {}
+        if landed.get("sha"):
+            block += ("ALREADY ON THE DEFAULT BRANCH: commit %s (%s) names this task and its "
+                      "pipeline is %s. Do not build it again: verify that commit against the "
+                      "acceptance on the deployed system, and finish with it as evidence -- or, "
+                      "if it falls short, build only what is missing.\n"
+                      % (landed["sha"][:12], landed.get("title") or "",
+                         landed.get("status") or "unknown"))
     elif item["kind"] == "attention":
         block = ("\nTHE ITEM (needs attention):\nid: %s\n%s\n" % (item["id"], item.get("body") or "")
                  + ATTENTION_BRIEF.replace("{ATTENTION_KIND}", item.get("attention_kind") or "?"))
@@ -401,6 +409,14 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
         if item.get("pipeline_wait"):
             # A hand-back whose pushed commit still has a pipeline running: nothing new to read.
             return {"item": item_id, "outcome": "waiting", "why": item["pipeline_wait"]}
+        landed = item.get("shipped") or {}
+        if landed.get("active"):
+            # A commit naming this task is on the default branch and its pipeline is still
+            # running: a session now would build the same change a second time.
+            return {"item": item_id, "outcome": "waiting",
+                    "why": "%s (%s) is on %s with its pipeline %s" % (
+                        str(landed.get("sha") or "")[:12], landed.get("title") or "",
+                        landed.get("project") or "the default branch", landed.get("status"))}
 
     # CLAIM FIRST for anything that is not a task (a task has its fenced lease): before a run is
     # queued, so a machine that loses the race writes no ledger row and spends nothing.

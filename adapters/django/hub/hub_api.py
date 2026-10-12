@@ -3061,6 +3061,52 @@ def ci_status_json(request):
 
 
 @require_GET
+def task_shipped_json(request, local):
+    """GET /hub/task/<local>/shipped.json[?since=<epoch>] -- what CI says already shipped for this
+    task, so a launcher never spends a session on work a person already pushed:
+
+      commit   the newest default-branch pipeline whose commit SUBJECT names the task id,
+               delivered after ``since`` (default: the task's filing) -- {sha, title, project,
+               pipeline, status, active, at} -- or null (hub_core.ci_events.shipped_for);
+      pushed   the task's own recorded push (its ``pushed`` checkpoint) with what CI last said
+               about THAT commit (ci-status), or null;
+      checked  false when no CI delivery store could be read: an unknown is never a "no".
+
+    From the retained webhook deliveries, so it needs no CI-provider credential anywhere."""
+    from hub_core import ci_events as _ci
+    eid = f"{hub_app.PROJECT_KEY}:task:{local}"
+    ent = hub_app.entity(eid)
+    if not ent:
+        raise Http404("no entity %s" % eid)
+    from . import veil
+    if not veil.veil_for(request).visible(ent):
+        raise Http404("no entity %s" % eid)
+    try:
+        since = float(request.GET.get("since") or 0)
+    except ValueError:
+        since = 0.0
+    if not since:
+        try:
+            from datetime import datetime
+            since = datetime.fromisoformat(str((ent.get("provenance") or {}).get("created_at")
+                                               or "").replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            since = 0.0
+    out = _ci.shipped_for(hub_app.HUB_DIR, eid, since)
+    push = task_rows.pushed(ent)
+    if push and push.get("sha"):
+        seen = _ci.sha_status(hub_app.HUB_DIR, push["sha"])
+        # A recorded sha CI has never reported on is found=false -- not a failed check.
+        out["pushed"] = {"sha": push["sha"], "at": push.get("at"), "found": seen.get("found"),
+                         "status": seen.get("status"), "active": seen.get("active"),
+                         "pipeline": seen.get("pipeline")}
+    else:
+        out["pushed"] = None
+    out["since"] = since or None
+    return JsonResponse({"data": out})
+
+
+@require_GET
 def ci_events_json(request):
     """GET /hub/ci-events.json?pipeline=|job=|project=[&limit=] — the RAW CI deliveries behind a
     CI row, newest first. Unlike the rest of the read surface this needs a credential with the
