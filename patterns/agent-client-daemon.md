@@ -49,6 +49,14 @@ content version, so a renderer change is detectable; give the per-prompt copy it
   output, 39% of status blocks differed from the previous one only in ages and 11% were
   byte-identical — a line that repeats every prompt is read past, and then missed the one time
   it changes. (`prompt_context.live_due` is the reference.)
+- **Then send what CHANGED, line by line.** A block hashed as a whole re-sends every line when one
+  count moves: on one fleet 53% of a day's per-prompt output was lines the same session had already
+  received, and an addressed list re-sent all its items whenever its count flapped. Keep a digest
+  per age-masked line the session was sent (a few hundred, newest kept -- err toward repeating,
+  never toward withholding); after the session start send only the unsent lines under the current
+  count ("3; 2 already shown in this session"), and nothing when the change only removed lines. A
+  session start, a resume or a compaction sends everything and resets what the session holds.
+  (`client prompt-context`'s live channel is the reference.)
 - **A floor for knowledge.** When a mid-session doctrine change forces the per-prompt copy, send
   a bounded change NOTICE (a few thousand characters, cut on a line) and point at the managed
   block that holds the full text — a full re-send under a hook-output ceiling leaves the ranked

@@ -2569,7 +2569,9 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
       doctrine  the charter core (+ HUB_DOCTRINE_FILE): emitted when its text changes, on
                 SessionStart (which also covers resume and post-compaction), or with --force;
                 otherwise SILENT — the session already holds it
-      live      what is addressed to this agent/console now (inbox): re-sent whenever it moves
+      live      what is addressed to this agent/console now (inbox): when it moves IN SUBSTANCE
+                (ages masked), only the lines this session has not been sent yet go out, under
+                the current count -- one changed count no longer re-sends every item
       nudge     the projects this console is in without a task: re-sent whenever it moves
 
     The per-session state file records the hash and time each channel was last emitted — the
@@ -2621,11 +2623,23 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
 
     emitted, parts = {}, []
     now = _time.time()
+    from .prompt_context import _AGE_TOKEN
     for name in ("doctrine", "live", "nudge"):
         text = channels[name]
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        # A line that differs only in an elapsed time ("waited 4 h") is the same line: the live
+        # channel is fingerprinted with ages masked, so a ticking clock is not news.
+        basis = _AGE_TOKEN.sub("<age>", text) if name == "live" else text
+        digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
         prior = (state.get(name) or {}).get("sha")
-        send = bool(text) and (digest != prior or (name == "doctrine" and force))
+        send = bool(text) and (digest != prior or (name == "doctrine" and force)
+                               or (name == "live" and force))
+        if send and name == "live":
+            text = _live_delta(state, live_lines, reset=force)
+            send = bool(text)
+            if not send:
+                # Only removals (an item was answered): nothing new to say, and the fingerprint
+                # moves so the shrunk block is not re-sent on the next prompt either.
+                state[name] = {"sha": digest, "emitted_at": now, "chars": 0}
         if send:
             parts.append(text)
             state[name] = {"sha": digest, "emitted_at": now, "chars": len(text)}
@@ -2647,6 +2661,33 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
         raise SystemExit(0)
     return {"context": context, "channels": emitted, "session": session,
             "chars": len(context)}
+
+
+#: How many line digests one session's receipt keeps for the live channel. A long session errs
+#: toward REPEATING a line it was sent long ago, never toward withholding one it was not.
+LIVE_LINES_KEEP = 600
+
+
+def _live_delta(state: dict[str, Any], lines: list[str], *, reset: bool) -> str:
+    """The live channel as THIS session still needs it: every line on a session start (whose
+    context is fresh -- it holds nothing), otherwise only the lines not yet sent this session,
+    under the current count. Measured on the origin system: 53% of per-prompt hook output was
+    lines the same session had already received, because a block hashed as a whole re-sent every
+    item whenever one count flapped. Returns '' when nothing in it is new."""
+    import hashlib
+    from .prompt_context import _AGE_TOKEN
+    keys = [hashlib.sha1(_AGE_TOKEN.sub("<age>", line).encode("utf-8", "replace")).hexdigest()[:12]
+            for line in lines]
+    held = [] if reset else [str(k) for k in (state.get("live_lines") or [])]
+    seen = set(held)
+    fresh = [line for line, key in zip(lines, keys) if key not in seen]
+    state["live_lines"] = list(dict.fromkeys(held + keys))[-LIVE_LINES_KEEP:]
+    if not fresh:
+        return ""
+    if reset or len(fresh) == len(lines):
+        return "Addressed to you now:\n" + "\n".join(lines)
+    return ("Addressed to you now (%d; %d already shown in this session):\n" % (
+        len(lines), len(lines) - len(fresh))) + "\n".join(fresh)
 
 
 def _stream_age(seconds) -> str:
