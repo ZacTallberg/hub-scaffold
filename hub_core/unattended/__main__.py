@@ -635,6 +635,8 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
                                pruned=pruned, fault=verdict["kind"] if lane_fault else "",
                                superseded=superseded or None, idle=bool(idle_task),
                                push=publisher.push_state())
+        # The run is measurable from every machine, not only this one (hub_core.run_ledger).
+        run = board.record_run(run_id, ledger_post="sent" if board.post_run(run) else "failed")
         if dirty and result not in ("cleared", "superseded"):
             board.report_fault("unattended_left_uncommitted_work",
                                "an unattended run ended with uncommitted work",

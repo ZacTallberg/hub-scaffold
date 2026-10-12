@@ -118,6 +118,13 @@ it was waiting on), not starting over.
 
 ## Hand-back with proof, and ONE self-counting row
 
+Every run that ends is also posted to the hub's cross-machine run ledger
+(`POST /hub/api/run-ledger`, read on `GET /hub/run-ledger.json` and `client run-ledger`): item,
+outcome, duration, exit code, tokens, and -- when the launcher could measure it -- where the wall
+time went. The local `runs.json` is the launcher's own record; the hub's ledger is how a run on
+one machine is measurable from every other.
+
+
 The launcher claims the task itself and gives the session its fencing token (`HUB_LEASE_TOKEN`)
 plus a lease journal (`HUB_RUN_LEASES`); `python -m hub_core.client claim|start` appends every
 granted lease to that journal. At teardown every journalled lease whose task is still in progress

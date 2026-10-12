@@ -168,6 +168,15 @@ def apply_step(plan, *, step=None, note="", kind="checkpoint", sha="", pipeline_
         rows.append(target)
     target["done"] = True
     target.pop("auto", None)
+    if note and str(note) != str(target.get("note") or "") and not (sha or pipeline_id
+                                                                   or pipeline_url):
+        # A NEW note on a checkpoint that recorded a push is a new report, not that push. Kept,
+        # the old sha made the board read the new checkpoint as pushing an old commit (and a
+        # deploy close or a pipeline hold then keyed on a commit the new report never named).
+        for key in ("sha", "pipeline_id", "pipeline_url"):
+            target.pop(key, None)
+        if target.get("kind") in ("pushed", "deployed"):
+            target["kind"] = kind
     if note:
         # Whole: the next reader acts on it; a surface that must fit a line shows a preview.
         target["note"] = str(note)

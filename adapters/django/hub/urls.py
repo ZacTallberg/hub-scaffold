@@ -22,6 +22,8 @@ urlpatterns = [
     # The unattended dispatch wake: a hash of the responder-eligible todo tasks, cheap enough to
     # ask every few seconds (above the catch-all, which would read it as an entity type).
     path("task_wake.json", R(hub_api.task_wake_json), name="task-wake"),
+    # The cross-machine run ledger: every machine's ended unattended runs (hub_core.run_ledger).
+    path("run-ledger.json", R(run_api.run_ledger_json), name="run-ledger"),
     # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
     # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
     path("live/events", R(hub_api.live_events), name="live-events"),
@@ -210,6 +212,7 @@ urlpatterns = [
     path("api/history", histories_api.upload, name="history-upload"),
     path("api/run", run_api.create_run),
     path("api/run/update", run_api.update_run),
+    path("api/run-ledger", run_api.run_ledger_post),
     # MCP (Model Context Protocol) over the board: one token-gated JSON-RPC endpoint so any MCP
     # client can discover the board, pull ready work, spec a stub, and finish with a receipt. It
     # never touches the ledger directly — every mutation goes through the /hub/api/* write seam
@@ -239,7 +242,7 @@ VISIBILITY = {
     # Candidates are unreviewed model output about internal systems: members only.
     "knowledge-candidates.json": "member",
     "distribution.json": "veiled", "built.json": "veiled", "ci-events.json": "member",
-    "ci-status.json": "member", "task_wake.json": "member",
+    "ci-status.json": "member", "task_wake.json": "member", "run-ledger.json": "member",
     "deploy-reconcile.json": "member",
     "<str:type>.json": "veiled", "<str:type>/<str:local>.json": "veiled",
     "cursor.json": "open", "whoami.json": "open", "schema/<str:type>.schema.json": "open",

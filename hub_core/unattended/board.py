@@ -668,6 +668,29 @@ def record_run(run_id: str, **fields) -> dict:
     return row
 
 
+def post_run(row: dict) -> bool:
+    """Send one ENDED run to the hub's cross-machine run ledger (POST /hub/api/run-ledger), so a
+    run on this machine is measurable from every other one. Sent once, when the run ends; a
+    failed send is recorded on the local row (``ledger_post``) and never retried in a loop --
+    the local ledger still holds it. Never raises."""
+    if not isinstance(row, dict) or not row.get("item"):
+        return False
+    started = row.get("launched") or row.get("created")
+    try:
+        duration = (int(float(row.get("ended") or time.time()) - float(started or 0))
+                    if started else None)
+    except (TypeError, ValueError):
+        duration = None
+    payload = {"agent": agent(), "item": row.get("item"), "item_kind": row.get("kind"),
+               "outcome": row.get("outcome"), "run_id": row.get("id"), "rc": row.get("rc"),
+               "tokens": row.get("tokens"), "turns": row.get("turns"),
+               "suspended_s": row.get("suspended_s"), "runtime": row.get("runtime"),
+               "lane": row.get("lane"), "session": row.get("session"), "started": started,
+               "duration_s": duration}
+    status, body = _write("run-ledger", {k: v for k, v in payload.items() if v not in (None, "")})
+    return status in (200, 201)
+
+
 def drop_run(run_id: str) -> None:
     """A stand-down that spent nothing and holds nothing leaves no row: kept, a respawn storm of
     stand-downs pushed the ENDED runs a lease proof needs out of the bounded ledger."""

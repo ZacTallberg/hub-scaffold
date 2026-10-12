@@ -1901,6 +1901,8 @@ def entity_json(request, type, local):
     if type not in _COLLECTION:
         raise Http404("unknown type")
     eid = f"{hub_app.PROJECT_KEY}:{type}:{local}"
+    if type == "task" and str(request.GET.get("raw") or "").strip().lower() in ("1", "true", "yes"):
+        return _task_raw(request, eid)
     state, _ = _snapshot()
     ent = state["entities"].get(eid)
     if not ent:
@@ -1929,6 +1931,34 @@ def entity_json(request, type, local):
             data["lineage"] = {"hops": [], "complete": False,
                                "error": "%s: %s" % (exc.__class__.__name__, str(exc)[:160])}
     return JsonResponse({"data": data})
+
+
+def _task_raw(request, eid):
+    """``task/<local>.json?raw=1`` -- the WRITER's read: the task folded from its own aggregate's
+    events (version, status, plan -- exactly what a write merges and checks) plus its ``holder``
+    from the lease file, without the board snapshot.
+
+    A worker reads a task before every checkpoint and around every claim, and the ordinary read
+    built (or waited for) the whole board snapshot to answer with one record: on a busy board
+    the snapshot is what a verb's latency was made of. The lease file is cheap and is kept: a
+    writer must be able to tell its own claim from somebody else's. Flags, readiness and the
+    annotated rows (responder, deployed, ci_problem) are the snapshot's, so they are absent
+    here, and ``raw: true`` says so. The fencing token never leaves the claims directory. An
+    older hub ignores the flag and answers the ordinary read, which carries every field used."""
+    ent = hub_app.entity(eid)
+    if not ent:
+        raise Http404("no entity %s" % eid)
+    from . import veil
+    if not veil.veil_for(request).visible(ent):
+        raise Http404("no entity %s" % eid)      # omission: exactly the unknown-entity answer
+    now = time.time()
+    lease = hub_app._read_lease(eid)
+    holder = None
+    if isinstance(lease, dict) and float(lease.get("expires") or 0) > now:
+        holder = {"agent": lease.get("agent"), "session": lease.get("session") or None,
+                  "machine": lease.get("machine") or None, "claimed": lease.get("claimed"),
+                  "expires_in_s": max(0, int(float(lease.get("expires") or 0) - now))}
+    return JsonResponse({"data": {**ent, "holder": holder, "raw": True}})
 
 
 def _annotated_tasks(state, tasks):
