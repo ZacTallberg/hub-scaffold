@@ -667,9 +667,35 @@ def guidance_json(request):
     # ?peer=<a peer message's text> answers memory_rank.peer_similarity (cosine against focus).
     peer = (request.GET.get("peer") or "").strip()[:400]
     memory, total, rank = memory_index(state, key, cap=cap, focus=focus, full=full, peer=peer)
-    return JsonResponse({"memory": memory, "memory_total": total, "memory_rank": rank,
-                         "live": _live(state, key, agent),
-                         "metadata": {"agent": agent or None, "head": {"seq": key[1], "hash": key[2]}}})
+    body = {"memory": memory, "memory_total": total, "memory_rank": rank,
+            "live": _live(state, key, agent),
+            "metadata": {"agent": agent or None, "head": {"seq": key[1], "hash": key[2]}}}
+    # A CONDITIONAL READ that can actually match. A client that holds the payload and polls with
+    # If-None-Match (or X-Hub-ETag, which a proxy that drops If-None-Match passes) gets a 304 when
+    # nothing it reads moved. The tag leaves out what TICKS on every read -- ages and durations
+    # (`*_s`, `*_ms`) -- and carries a 5-minute bucket instead, so ages are never staler than
+    # that: tagged over the raw body, three reads seconds apart had three tags and a holding
+    # client never once got its 304.
+    tag = '"%s"' % content_hash({"body": _without_ticking(body),
+                                 "bucket": int(time.time() // 300)})[:24]
+    sent = request.headers.get("If-None-Match") or request.headers.get("X-Hub-ETag") or ""
+    if sent == tag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = JsonResponse(body)
+    resp["ETag"] = tag
+    resp["X-Hub-ETag"] = tag
+    return resp
+
+
+def _without_ticking(obj):
+    """``obj`` without the fields that move on every read (``*_s``, ``*_ms``, ``timing*``)."""
+    if isinstance(obj, dict):
+        return {k: _without_ticking(v) for k, v in obj.items()
+                if not (str(k).endswith(("_s", "_ms")) or str(k).startswith("timing"))}
+    if isinstance(obj, list):
+        return [_without_ticking(v) for v in obj]
+    return obj
 
 
 # ── knowledge attached to an EVENT ──
