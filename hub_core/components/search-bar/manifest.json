@@ -1,7 +1,8 @@
 {
   "name": "search-bar",
   "title": "Search bar",
-  "what": "One search box any app links: a hairline field that submits to the app's own results page, an optional suggest-as-you-type panel from the app's own endpoint, a top match the app learned from what people actually opened, and an optional smart pass the app computes. Empty, unconfigured and failed are drawn as three different states.",
+  "version": "1.4.0",
+  "what": "One search box any app links: a hairline field that submits to the app's own results page, an optional suggest-as-you-type panel from the app's own endpoint, a top match the app learned from what people actually opened, an optional smart pass the app computes, and -- where the page has an agent component -- \"Ask the agent\" when nothing matched or a real question was typed. Empty, unconfigured and failed are drawn as three different states.",
   "link": [
     "<link rel=\"stylesheet\" href=\"{hub}/components/search-bar/search-bar.css\">",
     "<script src=\"{hub}/components/search-bar/search-bar.js\"></script>"
@@ -38,7 +39,8 @@
     "Nothing is learned from a query that was merely typed or run: the beacon fires only when a person opened a suggestion.",
     "A suggest endpoint that answers HTML is reported as a failure, never parsed as an empty result.",
     "The top match is lifted out of its group, never listed twice.",
-    "The pre-text never rotates; the endpoint's placeholder is applied once."
+    "The pre-text never rotates; the endpoint's placeholder is applied once.",
+    "ASK THE AGENT, ONLY WHERE THERE IS ONE (1.4.0). With an agent component ([data-hub-agent]) on the page, 'Nothing matched' carries an 'Ask the agent: <query>' button, and a query of three words or more (a question, not a name) gets the same as the LAST row, after the matches, under a dashed rule. Enter or a click on that row asks through hub:agent-ask and is never reported to the chose beacon as an opened result. The question is written by the context menu's shared composer (HubMenu.questionAbout) when it is on the page, else plainly here: the app, the page by its tab title, and the words. No agent, no row and no button."
   ],
   "props": [
     {"key": "placeholder", "label": "Search box pre-text", "type": "text", "max": 80, "default": "",
@@ -50,6 +52,7 @@
   "publishes": {
     "html_attributes": ["data-sb-ready", "data-sb-version"],
     "events_read": ["hub:component-props"],
+    "events_dispatched": ["hub:agent-ask"],
     "page_attributes_read": ["data-csrf"]
   }
 }

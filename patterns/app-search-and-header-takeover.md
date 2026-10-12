@@ -14,12 +14,15 @@ One search box for any app, degrading by configuration rather than by settings:
 | `+ data-suggest-url` | suggest-as-you-type from the app's own endpoint |
 | `+ data-chose-url` | the app learns from what people actually OPENED (never from what they typed) |
 | `smart: true` in the suggest answer | a second, re-ranked pass the APP computes (`smart=1`) |
+| an agent component on the page | "Ask the agent" on *Nothing matched*, and as the last row of a three-word-or-more question |
 
 The hub serves the file and never an app's data: every URL on the mount is on the app's origin,
 behind its sign-in. The component never calls a model and never writes a reason of its own —
 `top` and its `why` are the app's. Empty, unconfigured and failed are drawn as three different
 states, and a suggest endpoint that answers HTML (a sign-in or error page) is a failure, never
-"nothing matched". Inside the banner's `[data-ab-slot]` it inherits the band's tokens.
+"nothing matched". The agent row is not a result: pressing it dispatches `hub:agent-ask` and
+reports nothing to the chosen-result beacon, so asking can never teach the index a wrong top match.
+Inside the banner's `[data-ab-slot]` it inherits the band's tokens.
 
 ## Header takeover (`components/header-takeover/`)
 

@@ -257,3 +257,14 @@
   .sb, .sb-icon, .sb-agent { transition: none; }
   .sb-list { scroll-behavior: auto; }
 }
+
+/* ASK THE AGENT (1.4.0). The last row of a question's results, and the button on "Nothing matched".
+   A dashed rule says "not a result". */
+.sb-opt--ask { border-top: 1px dashed var(--sb-line); }
+.sb-opt--ask .sb-opt-title { font-weight: 600; color: var(--sb-accent); white-space: normal; }
+.sb-ask {
+  margin-top: .6rem; padding: .35rem .7rem; font: inherit; font-size: .8rem; font-weight: 600;
+  color: var(--sb-accent); background: var(--sb-surface-alt); border: 1px solid var(--sb-line);
+  border-radius: var(--sb-radius, 8px); cursor: pointer;
+}
+.sb-ask:hover, .sb-ask:focus-visible { border-color: var(--sb-accent); outline: none; }
