@@ -441,5 +441,5 @@ def menu_rank_view(request, b):
 # Presentation for other apps' pages (CSS/JS/manifests and the properties they draw): declared
 # public, exactly as the route table says, so the read gate never sits between a page and the
 # files it links. Nothing here is a board record or an identity.
-for _view in (component_index, component_file, component_props):
+for _view in (component_index, component_file, component_file_pinned, component_props):
     _view._hub_public_discovery = True
