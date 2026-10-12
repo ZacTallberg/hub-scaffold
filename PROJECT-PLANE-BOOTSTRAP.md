@@ -339,7 +339,8 @@ project key are renameable bindings; the rules are not.
         "pipeline_url": { "type": "string", "maxLength": 300 },
         "result": { "enum": ["pass", "fail"], "description": "On a `verified` row: what the check of the deployed build found." },
         "artifact": { "type": "string", "maxLength": 500, "description": "On an outcome row: what the check READ (a URL, a screenshot path, a probe's output reference)." },
-        "by": { "type": "string", "maxLength": 120, "description": "On an outcome row: who wrote it (stamped by the hub from the caller, never trusted from the body)." },
+        "by": { "type": "string", "maxLength": 120, "description": "On an outcome row or a pushed row: the subject that wrote it (stamped by the hub from the authenticated caller, never trusted from the body)." },
+        "evidence_level": { "enum": ["independent", "self-checked"], "description": "On a verified row: independent when a credential GRANTED verify:independent wrote it and that subject recorded none of the task's pushes; self-checked otherwise." },
         "facts": { "type": "object", "description": "On an outcome row: the structured readings behind it (counts, statuses), shown in full." },
         "receipt": { "enum": ["handoff"], "description": "Marks a `pushed` row the SYSTEM wrote (a published hand-off), so a plan write can never remove it, like any other receipt." }
       }, "required": ["step", "done"] },
