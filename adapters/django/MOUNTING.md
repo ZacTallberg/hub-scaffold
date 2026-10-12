@@ -177,6 +177,10 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 #                                               # takes its liveness from its tenants' probes
 #     "old-tool": {"status": "retired"},       # withheld from the observed table (not "partial"
 #                                               # forever); its errors still fold into problems
+#     "nightly-proof": {"kind": "probe"},      # a probe filing findings under its own name: not
+#                                               # a service row; its problems still fold
+#     "budget-sync": {"part_of": "budget-app"},  # a lane that ships inside budget-app and files
+#                                               # under its own name: counted on budget-app's row
 # }
 # `owners` routes a problem to who hears first; it is never a permission — anyone may fix any
 # service.

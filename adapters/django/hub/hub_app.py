@@ -1498,7 +1498,9 @@ def apps_config():
     """The services this project runs, as the adopter declares them: settings.HUB_APPS (a
     dict) or the HUB_APPS_JSON environment variable. Per service, all optional:
     {"url", "health_url", "project" (its CI project when it differs), "hosted_in",
-     "owners": [agent, ...], "status": "planned"}. A service that has never been declared but
+     "owners": [agent, ...], "status": "planned" | "retired", "kind": "probe" (a reporter, not a
+     service), "part_of": "<slug>" (a lane that ships inside another service)}. A service that
+     has never been declared but
     has forwarded an error still appears — reporting is evidence enough to exist."""
     raw = _dj_setting("HUB_APPS", None)
     if raw is None:
