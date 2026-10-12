@@ -106,6 +106,13 @@ fans out into a repository audit, and the Hub never executes the command.
 The final append rechecks the fencing token under the cross-process claim lock and uses the version
 whose command was verified, preventing an expired worker or concurrently changed task from landing
 an obsolete completion.
+Every step of an authenticated call is timed as a named phase (`hub_core/write_timing.py`):
+the split rides each response's `Server-Timing` header and `/hub/perf.json` `write_phases`,
+and `InFlightMiddleware` (outermost) measures what happens before the view -- the requests in
+flight at arrival and the interpreter's wake-up lag -- so a slow write is attributed to its
+handler, a lock, or the queue in front of it, never guessed. Only what the claims lock guards
+runs under it (the knowledge a task start carries is looked up after the release), and a deploy
+record answers once it is durable: its task close runs after, one at a time.
 See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
 
 ### Runtime sidecars beyond claims
@@ -116,6 +123,11 @@ into `presence/_retired/` — archive over delete), the bounded redacted operati
 claims/: they change with no ledger event, so the snapshot memo carries their change stamps and
 mutations to them publish realtime wake signals — a board keyed on the ledger head alone would
 freeze its fleet strip and error card between appends.
+
+Measurements are sidecars too, never ledger facts: the cross-machine run ledger
+(`run-ledger/YYYYMMDD.jsonl`, `hub_core/run_ledger.py`), the shared evidence store and the eval
+trend. Pinned hosted components need no sidecar at all: a release is read out of the hub's own
+git history (`hub_core/component_releases.py`), and only shipped commits are servable.
 
 ## Enforcement matrix
 
