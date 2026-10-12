@@ -83,6 +83,13 @@ def published(files: dict) -> dict:
     return out
 
 
+def published_digest(digest: str, published_at: float = 0.0) -> dict:
+    """One published artifact that is a COMPUTED digest rather than one file's bytes (the client's
+    module set), in the same shape ``published`` gives a file."""
+    digest = str(digest or "").strip().lower()
+    return {"sha": digest[:W], "accepted": [digest[:W]], "published_at": published_at}
+
+
 def _sha_half(value) -> str:
     value = str(value or "").strip()
     return value.rsplit("+", 1)[-1] if "+" in value else value

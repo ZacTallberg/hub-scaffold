@@ -152,7 +152,16 @@ from typing import Any
 
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; HubLiveClient/1.0)"
-_CLIENT_FILES = ("client.py", "checkpoints.py", "verifier.py")
+#: Every module a seat's client RUNS -- this file and the modules its verbs and hooks import --
+#: so a fix to any of them is a new client version. Fingerprinting only the entry file let a fix
+#: to a helper install everywhere and be graded current while seats still ran (or lacked) the old
+#: helper; on the origin system a helper module that a machine never received read exactly like a
+#: current one. An ABSENT module is a state of its own, so a seat that lacks one is not current.
+#: The hub computes the same digest over the client it serves (`client_digest`).
+_CLIENT_FILES = ("client.py", "checkpoints.py", "verifier.py", "client_knowledge.py",
+                 "client_memory.py", "prompt_context.py", "knowledge_mirror.py", "memory_feed.py",
+                 "lesson_triggers.py", "settings_io.py", "inbox.py", "task_rows.py",
+                 "process_lock.py")
 _SEEN = {"hub_client": ""}
 CONVERGE_EVERY_S = 15 * 60
 
@@ -161,15 +170,22 @@ def client_version() -> str:
     """A digest of the client this process runs: this module and the modules its verbs import,
     EOL-normalized so a CRLF checkout and an LF server agree on the same commit. The hub computes
     the same digest over the client it serves and names seats that differ."""
+    from pathlib import Path
+    return client_digest(Path(__file__).resolve().parent)
+
+
+def client_digest(root) -> str:
+    """The digest of the client files under ``root`` (hub_core/), EOL-normalized, each named so a
+    file's bytes cannot be read as another's, and an absent file counted as absent."""
     import hashlib
     from pathlib import Path
-    root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for name in _CLIENT_FILES:
+        digest.update(name.encode("ascii") + b"\0")
         try:
-            digest.update((root / name).read_bytes().replace(b"\r\n", b"\n"))
+            digest.update((Path(root) / name).read_bytes().replace(b"\r\n", b"\n"))
         except OSError:
-            pass
+            digest.update(b"\0absent")
     return digest.hexdigest()[:12]
 
 
@@ -1137,7 +1153,10 @@ def _artifact_headers() -> dict[str, str]:
     `name=path,...` (or `name=@<version>` for an artifact released by a pin). Hashes are over LF-normalized bytes, the same form the hub publishes, so a
     checkout with CRLF line endings is not reported as drift. Never raises."""
     import hashlib
-    pairs = {"client": _client_id().rsplit("+", 1)[-1]}
+    # `client` is the entry file's bytes; `client-modules` the digest over every module the
+    # client runs (`_CLIENT_FILES`), so a seat that installed a new client.py but kept -- or never
+    # received -- an older helper module is graded stale instead of current.
+    pairs = {"client": _client_id().rsplit("+", 1)[-1], "client-modules": client_version()}
     sha = _charter_sha()
     if sha:
         pairs["charter"] = sha[:16]
