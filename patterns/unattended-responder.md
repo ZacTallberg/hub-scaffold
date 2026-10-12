@@ -297,7 +297,10 @@ through a model session, so it is mechanical and narrow — ships it from a mach
    throwaway commit to a ref that never exists. A probe never sends a password (a directory-backed
    git host counts an expired stored password toward lockout): ssh keys only (`BatchMode`, no
    password or keyboard-interactive auth, empty credential helper and askpass), and an HTTPS
-   transport is "not proven" — it fails closed. The verdict is cached six hours either way.
+   transport is "not proven" — it fails closed. A refusal or a success is cached six hours; NO ANSWER
+   (a network failure, an untrusted certificate, a timeout) is asked again after an hour and never
+   recorded as "cannot push" -- ssh ends every failure with "Could not read from remote
+   repository", so that line is never read as a refusal (`publisher.push_outcome`).
 2. The URL is built from the record's project PATH and a transport this machine already uses,
    only for a host in `HUB_PUBLISH_HOSTS` — never taken from the hand-off, so a record can never
    steer a publisher at another host. No allowed host: the publisher is off.
