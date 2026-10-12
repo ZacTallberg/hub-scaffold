@@ -993,10 +993,14 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                 # the takeover is on record, and the fencing token ROTATES, so the old console
                 # can never complete over this one (it used to keep the old holder's name and
                 # hand this caller the same token).
+                # `console` marks a takeover between consoles of ONE agent, and `stale_s` is how
+                # long the old console had not renewed -- the notice states that real reason
+                # (without it the text read "silent for 0 minutes").
                 cur["took_over_from"] = {"session": holder, "agent": cur.get("agent"),
                                          "machine": cur.get("machine") or None,
                                          "claimed": cur.get("claimed"), "state": state,
-                                         "ended": ended, "at": now}
+                                         "ended": ended, "at": now, "console": True,
+                                         "stale_s": int(max(0.0, now - touched))}
                 cur["token"] = _uuid.uuid4().hex
                 cur["session"] = session
                 if not session:

@@ -367,13 +367,17 @@ def _route(item, agent: str, session: str, live) -> dict | None:
     * The item's console is LIVE elsewhere: not this reader's.
     * The item's console has ENDED: it falls through to the agent's most recently active live
       console, with `rerouted_from` naming the original — mail for a closed window must reach
-      the box, not nobody."""
+      the box, not nobody.
+    * ...unless the item is ``session_only`` (SESSION_ONLY_TAG): it is that console's or
+      nobody's."""
     target = str(item.get("session") or "").strip()
     me = str(session or "").strip()
     if not target or not me or sid_match(target, me):
         return item
     mine = [row for row in (live or []) if _norm(row.get("agent")) == _norm(agent)]
     if any(sid_match(row.get("session_id") or row.get("session"), target) for row in mine):
+        return None
+    if item.get("session_only"):
         return None
     # The mail's own MACHINE first: a message for a console is a message for that computer,
     # so when the console ends, another console on the same machine is the natural reader;
@@ -389,6 +393,11 @@ def _route(item, agent: str, session: str, live) -> dict | None:
 
 
 # ── messages and directives ─────────────────────────────────────────────────────────────────
+
+#: A message for ONE console and no other (a sibling console's takeover notice). When that
+#: console has ended it is delivered to nobody -- never readdressed to the agent's other
+#: consoles, which never held what it is about.
+SESSION_ONLY_TAG = "session-only"
 
 #: A message written before messages carried `expires_at` lives this long past its creation.
 LEGACY_MESSAGE_TTL_S = 72 * 3600
@@ -506,6 +515,7 @@ def message_items(state, agent: str, machine: str = "", now=None,
             "body": body_text(ent.get("body_md")),
             "body_complete": len(str(ent.get("body_md") or "")) <= INBOX_BODY_LIMIT,
             "session": _text(ent.get("session"), 64), "machine": pinned, "at": at,
+            **({"session_only": True} if SESSION_ONLY_TAG in tags else {}),
             "reply_cmd": "python -m hub_core.client msg %s%s --note \"<your reply>\"" % (
                 sender or "<agent>", (" --session " + sender_session) if sender_session else ""),
             "ack_cmd": "python -m hub_core.client inbox --agent %s --ack %s"

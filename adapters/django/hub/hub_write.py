@@ -19,6 +19,7 @@ from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
 from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, textguard, validate
 from hub_core import errorlog as _errorlog
+from hub_core import inbox as inbox_core
 from hub_core.canonical import content_hash
 from hub_core.process_lock import LockBusy, ProcessFileLock
 from hub_core.store import ConflictError, StoreBusy
@@ -1311,7 +1312,10 @@ def claim(request, b):
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if res.get("took_over") and res.get("took_over_from"):
-            _notify_taken_over(eid, ent, agent, res)
+            # `took_over` is true ONLY on the call that performed the takeover; the persisted
+            # `took_over_from` rides every later renewal and must never re-fire the notice.
+            _notify_taken_over(eid, ent, agent, res,
+                               taker_session=_claim_session(request, b))
         if status != "in_progress":
             transition, transition_status = _append(
                 "task", eid, {"type": "task", "status": "in_progress"},
@@ -1350,44 +1354,79 @@ def claim(request, b):
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
-def _notify_taken_over(eid, ent, agent, lease) -> None:
+def _notify_taken_over(eid, ent, agent, lease, *, taker_session="") -> None:
     """Tell the console whose lease was just taken over that it lost the task.
 
     Its own step/finish is refused with reason ``taken_over``; this message reaches it even if
     it never tries either -- a console whose machine only dropped off the network may still be
-    editing, and must learn the task is someone else's before it pushes. Pinned to the previous
-    holder's machine and console. Never raises: a missed notice must not undo a granted claim."""
+    editing, and must learn the task is someone else's before it pushes. Never raises: a missed
+    notice must not undo a granted claim.
+
+    WHO IS TOLD depends on whose lease it was. On the instance this was lifted from, one
+    person's console received several "stop work, hand it over" notices in an hour for tasks it
+    never held, each offering a reply the hub refused as "that is you":
+
+    * ANOTHER AGENT's lease: that agent, pinned to its console while the console may still be
+      there, else to the agent on its machine (the inbox reroutes a dead console's mail).
+    * A SIBLING console of the SAME agent going stale: only that console is told, tagged
+      ``session-only`` so the inbox never readdresses it to the agent's other consoles (they
+      never held the task, and the work is already in the agent's own hands). An ENDED sibling
+      is told nothing.
+
+    The notice names the taker's console (``from_session``) so its reply is addressable."""
     try:
         prev = lease.get("took_over_from") or {}
         old = str(prev.get("agent") or "").strip().lower()
         if not old or not _valid_agent_name(old):
             return
+        same_agent = old == str(agent or "").strip().lower()
+        old_session = str(prev.get("session") or "").strip()
+        if same_agent and (prev.get("ended") or not _SESSION_ID.fullmatch(old_session)):
+            return
+        taker_session = str(taker_session or "").strip()
+        if not _SESSION_ID.fullmatch(taker_session):
+            taker_session = ""
         if prev.get("ended"):
-            why = "the console holding it (%s) had ended" % prev.get("session")
+            why = "the console holding it (%s) had ended" % (old_session or "?")
         elif prev.get("machine_silent"):
             why = "its machine (%s) had gone silent" % (prev.get("machine") or "?")
+        elif prev.get("console"):
+            why = ("its console (%s) was no longer live and had not renewed the lease for %d "
+                   "minutes" % (old_session or "?", int(int(prev.get("stale_s") or 0) // 60)))
         else:
-            why = "its console (%s) was %s" % (prev.get("session") or "?",
-                                               prev.get("state") or "gone")
+            why = "its console (%s) was %s" % (old_session or "?", prev.get("state") or "gone")
+        taker = (("your console %s" % taker_session[:8]) if same_agent and taker_session
+                 else agent)
+        reply = "python -m hub_core.client msg %s%s --note \"<branch, sha or patch>\"" % (
+            agent, (" --session " + taker_session) if taker_session else "")
         body = ("%s (%s) was taken over by %s%s because %s. Stop work on it: hand anything you "
-                "changed for it to %s (a message naming your branch, sha or patch) rather than "
-                "pushing -- they are working the same outcome now.\n\n%s"
-                % (eid, ent.get("title") or "", agent,
-                   (" on " + lease["machine"]) if lease.get("machine") else "", why, agent,
-                   board_link(eid)))
+                "changed for it to %s (%s) rather than pushing -- they are working the same "
+                "outcome now.\n\n%s"
+                % (eid, ent.get("title") or "", taker,
+                   (" on " + lease["machine"]) if lease.get("machine") else "", why, taker,
+                   reply, board_link(eid)))
         local = "m-takeover-%s" % hashlib.sha256(
             ("%s|%s|%s" % (eid, prev.get("claimed"), agent)).encode("utf-8")).hexdigest()[:12]
+        tags = ["message", "open"]
+        if same_agent:
+            tags.append(inbox_core.SESSION_ONLY_TAG)
         note = {"type": "note", "category": "context", "status": "standing",
-                "title": "%s was taken over by %s" % (eid, agent), "tags": ["message", "open"],
+                "title": "%s was taken over by %s" % (eid, taker), "tags": tags,
                 "to": old, "from_agent": str(agent), "body_md": body}
+        if taker_session:
+            note["from_session"] = taker_session
         if prev.get("machine"):
             note["machine"] = str(prev["machine"])[:60]
-        # Pinned to the old console only while it may still be there: a console the hub proved
-        # ended, gone or silent reads nothing, so the notice goes to the AGENT on its MACHINE
-        # (the inbox also reroutes a dead console's mail to a live one on the same machine).
-        gone = prev.get("ended") or prev.get("machine_silent") or prev.get("gone_s") is not None             or str(prev.get("state") or "") == "gone"
-        if not gone and prev.get("session") and _SESSION_ID.fullmatch(str(prev["session"])):
-            note["session"] = str(prev["session"])
+        if same_agent:
+            note["session"] = old_session
+        else:
+            # Pinned to the old console only while it may still be there: a console the hub
+            # proved ended, gone or silent reads nothing, so the notice goes to the AGENT on its
+            # MACHINE (the inbox also reroutes a dead console's mail to a live one there).
+            gone = (prev.get("ended") or prev.get("machine_silent")
+                    or prev.get("gone_s") is not None or str(prev.get("state") or "") == "gone")
+            if not gone and _SESSION_ID.fullmatch(old_session):
+                note["session"] = old_session
         _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), note,
                 expected_version=None, agent=agent, idem="takeover:" + local,
                 etype="note.created")
