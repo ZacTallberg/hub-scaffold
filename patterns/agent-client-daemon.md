@@ -219,8 +219,9 @@ still exists; a reconcile run under another interpreter leaves the file byte-ide
   file. Without that, the fleet is the first place the self-test runs: a daemon every machine
   refused (one subprocess call without the hidden-window policy) was published three times in
   three weeks, and each time every machine sat on the old version until a person noticed. The same
-  stage runs the tier lens over every served file, so a restricted tier is never served a name its
-  lens hides -- a bundle that fails closed on such a name withholds the whole daemon from that tier.
+  stage runs each tier's veil (`hub_core.veil`) over every served file, so a restricted tier is never
+  served a name its veil hides -- a bundle that fails closed on such a name withholds the whole
+  daemon from that tier, and a comment was enough to do it.
 
 ## 4a. Companion tools at a pin the Hub publishes
 
