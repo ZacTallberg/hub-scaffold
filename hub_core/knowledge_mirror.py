@@ -313,9 +313,16 @@ def parse_health(raw: str) -> dict:
     return out
 
 
+#: Modes a status record carries when NO recall ran: nothing configured, a prompt too short to
+#: recall for, a session-start map. Not a degraded recall -- on the origin system grading them
+#: flipped healthy machines to stale for an hour after every short prompt or session start.
+NOT_A_RECALL = {"", "none", "unknown", "skipped", "map", "start"}
+
+
 def grade_health(raw: str, *, modes: set | None = None) -> tuple:
     """(grade, detail) for one machine's reported line: `current`, or `stale` when its recent
-    recalls ran a degraded mode. None when nothing was reported -- local memory is optional, so
+    recall RAN in a degraded mode. A status record from a moment no recall ran (NOT_A_RECALL) is
+    not a degraded recall. None when nothing was reported -- local memory is optional, so
     silence is not graded."""
     health = parse_health(raw)
     if not health:
@@ -325,7 +332,7 @@ def grade_health(raw: str, *, modes: set | None = None) -> tuple:
         age = int(health.get("age") or 0)
     except ValueError:
         age = 0
-    if mode and mode not in ("none", "unknown") and mode not in (modes or healthy_modes()) \
+    if mode not in NOT_A_RECALL and mode not in (modes or healthy_modes()) \
             and age <= DEGRADED_WINDOW_S:
         return "stale", dict(health, reason="local recall is running %s" % mode)
     return "current", health
