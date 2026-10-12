@@ -56,13 +56,14 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import atomic
-from .process_lock import ProcessFileLock
+from .process_lock import LockBusy, ProcessFileLock
 
 MAX_BYTES = 8 * 1024 * 1024
 KEEP_ROWS = 600
@@ -508,18 +509,42 @@ def _write_sources_seen_locked(hub_dir, update) -> bool:
         return True
 
 
+#: Stamps a failed write deferred, per hub dir: {family: (first, last, count)}, written by the
+#: next stamp that gets the lock. A ci.* stamp arrives straight from a webhook with NO error row
+#: behind it, so backfill_sources_seen() can never recover it: dropped, a first-ever stamp reads
+#: "never" until that project's next webhook.
+_PENDING_STAMPS: dict = {}
+_PENDING_LOCK = threading.Lock()
+
+
+def _defer_stamps(hub_dir, stamps: dict) -> None:
+    with _PENDING_LOCK:
+        queue = _PENDING_STAMPS.setdefault(str(hub_dir), {})
+        for fam, (lo, hi, n) in stamps.items():
+            cur = queue.get(fam)
+            queue[fam] = (min(lo, cur[0]), max(hi, cur[1]), cur[2] + n) if cur else (lo, hi, n)
+
+
 def _touch_family(hub_dir, source: str, now: float) -> None:
     keys = [k for k in (family_of(source), chat_family_of(source)) if k]
     if not keys:
         return
+    # Take whatever an earlier failed write deferred: written with this stamp, or handed back.
+    with _PENDING_LOCK:
+        pending = dict(_PENDING_STAMPS.pop(str(hub_dir), {}))
     # Cheap pre-check without the lock: most stamps fall inside the write interval.
     snap = read_sources_seen(hub_dir)
-    if all(isinstance(snap.get(k), dict) and (now - float(snap[k].get("last") or 0)) < _SEEN_WRITE_MIN_S
-           for k in keys):
+    fresh = [k for k in keys if not (isinstance(snap.get(k), dict)
+                                     and (now - float(snap[k].get("last") or 0)) < _SEEN_WRITE_MIN_S)]
+    if not fresh and not pending:
         return
 
     def _apply(data):
         wrote = False
+        for fam, (lo, hi, n) in pending.items():
+            data[fam] = _merge_family(data.get(fam) if isinstance(data.get(fam), dict) else None,
+                                      lo, hi, n)
+            wrote = True
         for fam in keys:
             prior = data.get(fam) if isinstance(data.get(fam), dict) else {}
             if prior and (now - float(prior.get("last") or 0)) < _SEEN_WRITE_MIN_S:
@@ -529,9 +554,17 @@ def _touch_family(hub_dir, source: str, now: float) -> None:
         return wrote
     try:
         _write_sources_seen_locked(hub_dir, _apply)
+        _STAMP_BUSY.pop(str(hub_dir), None)
     except (OSError, TimeoutError, _Unreadable) as exc:
-        # NEVER silent: a stamp that cannot be written makes the board say "never" about an
-        # app that reports fine. Once an hour it becomes an error row of the hub's own.
+        # NOTHING IS DROPPED: the stamps go back on the queue for the next writer. And NEVER
+        # silent: a stamp that cannot be written makes the board say "never" about an app that
+        # reports fine, so it becomes an error row of the hub's own -- at once for a broken
+        # store, but only for a lock that STAYS busy (a stalled sibling write is back-pressure).
+        held = dict(pending)
+        for fam in fresh:
+            lo, hi, n = held.get(fam, (now, now, 0))
+            held[fam] = (min(lo, now), max(hi, now), n + 1)
+        _defer_stamps(hub_dir, held)
         _stamp_failure(hub_dir, source, exc, now)
 
 
@@ -608,8 +641,22 @@ def backfill_sources_seen(hub_dir, now: float | None = None, force: bool = False
     return len(changed)
 
 
+#: A busy lock is back-pressure, not a lost stamp (the stamp waits in _PENDING_STAMPS): it
+#: reaches the board only once the streak is long AND old. Per hub dir: {"n", "since"}.
+_STAMP_BUSY: dict = {}
+BUSY_STAMPS_BEFORE_REPORT = 3
+BUSY_SPAN_BEFORE_REPORT_S = 600
+
+
 def _stamp_failure(hub_dir, source: str, exc: BaseException, now: float) -> None:
     key = str(hub_dir)
+    if isinstance(exc, LockBusy):
+        streak = _STAMP_BUSY.setdefault(key, {"n": 0, "since": now})
+        streak["n"] += 1
+        if streak["n"] < BUSY_STAMPS_BEFORE_REPORT or now - streak["since"] < BUSY_SPAN_BEFORE_REPORT_S:
+            return
+        exc = LockBusy("busy on %d consecutive stamps over %ds; last: %s"
+                       % (streak["n"], now - streak["since"], exc))
     last = _STAMP_FAILED_AT.get(key)
     if last is not None and now - last < 3600:
         return
@@ -617,7 +664,7 @@ def _stamp_failure(hub_dir, source: str, exc: BaseException, now: float) -> None
     try:
         record(hub_dir, "hub.sources_seen",
                "sources-seen stamp could not be written: %s: %s"
-               % (type(exc).__name__, str(exc)[:160]),
+               % (type(exc).__name__, str(exc)[:400]),
                severity="error", code="sources_seen_write_failed",
                details="stamping %s into %s" % (str(source)[:80], _sources_seen_path(hub_dir).name),
                context={"component": "hub"})
@@ -779,8 +826,17 @@ def deploy_refs() -> tuple:
 
 
 def is_synthetic(row) -> bool:
-    code = str((row or {}).get("code") or "").lower()
-    return bool(_SYNTHETIC.search(str((row or {}).get("message") or ""))) or code in _SYNTHETIC_CODES
+    """A forwarding probe or canary row: its code says so, or its message -- or, for a probe
+    whose message text the page under test produces, its path or operation -- carries the
+    marker. Below the bar at READ time, whatever else happened: the acks written at ingest and
+    by the auto-resolve sweep both fail soft under load, and a missed ack used to leave a proof
+    row on the queue as ordinary work, offered to responders."""
+    row = row if isinstance(row, dict) else {}
+    if str(row.get("code") or "").lower() in _SYNTHETIC_CODES:
+        return True
+    ctx = row.get("context") if isinstance(row.get("context"), dict) else {}
+    return any(_SYNTHETIC.search(str(v or "")) for v in (row.get("message"), ctx.get("path"),
+                                                          ctx.get("operation")))
 
 
 def _is_wsgi_trigger_blip(row) -> bool:

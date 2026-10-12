@@ -62,6 +62,8 @@ TASK_CAP_RUNS = 3
 CREDENTIAL_WARN_S = 14 * 86400
 CREDENTIAL_CRITICAL_S = 3 * 86400
 QUESTION_WAIT_S = 2 * 3600
+#: How long, from its expiry, an expired-and-unread message keeps telling its sender.
+UNDELIVERED_TELL_S = 3 * 86400
 CLEARED_KEEP = 30
 
 SEVERITIES = ("critical", "warn", "info")
@@ -76,6 +78,9 @@ PERSON_ONLY = {
     "credential_expiring": "a credential is rotated or re-issued at its source system",
     "question_waiting": "an ask is answered through the ask lane, not here",
     "errors_unclaimed": "the problems lane already offers every unclaimed problem",
+    # The SENDER decides what an undelivered message is worth now: re-send it to another
+    # console, reach the person another way, or let it go. A responder would only re-send blind.
+    "message_undelivered": "the sender decides whether to re-send it or reach the person another way",
 }
 #: Agent items that only the machine they name can clear (an install, a client update).
 ON_ITS_MACHINE = {"client_stale"}
@@ -122,7 +127,8 @@ def _plural(n, one, many=None) -> str:
 #   runs (run rows), sessions (live console rows with task_id), presence (per-agent rows with
 #   machines), hub_client (the client version the hub serves), credentials (public credential
 #   records), errors_unclaimed (bar-clearing unacked error rows), questions (open question items),
-#   answers (answer directives still active: {id, asker, at, revision})
+#   answers (answer directives still active: {id, asker, at, revision}), messages (open
+#   agent-to-agent message notes, as stored)
 
 def detect_tasks(ctx) -> list:
     operator = ctx.get("operator") or ""
@@ -134,6 +140,7 @@ def detect_tasks(ctx) -> list:
               "hand it back to the queue"),
              ("orphaned", "it is in progress with no checkpoints and has not moved",
               "Claim it (python -m hub_core.client start %s) or hand it back to the queue"))
+    full = {x.get("id"): x for x in ctx.get("tasks") or [] if isinstance(x, dict)}
     out = []
     for bucket, why, fix in table:
         for t in summary.get(bucket) or []:
@@ -142,6 +149,28 @@ def detect_tasks(ctx) -> list:
             age = int(t.get("age_s") or 0)
             severity = ("warn" if bucket == "complete_unclosed" or age >= task_health.STALE_AFTER_S
                         else "info")
+            from . import task_rows
+            task = full.get(tid) or {}
+            live = task_rows.deployed(task) if bucket == "complete_unclosed" else None
+            if live:
+                # Its commit is already live and the deploy close is waiting on what its refusal
+                # names: "finish it" here is a false close over the hub's own refusal.
+                ac = task.get("auto_close") if isinstance(task.get("auto_close"), dict) else {}
+                why_live = ("its commit %s is live; the close is waiting: %s"
+                            % (str(live.get("sha") or "")[:12],
+                               ac.get("why") or "no verification on the deployed surface yet"))
+                out.append(item("task_" + bucket, "tasks", severity, agent=owner or operator,
+                                who=owner or "the operator", subject=tid,
+                                title="%s: %s — %s" % (tid, str(t.get("title") or "")[:90], why_live),
+                                detail=str(t.get("reason") or ""),
+                                fix=("Verify it on the deployed surface the way the requester meets "
+                                     "it and step \"SEEN: <what is there>\" (python -m "
+                                     "hub_core.client step %s --note \"SEEN: ...\"); the deploy close "
+                                     "then lands it. Never finish over its refusal." % tid),
+                                evidence={"task": tid, "age_s": age, "deployed": live,
+                                          "auto_close": ac or None},
+                                lanes=("task-health",)))
+                continue
             out.append(item("task_" + bucket, "tasks", severity, agent=owner or operator,
                             who=owner or "the operator", subject=tid,
                             title="%s: %s — %s" % (tid, str(t.get("title") or "")[:90], why),
@@ -375,6 +404,14 @@ def detect_capped(ctx) -> list:
         pushed = task_rows.pushed(t) or {}
         sha = str((need or {}).get("sha") or (refused or {}).get("sha") or pushed.get("sha") or "")
         prio = str(t.get("priority") or "").upper()
+        # HELD IS IN FLIGHT. The lane gave up, but a live console may have picked the task up
+        # since; this item kept reading "a person must" over consoles that were on it, so the
+        # list read as unworked while it was in flight and buried the items nobody held. A
+        # holder proven GONE (detect_leases reports that one) is not a holder.
+        holder = next((l for l in ctx.get("leases") or []
+                       if str(l.get("task") or "") == tid
+                       and float(l.get("expires") or 0) > ctx["now"]
+                       and str(l.get("holder_state") or "") != "gone"), None)
         if need:
             why = "the launcher handed it to a person: %s" % str(need.get("reason") or
                                                                  "no reason given")[:200]
@@ -382,22 +419,41 @@ def detect_capped(ctx) -> list:
             why = "the deploy record's close was refused: %s" % str(refused.get("why") or "")[:200]
         else:
             why = "it was handed back %d times, so no responder will take it again" % runs
+        deployed = task_rows.deployed(t)
+        if holder:
+            state = "in flight · %s %s" % (holder.get("agent") or "?",
+                                           str(holder.get("session") or "")[:8])
+        elif deployed:
+            state = "its commit is live; verify it on the deployed surface and close it"
+        elif sha:
+            state = "a fix is pushed; verify it on the deployed surface and close it"
+        else:
+            state = "no responder will take it; work it or close it"
         out.append(item(
-            "task_needs_person", "tasks", "critical" if prio == "P0" else "warn",
+            "task_needs_person", "tasks",
+            "info" if holder else ("critical" if prio == "P0" else "warn"),
             agent=owner, who=owner or "the operator", subject=tid,
-            title="%s: %s -- %s" % (tid, str(t.get("title") or "")[:80],
-                                    "a fix is pushed and only a person can finish it" if sha
-                                    else "no responder will take it; a person must"),
-            detail="Why: %s.%s Responders stop at the cap and the queue shows it as ordinary "
+            title="%s: %s -- %s" % (tid, str(t.get("title") or "")[:80], state.strip()),
+            detail="Why: %s.%s%s Responders stop at the cap and the queue shows it as ordinary "
                    "todo, so nothing else will surface it."
-                   % (why, (" The newest pushed commit is %s." % sha[:12]) if sha else ""),
-            fix=("Read its checkpoints (python -m hub_core.client recall %s). If the work is done, "
-                 'finish it (python -m hub_core.client finish %s --accept-note "<outcome>" '
-                 "--evidence <sha|url>); if it needs a decision, make it on the task; if it should "
-                 "run again, hand it to someone (python -m hub_core.client hand %s --to <agent>)."
+                   % (why, (" The newest pushed commit is %s." % sha[:12]) if sha else "",
+                      (" The deploy record stepped %s live; the close is waiting on what its "
+                       "refusal names (a look at the real surface, the task's own words) -- a "
+                       "finish over it is a false close." % str(deployed.get("sha") or "")[:12])
+                      if deployed else ""),
+            fix=("Read its checkpoints (python -m hub_core.client recall %s). Prove the outcome on "
+                 "the deployed surface the way the requester meets it and step \"SEEN: ...\"; "
+                 "then the deploy close lands it, or finish it on that evidence "
+                 '(python -m hub_core.client finish %s --accept-note "<outcome>" --evidence '
+                 "<sha|url>). If it needs a decision, make it on the task; if it should run again, "
+                 "hand it to someone (python -m hub_core.client hand %s --to <agent>)."
                  % (tid, tid, tid)),
             evidence={"task": tid, "priority": prio, "handed_back": runs, "sha": sha[:40],
-                      "needs_person": need, "auto_close": refused}))
+                      "needs_person": need, "auto_close": refused,
+                      "deployed": deployed,
+                      "held_by": ({"agent": holder.get("agent"),
+                                   "session": str(holder.get("session") or "")[:8],
+                                   "machine": holder.get("machine")} if holder else None)}))
     return out
 
 
@@ -525,6 +581,48 @@ def detect_answers(ctx) -> list:
     return out
 
 
+def detect_undelivered_messages(ctx) -> list:
+    """A message that passed its expiry still OPEN -- no console acknowledged it -- never landed,
+    and its sender was never told: an expired message is kept and listed, but never delivered.
+    One item per message, to the SENDER, from its expiry for UNDELIVERED_TELL_S; it clears the
+    moment the message is acknowledged. Person-only: the sender decides what it is worth now."""
+    from . import inbox
+    now = ctx["now"]
+    known = {str(a).lower() for a in (ctx.get("presence") or {})}
+    out = []
+    for ent in ctx.get("messages") or []:
+        if not isinstance(ent, dict):
+            continue
+        tags = [str(t).lower() for t in (ent.get("tags") or [])]
+        if "message" not in tags or "open" not in tags:
+            continue
+        try:
+            exp, _implied = inbox.message_expiry(ent)
+        except Exception:                                    # noqa: BLE001 - unageable: silent
+            continue
+        if exp is None or now < exp or now - exp > UNDELIVERED_TELL_S:
+            continue
+        prov = ent.get("provenance") if isinstance(ent.get("provenance"), dict) else {}
+        sender = str(ent.get("from_agent") or prov.get("agent") or "").strip().lower()
+        if not sender or (known and sender not in known):
+            continue
+        to = str(ent.get("to") or "?")
+        written = task_health.age_s(prov.get("created_at") or "", now)
+        out.append(item(
+            "message_undelivered", "communication", "warn", agent=sender, who=sender,
+            subject=str(ent.get("id") or ""),
+            title="Your message to %s%s was never delivered: %s"
+                  % (to, (" written %s ago" % age_phrase(written)) if written else "",
+                     str(ent.get("title") or "")[:90]),
+            detail="It passed its expiry with no console acknowledging it. An expired message is "
+                   "kept and listed (inbox.json?expired=1), never delivered.",
+            fix="Re-send it if it still matters (python -m hub_core.client msg %s --note \"...\"), "
+                "pick a live console first (python -m hub_core.client consoles), or reach %s "
+                "another way." % (to, to),
+            evidence={"message": ent.get("id"), "to": to, "expired_at": exp}))
+    return out
+
+
 DETECTORS = (
     ("tasks", detect_tasks, ("tasks",)),
     ("capped", detect_capped, ("tasks",)),
@@ -537,6 +635,7 @@ DETECTORS = (
     ("errors", detect_errors, ("errors",)),
     ("questions", detect_questions, ("questions",)),
     ("answers", detect_answers, ("answers",)),
+    ("undelivered", detect_undelivered_messages, ("messages",)),
 )
 
 

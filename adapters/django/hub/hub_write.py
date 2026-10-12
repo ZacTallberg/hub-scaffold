@@ -359,7 +359,7 @@ def _request_scoped_idem(idem, payload):
 
 
 def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype,
-                       idem_scope=None, allocate=None):
+                       idem_scope=None, allocate=None, idem_exact=False):
     """Validate the MERGED entity, then append. Returns (response_dict, http_status).
 
     With ``idem_scope`` (creates only) a key already recorded under that id prefix replays the
@@ -382,7 +382,8 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     try:
         before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(), idem_key=_request_scoped_idem(idem, payload),
+                      git_sha=hub_app._git_head(),
+                      idem_key=idem if idem_exact else _request_scoped_idem(idem, payload),
                       idem_scope=idem_scope if idem else None, allocate=allocate,
                       **_event_identity(agent))
     except ConflictError as c:
@@ -409,13 +410,17 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
 
 
 def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_scope=None,
-            allocate=None):
-    """Append using a request-owned store and always release its database handle."""
+            allocate=None, idem_exact=False):
+    """Append using a request-owned store and always release its database handle.
+
+    ``idem_exact`` keeps the key as given instead of salting it with the payload's hash: for a
+    write whose key already names the FACT (one refusal per task and reason) while the payload
+    carries a timestamp, salting minted a new key on every pass and nothing ever deduplicated."""
     s = hub_app.store()
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
                                   agent=agent, idem=idem, etype=etype, idem_scope=idem_scope,
-                                  allocate=allocate)
+                                  allocate=allocate, idem_exact=idem_exact)
     finally:
         s.close()
 
@@ -442,7 +447,7 @@ def _id_allocator(type_, first_guess):
     return allocate
 
 
-def _append_create(type_, payload, *, agent, idem, etype):
+def _append_create(type_, payload, *, agent, idem, etype, idem_exact=False):
     """Create a record under a SERVER-numbered id, allocated under the store's write lock.
 
     Deriving the id from one read and appending it later is a check-then-act: a concurrent
@@ -456,14 +461,16 @@ def _append_create(type_, payload, *, agent, idem, etype):
 
     The idempotency key is scoped to the type's id prefix, so a client retry of a create whose
     response was lost replays the ORIGINAL record (under its original id) instead of minting a
-    twin under a freshly allocated one."""
+    twin under a freshly allocated one. ``idem_exact`` (a key that names the RECORD, such as one
+    fix task per problem) keeps the key unsalted, so a later create with a different body -- the
+    problem has recurred since -- still replays the first record instead of minting a twin."""
     scope = "%s:%s:" % (hub_app.PROJECT_KEY, type_)
     state = hub_app.current_state()
     first = ids.high_water(state["entities"], hub_app.PROJECT_KEY, type_) + 1
     guess = "%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, first)
     return _append(type_, guess, payload, expected_version=0, agent=agent, idem=idem,
                    etype=etype, idem_scope=scope if idem else None,
-                   allocate=_id_allocator(type_, first))
+                   allocate=_id_allocator(type_, first), idem_exact=idem_exact)
 
 
 #: How many fresh reads a server-side read-then-append gets before it gives up.
@@ -1102,17 +1109,37 @@ def _utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_VARIABLE = re.compile(r"\b[0-9a-f]{7,40}\b|\d+")
+
+
+def refusal_reason_key(why) -> str:
+    """The REASON a close was refused, with what varies between passes taken out (commit ids,
+    counts, ages): two refusals with the same key are the same fact."""
+    text = _VARIABLE.sub("#", str(why or "").strip().lower())
+    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:12]
+
+
 def _record_auto_close(eid, state, why, sha, deploy_id):
     """Write what the automatic close did onto the task, so a task waiting on a close that
-    cannot fire SAYS so instead of looking untouched."""
+    cannot fire SAYS so instead of looking untouched -- ONCE per (task, reason).
+
+    The close is retried every sweep, and every refusal used to be a new ledger event: the
+    payload carries ``at``, so the salted idempotency key was new on every pass. On the origin
+    system one task collected over a thousand identical refusal events in a day. The current
+    ``auto_close`` is checked first (no write lock for the common case), and the key is exact."""
     ent = (hub_app.current_state().get("entities") or {}).get(eid)
     if not ent or ent.get("status") == "done":
         return
+    key = refusal_reason_key(why)
+    cur = ent.get("auto_close") if isinstance(ent.get("auto_close"), dict) else {}
+    if cur.get("state") == state and (cur.get("reason_key") == key
+                                      or refusal_reason_key(cur.get("why")) == key):
+        return
     _append("task", eid, {"type": "task", "auto_close": {
-        "state": state, "why": str(why or "")[:200], "sha": str(sha or "")[:40],
+        "state": state, "why": str(why or "")[:200], "reason_key": key, "sha": str(sha or "")[:40],
         "deploy": deploy_id, "at": _utc_now()}},
         expected_version=ent.get("version"), agent=DEPLOY_ACTOR,
-        idem="deploy-close-%s:%s:%s" % (state, eid, str(sha or "")[:12]), etype="task.updated")
+        idem="deploy-close-%s:%s:%s" % (state, eid, key), etype="task.updated", idem_exact=True)
 
 
 def close_deployed_tasks(deploy_id, deployed_sha):
@@ -1853,10 +1880,14 @@ def item_claim(request, b):
     except Exception:                                        # noqa: BLE001 - unprovable, not gone
         roster = None
     try:
+        ending = None
+        if b.get("release") is True and b.get("outcome"):
+            ending = {k: b.get(k) for k in ("outcome", "final", "tokens", "spent")}
         granted, row = item_claims.claim(hub_app.HUB_DIR, item, machine,
                                          b.get("agent") or request.hub_auth.subject,
                                          release=b.get("release") is True, session=session,
-                                         roster=roster, grace_s=hub_app.gone_grace_s())
+                                         roster=roster, grace_s=hub_app.gone_grace_s(),
+                                         cls=str(b.get("class") or ""), ending=ending)
     except ValueError as exc:
         return JsonResponse({"errors": [{"code": "bad_claim", "msg": str(exc)}]}, status=400)
     if not granted:
@@ -1875,10 +1906,30 @@ def item_claim(request, b):
                      "releases_in_s": row.get("releases_in_s"),
                      "holder_state": row.get("holder_state"), "gone_s": row.get("gone_s"),
                      "frees_in_s": (row.get("frees_in_s") if row.get("holder_state") == "gone"
-                                    else row.get("releases_in_s"))}},
+                                    else row.get("releases_in_s")),
+                     **({"held_as": row["held_as"], "aggregate": row.get("aggregate")}
+                        if row.get("held_as") else {}),
+                     **({"history": row["history"]} if "history" in row else {})}},
             status=409)
     hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
                               released=bool(row.get("released")))
+    try:
+        from . import outcome_events
+        agg = item_claims.aggregate_of(item)
+        if b.get("release") is True and ending:
+            outcome_events.emit("run.finished", "run", agg, {
+                "item": item, "aggregate": agg, "machine": machine, "outcome": ending.get("outcome"),
+                "tokens": ending.get("tokens"), "spent": bool(ending.get("spent"))},
+                agent=str(b.get("agent") or request.hub_auth.subject or ""), actor_kind="responder",
+                idem="run-finished:%s:%s:%d" % (item, machine, int(time.time())))
+        elif b.get("release") is not True and not row.get("renewed"):
+            outcome_events.emit("run.started", "run", agg, {
+                "item": item, "aggregate": agg, "machine": machine,
+                "took_over_from": (row.get("took_over_from") or {}).get("machine")},
+                agent=str(b.get("agent") or request.hub_auth.subject or ""), actor_kind="responder",
+                idem="run-started:%s:%s:%d" % (item, machine, int(time.time())))
+    except Exception:                                        # noqa: BLE001
+        pass
     return JsonResponse({"data": {"granted": True, **row}})
 
 
@@ -2093,6 +2144,9 @@ def _already_covered(state, text):
 
 
 _AGENT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+#: Ids of board RECORDS that also fit the agent-name shape: a problem (p-<12 hex>) or a question
+#: (q-<asker>-<8 hex>). Task and record ids carry ':' and never pass the agent check at all.
+_RECORD_SHAPED = re.compile(r"p-[0-9a-f]{12}|q-[a-z0-9._-]+-[0-9a-f]{8}")
 
 
 def _valid_agent_name(name) -> bool:
@@ -2686,6 +2740,14 @@ def message(request, b):
     if not _valid_agent_name(str(agent)) or not _valid_agent_name(to):
         return JsonResponse({"errors": [{"code": "need_sender_and_recipient",
             "msg": "message needs a valid sender (agent) and recipient (to)"}]}, status=422)
+    if _RECORD_SHAPED.fullmatch(to):
+        # A board RECORD is not a reader: mail to a problem or question id is accepted, never
+        # delivered, and expires unread -- found as real messages addressed to ids that no
+        # console could ever be.
+        return JsonResponse({"errors": [{"code": "recipient_is_a_record",
+            "msg": "%r is a board record (a problem or question id), not an agent: message the "
+                   "agent who holds it (problems.json / inbox name them), or step the task" % to}]},
+            status=422)
     if not note_text:
         return JsonResponse({"errors": [{"code": "need_note"}]}, status=400)
     target_session = str(b.get("session") or "").strip()
@@ -3370,6 +3432,16 @@ def _problem_actor(request, b):
             (request.headers.get("X-Hub-Console-Name") or b.get("name") or "")[:40])
 
 
+def _problem_outcome(etype, pid, payload, agent, idem):
+    """A problem transition as a ledger event (hub.outcome_events). Never fails the route."""
+    try:
+        from . import outcome_events
+        outcome_events.emit(etype, "problem", pid, dict(payload, problem=pid), agent=agent,
+                            idem=idem, actor_kind="agent")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 def _problem_or_404(pid):
     from hub_core import problems as _problems
     pid = str(pid or "").strip().lower()
@@ -3378,7 +3450,16 @@ def _problem_or_404(pid):
             "msg": "a problem id looks like p-<12 hex>; read /hub/problems.json"}]}, status=422)
     found = _problems.find(hub_app.HUB_DIR, pid, hub_app.current_state())
     if not found:
-        return pid, None, JsonResponse({"errors": [{"code": "no_such_problem", "id": pid}]}, status=404)
+        # Say WHY and what to do: a bare 404 left a holder with a fix task it could neither
+        # resolve nor release. A problem leaves the board when its rows age out of the retained
+        # error window; its mirror task (if any) is handed back to the task lane as todo.
+        return pid, None, JsonResponse({"errors": [{
+            "code": "no_such_problem", "id": pid,
+            "msg": ("%s is not on the board: its rows have aged out of the retained error window "
+                    "(or it never existed). There is nothing left to claim, release or resolve here; "
+                    "if a fix task mirrors it, that task is handed back to todo -- finish or drop "
+                    "the TASK on the work's own evidence (/hub/problems.json?include=all lists "
+                    "what is still readable)." % pid)}]}, status=404)
     return pid, found, None
 
 
@@ -3405,6 +3486,11 @@ def problem_claim(request, b):
     if refusal:
         return JsonResponse({"errors": [refusal]}, status=409)
     hub_app.errors_changed()
+    if float(entry.get("since") or 0) == float(entry.get("at") or -1):     # a NEW holder
+        _problem_outcome("problem.claimed", pid, {
+            "agent": agent, "machine": entry.get("machine"), "session": entry.get("session"),
+            "take": bool(b.get("take")), "from": entry.get("taken_from")},
+            agent, "pclaim:%s:%s:%.3f" % (pid, agent, float(entry.get("at") or 0)))
     data = {"problem": pid, "claim": entry, "title": found.get("title"),
             "rows": len(found.get("rows") or [])}
     # What the board already knows about THIS failure, above the relevance cut-off.
@@ -3445,6 +3531,13 @@ def problem_resolve(request, b):
                               note=note, evidence=str(b.get("evidence") or ""),
                               session=session, name=name)
     hub_app.errors_changed()
+    # The resolution as HISTORY: problem-resolved.json keeps only the newest per problem, so a
+    # second resolve erased the first and recurrence over time was unrecoverable.
+    _problem_outcome("problem.resolved", pid, {
+        "agent": agent, "rows": len(found.get("rows") or []),
+        "evidence": str(b.get("evidence") or "")[:300], "note_chars": len(note),
+        "session": session, "held_by": (found.get("holder") or {}).get("agent")},
+        agent, "presolve:%s:%s" % (pid, (entry or {}).get("epoch") or (entry or {}).get("at")))
     from . import fix_tasks as _fix_tasks
     return JsonResponse({"data": {"problem": pid, "resolved": entry,
                                   "task": _fix_tasks.sync_pid(pid)}})
@@ -3465,6 +3558,8 @@ def problem_release(request, b):
         return JsonResponse({"errors": [{"code": "not_held",
             "msg": "no claim (or presumed reopen) by %s to release" % agent}]}, status=409)
     hub_app.errors_changed()
+    _problem_outcome("problem.released", pid, {"agent": agent}, agent,
+                     "prelease:%s:%s:%d" % (pid, agent, int(time.time())))
     from . import fix_tasks as _fix_tasks
     _fix_tasks.sync_pid(pid)
     return JsonResponse({"data": {"problem": pid, "released": True}})
@@ -3511,6 +3606,10 @@ def problem_escalate(request, b):
     except Exception:                                        # noqa: BLE001
         pass
     hub_app.errors_changed()
+    _problem_outcome("problem.escalated", pid, {
+        "agent": agent, "blocked_on": blocked_on, "session": session,
+        "note_chars": len(str(b.get("note") or ""))},
+        agent, "pescalate:%s:%s:%d" % (pid, blocked_on, int(time.time())))
     from . import fix_tasks as _fix_tasks
     fix_task = _fix_tasks.sync_pid(pid)
     return JsonResponse({"data": {"problem": pid, "escalation": entry, "task": fix_task}},

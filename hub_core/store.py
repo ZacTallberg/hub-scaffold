@@ -956,6 +956,18 @@ class EventStore:
             rows = self._db.execute("SELECT raw FROM events ORDER BY seq").fetchall()
         return [json.loads(r["raw"]) for r in rows]
 
+    def events_prefixed(self, prefix: str, since_seq: int = 0, limit: int = 500):
+        """Events whose aggregate starts with ``prefix`` (a log-only family such as the lifecycle
+        history), after ``since_seq``, oldest first, at most ``limit``: a seek on the aggregate
+        index, never a scan of the whole ledger."""
+        import json
+        rows = self._db.execute(
+            "SELECT raw FROM events WHERE aggregate >= ? AND aggregate < ? AND seq > ? "
+            "ORDER BY seq LIMIT ?",
+            (prefix, prefix + "\U0010ffff", max(0, int(since_seq or 0)),
+             max(1, min(int(limit), 5000)))).fetchall()
+        return [json.loads(r["raw"]) for r in rows]
+
     def events_after(self, seq: int, limit: int = 100):
         """Return canonical events after ``seq`` without replaying the full ledger.
 

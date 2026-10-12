@@ -1373,6 +1373,8 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "runs": state.get("by_type", {}).get("run", []), "sessions": consoles,
            "questions": asks, "errors_unclaimed": error_unclaimed,
            "answers": _unread_answers(state),
+           "messages": [e for e in state.get("by_type", {}).get("note", [])
+                        if "message" in (e.get("tags") or []) and "open" in (e.get("tags") or [])],
            "hub_client": hub_client_version()}
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
                        ("retired", lambda: _presence.retired_rows(hub_app.HUB_DIR)),
@@ -1482,6 +1484,11 @@ def _sweep_leases():
         logging.getLogger("hub.lease_sweep").warning("sweep pass failed", exc_info=True)
     # A deploy close refused while a lease was held is retried on the same kind of throttle --
     # in ONE background thread, never on this read (deploy_close.sweep_async).
+    try:
+        from . import outcome_events
+        outcome_events.kick()            # spool drain + recurrence sweep, no-op in the web role
+    except Exception:                                        # noqa: BLE001
+        pass
     try:
         from . import deploy_close
         deploy_close.sweep_async()
@@ -2464,7 +2471,13 @@ def _inbox_kwargs(request, machine, session):
         live = hub_app.live_sessions() if session else None
     except Exception:                                        # noqa: BLE001 - never break delivery
         live = None
-    return {"machine": machine, "session": session, "live": live,
+    try:
+        # What each stored console (an ended one included) was on, so mail for a console that
+        # ended follows its work rather than the freshest window.
+        affinity = _presence.session_records(hub_app.HUB_DIR) if session else None
+    except Exception:                                        # noqa: BLE001
+        affinity = None
+    return {"machine": machine, "session": session, "live": live, "affinity": affinity,
             "human_gate": hub_app.human_gate(), "gate_satisfied": hub_app.gate_satisfied(),
             "visible": _veil_visible(request), "problem_states": _ProblemStates(),
             # Self-test asks reach only a reader that asks for them (the responder).

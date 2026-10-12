@@ -213,6 +213,23 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
                if isinstance(v, dict) and str(v.get("status") or "") == "retired"
                and not v.get("hosted_in")}
     slugs -= retired - {native}
+    # A REPORTER THAT IS NOT A SERVICE is not a row either. Every app.<x> family becomes a row,
+    # so a fleet PROBE posting its verified findings under a name of its own (`kind: "probe"`), or
+    # a COMPONENT of a service filing under its own name so its failures fold as their own class
+    # (`part_of: "<slug>"`), became a "service" with no URL, no deploy and no CI -- gaps nobody can
+    # ever clear, which the attention lane then offered to responders. A probe's problems still
+    # fold onto the board; a component's are counted on the row of the service it ships in. A
+    # name declared either way that is ever deployed as itself is declared as a service again.
+    probes = {str(k).lower() for k, v in apps.items()
+              if isinstance(v, dict) and str(v.get("kind") or "") == "probe"} - {native}
+    part_of = {str(k).lower(): str(v.get("part_of")).lower() for k, v in apps.items()
+               if isinstance(v, dict) and v.get("part_of")
+               and str(v.get("part_of")).lower() != str(k).lower()}
+    slugs -= probes | set(part_of)
+    components_of: dict = {}
+    for comp, host in part_of.items():
+        components_of.setdefault(host, set()).add(comp)
+        slugs.add(host)
     tenants_of: dict = {}
     for t, v in apps.items():
         host = str((v or {}).get("hosted_in") or "").lower() if isinstance(v, dict) else ""
@@ -228,10 +245,11 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
         fwd = families.get("app." + slug) if isinstance(families.get("app." + slug), dict) else {}
         chat = families.get("chat." + slug) if isinstance(families.get("chat." + slug), dict) else {}
         ci = families.get("ci." + project) if isinstance(families.get("ci." + project), dict) else {}
+        wheres = {slug} | components_of.get(slug, set())
         window = {"total": 0, "deferred": 0, "by_kind": {}}
         for r in err_rows:
             src = str(r.get("source") or "").lower()
-            if not src.startswith("app." + slug + "."):
+            if not any(src.startswith("app." + w + ".") for w in wheres):
                 continue
             window["total"] += 1
             kind = src.split(".")[2] if len(src.split(".")) > 2 else "server"
@@ -239,7 +257,7 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
             if not errorlog.passes_bar(r)[0]:
                 window["deferred"] += 1
         mine = [p for p in probs if p["on_board"] and p["state"] != "resolved"
-                and (p["where"] == slug or (p["kind"] == "ci" and p["where"] == project))]
+                and (p["where"] in wheres or (p["kind"] == "ci" and p["where"] == project))]
         unclaimed = [p for p in mine if p["state"] == "unclaimed"]
         dep = (native_deploy or {}) if is_native else {}
         derived = ""
@@ -250,6 +268,9 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
         # ends with a host step) held as a GAP keeps the row `partial` forever, and every
         # responder offered it comes back not-cleared on a condition no agent can change.
         notes = [derived] if derived else []
+        if components_of.get(slug):
+            notes.append("also carries the lanes that ship inside it (%s): their errors and "
+                         "problems are counted on this row" % ", ".join(sorted(components_of[slug])))
         if is_native:
             # The hub records its own server errors directly; it has no forwarder to wire.
             fwd = fwd or {"first": 0, "last": now, "count": window["total"]}
@@ -313,6 +334,7 @@ def rows(hub_dir, state=None, *, apps: dict | None = None, native: str = "hub",
     out.sort(key=lambda r: (rank.get(r["verdict"], 3), -r["problems"]["unclaimed"], r["slug"]))
     counts = {k: sum(1 for r in out if r["verdict"] == k) for k in rank}
     meta = {"counts": counts, "total": len(out), "retired_withheld": sorted(retired - {native}),
+            "probes_withheld": sorted(probes), "components": {k: v for k, v in sorted(part_of.items())},
             "sources_seen": errorlog.sources_seen_store(hub_dir),
             "liveness_stale_s": LIVENESS_STALE_S,
             "note": ("a verdict of 'never' means nothing when the stamp store is not writable; "
@@ -338,7 +360,15 @@ def doctor(hub_dir, slug: str, state=None, *, apps: dict | None = None, native: 
     history = [p for p in mine if p["state"] == "resolved"]
     blockers = [p for p in open_ if p["state"] == "unclaimed"]
     waiting = [p for p in open_ if p["state"] in ("in_flight", "escalated")]
-    if row is None and slug in (meta.get("retired_withheld") or []):
+    if row is None and slug in (meta.get("probes_withheld") or []):
+        verdict = "probe"
+        lines = ["%s is declared a probe in HUB_APPS (kind: probe): it reports findings, it is not "
+                 "a service to observe; its problems still fold onto the board" % slug]
+    elif row is None and slug in (meta.get("components") or {}):
+        verdict = "component"
+        lines = ["%s ships inside %s (part_of): read that row -- its errors and problems are "
+                 "counted there" % (slug, meta["components"][slug])]
+    elif row is None and slug in (meta.get("retired_withheld") or []):
         verdict = "retired"
         lines = ["%s is declared retired in HUB_APPS: it is not observed, and its remaining "
                  "errors still fold into problems" % slug]

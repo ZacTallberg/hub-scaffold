@@ -119,6 +119,14 @@ claims/: they change with no ledger event, so the snapshot memo carries their ch
 mutations to them publish realtime wake signals — a board keyed on the ledger head alone would
 freeze its fleet strip and error card between appends.
 
+Those side files hold the LATEST state only, so their HISTORY is written to the ledger beside
+them (`hub/outcome_events.py`): every lease claim, takeover and release, every problem claim,
+release, escalation, resolve and recurrence, and every responder run's start and finish is one
+event on a log-only aggregate (`<project>:outcome:<kind>.<subject>`) that the fold skips, so it
+never bumps a task's version. A busy ledger spools a live transition under its idempotency key for
+the background tick to write; nothing describing a claim can fail the claim. `GET
+/hub/outcomes.json` reads the history.
+
 ## Enforcement matrix
 
 | Claim | Shipped enforcement | Important boundary |

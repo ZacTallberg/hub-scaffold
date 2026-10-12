@@ -301,6 +301,16 @@ grace the `409` says `holder_state: "gone"` and `frees_in_s`. A claimed question
 reported IN FLIGHT on the rail and the error card, never as unclaimed; a gone holder's reads
 "holder gone · frees in …".
 
+A claim is on the THING, not the key: each item belongs to an aggregate (`aggregate` in the
+answer; an attention condition about a task is that task, a recurring condition keeps one
+aggregate across its ids), and a claim is refused while another machine holds ANY key of the same
+aggregate (`409` with `held_as`). The unattended launcher claims tasks this way too, beside their
+lease, so a task and an attention item about it never run on two machines at once. With `class`
+(the launcher sends the aggregate) a grant or a refusal carries `history`: the endings earlier
+runs left on that class, and a release carrying `{outcome, final, tokens, spent}` records this
+run's (`recorded`) -- the next session on a recurrence is told what the last one concluded
+(8 endings per class, 14 days, `HUB_DIR/item-claim-history.json`).
+
 ### The lineage ladder
 
 `GET /hub/task/<local>.json?lineage=1` adds `lineage: {hops[], complete, shipped, project}`:
@@ -498,7 +508,7 @@ fan-out. Once the actual changed behavior succeeds and no critical boundary rema
 | `/hub/api/question/withdraw` (`ask:write`) | `agent` (the asker), `question` (id or local), `reason` | The ASKER closes their own question: drops `open`, adds `withdrawn`, appends "Withdrawn by <asker>: <reason>" to the body, issues no directive. `403 not_the_asker` for anyone else (they close it with an answer); `400 need_question_and_reason`; `404 no_such_question`; an already-closed question answers `200` with `unchanged:true`. `questions.json` rows carry `withdrawn`. |
 | `/hub/api/directive` (`directive:write`) | Create: `title`, `body_md`, optional `targets[]` (default `["all"]`), `remediation_cmd`, `deadline`, `machine`, `session`; update: `id` + `expected_version` | An operator instruction addressed to named agents. `machine` pins delivery to one computer; `session` pins it to one console and may be the console's NAME — the console must be live now (`409 console_not_live` / `console_ambiguous`), so a pinned message never lands nowhere while answering 201. `directive:write` is an authority tier above ordinary board writes — the shared-root credential holds it; issue it to a worker credential only deliberately. |
 | `/hub/api/ack` (`ack:write`) | `agent`, `directive` (id or local), optional `note`, `delivery_revision` | One agent's record that delivery landed. Stable id (replay-safe). A revisioned answer needs the revision read: missing → `428 need_delivery_revision`, stale → `409 answer_changed` (a correction is never closed by a receipt for the text it replaced). Records a `delivered` receipt. The item leaves that agent's inbox; a directive whose every NAMED target has acked retires itself to `fulfilled`. |
-| `/hub/api/message` (`message:write`) | `to`, `note`, optional `title`, `session` (one recipient console), `machine`, `expires_hours` (0.25-168) or `expires_at` (ISO, fixed by the sender at intent time), `structured` `{finding, evidence, split}` | Agent-to-agent mail: a note tagged `message`+`open` with `from_agent` and the sender's console in `from_session` (so a reply targets that console). Idempotent on (sender, recipient, text). Delivered by the recipient's inbox UNTIL `expires_at` -- stamped by the hub from `expires_hours`, a sent `expires_at` capped at a week, or `HUB_MESSAGE_EXPIRES_H` (default 24); past it the note is kept and listed (`inbox.json?expired=1`), never delivered. `structured` is also appended to the body, so a reader that knows nothing of it still sees every word. `422 bad_expires` / `bad_structured`. |
+| `/hub/api/message` (`message:write`) | `to`, `note`, optional `title`, `session` (one recipient console), `machine`, `expires_hours` (0.25-168) or `expires_at` (ISO, fixed by the sender at intent time), `structured` `{finding, evidence, split}` | Agent-to-agent mail: a note tagged `message`+`open` with `from_agent` and the sender's console in `from_session` (so a reply targets that console). Idempotent on (sender, recipient, text). Delivered by the recipient's inbox UNTIL `expires_at` -- stamped by the hub from `expires_hours`, a sent `expires_at` capped at a week, or `HUB_MESSAGE_EXPIRES_H` (default 24); past it the note is kept and listed (`inbox.json?expired=1`), never delivered. `structured` is also appended to the body, so a reader that knows nothing of it still sees every word. `422 bad_expires` / `bad_structured`; `422 recipient_is_a_record` when `to` is a problem or question id (a record is not a reader: such mail would expire undelivered). |
 | `/hub/api/evidence` (`evidence:write`) | `subject` (3-140 chars), `summary` (one line), optional `kind` (`probe`\|`trace`\|`measurement`\|`timing`), `body` (the printed output, 16 KB max), `repo`, `commit` (7-40 hex) | One raw READING in the shared evidence store (`HUB_DIR/evidence.jsonl`, never the ledger; capped at 4,000 rows, oldest first). `repo` is normalised to `group/name` -- a remote URL's scheme, credentials and host are dropped before storage. Passes the same secret-shape refusal as every write. `201 {data: row}`; `422 need_subject`/`need_summary`/`bad_kind`/`bad_repo`/`bad_commit`; `413 body_too_large`. |
 | `/hub/api/message/ack` (`message:write`) | `id`, optional `via` | Retire a delivered message. Only its recipient may (`403 not_recipient`, recorded as a `failed` receipt); a message pinned to a machine is retired only from that machine (`409 other_machine`). |
 | `/hub/api/tier` (`credential:manage`) | `target`, `tier` (`operator`/`member`/`contributor`, or `""` to clear) | Set an agent's visibility tier. A tier is a fact about an identity, never a header a reader sends. |
@@ -562,7 +572,7 @@ responder lane (`routing.required_capabilities` += `unattended`; `patterns/unatt
 | `/hub/api/overlap/seen` (`presence:write`) | `ids[]` (the addressed `ov-...` item ids) | Record that crossovers were put in front of this console, so each is announced once per side (again only when it changes, or after 6 h). |
 | `/hub/api/leave` (`enroll:leave`) | optional `dry_run` | Un-enroll THIS machine: the presented scoped credential revokes ITSELF and the machine's presence rows are dropped. Self-revocation only reduces authority; the shared-root token is `409 not_a_machine_credential`. |
 
-An APP problem on the board is also a board TASK (`hub_core/fix_tasks.py`): claim, resolve, release and escalate re-sync its mirror and name it in the response (`data.task`; a claim adds `task_hint`). The mirror's status is the problem's — `todo` unclaimed, `in_progress` claimed, `blocked` on the escalation's ask/task, `done` on resolve (granted through the hub's one done path with the root cause as `verified_by` and the resolve evidence plus `hub:problem:<id>` as `evidence_uri`) — and a recurrence reopens it with a "Came back" step. A fixer adds checkpoints with the ordinary `step <task>`; they are kept between "Picked up" and "Fixed". Mirrors carry `source: problem:<id>`, are never unattended, and the lease sweep, task-health and readiness classifiers leave them alone. A new error, an auto-resolve or a recurrence is caught by a reconcile that the background tick runs and that an app-error ingest and an `app-fixes.json` poll each KICK onto a debounced thread (a single-process hub has no tick).
+An APP problem on the board is also a board TASK (`hub_core/fix_tasks.py`): claim, resolve, release and escalate re-sync its mirror and name it in the response (`data.task`; a claim adds `task_hint`). The mirror's status is the problem's — `todo` unclaimed, `in_progress` claimed, `blocked` on the escalation's ask/task, `done` on resolve (granted through the hub's one done path with the root cause as `verified_by` and the resolve evidence plus `hub:problem:<id>` as `evidence_uri`) — and a recurrence reopens it with a "Came back" step. A fixer adds checkpoints with the ordinary `step <task>`; they are kept between "Picked up" and "Fixed". Mirrors carry `source: problem:<id>`, are never unattended, and the lease sweep, task-health and readiness classifiers leave them alone. A new error, an auto-resolve or a recurrence is caught by a reconcile that the background tick runs and that an app-error ingest and an `app-fixes.json` poll each KICK onto a debounced thread (a single-process hub has no tick; in the `web` role the kick does nothing, because the background process owns the pass). The mirror lock covers only the problem-to-task map file; the ledger fold and write run outside it (a create is deduplicated by its exact key `fix-task:<pid>`, an update by `expected_version`), and a busy lock or a busy ledger skips the pass -- only three busy passes in a row fail the job. A mirror whose problem has AGED OUT of the retained error window is handed back to `todo` once, with a checkpoint saying so, because no problem verb can move it any more; claim, release and resolve on such an id answer `404 no_such_problem` with that explanation.
 
 `python -m hub_core.client` routes by id type so a caller never has to know which store an id
 lives in: `claim <p-id>` claims a problem (a task id claims the task), `ack <id>` records a
@@ -612,8 +622,12 @@ themselves: `decision` to the deciders, `task-stall` (unclosed, stalled or unsta
 operator, `attention` items to their owner after 30 minutes (critical at once) and to the operator
 after 24 hours, and `overlap` crossovers to each attended console's agent, once per side. Every
 attention item names who can clear it (`actor`: `agent` or `person`); an AGENT item reaches its
-owner at any severity and an unattended responder may take it (`on_its_machine` items only on the
-machine they name). A CI problem item carries `knowledge` when a record clears the relevance cut.
+owner at any severity and an unattended responder may take it (an item naming a machine only on
+that machine). A task at the responder cap that a live console holds reads `in flight · <holder>`
+at info (`evidence.held_by`), and one whose commit a deploy already stepped live says to verify it
+on the deployed surface, never to finish over the close's refusal. An open message past its
+expiry raises `message_undelivered` to its SENDER (person-only) for three days, until it is
+acknowledged. A CI problem item carries `knowledge` when a record clears the relevance cut.
 
 **A verified deploy closes the loop.** After `POST /hub/api/deploy` records a release, every open
 task whose structured commit (`plan[].sha`) is an ANCESTOR of the deployed sha gets exactly one
@@ -629,16 +643,38 @@ durable.
 
 A refused close is **retried, not final**. An unattended task already stepped `deployed` but not
 done is offered to the close again on every later deploy (never stepped twice), on the hand-back,
-release or lease sweep that frees its lease, and by a throttled sweep started from the board's
-read path -- always in ONE single-flight background thread, never on the request. A task whose own
-checkpoint says it is NOT finished ("NOT DONE", "active on purpose") is refused with the quote in
-`auto_close.why` and is not retried; the attention list takes it to a person. A sha written in a
-checkpoint's prose counts only when a deploy record served exactly that commit.
+release or lease sweep that frees its lease, and by a sweep started from the board's read path at
+most once a minute -- always in ONE single-flight background thread, never on the request. A task
+whose NEWEST work checkpoint says it is not finished ("not done", "active on purpose", "not pushed",
+"branch-only", "waiting on the operator's yes") is refused with the quote in `auto_close.why`; the
+sweep re-reads the task's words every pass, so a later checkpoint lifts the refusal, and the
+client's own echo of a refused finish (`finish REFUSED ...`) never counts as the task's word. **A
+deploy alone never closes a task:** until a work checkpoint carries `SEEN: <what is on the real
+surface and in the saved state>` after the change, the close is refused with that reason and the
+next run resumes the task with the look as its first job. A refusal is written once per (task,
+reason) -- `auto_close.reason_key` is the reason with ids, counts and ages normalised out -- never
+once per retry. A sha written in a checkpoint's prose counts only when the task recorded no commit
+of its own and a deploy record served exactly that commit. The sweep also replays a deploy record
+whose served sha is a task's newest recorded push but which was written BEFORE that push was
+recorded (at most 3 a pass, once per record and task), so a push recorded seconds after its own
+release is stamped without waiting for the next one.
 `POST /hub/api/deploy/reconcile` (`deploy:write`) replays the newest deploy record and retries
 every stepped close in a thread (202; 200 with the running state if one is going); a `running`
 state that has not moved for 2 minutes belongs to a dead process and is restarted, and a replay
 stops at 10 minutes and says so. `GET /hub/deploy-reconcile.json` (member) reads its progress and
 result from `HUB_DIR/deploy-reconcile.json`, so every hub process answers the same.
+
+**Lifecycle history.** The claim, problem and run side files hold only the latest state, so each
+transition is also a ledger event on a log-only aggregate the fold skips (`hub/outcome_events.py`):
+`lease.claimed` / `lease.taken_over` (a NEW holder, never a renewal) / `lease.released` (`reason`:
+released, voided, expired), `problem.claimed` / `released` / `escalated` / `resolved` /
+`reopened` (a background sweep, once per resolution that recurred), `run.started` / `run.finished`
+(an item claim granted to a new machine; its release carrying an ending). Every event names who
+wrote it. A write that meets a busy ledger is spooled (`HUB_DIR/outcome-events.pending.jsonl`) and
+written by the background tick -- or, in a single process, by a throttled pass the board's read
+path starts -- and goes loud only after an hour; a missing required field goes loud at once.
+`GET /hub/outcomes.json?type=<t>[,<t>]&since=<seq>&limit=<n>` (member) pages the history
+(`metadata.next`, and this process's write counters in `metadata.stats`).
 
 **Client telemetry.** Every `hub_core.client` call sends `X-Hub-Client-Version` (a digest of the
 client); write responses carry `X-Hub-Client-Current`, and the attention list names each seat

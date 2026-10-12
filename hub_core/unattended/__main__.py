@@ -276,6 +276,16 @@ def _prompt(item: dict, bound_s: int, tree: dict) -> str:
         block = ("\nTHE ITEM (question%s):\nid: %s\nfrom: %s\nquestion: %s\ncontext:\n%s\n" % (
             ", escalation hop %d" % escalation.hop_of(item) if escalation.hop_of(item) else "",
             item["id"], item.get("from") or "?", item.get("title") or "", item.get("body") or ""))
+    endings = [h for h in item.get("history") or [] if isinstance(h, dict)]
+    if endings:
+        block += ("\nEARLIER RUNS ON THIS SAME THING (%s) -- read them before you start; do not "
+                  "repeat what already failed:\n" % board.item_class(item["id"]))
+        for h in endings[-4:]:
+            block += "- %s on %s ended %s%s: %s\n" % (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(float(h.get("at") or 0))),
+                h.get("machine") or "?", h.get("outcome") or "?",
+                "" if h.get("spent") else " (spent nothing)",
+                " ".join(str(h.get("final") or "(no final message)").split())[-600:])
     return charter + block + worktree.brief(tree)
 
 
@@ -398,9 +408,10 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
             # A hand-back whose pushed commit still has a pipeline running: nothing new to read.
             return {"item": item_id, "outcome": "waiting", "why": item["pipeline_wait"]}
 
-    # CLAIM FIRST for anything that is not a task (a task has its fenced lease): before a run is
-    # queued, so a machine that loses the race writes no ledger row and spends nothing.
-    claimed = kind != "task"
+    # CLAIM FIRST, before a run is queued, so a machine that loses the race writes no ledger row
+    # and spends nothing. A task claims too (beside its fenced lease): the claim is on the item's
+    # CLASS, so a task and an attention item about that task never run on two machines at once.
+    claimed = True
     if claimed:
         verdict = board.item_claim(item_id)
         if verdict.startswith("held:"):
@@ -475,6 +486,7 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
         records = board.responses()
         records[item_id] = {"state": "running", "at": time.time(), "attempts": attempts + 1}
         board.save_responses(records)
+        item["history"] = board.CLAIM_HISTORY.get(item_id) or []
         prompt = _prompt(item, bound, tree)
         watch = {"next": time.time() + SUPERSEDE_CHECK_S, "strikes": 0, "held_by": "",
                  "claim_at": time.time()}
@@ -619,7 +631,11 @@ def _respond(item_id: str, workspace: str, repo_url: str = "") -> dict:
         if kind == "task" and result == "left-active" and any(f["task"] == item_id for f in freed):
             result = "handed-back"
         if claimed:
-            board.item_claim(item_id, release=True)         # given back the moment the run ends
+            # Given back the moment the run ends, leaving its ending on the class.
+            board.item_claim(item_id, release=True, ending={
+                "outcome": result, "final": str(verdict.get("result") or "")[-2000:],
+                "tokens": int(verdict.get("tokens") or 0),
+                "spent": int(verdict.get("tokens") or 0) > 0})
         dirty = _uncommitted(session_dir)
         settled = worktree.settle(tree, "cleared" if result == "cleared" else result) if tree else ""
         pruned = worktree.prune(workspace, item_id.rsplit(":task:", 1)[0], skip=tree.get("path", "")) \

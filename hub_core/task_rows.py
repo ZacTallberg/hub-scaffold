@@ -56,6 +56,12 @@ def note_shas(text) -> list:
 
 
 def pushed(task: dict) -> dict | None:
+    """The task's newest push: a typed ``pushed`` checkpoint, else a sha a WORK checkpoint names.
+
+    Never the hub's ``deployed`` receipt and never a lifecycle row (a hand-back, a released
+    lease): a hand-back note that quotes the commit an earlier run pushed is not a newer push.
+    Read off a hand-back, ``pushed`` named the previous commit while the run's own newer push was
+    still deploying, so a launcher's pipeline hold passed and a second run launched on top of it."""
     typed = checkpoints.latest(task, "pushed")
     if typed and typed.get("sha"):
         out = {"sha": typed["sha"], "source": "step", "at": typed.get("note_at") or ""}
@@ -64,7 +70,7 @@ def pushed(task: dict) -> dict | None:
                 out[key] = typed[key]
         return out
     for s in reversed(task.get("plan") or []):
-        if isinstance(s, dict) and s.get("kind") not in ("deployed",) and not s.get("lifecycle"):
+        if isinstance(s, dict) and s.get("kind") != "deployed" and not checkpoints.is_lifecycle(s):
             if s.get("sha"):
                 return {"sha": s["sha"], "source": "step", "at": s.get("note_at") or ""}
             sha = note_sha(s.get("note"))

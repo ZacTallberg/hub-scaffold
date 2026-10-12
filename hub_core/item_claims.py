@@ -25,12 +25,27 @@ A held item is WAITING, not unclaimed: every surface that counts "nobody has loo
 as in flight, naming the machine -- a false "unclaimed" sends a second agent to dig at work that
 is already held, and teaches the reader that the alarm is decoration.
 
+A CLAIM IS ON A THING, NOT ON A KEY. Several item ids name one piece of work: an attention
+condition ABOUT a task (stalled, needs a person, an orphaned lease) is that task, and a condition
+that clears and returns is a new id for the same condition. Each key therefore belongs to an
+AGGREGATE (``aggregate_of``), and a claim is refused while ANOTHER machine holds any key of the same
+aggregate. On the instance this was lifted from, a task ran on one machine while the attention
+item about the same task ran on another in the same minute.
+
+THE CLASS REMEMBERS. A recurrence is a new item id, so nothing remembered what the last session on
+the same condition concluded, and the next machine started cold. A claim may name a ``cls`` (the
+launcher sends the aggregate); the release that ends a run records its ending there (outcome,
+whether it spent anything, its final message), and the next claim on the class returns that
+history so the next session is told what the last one found. Bounded: ``HISTORY_KEEP_PER_CLASS``
+endings per class, ``HISTORY_MAX_CLASSES`` classes, ``HISTORY_KEEP_S``.
+
 Standard library only; the adapter supplies the directory and the auth.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -50,6 +65,78 @@ def ttl_for(item: str, default: float = TTL_S) -> int:
     return int(TASK_TTL_S if ":task:" in str(item or "") else default)
 MAX_CLAIMS = 500
 FILE = "item-claims.json"
+HISTORY_FILE = "item-claim-history.json"
+HISTORY_KEEP_PER_CLASS = 8
+HISTORY_MAX_CLASSES = 1500
+HISTORY_KEEP_S = 14 * 86400
+HISTORY_FINAL_MAX = 2000
+
+_TASK_IN = re.compile(r"([a-z0-9._-]+:task:[A-Za-z0-9._-]+)")
+
+
+def aggregate_of(item: str) -> str:
+    """The thing a claim is ON, whatever key it was taken under.
+
+    ``class:<x>`` -> x; ``attention:<kind>:<subject>[:<since>][:escalated]`` -> the TASK when the
+    subject names one (a condition about a task is that task), else ``attention:<kind>:<subject>``;
+    anything else is its own aggregate (a task id, a question id, a problem)."""
+    i = str(item or "").strip()
+    if i.startswith("class:"):
+        i = i[len("class:"):]
+    if i.startswith("attention:"):
+        rest = i[len("attention:"):]
+        for suffix in (":escalated", ":leader"):
+            if rest.endswith(suffix):
+                rest = rest[:-len(suffix)]
+        head, _, tail = rest.rpartition(":")
+        rest = head if head and tail.isdigit() else rest
+        m = _TASK_IN.search(rest.partition(":")[2])
+        return m.group(1) if m else "attention:" + rest
+    return i
+
+
+def _history_path(hub_dir) -> Path:
+    return Path(hub_dir) / HISTORY_FILE
+
+
+def _read_history(hub_dir) -> dict:
+    try:
+        data = json.loads(_history_path(hub_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def history_for(hub_dir, cls: str, now: float | None = None) -> list:
+    """The kept endings of earlier runs on this class, oldest first ([] for none)."""
+    now = time.time() if now is None else now
+    rows = _read_history(hub_dir).get(str(cls or "")) or []
+    return [r for r in rows if isinstance(r, dict) and now - float(r.get("at") or 0) < HISTORY_KEEP_S]
+
+
+def _record_ending(hub_dir, cls: str, ending: dict, now: float) -> None:
+    """Append one run's ending to its class (caller holds the claims lock)."""
+    hist = {k: v for k, v in _read_history(hub_dir).items()
+            if isinstance(v, list) and any(isinstance(r, dict)
+                                           and now - float(r.get("at") or 0) < HISTORY_KEEP_S
+                                           for r in v)}
+    try:
+        tokens = max(0, int(ending.get("tokens") or 0))
+    except (TypeError, ValueError):
+        tokens = 0
+    hist.setdefault(cls, []).append({
+        "at": now, "machine": str(ending.get("machine") or "")[:120],
+        "agent": str(ending.get("agent") or "")[:120], "item": str(ending.get("item") or "")[:200],
+        "outcome": str(ending.get("outcome") or "")[:40], "tokens": tokens,
+        "spent": bool(ending.get("spent")),
+        "final": str(ending.get("final") or "")[-HISTORY_FINAL_MAX:]})
+    hist[cls] = hist[cls][-HISTORY_KEEP_PER_CLASS:]
+    if len(hist) > HISTORY_MAX_CLASSES:
+        hist = dict(sorted(hist.items(), key=lambda kv: float(kv[1][-1].get("at") or 0))
+                    [-HISTORY_MAX_CLASSES:])
+    tmp = _history_path(hub_dir).with_suffix(".tmp%d" % os.getpid())
+    tmp.write_text(json.dumps(hist, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, _history_path(hub_dir))
 
 
 def _path(hub_dir) -> Path:
@@ -114,12 +201,15 @@ def live(hub_dir, now: float | None = None, ttl_s: float = TTL_S, roster=None,
 
 def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = False,
           session: str = "", roster=None, now: float | None = None, ttl_s: float = TTL_S,
-          grace_s: float | None = None) -> tuple:
+          grace_s: float | None = None, cls: str = "", ending: dict | None = None) -> tuple:
     """``(granted, row_or_holder)``. Atomic under a process-and-thread lock.
 
     release=True gives the claim back -- only the holding machine may. `roster` (a
     hub_core.liveness.Roster) lets a claim whose console is GONE past its grace be taken over;
-    without one, only the TTL frees a claim."""
+    without one, only the TTL frees a claim. A claim held on ANOTHER key of the same aggregate by
+    another machine refuses this one. With `cls`, a grant or a refusal carries ``history`` (what
+    earlier runs on the class concluded), and a release carrying `ending` ({outcome, final,
+    tokens, spent}) records this run's ending there."""
     item = str(item or "").strip()[:200]
     machine = str(machine or "").strip().lower()[:120]
     agent = str(agent or "").strip().lower()[:120]
@@ -130,25 +220,50 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
     grace_s = _grace() if grace_s is None else grace_s
     hub_dir = Path(hub_dir)
     hub_dir.mkdir(parents=True, exist_ok=True)
+    cls = str(cls or "").strip()[:200]
     with ProcessFileLock(hub_dir, name=".item-claims.lock", timeout=5):
         claims = _live(_read(hub_dir), now, ttl_s)
         held = claims.get(item)
+        if not release and not (held and held.get("machine") != machine):
+            # Any OTHER key of the same aggregate that another machine holds holds this one too.
+            agg = aggregate_of(item)
+            for key, row in claims.items():
+                if key != item and row.get("machine") != machine and aggregate_of(key) == agg:
+                    v = _judge(row, roster, now, grace_s)
+                    if not v["released"]:
+                        age = int(now - float(row.get("at") or now))
+                        out = {"machine": row.get("machine"), "session": row.get("session"),
+                               "agent": row.get("agent"), "age_s": age, "held_as": key,
+                               "aggregate": agg,
+                               "releases_in_s": max(0, int(_row_ttl(row, ttl_s) - age)),
+                               "holder_state": v["state"], "gone_s": v["gone_s"],
+                               "frees_in_s": v["frees_in_s"]}
+                        if cls:
+                            out["history"] = history_for(hub_dir, cls, now)
+                        return False, out
         took_over = None
         if held and held.get("machine") != machine:
             v = _judge(held, roster, now, grace_s)
             age = int(now - float(held.get("at") or now))
             if not v["released"]:
-                return False, {"machine": held.get("machine"), "session": held.get("session"),
-                               "agent": held.get("agent"), "age_s": age,
-                               "releases_in_s": max(0, int(_row_ttl(held, ttl_s) - age)),
-                               "holder_state": v["state"], "gone_s": v["gone_s"],
-                               "frees_in_s": v["frees_in_s"]}
+                out = {"machine": held.get("machine"), "session": held.get("session"),
+                       "agent": held.get("agent"), "age_s": age,
+                       "releases_in_s": max(0, int(_row_ttl(held, ttl_s) - age)),
+                       "holder_state": v["state"], "gone_s": v["gone_s"],
+                       "frees_in_s": v["frees_in_s"]}
+                if cls:
+                    out["history"] = history_for(hub_dir, cls, now)
+                return False, out
             took_over = {"machine": held.get("machine"), "session": held.get("session"),
                          "agent": held.get("agent"), "gone_s": v["gone_s"]}
             held = None
         if release:
             claims.pop(item, None)
             row = {"item": item, "machine": machine, "released": bool(held or took_over)}
+            if cls and isinstance(ending, dict) and str(ending.get("outcome") or "").strip():
+                _record_ending(hub_dir, cls, dict(ending, machine=machine, agent=agent,
+                                                  item=item), now)
+                row["recorded"] = cls
         else:
             # A re-claim by the same machine renews the TTL from now (and records the console
             # that renewed it, so liveness judges the console actually doing the work).
@@ -163,6 +278,9 @@ def claim(hub_dir, item: str, machine: str, agent: str = "", *, release: bool = 
                    "session": entry.get("session"), "renewed": bool(held), "ttl_s": granted_ttl}
             if took_over:
                 row["took_over_from"] = took_over
+            row["aggregate"] = aggregate_of(item)
+            if cls:
+                row["history"] = history_for(hub_dir, cls, now)
         if len(claims) > MAX_CLAIMS:
             claims = dict(sorted(claims.items(),
                                  key=lambda kv: float(kv[1].get("at") or 0))[-MAX_CLAIMS:])
