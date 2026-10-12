@@ -218,6 +218,24 @@ sent (unknown ids dropped and counted, only optional items hideable, nothing des
 pinned), so a model can make a menu less useful but never make it do something new. No model,
 or one that fails, leaves the catalog's own order with no "organised" star.
 
+**Ask about what you pointed at.** Where the page has an agent component, the menu also answers
+on things no catalog declared, by what they ARE -- a link, a table row and the cell pressed, a
+section heading, a card (`.card`, `.panel`, `[data-card]`; a link that IS a card is a card first)
+-- and a declared kind that carries no ask of its own gains "Ask the agent" (plus "About this
+<column>" when the press landed in a table cell). Every such question comes from ONE composer,
+`HubMenu.questionAbout(thing)`, which says what the thing is and where it sits: its column and
+row, the record it belongs to, the section sub-heading, and the page by its banner nav NAME, never
+the h1 (a page's h1 often states a finding, not the page). Text is read without the controls inside
+it, so a heading's info button is never part of its name. The table and the search bar call the
+same composer when the menu is on the page.
+
+**Selected words keep Copy.** A right-click ON the person's own selection never opens a declared
+kind's menu over it -- that took Copy away and made the words as good as unselectable. With an
+agent on the page it opens the selected-text menu, Copy first, then "Ask the agent about this" and
+"Explain this in plain words"; without one, the browser's menu. Shift + right-click is always the
+browser's menu, and the `selection` property (`menu` | `browser`) gives an app the browser's menu
+on selections back. With no agent on the page, none of the built-in kinds exist.
+
 ## 6. The table — interaction hosted, persistence the app's
 
     <section data-hub-table data-app="budget-app" data-table="#ledger">

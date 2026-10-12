@@ -1,5 +1,5 @@
 /* =============================================================================
-   CONTEXT MENU — one right-click menu for every app around the hub.  v1.0.1
+   CONTEXT MENU — one right-click menu for every app around the hub.  v1.1.0
 
    A hosted component: an app LINKS these files from the hub and never copies
    them, so a change here reaches every adopting app on its next page load with no
@@ -30,6 +30,19 @@
    per click. A model that is down, slow or wrong costs nothing: the failure mode of
    a heuristic is "do nothing".
 
+   ASK ABOUT WHAT YOU POINTED AT (1.1.0). Where the page has an agent component, the
+   menu also answers on things no catalog declared, by what they ARE: words the person
+   selected (Copy first, then ask), a link, a table row and the cell pressed, a
+   section heading, a card. Every one of those questions -- and an "Ask the agent"
+   added to a declared kind that carries no ask of its own -- is written by ONE
+   composer, questionAbout(thing): what the thing is and WHERE it sits (its column
+   and row, the record it belongs to, the section, the page by its NAV name), so the
+   agent is asked something it can answer without the person re-typing the context.
+   Other components call the same composer as HubMenu.questionAbout. With no agent on
+   the page none of this exists, and a right-click on a selection keeps the browser's
+   own menu: Copy is never taken away from words. Shift + right-click is always the
+   browser's menu.
+
    THE MOUNT
        <div id="hub-menu" hidden data-app="<slug>" data-app-name="..." data-page="<key>"
             data-role="<rung>" data-smart-url="<the app's gated bridge, optional>"
@@ -49,11 +62,12 @@
    It dispatches hub:agent-ask (cancelable, { question }) for an "ask" action; the
    agent component cancels it once it has taken the question.
    And a global, for an app that wants to open it from its own control:
-       window.HubMenu = { open(target, x, y), close(), register(kind, def), kinds(), smart(), version }
+       window.HubMenu = { open(target, x, y), close(), register(kind, def), kinds(), smart(),
+                          questionAbout(thing), version }
    ============================================================================= */
 (function () {
   "use strict";
-  var VERSION = "1.0.1";
+  var VERSION = "1.1.0";
   var doc = document;
   var mount = doc.getElementById("hub-menu") || doc.querySelector("[data-hub-menu]");
   if (!mount || mount.getAttribute("data-hcm-ready") === "1") return;
@@ -71,11 +85,11 @@
   // An operator sets these per app (POST /hub/api/component-props); they arrive as
   // window.HubComponentProps, from data-props, or on the hub:component-props event.
   // Defaults match this component's manifest "props".
-  var PROPS = { smart: "on", tabs: "auto", recent: "on", head: "on", facts: "on" };
+  var PROPS = { smart: "on", tabs: "auto", recent: "on", head: "on", facts: "on", selection: "menu" };
   function takeProps(all) {
     var p = all && (all["context-menu"] || (all.props || {})["context-menu"]);
     if (!p) return;
-    ["smart", "tabs", "recent", "head", "facts"].forEach(function (k) {
+    ["smart", "tabs", "recent", "head", "facts", "selection"].forEach(function (k) {
       if (typeof p[k] === "string" && p[k]) PROPS[k] = p[k];
     });
   }
@@ -182,7 +196,9 @@
     board: '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11M10 2.5v6"/>',
     ship: '<path d="M2 11.5c1.5 1.2 3 1.2 4.5 0 1.5 1.2 3 1.2 4.5 0 1 .8 2 1 3 .5"/><path d="M3 10.5 2.5 8h11L13 10.5"/><path d="M4.5 8V4.5h7V8M8 2.5v2"/>',
     grid: '<rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/>',
-    x: '<path d="M4 4l8 8M12 4l-8 8"/>'
+    x: '<path d="M4 4l8 8M12 4l-8 8"/>',
+    open: '<path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7.5 8.5"/><path d="M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3"/>',
+    tab: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M6 3v3"/>'
   };
   function icon(name, color) {
     var wrap = el("span", "hcm-ico");
@@ -302,12 +318,283 @@
     facts.href = facts.href || (anchor ? anchor.getAttribute("href") : "");
     facts["href-abs"] = facts.href ? new URL(facts.href, location.href).href : "";
     var labelNode = node ? (node.querySelector("[data-hcm-label]") || node.querySelector("h1,h2,h3,h4,a,th,strong")) : null;
-    facts.text = facts["hcm-label"] || (labelNode ? (labelNode.textContent || "").trim().slice(0, 80) : "");
+    facts.text = facts["hcm-label"] || (labelNode ? wordsOf(labelNode, 80) : "");
     facts.page = location.href;
     facts.origin = location.origin;
     facts.kind = kind;
     return facts;
   }
+
+  /* ------------------------------------------------- reading the page (1.1.0) */
+  function oneLine(v, n) { return String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, n || 80); }
+  /* An element's WORDS, without the controls inside it. A heading that carries an info
+     button read as "Overdue lines i" -- in the menu's own header and in every question
+     composed from it. Buttons, role=button, aria-hidden, svg, script and style are not
+     words a person reads as the heading. */
+  function wordsOf(node, n) {
+    try {
+      var c = node.cloneNode(true);
+      c.querySelectorAll("button, [role=button], [aria-hidden=true], svg, script, style").forEach(function (x) { x.remove(); });
+      return oneLine(c.textContent, n);
+    } catch (e) { return oneLine(node && node.textContent, n); }
+  }
+  function headingsOf(table) {
+    var ths = table ? table.querySelectorAll("thead th") : [];
+    return Array.prototype.map.call(ths, function (th) {
+      return oneLine(th.getAttribute("data-label") || wordsOf(th, 40), 40);
+    });
+  }
+  function cellsOf(tr) {
+    return Array.prototype.map.call(tr.children, function (td) { return oneLine(td.innerText || td.textContent, 400); });
+  }
+  // The page's AGENT: the agent component's mount. No agent, nothing is offered that asks one.
+  function agentHere() { return !!doc.querySelector("[data-hub-agent]"); }
+  /* The page by its NAME, read from the shared banner's nav island (the entry marked
+     current, or the one whose address is this page), else the tab title's first part.
+     Never the h1: a page's h1 often states a finding ("Spend is 4% under forecast"),
+     which is not what the page is called. */
+  function samePath(href) {
+    try {
+      var u = new URL(href, location.href);
+      return u.origin === location.origin && u.pathname.replace(/\/+$/, "") === location.pathname.replace(/\/+$/, "");
+    } catch (e) { return false; }
+  }
+  function pageName() {
+    var current = "";
+    try {
+      var node = doc.querySelector('#app-banner script[type="application/json"][data-ab="nav"]');
+      var nav = node ? JSON.parse(node.textContent || "[]") : [];
+      (Array.isArray(nav) ? nav : []).forEach(function (n) {
+        if (!n || !n.label) return;
+        if (n.current || (n.href && samePath(n.href))) current = String(n.label);
+        (n.children || []).forEach(function (c) {
+          if (c && c.label && (c.current || (c.href && samePath(c.href)))) current = n.label + ": " + c.label;
+        });
+      });
+    } catch (e) { /* no banner, or a bad island: the title below */ }
+    if (current) return current;
+    var tab = oneLine(doc.title, 120).split(/ [·|—–-] /)[0];
+    return tab && tab !== APP_NAME ? tab : "";
+  }
+  /* WHERE a thing sits: its column and row, the table's caption, the declared record it
+     belongs to, the nearest section heading (a sub-heading only, never the page's h1). */
+  function whereOf(node) {
+    var out = {};
+    try {
+      var cell = node && node.closest && node.closest("td, th");
+      var tr = cell && cell.closest("tr");
+      var table = tr && tr.closest("table");
+      if (cell && table) {
+        var heads = headingsOf(table), cells = cellsOf(tr);
+        var ci = Array.prototype.indexOf.call(tr.children, cell);
+        if (heads[ci]) out.column = heads[ci];
+        var first = cells.filter(Boolean)[0];
+        if (first && cells[ci] !== first) out.row = oneLine(first, 60);
+        var cap = table.querySelector("caption");
+        if (cap) out.table = wordsOf(cap, 60);
+      }
+      var rec = findTarget(node);
+      if (rec) {
+        var d = KINDS[rec.kind] || {};
+        out.record = (d.label || rec.kind) + " " + oneLine(fill(d.head || "{id}", factsOf(rec.kind, rec.node)), 60);
+      }
+      var scope = node && node.closest && node.closest("section, article, [role=region], .card, [data-card]");
+      var h = scope && scope.querySelector("h2, h3, h4");
+      if (h && !h.closest(".hcm, .ab-root")) out.section = wordsOf(h, 70);
+    } catch (e) { /* a thinner question, never a failure */ }
+    return out;
+  }
+  /* THE ONE COMPOSER. Every "ask the agent about this" on the page -- this menu's, the
+     table's, the search bar's -- is written here (HubMenu.questionAbout), so a question
+     always says what the thing is, where it sits, and in which app and page. */
+  function questionAbout(thing) {
+    thing = thing || {};
+    var w = thing.where || {};
+    var at = [];
+    if (w.column) at.push("the " + w.column + " column" + (w.row ? " of “" + w.row + "”" : ""));
+    if (w.record && thing.kind !== "record") at.push(w.record);
+    if (w.section) at.push("the “" + w.section + "” section");
+    var page = pageName();
+    var place = "In " + (APP_NAME || "this app") + (page ? ", on the " + page + " page" : "") +
+                (at.length ? " (" + at.join(", ") + ")" : "");
+    var text = oneLine(thing.text || "", 240);
+    var facts = thing.facts ? " (" + oneLine(thing.facts, 300) + ")" : "";
+    switch (thing.intent) {
+      case "explain": return place + ": what does “" + text + "” mean here, in plain words?";
+      case "use": return place + ": how do I use “" + text + "” here?" + facts;
+      case "next": return place + ": “" + text + "”" + facts + " -- what should I know about it, and what can I do next?";
+      case "link": return place + ": what will I find behind the link “" + text + "”" + (thing.path ? " (" + thing.path + ")" : "") + ", and when would I use it?";
+      case "search": return place + ": I searched for “" + text + "”. Can you answer it, or find what I am looking for?";
+      case "table": return place + ", about " + (thing.facts || "this table") + ": " + text;
+      case "page": return "In " + (APP_NAME || "this app") + ", what is " + (page ? "the " + page + " page" : "this page") + " for, and what can I do here?";
+      default: return place + ": tell me about “" + text + "”" + facts + ".";
+    }
+  }
+
+  /* -------------------------------------------- what was right-clicked (1.1.0) */
+  // With no declared kind under the pointer, the thing is named by what it IS. Only where
+  // the page has an agent: these kinds exist to put a question to it.
+  var NOT_OURS = "input, textarea, select, [contenteditable], .hcm, .ab-band, .ab-surface, .hub-agent-panel, " +
+                 "img, picture, video, audio, canvas, iframe, svg, [data-hcm-native]";
+  var CARD_SEL = ".card, .chart-card, .panel, [data-card]";
+  function cardTitle(card) {
+    var t = card.querySelector("[data-card-title], .card-title, .card-header h2, .card-header h3, h2, h3, h4, header strong");
+    return t ? wordsOf(t, 80) : "";
+  }
+  function builtinHit(from, second) {
+    if (!agentHere() || from.closest(NOT_OURS)) return null;
+    var a = from.closest("a[href]");
+    if (a) {
+      var href = a.getAttribute("href") || "";
+      if (/^\s*(javascript:|#\s*$)/i.test(href) || !href.trim()) return null;
+      // A LINK THAT IS A CARD (a dashboard tile wrapped in one <a>) is a card first: its
+      // asks are about the card, and its Open items stay at the top.
+      var linkCard = a.matches(CARD_SEL) ? a : a.querySelector(CARD_SEL);
+      if (!linkCard) {
+        var around = a.closest(CARD_SEL);
+        var t = around && around.querySelector("[data-card-title], .card-title, h2, h3, h4");
+        if (t && a.contains(t)) linkCard = around;
+      }
+      if (linkCard && cardTitle(linkCard)) return { kind: "@card", node: linkCard, link: a };
+      return { kind: "@link", node: a };
+    }
+    if (from.closest("button, [role=button], label, summary, thead, th")) return null;
+    var tr = from.closest("tbody tr");
+    if (tr && tr.closest("table")) return { kind: "@row", node: tr, cell: from.closest("td, th") };
+    var h = from.closest("h1, h2, h3, h4");
+    if (h && wordsOf(h, 80)) return { kind: "@heading", node: h };
+    // A CARD only on the second pass, so an app's declared page kind still wins over it.
+    if (second) {
+      var card = from.closest(CARD_SEL);
+      if (card && cardTitle(card)) return { kind: "@card", node: card };
+    }
+    return null;
+  }
+  function raw(items) {
+    // Built-in items carry text read off the page: it is never a template, so a "{" in a
+    // cell is shown and asked about as written.
+    return items.filter(Boolean).map(function (it) { it.raw = true; if (it.sub) raw(it.sub); return it; });
+  }
+  function ask(id, label, icon_, thing, hint) {
+    return { id: id, label: label, icon: icon_, hint: hint || "", do: { type: "ask", question: questionAbout(thing) } };
+  }
+  function composeBuiltin(hit) {
+    var kind = hit.kind, node = hit.node, def = null;
+    if (kind === "@selection") {
+      var stext = hit.text, swhere = whereOf(node);
+      def = { label: "Selected text", head: "“" + oneLine(stext, 60) + "”", items: [
+        { id: "@sel-copy", label: "Copy", icon: "copy", kbd: "Ctrl+C", hint: "Shift + right-click opens the browser's own menu",
+          do: { type: "copy", text: stext, toast: "Copied." } },
+        { sep: true },
+        ask("@sel-ask", "Ask the agent about this", "chat", { kind: "selection", intent: "next", text: stext, where: swhere }, oneLine(stext, 40)),
+        ask("@sel-explain", "Explain this in plain words", "question", { kind: "selection", intent: "explain", text: stext, where: swhere })
+      ] };
+    } else if (kind === "@link") {
+      var url; try { url = new URL(node.getAttribute("href"), location.href); } catch (e) { return null; }
+      var external = url.origin !== location.origin;
+      var text = wordsOf(node, 60) || url.pathname;
+      def = { label: external ? "Link, outside " + APP_NAME : "Link", head: text, items: [
+        external ? null : { id: "@open", label: "Open", icon: "open", do: { type: "navigate", url: url.href } },
+        { id: "@open-tab", label: "Open in a new tab", icon: "tab", do: { type: "open", url: url.href } },
+        { sep: true },
+        { id: "@copy-link", label: "Copy link", icon: "link", do: { type: "copy", text: url.href, toast: "Link copied." } },
+        external ? null : { sep: true },
+        external ? null : ask("@ask-link", "Ask the agent about this link", "chat",
+          { kind: "link", intent: "link", text: text, path: url.pathname, where: whereOf(node) })
+      ] };
+    } else if (kind === "@row") {
+      var table = node.closest("table");
+      var heads = headingsOf(table), cells = cellsOf(node);
+      var ci = hit.cell ? Array.prototype.indexOf.call(node.children, hit.cell) : -1;
+      var col = ci >= 0 ? (heads[ci] || "") : "", val = ci >= 0 ? (cells[ci] || "") : "";
+      var first = cells.filter(Boolean)[0] || "";
+      var pairs = cells.map(function (c, i) { return heads[i] && c ? heads[i] + ": " + c : ""; }).filter(Boolean);
+      var rowWhere = whereOf(hit.cell || node); delete rowWhere.column; delete rowWhere.row;
+      def = { label: "Row", head: oneLine(first, 60) || "this row", items: [
+        val ? { id: "@copy-cell", label: col ? "Copy " + col : "Copy this cell", icon: "copy", hint: oneLine(val, 50),
+                do: { type: "copy", text: val, toast: (col || "Cell") + " copied." } } : null,
+        { id: "@copy-row", label: "Copy the row", icon: "copy", hint: "tab-separated, pastes into a spreadsheet",
+          do: { type: "copy", text: cells.join("\t"), toast: "Row copied." } },
+        { sep: true },
+        pairs.length ? ask("@ask-row", "Ask the agent about this row", "chat",
+          { kind: "row", intent: "next", text: oneLine(first, 80), where: rowWhere,
+            facts: pairs.slice(0, 6).map(function (x) { return x.slice(0, 60); }).join("; ") }) : null,
+        val && val !== first ? ask("@ask-cell", "Ask about " + (col ? "this " + col : "this value"), "question",
+          { kind: "cell", intent: "explain", text: oneLine(val, 120), where: whereOf(hit.cell) }, oneLine(val, 40)) : null
+      ] };
+    } else if (kind === "@heading") {
+      var sec = node.id ? node : node.closest("[id]:not(body):not(main)");
+      var htext = wordsOf(node, 80), hi = [];
+      if (sec && sec.id) {
+        var u = new URL(location.href); u.hash = sec.id;
+        hi.push({ id: "@copy-section", label: "Copy link to this section", icon: "hash", do: { type: "copy", text: u.href, toast: "Link copied." } });
+      }
+      hi.push({ id: "@copy-heading", label: "Copy the heading", icon: "copy", do: { type: "copy", text: htext, toast: "Copied." } });
+      hi.push({ sep: true });
+      hi.push(ask("@ask-heading", "Ask the agent about this", "chat", { kind: "heading", intent: "explain", text: htext }));
+      def = { label: "Section", head: htext, items: hi };
+    } else if (kind === "@card") {
+      var ctitle = cardTitle(node), cbody = "";
+      try {
+        var cc = node.cloneNode(true);
+        cc.querySelectorAll("script, style, button, svg, [aria-hidden=true], [hidden]").forEach(function (x) { x.remove(); });
+        cbody = oneLine(cc.textContent, 400).replace(ctitle, "").trim().slice(0, 240);
+      } catch (e) { cbody = ""; }
+      var cwhere = whereOf(node.parentElement || node);
+      var citems = [
+        ask("@ask-card", "Ask the agent about this card", "chat", { kind: "card", intent: "next", text: ctitle, facts: cbody, where: cwhere }),
+        ask("@explain-card", "Explain what this card shows", "question", { kind: "card", intent: "explain", text: ctitle, where: cwhere }),
+        { id: "@copy-card-title", label: "Copy the card's title", icon: "copy", do: { type: "copy", text: ctitle, toast: "Copied." } }
+      ];
+      if (hit.link) {
+        var cu; try { cu = new URL(hit.link.getAttribute("href"), location.href); } catch (e) { cu = null; }
+        if (cu) citems = [
+          cu.origin === location.origin ? { id: "@card-open", label: "Open", icon: "open", do: { type: "navigate", url: cu.href } } : null,
+          { id: "@card-tab", label: "Open in a new tab", icon: "tab", do: { type: "open", url: cu.href } },
+          { sep: true }
+        ].concat(citems);
+      }
+      def = { label: "Card", head: ctitle, items: citems };
+    }
+    if (!def) return null;
+    def.items = raw(def.items);
+    if (!def.items.some(function (it) { return !it.sep; })) return null;
+    def.builtin = true;
+    BUILT[kind] = def;
+    return def;
+  }
+  var BUILT = {};   // built-in kind -> the definition composed at its last open
+  function defOf(kind) { return KINDS[kind] || BUILT[kind] || null; }
+  // Was the right-click ON the person's own selection (or Shift+F10 / the Menu key while
+  // words are selected)? A right-click elsewhere on the page is about what is under it.
+  function onSelection(e) {
+    try {
+      var sel = window.getSelection && window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount || !String(sel).trim()) return false;
+      var x = e.clientX, y = e.clientY;
+      if ((x === 0 && y === 0) || e.button === -1) return true;
+      for (var i = 0; i < sel.rangeCount; i++) {
+        var rects = sel.getRangeAt(i).getClientRects();
+        for (var j = 0; j < rects.length; j++) {
+          var r = rects[j];
+          if (x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2) return true;
+        }
+      }
+    } catch (err) { /* no selection API: behave as before */ }
+    return false;
+  }
+  function selectionHit() {
+    try {
+      var sel = window.getSelection && window.getSelection();
+      var text = sel ? oneLine(String(sel), 600) : "";
+      if (!text || !sel.rangeCount) return null;
+      var n = sel.getRangeAt(0).startContainer;
+      var node = n && n.nodeType === 1 ? n : (n && n.parentElement);
+      if (!node || node.closest("input, textarea, select, [contenteditable], .hcm")) return null;
+      return { kind: "@selection", node: node, text: text };
+    } catch (e) { return null; }
+  }
+  var LAST_FROM = null;   // the element the last gesture landed on (a declared row's pressed cell)
 
   /* ----------------------------------------------------------- recent use */
   // Decayed counts per app + kind, this browser only: what THIS person reaches for.
@@ -439,7 +726,7 @@
   var confirmArmed = null;
 
   function itemsFor(kind, facts, node) {
-    var def = KINDS[kind] || {};
+    var def = defOf(kind) || {};
     var items = (def.items || []).map(function (it) { return it; });
     // The app may add to the list for THIS target (hub-menu:open detail.add) or cancel.
     var added = [];
@@ -456,7 +743,7 @@
 
   function build(kind, node, x, y, viaKeyboard) {
     close();
-    var def = KINDS[kind];
+    var def = defOf(kind);
     if (!def) return false;
     var facts = factsOf(kind, node);
     var items = itemsFor(kind, facts, node);
@@ -476,7 +763,7 @@
     menu.id = ID;
     menu.setAttribute("role", "menu");
     menu.setAttribute("data-kind", kind);
-    var headId = fill(def.head || "{id}", facts);
+    var headId = def.builtin ? (def.head || "") : fill(def.head || "{id}", facts);
     menu.setAttribute("aria-label", (def.label || kind) + " " + headId);
     if (def.width) menu.style.minWidth = def.width;
 
@@ -488,7 +775,7 @@
       var head = el("div", "hcm-head");
       if (def.label) head.appendChild(el("span", "hcm-head-kind", def.label));
       head.appendChild(el("span", "hcm-head-id", headId));
-      if (smartOn() && (!smart || smart.state !== "off")) {
+      if (smartOn() && !def.builtin && (!smart || smart.state !== "off")) {
         var star = el("span", "hcm-star");
         star.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true">' + ICONS.sparkle + "</svg>";
         star.title = ranking ? "Organised by the hub's model for this app"
@@ -542,10 +829,33 @@
     // ASKS (model): questions for the page's agent about this thing -- only
     // where the page has the agent to ask.
     var asks = (ranking && ranking.asks || []).filter(function (a) { return a && a.question; }).slice(0, 3);
-    if (asks.length && doc.querySelector("[data-hub-agent]")) {
+    /* A DECLARED KIND THE CATALOG GAVE NO ASK (1.1.0): with an agent on the page, one
+       question about this record, composed with its facts and where it sits; and when the
+       press landed in a table cell, one about that column's value. */
+    if (!def.builtin && agentHere()) {
+      var hasAsk = visible.some(function (it) { return it.do && it.do.type === "ask"; });
+      var recWhere = whereOf(node); delete recWhere.record;
+      if (!asks.length && !hasAsk) {
+        var known = (def.facts || []).map(function (f) {
+          var k = typeof f === "string" ? f : f.key, lab = typeof f === "string" ? f : f.label;
+          var v = fill("{" + k + "}", facts); return v ? lab + ": " + oneLine(v, 50) : "";
+        }).filter(Boolean).slice(0, 5);
+        asks.push({ label: "About this " + (def.label || kind).toLowerCase(), raw: true,
+                    question: questionAbout({ kind: "record", intent: "next", text: oneLine((def.label || kind) + " " + headId, 80),
+                                              where: recWhere, facts: known.join("; ") }) });
+      }
+      var cell = LAST_FROM && node.contains(LAST_FROM) ? LAST_FROM.closest("td") : null;
+      var cw = cell ? whereOf(cell) : null;
+      var cv = cell ? wordsOf(cell, 120) : "";
+      if (cw && cw.column && cv) {
+        asks.push({ label: "About this " + cw.column + " (" + oneLine(cv, 30) + ")", raw: true,
+                    question: questionAbout({ kind: "cell", intent: "explain", text: cv, where: cw }) });
+      }
+    }
+    if (asks.length && agentHere()) {
       visible.push({ sep: true });
       visible.push({ id: "__ask", icon: "chat", label: "Ask the agent", sub: asks.map(function (a, i) {
-        return { id: "__ask" + i, icon: "question", label: a.label || a.question,
+        return { id: "__ask" + i, icon: "question", label: a.label || a.question, raw: !!a.raw,
                  do: { type: "ask", question: a.question } };
       }) });
     }
@@ -650,6 +960,7 @@
     }
     menu.appendChild(body);
     if (ranking && ranking.note && PROPS.head !== "off") menu.appendChild(el("div", "hcm-note", String(ranking.note).slice(0, 140)));
+    if (def.builtin) menu.appendChild(el("div", "hcm-note", "Shift + right-click for the browser's own menu"));
 
     doc.body.appendChild(menu);
     place(menu, x, y, node, viaKeyboard);
@@ -696,8 +1007,8 @@
     if (it.danger) b.classList.add("is-danger");
     var color = it.color ? fill(it.color, facts) : "";
     b.appendChild(icon(it.icon || (it.sub ? "list" : ""), color));
-    var label = el("span", null, fill(it.label || it.id || "", facts));
-    if (it.hint) label.appendChild(el("small", "hcm-hint", fill(it.hint, facts)));
+    var label = el("span", null, it.raw ? (it.label || it.id || "") : fill(it.label || it.id || "", facts));
+    if (it.hint) label.appendChild(el("small", "hcm-hint", it.raw ? it.hint : fill(it.hint, facts)));
     b.appendChild(label);
     if (it.kbd) b.appendChild(el("kbd", "hcm-kbd", it.kbd));
     if (on) { var c = el("span", "hcm-check"); c.innerHTML = '<svg viewBox="0 0 16 16">' + ICONS.check + "</svg>"; b.appendChild(c); }
@@ -746,7 +1057,7 @@
       }
       var o = openState;
       close();
-      if (it.id && it.id.indexOf("__") !== 0) bump(kind, it.id);
+      if (it.id && it.id.indexOf("__") !== 0 && it.id.charAt(0) !== "@") bump(kind, it.id);
       run(it, kind, facts, node, o);
     });
     return b;
@@ -754,7 +1065,7 @@
 
   /* ---------------------------------------------------------------- actions */
   function run(it, kind, facts, node, o) {
-    var d = it.do ? fillDeep(it.do, facts) : null;
+    var d = it.do ? (it.raw ? it.do : fillDeep(it.do, facts)) : null;
     try {
       doc.dispatchEvent(new CustomEvent("hub-menu:action", { detail: {
         kind: kind, id: facts.id, item: it, target: node, facts: facts, action: d } }));
@@ -909,9 +1220,27 @@
     // People right-click a text field for the browser's own menu; leave that alone.
     if (e.target.closest("input, textarea, select, [contenteditable]")) return;
     if (e.target.closest("[data-hcm-native]")) return;
-    var hit = findTarget(e.target) || pageKindHit(e.target);
-    if (!hit) return;
+    /* TEXT A PERSON SELECTED IS NEVER MADE UNCOPYABLE (1.1.0). Highlighting words and
+       right-clicking them is how people copy; a declared kind's menu opening over the
+       selection took Copy away and made the words as good as unselectable. A press ON the
+       selection gets the browser's menu -- or, where the page has an agent, the
+       selected-text menu with Copy FIRST and then the asks. Shift, or the "selection"
+       property set to "browser", is always the browser's menu. */
+    if (onSelection(e)) {
+      if (e.shiftKey || PROPS.selection === "browser" || !agentHere()) return;
+      var sh = selectionHit();
+      if (sh && composeBuiltin(sh) && openFor(sh, e.clientX, e.clientY, false)) e.preventDefault();
+      return;
+    }
     var x = e.clientX, y = e.clientY;
+    // SHIFT + RIGHT-CLICK IS ALWAYS THE BROWSER'S MENU: one gesture that never gets ours.
+    // Not Shift+F10, which arrives as a contextmenu at (0,0) with Shift held.
+    if (e.shiftKey && !(x === 0 && y === 0)) return;
+    LAST_FROM = e.target;
+    // Declared kinds first, then what the thing is, then the app's page kind, then a card.
+    var hit = findTarget(e.target) || builtinHit(e.target, false) || pageKindHit(e.target) || builtinHit(e.target, true);
+    if (!hit) return;
+    if (hit.kind.charAt(0) === "@" && !composeBuiltin(hit)) return;
     // Shift+F10 and the Menu key arrive as a contextmenu event at (0,0) in some
     // browsers; place beside the element instead of the corner.
     var viaKeyboard = (x === 0 && y === 0) || e.button === -1;
@@ -921,9 +1250,16 @@
     var menu = doc.getElementById(ID);
     if (!menu) {
       if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
+        if (onSelection({ clientX: 0, clientY: 0, button: -1 })) {
+          var ks = PROPS.selection === "browser" || !agentHere() ? null : selectionHit();
+          if (ks && composeBuiltin(ks) && openFor(ks, 0, 0, true)) e.preventDefault();
+          return;
+        }
         var a = doc.activeElement;
         if (a && a !== doc.body) {
-          var hit = findTarget(a);
+          LAST_FROM = a;
+          var hit = findTarget(a) || builtinHit(a, false);
+          if (hit && hit.kind.charAt(0) === "@" && !composeBuiltin(hit)) hit = null;
           if (hit && openFor(hit, 0, 0, true)) e.preventDefault();
         }
       }
@@ -1012,6 +1348,10 @@
       if (SMART[kind]) delete SMART[kind];
     },
     kinds: function () { return Object.keys(KINDS); },
+    /* The shared composer: what a thing is and where it sits, as one question for the
+       page's agent. thing = {kind, intent: next|explain|link|search|table|page, text,
+       facts, where:{column,row,record,section}}. */
+    questionAbout: function (thing) { return questionAbout(thing); },
     smart: function () { var out = {}; Object.keys(SMART).forEach(function (k) { out[k] = { state: SMART[k].state, reason: SMART[k].reason || "", error: SMART[k].error || "", ms: SMART[k].ms || 0 }; }); return out; }
   };
 

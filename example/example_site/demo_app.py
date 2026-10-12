@@ -135,10 +135,10 @@ PAGE = """<!doctype html>
 <body>
 <header><h1>Budget app</h1><div class="slot"><span data-hub-agent-header></span><span class="mark" id="mark" title="">?</span></div></header>
 <main>
-  <section><h2>Being built for this app</h2><div id="checklist" class="empty">Loading&hellip;</div></section>
-  <section><h2>Built because you asked</h2><div id="announcements" class="empty">Loading&hellip;</div></section>
+  <section data-card><h2>Being built for this app</h2><div id="checklist" class="empty">Loading&hellip;</div></section>
+  <section data-card><h2>Built because you asked</h2><div id="announcements" class="empty">Loading&hellip;</div></section>
   <section class="wide" data-hub-table data-app="budget-app" data-table="#ledger">
-    <h2>Ledger</h2>
+    <h2 id="ledger-head">Ledger <button type="button" class="info" aria-label="What the ledger holds">i</button></h2>
     <div class="bar" data-ht-toolbar>
       <button type="button" data-ht-overflow="20">Export</button>
       <button type="button" data-ht-overflow="10">New line</button>
