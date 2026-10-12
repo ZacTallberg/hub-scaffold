@@ -253,26 +253,21 @@ def relevance_filter(memory, rank, *, cut=None, most=None) -> tuple:
 
 
 #: When the hub could only rank by WORDS, each matching row carries `lexical_score`: the share
-#: of THIS query's own BM25 ceiling it answers (0..1). Read from real focuses, not a round
-#: number: the top row must reach LEXICAL_SCORE_MIN, a later row LEXICAL_FOLLOW_MIN AND
-#: LEXICAL_FOLLOW_FRAC of the top, at most LEXICAL_RELEVANT_MAX rows — fewer than a meaning-based
-#: ranking would get, because a shared word is weaker evidence of relevance than a close meaning.
-LEXICAL_SCORE_MIN = 0.25
-LEXICAL_FOLLOW_MIN = 0.24
-LEXICAL_FOLLOW_FRAC = 0.6
-LEXICAL_RELEVANT_MAX = 4
+#: of THIS query's own BM25 ceiling it answers (0..1). The cut on it is RANK, not score: every
+#: query term counts in the ceiling, so the score FALLS WITH QUERY LENGTH and a prompt-length
+#: query rarely clears any fixed floor. Measured on the origin system over 758 real answered asks
+#: (context-only queries): a floor of 0.25 with a 60%-of-top follow delivered the answering record
+#: for 2 and gave 754 prompts nothing (median top score 0.119); the first six matches delivered
+#: 309, 80% of what the meaning-based ranking delivered on the same asks.
+LEXICAL_RELEVANT_MAX = 6
 
 
 def lexical_cut(memory) -> tuple:
-    """(rows that clear the word-match cut, how many scored rows were considered)."""
-    scored = [m for m in memory if isinstance(m.get("lexical_score"), (int, float))]
+    """(the first LEXICAL_RELEVANT_MAX rows that match at all, how many scored rows there were)."""
+    scored = [m for m in memory if isinstance(m.get("lexical_score"), (int, float))
+              and float(m["lexical_score"]) > 0]
     scored.sort(key=lambda m: -float(m["lexical_score"]))
-    if not scored or float(scored[0]["lexical_score"]) < LEXICAL_SCORE_MIN:
-        return [], len(scored)
-    top = float(scored[0]["lexical_score"])
-    follow = max(LEXICAL_FOLLOW_MIN, LEXICAL_FOLLOW_FRAC * top)
-    kept = [scored[0]] + [m for m in scored[1:] if float(m["lexical_score"]) >= follow]
-    return kept[:LEXICAL_RELEVANT_MAX], len(scored)
+    return scored[:LEXICAL_RELEVANT_MAX], len(scored)
 
 
 def delivered_cut(memory, rank) -> tuple:
