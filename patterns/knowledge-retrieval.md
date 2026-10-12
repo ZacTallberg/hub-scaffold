@@ -259,8 +259,11 @@ It asks `guidance.json` for the index ranked by the console's focus (by meaning 
 the first 400 characters of the prompt), prints the rows the session does not already hold
 (a per-session receipt in `HUB_CLIENT_STATE_DIR`, reset on session start), names the relevant
 rows it already holds in one line, and keeps the whole output under 9,500 characters — rows that
-did not fit are written to a pack file whose path is printed, and only rows that rendered become
-receipt keys. When the ranking is by MEANING, each row carries its cosine (`score`) and only
+did not fit are NOT delivered (one line counts them and names `search`; an overflow pack file was
+retired after packs holding thousands of rows were read zero times), and only rows that rendered
+become receipt keys. When the board could not rank for the prompt at all, no rows are delivered
+and one line says why, with the search verb: unranked is not relevant, and a prompt that got
+nothing must not look like one where nothing applied. When the ranking is by MEANING, each row carries its cosine (`score`) and only
 rows at or above `HUB_PROMPT_RELEVANCE_CUT` (0.48) are delivered, at most
 `HUB_PROMPT_RELEVANCE_MAX` (6), never padded: a budget filled with whatever ranked next is read
 by nobody. A prompt whose focus is the one the session's last memory block was ranked for gets

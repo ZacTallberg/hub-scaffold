@@ -19,8 +19,10 @@ FOUR RULES, each paid for on the instance this was lifted from:
   * WHAT FITS IS WHAT IS DELIVERED. Agent harnesses commonly show hook output inline only up to
     a ceiling and replace anything longer with a short preview — so a 30 KB block delivers its
     first few rows while the receipt marks hundreds as held. Output is fitted under
-    OUTPUT_MAX, rows that did not fit are written to a pack file the agent can read, and only
-    rows that actually rendered become receipt keys. A cut is never silent.
+    OUTPUT_MAX and only rows that actually rendered become receipt keys; rows that did not fit
+    are NOT delivered, and one line says how many and how to search for them. (An overflow pack
+    file was tried and retired: on the instance this was lifted from, packs held thousands of
+    rows over weeks and were read zero times.) A cut is never silent.
   * A STATE CLAIM CARRIES ITS DATE AND ITS CHECK. A rule that says "port 8001 serves X" decays
     from the day it is written; rows print the hub's one label for the record (STATE as of ...
     · verify before acting / UNVERIFIED / CHECK FAILED — NEEDS REVIEW, hub_core.staleness), or
@@ -30,7 +32,10 @@ FOUR RULES, each paid for on the instance this was lifted from:
     never padded to fill the room -- on the instance this was lifted from, a few thousand
     records delivered by budget were referred to a handful of times, and the rows past the
     first few added almost nothing to the answers people actually got. A row without a score
-    is unranked, not relevant.
+    is unranked, not relevant: when the board could not rank for this prompt at all (no focus,
+    an embedder and a word index both unavailable), NO rows are delivered and one line says so,
+    with the reason and the search verb -- a prompt that got nothing because nothing could be
+    ranked must not look like one where nothing applied.
   * THE SAME QUESTION GETS NO NEW ANSWERS. A prompt whose focus is the one the session's last
     memory block was ranked for re-ranks the SAME query, so all it could add sits BELOW rows
     the session already holds (most prompts that repeat a focus are notifications and relayed
@@ -51,7 +56,7 @@ from pathlib import Path
 OUTPUT_MAX = 9500
 #: The most the memory block may take of that.
 MEMORY_BUDGET = 8000
-SPILL_LINE_RESERVE = 260
+SPILL_LINE_RESERVE = 200
 #: After a session's first injection, only this head of the ranking is considered for new rows,
 #: and only the first DELTA_FULL of those carry their full RULE/WHY.
 DELTA_RANK_WINDOW = 60
@@ -71,8 +76,7 @@ def _env_float(name, default):
 RELEVANCE_CUT = _env_float("HUB_PROMPT_RELEVANCE_CUT", 0.48)
 RELEVANCE_MAX = int(_env_float("HUB_PROMPT_RELEVANCE_MAX", 6))
 SPILL_MARK = ("  (%d more records ranked for this prompt did not fit inline and were NOT delivered; "
-              "they are in full, in rank order, in the file named below — read it when the task "
-              "touches them)")
+              "find them with: %s search \"<symptom>\")")
 
 
 def state_dir() -> Path:
@@ -273,7 +277,8 @@ def lexical_cut(memory) -> tuple:
 
 def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
     """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
-    the receipt keys of rows that actually rendered, and the rendered rows that did not fit."""
+    the receipt keys of rows that actually rendered, and the rows that did not fit (counted in
+    the block, never delivered and never receipted)."""
     memory = list(payload.get("memory") or [])
     rank = payload.get("memory_rank") or {}
     word_cut = None
@@ -305,6 +310,14 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
     else:
         fresh = memory
     memory_block, kept_keys, spill = "", [], []
+    if word_cut is None and not rank.get("ranked") and memory:
+        # UNRANKED IS NOT RELEVANT. A standing-order list under a knowledge header is read as
+        # relevance it is not, and padding a prompt with it is the budget fill the cut replaced.
+        memory_block = ("<hub-knowledge>\nBOARD KNOWLEDGE was NOT delivered for this prompt: the "
+                        "board could not rank it (%s). Search it yourself: %s search \"<symptom>\"\n"
+                        "</hub-knowledge>" % (re.sub(r"[<>]", "", str(
+                            rank.get("reason") or "unranked"))[:160], client_hint))
+        fresh, already = [], []
     if word_cut is not None and not word_cut["kept"]:
         memory_block = ("<hub-knowledge>\nBOARD KNOWLEDGE was NOT delivered for this prompt: it could "
                         "only be ranked by WORDS (%s) and no record matched them strongly enough "
@@ -351,7 +364,7 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
             else:
                 spill.append(row)        # rank order holds: nothing lower jumps a row that did not fit
         if kept or already:
-            lines = head + kept + ([SPILL_MARK % len(spill)] if spill else []) + tail
+            lines = head + kept + ([SPILL_MARK % (len(spill), client_hint)] if spill else []) + tail
             memory_block = "\n".join(lines)
     live = payload.get("live") or {}
     live_lines = []
@@ -367,31 +380,6 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
         live_lines.append("(the live block could not be read: %s)" % live["error"])
     live_block = "\n".join(["<hub-live>"] + live_lines + ["</hub-live>"]) if live_lines else ""
     return {"memory": memory_block, "live": live_block, "keys": kept_keys, "spill": spill}
-
-
-def write_spill(sid, rows) -> str:
-    """Rows that did not fit inline, written where the agent can read them; the path, or ""."""
-    if not rows:
-        return ""
-    try:
-        d = state_dir() / "packs"
-        d.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha1("\n".join(rows).encode("utf-8", "replace")).hexdigest()[:8]
-        path = d / ("%s-%s.md" % (_safe(sid), digest))
-        cutoff = time.time() - 86400
-        for old in d.glob("*.md"):
-            try:
-                if old.stat().st_mtime < cutoff:
-                    old.unlink()
-            except OSError:
-                pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text("# Board knowledge ranked for this prompt (%s); did not fit inline.\n\n%s\n"
-                       % (time.strftime("%Y-%m-%d %H:%M:%S"), "\n".join(rows)), encoding="utf-8")
-        os.replace(tmp, path)
-        return str(path).replace("\\", "/")
-    except OSError:
-        return ""
 
 
 def fit_output(parts, limit=OUTPUT_MAX) -> str:

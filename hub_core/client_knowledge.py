@@ -285,7 +285,12 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     # block still rides) and print one line that says which side is serving. Any doubt keeps
     # the hub block: the decision fails closed.
     from . import knowledge_mirror
-    local = knowledge_mirror.local_owner()
+    # PER SESSION, not only per machine: a session started without the local recall hook (an
+    # unattended run's lean settings set HUB_SESSION_LOCAL_RECALL=0) is served by nobody if this
+    # hook stands down for the machine's engine -- on the origin system none of six lean
+    # unattended runs received any knowledge while the machine's bit said "local serves".
+    local = (os.environ.get("HUB_SESSION_LOCAL_RECALL", "").strip() != "0"
+             and knowledge_mirror.local_owner())
     query: dict[str, Any] = {"agent": _agent(arguments),
                              "memory_cap": 1 if local else arguments.memory_cap,
                              "memory_full": 0 if local else arguments.memory_full}
@@ -324,16 +329,11 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
         return None
     phases["render_ms"] = round((_time.perf_counter() - t1) * 1000)
     parts = [out["live"], out["memory"]]
-    if out["spill"]:
-        t2 = _time.perf_counter()
-        path = pc.write_spill(sid, out["spill"])
-        phases["pack_ms"] = round((_time.perf_counter() - t2) * 1000)
-        parts.append("(%d more ranked records are in %s)" % (len(out["spill"]), path or
-                     "no file — the overflow could not be written; use `search`"))
     text = pc.fit_output(parts)
     if text:
         print(text)
     phases.update(total_ms=round((_time.perf_counter() - t0) * 1000), delivered=len(out["keys"]),
+                  withheld=len(out["spill"]),
                   held=len(delivered), chars=len(text or ""), outcome="delivered" if text else "silent",
                   rank=(payload.get("memory_rank") or {}).get("by") or
                   ("ranked" if (payload.get("memory_rank") or {}).get("ranked") else "standing"))
