@@ -24,6 +24,32 @@ except Exception:  # pragma: no cover - fallback path
 _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
 
 
+class SchemaDuplicateKey(ValueError):
+    """A schema file declares the same key twice in one object; the registry refuses to load it."""
+
+
+def _refuse_duplicate_keys(source):
+    """An ``object_pairs_hook`` that refuses an object naming one key twice.
+
+    JSON parsers keep the LAST of two equal keys, silently. In a schema that turns two edits to
+    the same property (two branches each declaring it, a rebase that keeps both) into whichever
+    one happened to land second: on the instance this was lifted from, a stricter duplicate
+    definition of an array's items won and every append to that field was refused, and a later
+    rebase that dropped "the duplicate" removed the only declaration, so every update to the
+    entity failed validation. Both reached production through a parser that never said a word.
+    A schema is the write path's contract, so a duplicate fails the load, naming file and key."""
+    def hook(pairs):
+        seen = set()
+        for key, _value in pairs:
+            if key in seen:
+                raise SchemaDuplicateKey("%s: key %r is declared twice in one object (JSON keeps "
+                                         "the last silently; merge them into one declaration)"
+                                         % (source, key))
+            seen.add(key)
+        return dict(pairs)
+    return hook
+
+
 class Registry:
     """Maps schema $id -> schema doc, loaded from a directory of *.schema.json."""
 
@@ -34,7 +60,8 @@ class Registry:
     def from_dir(cls, schema_dir) -> "Registry":
         reg = cls()
         for p in sorted(Path(schema_dir).glob("*.schema.json")):
-            doc = _json.loads(Path(p).read_text(encoding="utf-8"))
+            doc = _json.loads(Path(p).read_text(encoding="utf-8"),
+                              object_pairs_hook=_refuse_duplicate_keys(Path(p).name))
             sid = doc.get("$id") or p.stem
             reg.by_id[sid] = doc
         return reg
