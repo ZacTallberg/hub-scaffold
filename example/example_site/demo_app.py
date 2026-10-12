@@ -180,7 +180,18 @@ PAGE = """<!doctype html>
 <div data-hub-agent data-app="budget-app" data-title="Budget assistant"
      data-ask="/demo-app/agent/ask" data-history="/demo-app/agent/history"
      data-conversation="/demo-app/agent/conversation" data-profile="/demo-app/profile.json"
-     data-props="/hub/components/props/budget-app.json"></div>
+     data-props="/hub/components/props/budget-app.json">
+  <script type="application/json" data-agent-guide>{"title": "Budget overview",
+    "summary": "What each part of this page is, and who fills it in.",
+    "sections": [
+      {"name": "Being built for this app", "kind": "system", "target": "#checklist",
+       "text": "Open board tasks that name this app, read from the hub."},
+      {"name": "Built because you asked", "kind": "system", "target": "#announcements",
+       "text": "Work finished on a request from someone using this app."},
+      {"name": "Ledger", "kind": "mixed", "target": "#ledger",
+       "text": "Lines are entered by people; status and the late flag are set by the app.",
+       "who": "Members add lines; the owner column is whoever claimed it."}]}</script>
+</div>
 <script>
 (function () {
   function list(id, rows, empty, matched) {

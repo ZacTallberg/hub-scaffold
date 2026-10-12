@@ -153,6 +153,45 @@ failed (with retry) and empty states. Any element with `data-hub-agent-open`, or
 `hub:agent-open` window event (`detail: {question}`), opens it. Agent text is rendered as text,
 never HTML.
 
+**It reads the page the person is on — on by default, one click off.** A chip above the
+question box says "Reading this page"; one click says "Not reading this page", and the choice
+is remembered for every app (`hub-agent:page`), because it is the reader's habit. "What it
+reads" shows the exact text a question would carry. It is read at the moment of asking and only
+what is on screen: title, address (secret-looking query values dropped), the nav's current
+section, selected text, open panels and dialogs first, then the visible text in reading order
+(a table row as `a | b | c`) and visible fields with values — never password or hidden fields,
+the shared banner, the panel itself, or anything marked `data-agent-skip`. At most 7,000
+characters, sent as ONE `thread` item `{"role": "page", "text": …}`: every bridge already
+forwards `thread` untouched, so adopters gain it with no change. `agent_broker.compose` lifts it
+out before counting turns (a page never pushes a real turn out of the window), caps it at
+`PAGE_MAX_CHARS` and states it first as what the person is looking at. An answer to a question
+that carried the page says "read this page" under it.
+
+**Other sidebars step aside.** Docked, the panel takes its width from `<body>`, but a FIXED
+layer ignores body margin — an app's own right-edge drawer was drawn over the panel or under
+it. While docked, every fixed layer reaching the right edge (probed every 48px: a sidebar, a
+sheet across the foot, a toast; never the shared banner, never the panel's own parts) is moved
+left by exactly the panel's width — right margin, or a translate for a layer placed by `left`; a
+window-wide layer that will not shrink is left alone — re-checked on page changes and every
+resize, and restored exactly on close. While the panel is open the floating button and the edge
+tab step away; the panel carries its own close.
+
+**An optional page guide.** An app may declare, per page, what each section is and who fills
+it in, as a JSON island anywhere on the page (inside the mount is tidiest):
+
+    <script type="application/json" data-agent-guide>{"title": "Overview", "summary": "...",
+      "sections": [{"name": "Ledger", "kind": "system|user|mixed", "text": "...", "who": "...",
+                    "target": "#ledger"}], "labels": {"system": "..."}, "more": {"label": "...", "href": "..."}}</script>
+
+It is drawn as a folding "About this page" block above the conversation, at most 45% of the
+panel and scrolling inside itself so the question box is never pushed off. Each kind is a WORD
+on a chip (Automatic / Entered by people / Both, relabelled by `labels`), never colour alone,
+and the legend lists only the kinds the page has. A section whose `target` is on the page gets a
+button that scrolls to it and outlines it. Folded or open is remembered for every app
+(`hub-agent:guide-open`). No island, or no sections, draws nothing. A page that changes what it
+shows without a reload dispatches `hub:agent-guide` on `document` (`detail: {guide}` draws that
+guide; no detail re-reads the island).
+
 ## 5. The context menu — the app declares, the hub organises
 
     <div id="hub-menu" hidden data-app="budget-app" data-page="ledger" data-role="member"
