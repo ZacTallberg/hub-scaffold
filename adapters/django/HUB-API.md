@@ -676,6 +676,13 @@ four disciplines, each learned from a seat that lost work without knowing it:
   5xx is the hub having been reached, and resending a write there could land it twice. Reads get
   `HUB_CLIENT_TIMEOUT_S` (10), writes `HUB_CLIENT_WRITE_TIMEOUT_S` (30). "Unreachable" names every
   route tried and how to point this shell at another route.
+- **A restart is ridden, not reported.** A failure with a restart's shape -- the connection refused
+  or reset behind a right route, a proxy 503 that is not the hub's envelope, a gateway 502/504 on a
+  read -- waits for the hub on a token-free read (`HUB_CLIENT_HEALTH_PATH`, `cursor.json`) every ~2 s,
+  jittered, for up to `HUB_CLIENT_RESTART_RIDE_S` (150; `0` = off), spreads its return over a
+  second and a half, and sends again. A write that may already have landed is never resent by the
+  ride (a retry-safe write is, under its idempotency key). Only a failure past the ride opens the
+  blind window or queues. Per-prompt hooks turn the ride off: a prompt never waits on a deploy.
 - **Three outcomes for a write, not two.** Landed; refused; or not sent. A write whose every route
   failed to connect is QUEUED in the seat's queue (`HUB_CLIENT_HOME`, default `~/.hub-client`),
   stamped with the console that queued it, and replayed in order ahead of the next write — AS that

@@ -388,9 +388,15 @@ class HubUnreachable(RuntimeError):
     """No answer. `reached` says whether the request may have arrived (a read timeout or a 5xx
     from the hub/its proxy) — for a write that means the outcome is UNKNOWN, not failed."""
 
-    def __init__(self, message: str, *, reached: bool, bases: list[str]):
+    def __init__(self, message: str, *, reached: bool, bases: list[str], restart: bool = False,
+                 base: str = ""):
         self.reached = reached
         self.bases = bases
+        # RESTART-SHAPED: the route is right and the process behind it is not answering yet (the
+        # connection was refused or reset, or the proxy in front has no upstream) -- a hub coming
+        # back from a deploy, never a wrong address or a dead network. `base` is that route.
+        self.restart = restart
+        self.base = base
         hint = ("" if reached else
                 " -- every configured route failed to connect. If you hold another route to the "
                 "same hub (e.g. a tunnel you opened yourself), set HUB_API_BASE to it for this "
@@ -415,9 +421,100 @@ def _is_hub_answer(body: Any) -> bool:
     return isinstance(body, dict) and ("errors" in body or "data" in body or "ok" in body)
 
 
+#: RIDE OUT A HUB RESTART INSTEAD OF FAILING. A hub that deploys often restarts often (the origin
+#: system measured 24 restarts in three hours on one busy day), and the old answer to a refused
+#: connection or a proxy with no upstream was one resend a second later and then "unreachable":
+#: a read failed, a write was queued and its author told not to report it -- and re-sent it by
+#: hand, so the recipient got it twice. A restart is not an outage: the address is right and
+#: the process is back in tens of seconds. So a failure with a restart's shape waits for the
+#: hub on a cheap token-free read (HUB_CLIENT_HEALTH_PATH, default `cursor.json`) every ~2 s,
+#: jittered so a fleet of clients does not return on one beat, then spreads its return over a
+#: second and a half and sends again. Bounded by HUB_CLIENT_RESTART_RIDE_S (150 s; 0 = off);
+#: past it the old path applies (the offline queue, the blind window). A network failure (DNS,
+#: a connect timeout) does not wait here -- that is a route, and the breadth-first sweep handles
+#: it. A write that may already have landed is never resent from here: only a request that
+#: never reached the hub, or a READ, rides; a retry-safe write rides inside `_post` under its
+#: idempotency key. A per-prompt hook turns the ride off (`no_restart_ride`): a prompt must
+#: never wait on a deploy.
+RESTART_POLL_S = 2.0
+_RIDE = {"off": False}
+
+
+def _restart_ride_s() -> int:
+    if _RIDE["off"]:
+        return 0
+    try:
+        return max(0, int(os.environ.get("HUB_CLIENT_RESTART_RIDE_S") or 150))
+    except ValueError:
+        return 150
+
+
+def no_restart_ride() -> None:
+    """For a process that must answer NOW (a prompt or tool hook): fail fast, never wait for a
+    restarting hub."""
+    _RIDE["off"] = True
+
+
+def _restart_shaped(error) -> bool:
+    """A refused, reset or aborted connection: something answers on the route and the process
+    behind it does not -- a restart, never a wrong address."""
+    return isinstance(error, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError))
+
+
+def _await_hub_back(base: str, budget_s: float) -> bool:
+    """Poll the hub's cheap read until it answers 200 or the budget ends. True = it is back.
+    One line to stderr when it starts and one when it ends, so a pause is never read as a hang."""
+    import time as _time
+    if budget_s <= 0 or not base:
+        return False
+    path = (os.environ.get("HUB_CLIENT_HEALTH_PATH") or "cursor.json").lstrip("/")
+    t0 = _time.monotonic()
+    print("hub is restarting; waiting for it to answer, up to %ds ..." % int(budget_s),
+          file=sys.stderr)
+    while _time.monotonic() - t0 < budget_s:
+        _time.sleep(RESTART_POLL_S * random.uniform(0.7, 1.3))
+        try:
+            request = urllib.request.Request(f"{base}/{path}", method="GET",
+                                             headers=_safe_headers(_common_headers()))
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if getattr(response, "status", 200) == 200:
+                    # Spread the return: every client that waited sees 200 in the same poll
+                    # window, and they must not all land on a process that has just come up.
+                    _time.sleep(random.uniform(0, 1.5))
+                    print("hub is back after %.0fs; sending." % (_time.monotonic() - t0),
+                          file=sys.stderr)
+                    return True
+        except Exception:                                    # noqa: BLE001 - still coming up
+            continue
+    print("hub did not come back within %ds." % int(budget_s), file=sys.stderr)
+    return False
+
+
 def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
-             headers: dict[str, str], timeout: int | None = None,
-             _busy: int = 0) -> dict[str, Any]:
+             headers: dict[str, str], timeout: int | None = None) -> dict[str, Any]:
+    """One request over every route, riding out a hub restart (see RESTART_POLL_S). Only the
+    FINAL failure opens the blind window: a restart the client waited out is not an outage."""
+    import time as _time
+    t0 = _time.monotonic()
+    while True:
+        try:
+            return _request_sweep(bases, method, path, data=data, headers=headers,
+                                  timeout=timeout)
+        except HubUnreachable as error:
+            left = _restart_ride_s() - (_time.monotonic() - t0)
+            rideable = error.restart and (not error.reached or method == "GET")
+            if not rideable or left <= 0 or not _await_hub_back(error.base or bases[0], left):
+                if not _REPORTING["active"]:
+                    # Everything that fails while the hub is unreachable is invisible to the
+                    # board, so the span is remembered locally and reported by the first call
+                    # that succeeds.
+                    _window_failed(bases[0] if bases else "", method != "GET", str(error)[:200])
+                raise
+
+
+def _request_sweep(bases: list[str], method: str, path: str, *, data: bytes | None,
+                   headers: dict[str, str], timeout: int | None = None,
+                   _busy: int = 0) -> dict[str, Any]:
     import socket
     import time as _time
     busy = _busy
@@ -462,9 +559,9 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                     except (TypeError, ValueError):
                         delay = 2.0
                     _time.sleep(max(0.5, min(delay, 10.0)) * busy)
-                    return _request([base] + [b for b in bases if b != base], method, path,
-                                    data=data, headers=headers, timeout=timeout,
-                                    _busy=busy)
+                    return _request_sweep([base] + [b for b in bases if b != base], method,
+                                          path, data=data, headers=headers, timeout=timeout,
+                                          _busy=busy)
                 if error.code == 503 and _retryable(parsed):
                     raise HubRefused(error.code, parsed) from error
                 if error.code >= 500 and _is_hub_answer(parsed):
@@ -477,13 +574,14 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                     # hand the request to: it never reached the hub, so even a write is safe to
                     # send again on the next sweep.
                     last = HubUnreachable("gateway HTTP 503, not the hub's answer", reached=False,
-                                          bases=bases)
+                                          bases=bases, restart=True, base=base)
                     break
                 if error.code >= 500:
                     # A gateway 502/504 in front of the hub: the request may have reached it.
                     # Another route ends at the same process, so it would only repeat the answer;
                     # the backed-off second sweep may retry a read.
-                    last = HubUnreachable(f"HTTP {error.code}", reached=True, bases=bases)
+                    last = HubUnreachable(f"HTTP {error.code}", reached=True, bases=bases,
+                                          restart=error.code in (502, 504), base=base)
                     break
                 _mark_route(base, failed=False)   # it answered: this route is right
                 try:
@@ -492,25 +590,25 @@ def _request(bases: list[str], method: str, path: str, *, data: bytes | None,
                     body = detail
                 raise HubRefused(error.code, body) from error
             except urllib.error.URLError as error:
-                _mark_route(base, failed=True)    # a ROUTE failure: demote it, try the next now
-                last = HubUnreachable(str(error.reason)[:200], reached=False, bases=bases)
+                restart = _restart_shaped(error.reason)
+                if not restart:
+                    # A refused connection is the process restarting behind a right route; only
+                    # a route that could not be reached at all is demoted.
+                    _mark_route(base, failed=True)    # a ROUTE failure: demote it, try the next
+                last = HubUnreachable(str(error.reason)[:200], reached=False, bases=bases,
+                                      restart=restart, base=base)
             except (socket.timeout, TimeoutError, ConnectionError, OSError) as error:
                 # REACHED: the request went out and the answer did not come back. No second
                 # route in this sweep, and never a resend of a write — it may have landed.
                 last = HubUnreachable(f"{type(error).__name__}: {str(error)[:160]}",
-                                      reached=True, bases=bases)
+                                      reached=True, bases=bases,
+                                      restart=_restart_shaped(error), base=base)
                 break
         if last is not None and last.reached and method != "GET":
-            if not _REPORTING["active"]:
-                _window_failed(bases[0] if bases else "", True, str(last)[:200])
             raise last
         if attempt + 1 < ATTEMPTS and _time.monotonic() < deadline:
             _time.sleep(1 + attempt)          # once per sweep, never between two routes
     assert last is not None
-    if not _REPORTING["active"]:
-        # Everything that fails while the hub is unreachable is invisible to the board, so the
-        # span is remembered locally and reported by the first call that succeeds.
-        _window_failed(bases[0] if bases else "", method != "GET", str(last)[:200])
     raise last
 
 
@@ -777,6 +875,9 @@ def _post(base: Any, operation: str, payload: dict[str, Any],
                 raise                      # no route connected: the offline queue's case
             if attempt == RETRY_ATTEMPTS:
                 raise
+            if error.restart and _await_hub_back(error.base or _bases_of(base)[0],
+                                                 _restart_ride_s()):
+                continue                   # back: resend under the SAME key (replayed if landed)
             delay = 0.5 * attempt + random.uniform(0, 0.5)
             print(json.dumps({"transient": str(error)[:200], "retry": attempt,
                               "retry_in_s": round(delay, 2)}), file=sys.stderr)
@@ -2327,9 +2428,13 @@ def _run_wait(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
             # back off and retry (capped); a one-shot wait still reports the failure.
             if not arguments.follow:
                 raise
-            print(json.dumps({"transient": str(error)[:200], "retry_in_s": backoff}),
+            # A hub RESTART was already ridden inside the read (it never reaches here while the
+            # hub is coming back); what reaches here is an outage. Jittered, so a fleet of
+            # notifiers does not return on one beat when it ends.
+            delay = backoff * random.uniform(0.8, 1.2)
+            print(json.dumps({"transient": str(error)[:200], "retry_in_s": round(delay, 1)}),
                   file=sys.stderr, flush=True)
-            _time.sleep(backoff)
+            _time.sleep(delay)
             backoff = min(60.0, backoff * 2)
             continue
         backoff = 1.0
@@ -2451,6 +2556,7 @@ def _run_prompt_context(base: str | None, arguments: argparse.Namespace) -> dict
     receipt that says what this session was actually told. The text to inject is `context`."""
     import hashlib
     import time as _time
+    no_restart_ride()              # a per-prompt hook answers now; it never waits on a deploy
     session = arguments.session or os.environ.get("HUB_SESSION_ID", "") or "default"
     state_path = _context_state_path(session)
     try:

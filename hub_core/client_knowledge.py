@@ -260,6 +260,7 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     from urllib.parse import urlencode
     from . import prompt_context as pc
     _utf8_stdout()
+    _c.no_restart_ride()           # a per-prompt hook answers now; it never waits on a deploy
     sid = arguments.session or os.environ.get("HUB_SESSION_ID", "")
     event, prompt = arguments.event or "", ""
     if arguments.hook:
