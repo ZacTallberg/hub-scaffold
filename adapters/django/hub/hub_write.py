@@ -1082,17 +1082,60 @@ def deploy(request, b):
                            agent=b.get("agent", "agent"), idem=b.get("idem_key"),
                            etype="deploy.created")
     if status == 200:
-        # THE DEPLOY CLOSES THE LOOP (hub_core.task_completion). Fail-soft: the release record
-        # is already durable, and a task that could not be annotated must never 500 it.
+        # THE DEPLOY CLOSES THE LOOP (hub_core.task_completion) -- AFTER the record is durable,
+        # never as a condition of acknowledging it. The close walks every open task (and may ask
+        # a repository about ancestry), and run inline it once cost a deploy job its record: the
+        # job's HTTP client timed out while the hub was still closing, so the job reported the
+        # record failed and the close it would have driven was lost with it. The close runs on
+        # its own thread; the record waits at most DEPLOY_CLOSE_INLINE_S for it and otherwise
+        # answers `queued`.
+        outcome = run_deploy_close(eid, sha, wait_s=DEPLOY_CLOSE_INLINE_S)
+        if outcome.get("queued"):
+            resp = dict(resp, tasks={"queued": True})
+        elif any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
+            resp = dict(resp, tasks=outcome)
+    return JsonResponse(resp, status=status)
+
+
+#: How long a deploy record's answer waits for its own task close before answering `queued`.
+#: A deploy job posts one record per release and a hub that answers slowly is deploy time the
+#: whole job spends waiting; the close finishes in the background either way.
+DEPLOY_CLOSE_INLINE_S = 3.0
+#: Closes run ONE AT A TIME. Several records landing together (one per app of a multi-app
+#: deploy) each closing concurrently raced each other on the same task's version: one close
+#: was refused on a version conflict that another then closed a moment later, and the refusal
+#: was written onto the task as if the close had failed.
+_DEPLOY_CLOSE_SERIAL = __import__("threading").Lock()
+
+
+def run_deploy_close(deploy_id, sha, *, wait_s=DEPLOY_CLOSE_INLINE_S) -> dict:
+    """Run close_deployed_tasks(deploy_id, sha) on its own daemon thread, serialized with every
+    other deploy close, and wait at most ``wait_s`` for it. Returns its outcome, or
+    ``{"queued": True}`` when it is still running (it finishes and records its own failure)."""
+    import threading
+    box, done = {}, threading.Event()
+
+    def _run():
+        started = time.monotonic()
         try:
-            outcome = close_deployed_tasks(eid, sha)
-            if any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
-                resp = dict(resp, tasks=outcome)
-        except Exception as exc:                             # noqa: BLE001
+            with _DEPLOY_CLOSE_SERIAL:
+                box["outcome"] = close_deployed_tasks(deploy_id, sha)
+        except Exception as exc:                             # noqa: BLE001 - recorded, never raised
             hub_app.record_error("hub.deploy-close", "deploy-driven task closure failed: %s"
                                  % type(exc).__name__, severity="error",
-                                 context={"component": "hub-write", "deploy": eid})
-    return JsonResponse(resp, status=status)
+                                 context={"component": "hub-write", "deploy": deploy_id})
+            box["outcome"] = {}
+        finally:
+            done.set()
+            logging.getLogger("hub.deploy_close").info(
+                "deploy close %s finished in %.1fs: %s", deploy_id, time.monotonic() - started,
+                {k: len(v) if isinstance(v, list) else v
+                 for k, v in (box.get("outcome") or {}).items()})
+
+    threading.Thread(target=_run, name="hub-deploy-close", daemon=True).start()
+    if wait_s and done.wait(timeout=wait_s):
+        return box.get("outcome") or {}
+    return {"queued": True}
 
 
 DEPLOY_ACTOR = "hub"
@@ -3669,15 +3712,8 @@ def _deploy_job_closes(body) -> str:
             return ""                    # a verified release record exists; it closes its tasks
         deploy_id = "ci-job:%s:%s" % (ev.get("project") or "project", sha[:12])
 
-        def _run():
-            try:
-                close_deployed_tasks(deploy_id, sha)
-            except Exception as exc:                         # noqa: BLE001
-                hub_app.record_error("hub.deploy-close", "deploy-job task closure failed: %s"
-                                     % type(exc).__name__, severity="error",
-                                     context={"component": "hub-write", "deploy": deploy_id})
-        import threading
-        threading.Thread(target=_run, name="hub-ci-deploy-close", daemon=True).start()
+        # Off the delivery's request and serialized with every other deploy close.
+        run_deploy_close(deploy_id, sha, wait_s=0)
         return deploy_id
     except Exception:                                        # noqa: BLE001 - never break intake
         return ""
