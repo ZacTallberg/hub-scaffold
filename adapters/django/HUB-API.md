@@ -301,6 +301,16 @@ grace the `409` says `holder_state: "gone"` and `frees_in_s`. A claimed question
 reported IN FLIGHT on the rail and the error card, never as unclaimed; a gone holder's reads
 "holder gone · frees in …".
 
+A claim is on the THING, not the key: each item belongs to an aggregate (`aggregate` in the
+answer; an attention condition about a task is that task, a recurring condition keeps one
+aggregate across its ids), and a claim is refused while another machine holds ANY key of the same
+aggregate (`409` with `held_as`). The unattended launcher claims tasks this way too, beside their
+lease, so a task and an attention item about it never run on two machines at once. With `class`
+(the launcher sends the aggregate) a grant or a refusal carries `history`: the endings earlier
+runs left on that class, and a release carrying `{outcome, final, tokens, spent}` records this
+run's (`recorded`) -- the next session on a recurrence is told what the last one concluded
+(8 endings per class, 14 days, `HUB_DIR/item-claim-history.json`).
+
 ### The lineage ladder
 
 `GET /hub/task/<local>.json?lineage=1` adds `lineage: {hops[], complete, shipped, project}`:

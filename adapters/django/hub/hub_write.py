@@ -1878,10 +1878,14 @@ def item_claim(request, b):
     except Exception:                                        # noqa: BLE001 - unprovable, not gone
         roster = None
     try:
+        ending = None
+        if b.get("release") is True and b.get("outcome"):
+            ending = {k: b.get(k) for k in ("outcome", "final", "tokens", "spent")}
         granted, row = item_claims.claim(hub_app.HUB_DIR, item, machine,
                                          b.get("agent") or request.hub_auth.subject,
                                          release=b.get("release") is True, session=session,
-                                         roster=roster, grace_s=hub_app.gone_grace_s())
+                                         roster=roster, grace_s=hub_app.gone_grace_s(),
+                                         cls=str(b.get("class") or ""), ending=ending)
     except ValueError as exc:
         return JsonResponse({"errors": [{"code": "bad_claim", "msg": str(exc)}]}, status=400)
     if not granted:
@@ -1900,7 +1904,10 @@ def item_claim(request, b):
                      "releases_in_s": row.get("releases_in_s"),
                      "holder_state": row.get("holder_state"), "gone_s": row.get("gone_s"),
                      "frees_in_s": (row.get("frees_in_s") if row.get("holder_state") == "gone"
-                                    else row.get("releases_in_s"))}},
+                                    else row.get("releases_in_s")),
+                     **({"held_as": row["held_as"], "aggregate": row.get("aggregate")}
+                        if row.get("held_as") else {}),
+                     **({"history": row["history"]} if "history" in row else {})}},
             status=409)
     hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
                               released=bool(row.get("released")))
