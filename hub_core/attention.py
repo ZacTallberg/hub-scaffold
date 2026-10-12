@@ -525,6 +525,31 @@ def detect_answers(ctx) -> list:
     return out
 
 
+#: A board with at least this many live lessons and NOT ONE trigger is a dark trigger lane.
+TRIGGERS_DARK_MIN_LESSONS = 50
+
+
+def detect_knowledge(ctx) -> list:
+    """``knowledge_triggers_dark``: many live lessons and none carries an ``applies_when``. Every
+    tool-time hook then fires nothing, so no rule ever arrives at the moment it applies -- a
+    whole delivery lane dark while every surface reads green. One item, critical, until a
+    derivation lands (``client consolidate`` dry run, then ``--apply-triggers``)."""
+    cov = ctx.get("knowledge") or {}
+    lessons, lit = int(cov.get("lessons") or 0), int(cov.get("with_triggers") or 0)
+    if lessons < TRIGGERS_DARK_MIN_LESSONS or lit:
+        return []
+    return [item("knowledge_triggers_dark", "hub", "critical", agent=ctx.get("operator") or "",
+                 who="the operator",
+                 title="%d live lessons and not one carries a trigger (applies_when)" % lessons,
+                 detail="A tool-time hook matches a rule's applies_when against the error, command "
+                        "or path in front of an agent; with none published, no lesson is ever "
+                        "delivered at the moment it applies.",
+                 fix="python -m hub_core.client consolidate  (a dry run derives applies_when "
+                     "with the judge model), then the same with --apply-triggers to write only "
+                     "the triggers it printed",
+                 evidence={"lessons": lessons, "with_triggers": lit})]
+
+
 DETECTORS = (
     ("tasks", detect_tasks, ("tasks",)),
     ("capped", detect_capped, ("tasks",)),
@@ -537,6 +562,7 @@ DETECTORS = (
     ("errors", detect_errors, ("errors",)),
     ("questions", detect_questions, ("questions",)),
     ("answers", detect_answers, ("answers",)),
+    ("knowledge", detect_knowledge, ("knowledge",)),
 )
 
 

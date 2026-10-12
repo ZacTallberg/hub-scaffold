@@ -708,13 +708,15 @@ class TriggerRefused(ValueError):
 
 
 def parse_trigger_line(line: str) -> dict:
-    """`apply [limit=N] [except <id>,<id>]` | `revert <run> [only <id>,<id>]` | anything else
-    (a dry run). Every token after `apply`/`revert` must be understood: an ignored hold-back or
+    """`apply [triggers] [limit=N] [except <id>,<id>]` | `revert <run> [only <id>,<id>]` |
+    anything else (a dry run). `apply triggers` writes ONLY the derived applies_when (folds,
+    supersedes and contradictions stay for a person). Every token after `apply`/`revert` must be understood: an ignored hold-back or
     cap must stop the run, never be written through (on the source instance a reviewer's
     hold-back was silently dropped and the held record was superseded)."""
     words = str(line or "").split()
     verb = words[0].lower() if words else ""
-    spec = {"mode": "dry-run", "apply_limit": None, "exclude": [], "only": [], "run": ""}
+    spec = {"mode": "dry-run", "apply_limit": None, "exclude": [], "only": [], "run": "",
+            "triggers_only": False}
     if verb not in ("apply", "revert"):
         return spec
     rest = words[1:]
@@ -725,6 +727,9 @@ def parse_trigger_line(line: str) -> dict:
         rest = rest[1:]
     else:
         spec["mode"] = "apply"
+        if rest and rest[0].lower() == "triggers":
+            spec["triggers_only"] = True
+            rest = rest[1:]
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -751,7 +756,7 @@ def parse_trigger_line(line: str) -> dict:
 # --------------------------------------------------------------------------- #
 def run(records, vectors, conn, *, write, log_dir, apply_writes=False, judge_limit=MAX_JUDGE,
         trigger_limit=MAX_TRIGGERS, apply_limit=MAX_APPLY, exclude=(), cfg=None, out=print,
-        pairs=None) -> dict:
+        pairs=None, triggers_only=False) -> dict:
     """One pass over `records` ({id: note}, from `live`) with `vectors` ({id: unit vector}), or
     with `pairs` already found by `candidates_from_hub` (then `vectors` is unused).
 
@@ -885,6 +890,15 @@ def run(records, vectors, conn, *, write, log_dir, apply_writes=False, judge_lim
     t["relearn"] = relearn_stats(records, judged)
     out("RELEARN " + json.dumps(t["relearn"]))
     if apply_writes:
+        if triggers_only:
+            # TRIGGERS ONLY: what makes a rule fire at the moment it applies is low-risk and
+            # revertable; folding and superseding records is a person's call. So this apply
+            # writes nothing but NON-EMPTY applies_when (an empty derivation would erase a
+            # working trigger and gain nothing), through the same logged, revertable path.
+            actions = []
+            triggers = {eid: v for eid, v in triggers.items()
+                        if any(v[1].get(k) for k in TRIGGER_KEYS)}
+            t["mode"] = "apply-triggers"
         t["apply"] = apply(actions, records, triggers, run_id, write=write, log_dir=log_dir,
                            model=model, out=out, limit=apply_limit)
     return t

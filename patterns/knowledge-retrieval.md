@@ -169,6 +169,13 @@ console is not for.
 - **An apply writes only what an earlier dry run judged.** `--apply` judges nothing new and derives
   no new triggers; it replays the cached plan, so an apply must use the dry run's `--state-dir`.
   Otherwise pairs judged in the same run as the apply would be written unread.
+- **Triggers alone.** `--apply-triggers` (trigger line `apply triggers [limit=N] [except <ids>]`)
+  writes ONLY the non-empty `applies_when` the dry run derived, through the same logged,
+  revertible path; folds, supersedes and contradictions stay for a person. What makes a rule fire
+  at the moment it applies is low-risk; retiring a record is not. An empty derivation is never
+  written (it would erase a working trigger and gain nothing). The board raises one critical
+  `knowledge_triggers_dark` attention item while it holds 50 or more live lessons and not one
+  carries a trigger -- every tool-time hook then fires nothing while every surface reads green.
 - **Hold-backs.** `--except <id>,<id>` drops every action touching a held record (and its
   `applies_when`), each printed `HELD BY REVIEWER`. `--apply-limit` caps writes per run.
 - **Nothing is deleted; everything is revertible.** Before each write the record's full prior
@@ -178,8 +185,8 @@ console is not for.
   form; a lesson's status defaults to `standing`) — re-sending a payload without an added key
   leaves the key standing. Each revert carries its own idempotency key, so a corrective second
   revert writes instead of replaying the first.
-- **Parse or refuse.** `--from-trigger FILE` reads the last non-comment line: `apply [limit=N]
-  [except <ids>]`, `revert <run> [only <ids>]`, anything else a dry run. Every token must be
+- **Parse or refuse.** `--from-trigger FILE` reads the last non-comment line: `apply [triggers]
+  [limit=N] [except <ids>]`, `revert <run> [only <ids>]`, anything else a dry run. Every token must be
   understood; an unreadable limit or a hold-back with no ids exits 4 before any write, and the
   run prints `PARSED mode=… apply_limit=… exclude=… only=…` with the file and git HEAD of the
   code that parsed it. On the source instance an ignored hold-back was written through and the
@@ -303,7 +310,12 @@ it with `python -m hub_core.client knowledge-sync --out <file>`, which pages
 its ETag on every carrier (`If-None-Match`, `X-Hub-ETag`, `?etag=`) and gets a 304; a narrowed
 reader is never sent a revoke for a record it could not see (a revoke carries an id, and ids are
 often slugs of titles). The feed serves record text redacted (a mirror is a second copy on
-somebody's disk). How a local memory engine consumes that mirror — what it indexes, how it
+somebody's disk). A `put`'s `author` is the record's FIRST writer (`last_writer` beside it): the
+last writer is often a maintenance pass -- a re-check, an attestation, a consolidation -- and
+naming it credited the machinery with every rule it touched. The cursor carries the `put` shape
+it was built with (`.P<n>`); a cursor from an older shape (or a bare integer) re-pages the ledger
+once, so records a mirror already holds arrive again in the current shape instead of only when
+they next change. How a local memory engine consumes that mirror — what it indexes, how it
 renders, and the tool-time lesson triggers that fire on a command, a path or an error — is
 `patterns/agent-memory.md`.
 

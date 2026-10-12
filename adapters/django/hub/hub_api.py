@@ -1375,6 +1375,11 @@ def _attention_payload(state, consoles, activity, asks, error_unclaimed):
            "questions": asks, "errors_unclaimed": error_unclaimed,
            "answers": _unread_answers(state),
            "hub_client": hub_client_version()}
+    try:
+        from hub_core import knowledge as _knowledge
+        ctx["knowledge"] = _knowledge.trigger_coverage(state)
+    except Exception as exc:                                 # noqa: BLE001 - one source, not the list
+        ctx["sources"]["knowledge"] = "unreadable: %s" % type(exc).__name__
     for name, read in (("leases", hub_app.leases), ("presence", hub_app.read_presence),
                        ("retired", lambda: _presence.retired_rows(hub_app.HUB_DIR)),
                        ("credentials", lambda: agent_auth.CredentialRegistry(
