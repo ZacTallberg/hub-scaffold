@@ -3205,8 +3205,8 @@ def _run_finish(base: Any, arguments: argparse.Namespace) -> dict[str, Any]:
         problem = verifier.exfil_problem(command)
         if problem:
             raise RuntimeError(f"the task's declared probe was refused before running: {problem}")
-        argv, use_shell = verifier.build_exec(command)
-        run = subprocess.run(argv, shell=use_shell, env=verifier.hardened_env(),
+        argv, use_shell, env = verifier.prepare(command)
+        run = subprocess.run(argv, shell=use_shell, env=env,
                              capture_output=True, timeout=900)
         output = (run.stdout or b"") + (run.stderr or b"")
         receipt = {"command": command, "exit_code": int(run.returncode),
