@@ -79,6 +79,11 @@ def cursor_json(request):
         s.close()
 
 
+# The liveness cursor carries no board content, so it declares itself public the way the discovery
+# card does: a supervisor, a rolling-restart health wait or a canary reads it with no credential.
+cursor_json._hub_public_discovery = True
+
+
 def _fmt_age(s):
     if s is None:
         return "?"

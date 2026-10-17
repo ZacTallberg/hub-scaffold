@@ -22,7 +22,7 @@ urlpatterns = [
     # The live rail. These MUST stay above the `<str:type>.json` catch-all below, which would
     # otherwise match "cursor"/"delta" as entity types and 404 them as unknown collections.
     path("live/events", R(hub_api.live_events), name="live-events"),
-    path("cursor.json", R(hub_api.cursor_json), name="cursor"),
+    path("cursor.json", hub_api.cursor_json, name="cursor"),   # payload-free liveness: token-free by design
     path("delta.json", R(hub_api.delta_json), name="delta"),
     # The ask/answer surfaces, the operational stream, board search, and request identity.
     # Same rule: above the catch-all, or each would 404 as an unknown entity collection.
