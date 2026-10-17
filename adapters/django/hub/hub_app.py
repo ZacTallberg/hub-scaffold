@@ -400,6 +400,21 @@ def _normalize_build_sha(value):
     return value if re.fullmatch(r"[0-9a-f]{7,64}", value) else None
 
 
+def _same_commit(a, b):
+    """Do two build identities name the same commit?
+
+    `git rev-parse --short HEAD` returns 7 characters; deploy.sh records 12 in state.json. Comparing
+    those with `==` says a commit is not itself, so `coherent` was permanently False and the state
+    shortcut could never fire - which is why coherence:repo fell through to the newest LOCAL deploy
+    entity and reported a sha several deploys stale, blocking data ships that were perfectly fine.
+    Git's own rule is prefix matching, so that is the rule used here, with git's 7-character floor.
+    """
+    if not a or not b:
+        return False
+    n = min(len(a), len(b))
+    return n >= 7 and a[:n] == b[:n]
+
+
 def _running_sha():
     """The immutable identity carried by the RUNNING artifact, even when ``.git`` is absent.
 
@@ -429,6 +444,11 @@ def _state_json() -> dict:
     return {}
 
 
+def _ledger_has(candidates, sha):
+    """Has this ledger actually seen the deploy `sha` names?"""
+    return any(_same_commit(_normalize_build_sha(row.get("sha")), sha) for row in candidates)
+
+
 def build_meta(served=None, state=None) -> dict:
     """The build/coherence block for /hub.json. ``coherent`` is always computed.
 
@@ -451,16 +471,23 @@ def build_meta(served=None, state=None) -> dict:
             if (shipped and observed == shipped and
                     isinstance(deploy.get("tasks_closed"), list)):
                 candidates.append(deploy)
-    matching = [row for row in candidates if _normalize_build_sha(row.get("sha")) == head]
+    matching = [row for row in candidates if _same_commit(_normalize_build_sha(row.get("sha")), head)]
     if matching:
         release = max(matching, key=lambda row: str(row.get("at") or ""))
         sha = _normalize_build_sha(release.get("sha"))
-    elif state_sha and state_sha == head:
+    elif state_sha and _same_commit(state_sha, head):
         sha = state_sha
-    elif candidates:
+    elif candidates and (not state_sha or _ledger_has(candidates, state_sha)):
+        # Fall back to the newest closure ONLY when the ledger has actually seen the deploy that
+        # state.json names. deploy.sh posts its closure to the PRODUCTION hub, so a LOCAL ledger can
+        # sit several releases behind while state.json is exactly right - and preferring the stale
+        # entity made the audit report a sha from hours earlier as "deployed", which also made its
+        # "unshipped paths" list name files that had in fact shipped. A ledger that has never heard
+        # of the recorded deploy is BEHIND state.json, not stronger evidence than it.
         release = max(candidates, key=lambda row: str(row.get("at") or ""))
         sha = _normalize_build_sha(release.get("sha"))
-    coherent = bool(head and sha and head == sha and (served is None or served_sha == head))
+    coherent = bool(head and sha and _same_commit(head, sha)
+                    and (served is None or _same_commit(served_sha, head)))
     release_source = "deploy entity" if release else ("state.json" if state_sha else None)
     return {
         "repo": sj.get("repo_build"),

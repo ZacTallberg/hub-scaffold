@@ -359,6 +359,22 @@ A terminal result writes a checkpoint onto the task -- `kind: "pushed"` with the
 publish, which the deploy close reads -- and messages the author's machine;
 `data.notified` says whether each landed.
 
+### The ledger sync lane (`ledger`)
+
+A project whose canonical ledger is written on a workstation first (the local board is the record;
+the served board is its mirror) pushes every write to the served board as a DELTA.
+`POST /hub/api/ledger/sync` (`ledger:sync`) takes one of two bodies. `{"delta": "<jsonl>"}` is the
+steady state: the events past the served head, in order, each hash-chained. The first must be
+`seq head+1` with `prev_hash` equal to the served head's hash, every hash must recompute, and the
+file's own last line must still be that head when the append happens, so a gapped, forked or
+tampered tail is refused (`409 stale_base`, `409 stale_file_tail`, `422 seq_gap`,
+`422 chain_break`, `422 forged_hash`) instead of corrupting the chain. An empty delta answers
+`{noop: true}` with the served head. On success the tail is appended under the ledger lock and
+each appended event wakes the live streams as a local append would. `{"ledger": "<whole jsonl>"}`
+is recovery only, for an empty or diverged mirror: it must link from seq 1, be no shorter than the
+served chain (`409 regression`) and extend it exactly (`409 divergent`); then the file is replaced
+crash-durably (`mode: "full"`). Both answer `{ok, seq, hash, count, mode}`.
+
 ### Evidence in the task's own project
 
 In `strict` mode a bare commit sha dereferences when it is a commit of the Hub's repository OR of

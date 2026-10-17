@@ -255,8 +255,11 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
             # the range and the finding stands. A None delta means the range could not be read,
             # which is unknown, not empty — report it rather than assuming either way.
             delta = coherence.get("delta_paths")
-            bookkeeping_only = delta is not None and bool(delta) and set(delta).issubset(
-                DEPLOY_BOOKKEEPING_PATHS)
+            # An EMPTY delta is the BEST case - the deployed sha and HEAD are the same commit and
+            # nothing at all is unshipped - and `bool(delta)` was excluding it, so the one state
+            # this check exists to bless could never go green. Only `delta is None` (the range could
+            # not be read) is unknown; an empty set is issubset of anything, which is the right answer.
+            bookkeeping_only = delta is not None and set(delta).issubset(DEPLOY_BOOKKEEPING_PATHS)
             if not bookkeeping_only:
                 extra = ""
                 if delta is None:

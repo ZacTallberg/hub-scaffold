@@ -6,7 +6,7 @@ the board public (``HUB_READ_AUTH = "public"``). NEVER mount at the front door.
 """
 from django.urls import path
 
-from . import (app_services, candidates, deploy_close, evals_api, evidence_api, handoff_api, held,
+from . import (app_services, candidates, deploy_close, evals_api, evidence_api, handoff_api, held, ledger_sync,
                histories_api, hub_api, hub_write, hubsite, knowledge_api, knowledge_write, veil,
                mcp_server, read_auth, run_api)
 
@@ -147,6 +147,7 @@ urlpatterns = [
     path("api/handoff/claim", handoff_api.claim),
     path("api/handoff/bundle", handoff_api.bundle),
     path("api/handoff/result", handoff_api.result),
+    path("api/ledger/sync", ledger_sync.sync),
     path("api/fail", hub_write.fail),
     path("api/release", hub_write.release),
     # Letting go of a task: back to the queue for an unattended worker (hand) or just released

@@ -60,6 +60,9 @@ _SECRET_SHAPE = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KE
 _SCRUB_EXEMPT = ("SECRET_KEY",)
 
 
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
 def split_stages(vc):
     """Split a command on UNQUOTED statement separators (`;`, `&&`, `||`, `|`, `&`, newline),
     preserving empty stages (a trailing `&` or `;` yields an empty final stage). Redirection
@@ -133,6 +136,30 @@ def needs_shell(vc):
     return len(split_stages(vc or "")) > 1
 
 
+def split_env_prefix(vc):
+    """({VAR: value}, remainder): the leading `VAR=value` assignments a POSIX shell would apply to
+    the child, peeled off the front of the command.
+
+    They cannot survive argv-form: `DEBUG=1 python manage.py x` spawns a program literally named
+    `DEBUG=1`, which on Windows is a bare WinError 2 with no hint of the cause — every task whose
+    verification_command carried an env prefix was unfinishable here, and the receipt gate that
+    depends on running it could not be satisfied at all. Dropping them silently would be worse than
+    failing: the proof would run without the settings it names.
+    """
+    vc = (vc or "").strip()
+    try:
+        tokens = shlex.split(vc, posix=True)
+    except ValueError:
+        return {}, vc          # unlexable: leave it whole, the shell reports its own syntax error
+    n = 0
+    while n < len(tokens) and _ENV_ASSIGN.match(tokens[n]):
+        n += 1
+    if not n or n == len(tokens):
+        return {}, vc          # no prefix, or assignments with no command to run
+    env = dict(t.split("=", 1) for t in tokens[:n])
+    return env, shlex.join(tokens[n:])
+
+
 def build_exec(vc):
     """(command, shell): an argv LIST with shell=False whenever the command needs no shell, else
     the original string with shell=True. Argv-form is what makes an injected `; curl ...` inert —
@@ -141,6 +168,7 @@ def build_exec(vc):
     vc = (vc or "").strip()
     if not vc or needs_shell(vc):
         return vc, True
+    _, vc = split_env_prefix(vc)   # the assignments travel in the child ENV (see prepare)
     try:
         argv = shlex.split(vc, posix=True)
     except ValueError:
@@ -176,6 +204,18 @@ def _scratch_cred_file():
         import tempfile
         _SCRATCH_CRED = str(Path(tempfile.mkdtemp(prefix="verify_cred_")) / "agent-cred.json")
     return _SCRATCH_CRED
+
+
+def prepare(vc, base_env=None):
+    """(command, shell, env) for one verification_command — the single call a runner should use.
+
+    build_exec() alone silently drops a `VAR=value` prefix, and a proof that runs without the
+    settings it names is not the proof that was recorded. Taking both from one function makes that
+    mismatch impossible to write.
+    """
+    env_prefix, _ = split_env_prefix(vc)
+    command, use_shell = build_exec(vc)
+    return command, use_shell, hardened_env(base_env, extra=env_prefix or None)
 
 
 def hardened_env(base=None, extra=None):

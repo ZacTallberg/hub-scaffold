@@ -14,6 +14,30 @@ deploy events are a different artifact (`hub_core.projections.render_changelog_m
 
 ## Unreleased
 
+### Lifted from a working instance: what two months of production taught the engine
+
+- **A `VAR=value` prefix on a verification command travels in the child environment.**
+  `hub_core.verifier.prepare()` is the one call a runner uses: it peels the leading assignments a
+  POSIX shell would apply (`DEBUG=1 python manage.py check`), hands them to the child through
+  `hardened_env`, and runs the rest in argv form. Before, argv form spawned a program literally
+  named `DEBUG=1` (a bare WinError 2 on Windows) and every task whose command carried a prefix was
+  unfinishable; dropping the prefix silently would have run a proof without the settings it names.
+- **Build identity matches the way git matches.** `build_meta` compares a 7-character
+  `rev-parse --short` and a 12-character deploy stamp by prefix (7-character floor), so a commit is
+  no longer "not itself" and `coherent` can be true; the newest ledger closure outranks
+  `state.json` only when the ledger has actually seen the deploy the stamp names, because a ledger
+  that never heard of that release is BEHIND the stamp, not stronger evidence than it.
+- **An empty deploy delta is the best case, not an unknown.** `coherence:repo` no longer reports a
+  HEAD that IS the deployed commit as unshipped work; only an unreadable range is.
+- **Ledger sync over HTTPS** (`POST /hub/api/ledger/sync`, scope `ledger:sync`): a served board
+  extends its chain by a validated DELTA from the workstation that writes first, refusing a gapped,
+  forked or tampered tail, with FULL replace as the recovery path; every appended event wakes the
+  live streams. HUB-API.md "The ledger sync lane".
+- **A receipt declares its binding.** `verification_run` items admit the fields the engine already
+  reads (`hub_core.upcast` keys on `predicate_type`): `predicate_type`, `subject_tree_sha`,
+  `charter_core_sha`, `task`, `verifier`, `attestation`, `attested_at`. The schema had fallen
+  behind the engine, so a bound receipt failed portable validation.
+
 ### Round 2 — app-kit: whose rows, honest tallies, slug-named migrations
 
 - **Assistant kit: every read is the actor's.** `Entity.scope` narrows every generic family's

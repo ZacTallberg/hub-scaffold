@@ -317,7 +317,14 @@ project key are renameable bindings; the rules are not.
           "exit_code": { "type": "integer" },
           "output_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "ran_by": { "type": "string", "minLength": 1 },
-          "ran_at": { "type": "string" }
+          "ran_at": { "type": "string" },
+          "predicate_type": { "type": "string", "minLength": 1, "description": "The receipt's OWN shape, in-toto/SLSA predicate style (<app_host>/verification_run/v1): hub_core.upcast keys receipt versions on it instead of sniffing which fields happen to be present." },
+          "subject_tree_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$", "description": "The git tree the proof actually ran against; binds a green run to the bytes it verified." },
+          "charter_core_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$", "description": "sha256 of CHARTER-CORE.md as held by the finishing agent at proof time (the re-grounding gate)." },
+          "task": { "type": "string", "minLength": 1, "description": "The board task this receipt proves, named inside the receipt so a stored receipt is self-describing." },
+          "verifier": { "type": "string", "minLength": 1, "description": "Agent id of a separate verifier that ran the proof, when the builder/verifier split applies." },
+          "attestation": { "type": "string", "minLength": 1, "description": "Signed attestation over the receipt, binding it to subject_tree_sha and charter_core_sha." },
+          "attested_at": { "type": "string", "description": "Timestamp the attestation was produced." }
         },
         "required": ["command", "exit_code"]
       }
