@@ -355,7 +355,8 @@ a background refresh cycle. Every run append wakes SSE as part of the normal com
 
 Read surface (authenticated by default via `read_auth.reader`; every route below answers 401 to an
 anonymous request unless `HUB_READ_AUTH = "public"`, and the route audit names any read route that
-lacks the gate):
+lacks the gate; `cursor.json` alone stays token-free, a payload-free liveness cursor for
+supervisors, health waits and canaries):
 
 - `GET /hub/` — the human view (single-file tabbed app; `?format=json` returns the snapshot)
 - `GET /hub/?served=<sha>` / `hub.json` — snapshot incl. build coherence
