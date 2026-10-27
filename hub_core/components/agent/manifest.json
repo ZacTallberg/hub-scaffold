@@ -1,13 +1,16 @@
 {
   "title": "Agent interface",
-  "what": "A chat panel an app links to put the brokered agent on its pages: a launcher (floating button, right-edge tab or header button), a docked, resizable sidebar that pushes the page instead of covering it, past conversations for this app or all apps, and distinct unconfigured / failed / empty states. It talks only to the APP's own bridge endpoints; the app's server forwards to /hub/api/agent/* with its hub credential, and the agent key never leaves the hub.",
+  "what": "A chat panel an app links to put the brokered agent on its pages: a launcher (floating button, right-edge tab or header button), a docked, resizable sidebar that pushes the page instead of covering it, past conversations for this app or all apps, distinct unconfigured / failed / empty states, an optional per-page guide above the conversation, and the page the person is on read into each question (on by default, one click off). It talks only to the APP's own bridge endpoints; the app's server forwards to /hub/api/agent/* with its hub credential, and the agent key never leaves the hub.",
   "link": [
     "<link rel=\"stylesheet\" href=\"/hub/components/agent/agent.css\">",
     "<script src=\"/hub/components/agent/agent.js\" defer></script>"
   ],
-  "mount": "<div data-hub-agent data-app=\"<slug>\" data-ask=\"<bridge POST url>\" data-history=\"<bridge GET url>\" data-conversation=\"<bridge GET url>\" data-profile=\"<bridge GET url, optional>\" data-props=\"/hub/components/props/<slug>.json\" data-title=\"Assistant\"></div>. Optional: an element with data-hub-agent-header receives the header button; any element with data-hub-agent-open opens the panel.",
+  "mount": "<div data-hub-agent data-app=\"<slug>\" data-ask=\"<bridge POST url>\" data-history=\"<bridge GET url>\" data-conversation=\"<bridge GET url>\" data-profile=\"<bridge GET url, optional>\" data-props=\"/hub/components/props/<slug>.json\" data-title=\"Assistant\"></div>. Optional: an element with data-hub-agent-header receives the header button; any element with data-hub-agent-open opens the panel. Optional: a <script type=\"application/json\" data-agent-guide> island (see `guide`); data-agent-skip on any element keeps it out of what the agent reads.",
+  "guide": "{title, summary, sections: [{name, kind: system|user|mixed, text, who, target: <CSS selector>}], labels: {system|user|mixed: <word>}, more: {label, href}} -- drawn as a folding 'About this page' block above the conversation (at most 45% of the panel, scrolling inside itself); each kind is a worded chip, never colour alone; a section whose target is on the page gets a button that scrolls to it and outlines it. Folded/open is remembered for every app (hub-agent:guide-open). No island, or no sections, draws nothing.",
+  "page": "A 'Reading this page' chip, on by default and remembered for every app (hub-agent:page); 'What it reads' shows the exact text. Read at the moment of asking, on-screen only: title, address (secret-looking query values dropped), the nav's current section, selected text, open panels and dialogs first, then visible text in reading order (table rows as 'a | b | c') and visible fields with values; never password/hidden fields, the shared banner, the panel, or [data-agent-skip]. At most 7,000 chars, sent as ONE thread item {role: 'page', text}; the hub lifts it out before counting turns and caps it (agent_broker.PAGE_MAX_CHARS). An answer to a question that carried it says 'read this page'.",
+  "step_aside": "While docked, every FIXED layer reaching the right edge (probed every 48px; never the shared banner, never the panel's own parts) is moved left by the panel's width -- right margin, or translate for a layer placed by left; a window-wide layer is left alone -- re-checked on page changes and resizes, restored exactly on close. The floating button and the edge tab step away while the panel is open.",
   "bridge": {
-    "ask": "POST JSON {question, thread, conversation_id} -> forward to POST /hub/api/agent/ask adding {app, person} from the app's own sign-in; return the hub's JSON unchanged.",
+    "ask": "POST JSON {question, thread, conversation_id} (thread may end with one {role: 'page', text} item -- forward it untouched) -> forward to POST /hub/api/agent/ask adding {app, person} from the app's own sign-in; return the hub's JSON unchanged.",
     "history": "GET ?scope=app|all -> forward to GET /hub/api/agent/history?person=&app=&scope=.",
     "conversation": "GET ?id= -> forward to GET /hub/api/agent/conversation?person=&id=.",
     "profile": "GET -> forward to GET /hub/api/profile?person= and return its data (the person's `agent` placement is honoured when the app allows it)."
@@ -15,6 +18,7 @@
   "events": {
     "hub:component-props": "window event, detail {app, props}; props.agent overrides the fetched values without a reload",
     "hub:agent-open": "dispatch on window to open the panel; detail {question} pre-fills and sends",
+    "hub:agent-guide": "dispatch on document when the page changes what it shows without a reload: detail {guide} draws that guide, no detail re-reads the island",
     "hub:agent-ask": "dispatch on document, cancelable, detail {question}: the panel opens and asks it as if typed, and cancels the event so the sender knows it was taken (the context menu's \"Ask the agent\" uses it); a question already in flight is not interrupted -- the new one waits in the box"
   },
   "props": [

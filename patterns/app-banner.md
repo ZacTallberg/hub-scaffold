@@ -47,7 +47,28 @@ horizontal scroller clips its other axis too. The sidebar collapses to a rail (C
 field); on the rail a fold opens as a flyout on hover **and** focus, and nothing is
 `display:none`, so Tab still reaches every page. Its open/rail state is the person's, per app.
 `count`/`countId` draw a pill the app's own script keeps updating by id; zero is hidden. An item
-with no `hint` is reported once in the console.
+with no `hint` is reported once in the console. A menu opened by hover gives no focus back when
+it closes (a focus ring on a tab nothing points at); one opened by a click or the keyboard does.
+The strip's look is the banner's `strip` component property: `underline` (default — a line grows
+from the centre under the page you point at, and stays, in the accent, under the page you are on)
+or `classic` (a ground on hover, a bottom border under the current page), so a contested look is
+one setting away from the earlier one, with no deploy.
+
+**The person arranges the pages, for themselves.** In the sidebar every row shows a pin and a
+`…` menu on hover or focus (pin to top, make this my home page, move up/down, hide from the
+sidebar); rows drag to reorder, and into or out of **Pinned**. The strip draws pinned pages first,
+its tabs drag sideways, and an **Arrange** control at its end (and on the sidebar's top bar) lists
+every page with the same controls for a keyboard. Hiding is the sidebar's (the strip has nowhere
+to put the way back): the page you are on is never concealed, a group whose every page is hidden
+goes with them, and **Show N hidden** — one small line at the foot, there only while something
+is hidden — draws them dimmed to bring back. The **home page** is where the band's name links;
+arriving at the app's root from OUTSIDE the app (no referrer inside it, no query or fragment, in
+the first moments of the page, `data-home` absolute) lands there. All of it is stored on the
+person's hub record as `nav_hidden` / `nav_layout`, per app, keyed by the page's label (or
+`Group / Page`) and compared only against the pages the app declares now, so a renamed page comes
+back where the app put it. The navigation is redrawn only when what it is drawn from changed, and
+a rebuilt sidebar keeps each group's open state and its scroll; one profile save is in the air at
+a time, later changes queue behind it in order, and an answer already overtaken is not adopted.
 
 **Preferences that follow the person.** Theme, size (zoom), text size, reading face, motion, and
 the two help switches, held at the hub (`/hub/api/profile`, below) so a choice made in one app is
@@ -78,15 +99,20 @@ upload lane, no file store; SVG is refused because it can carry script.
 **Info bubbles.** Anything on the page with `data-ab-info="what this is for"` (and optional
 `data-ab-info-title`) explains itself after a short pause on hover or keyboard focus, placed
 below/above/beside to fit the window. Every bubble carries **Hide all info bubbles**, which turns
-them off everywhere at once (clearing this app's own override too) and offers **Undo**. A tap is a
-press, never a hover. `data-ab-tip` is the instant name chip for glyph-only controls;
+them off everywhere at once (clearing this app's own override too) and offers **Undo**. Where the
+page has an agent component (`[data-hub-agent]`), a bubble also carries **Ask about this**: it
+hands the agent (`hub:agent-ask`) a question naming the app, the page by its nav name and the
+thing the bubble explains, written by the context menu's shared composer when that is on the page.
+A page with no agent shows no button that asks nobody. A tap is a press, never a hover. `data-ab-tip` is the instant name chip for glyph-only controls;
 `data-ab-help` marks an app's help buttons so the person's *Help buttons: Off* hides them.
 
 **A derived tour and read-me.** Both are built when OPENED from what is on screen: the band's
 parts that are visible, then the app's `data-ab-info` key things. Renaming a page or dropping a
 control updates them with nobody maintaining a copy. An app that writes its own still wins —
 `data-tour-url` → `{steps:[{selector, title, text}]}` (a step whose selector finds nothing is
-named in the console and skipped) and `data-readme-url` → `{lead, sections:[{head, lines}], note}`.
+named — number, title, selector — in the console and in an `app-banner:tour-missing` event, and
+skipped; a target below the fold is scrolled to before its ring is drawn, which also reveals one
+that fades in as it enters the viewport) and `data-readme-url` → `{lead, sections:[{head, lines}], note}`.
 The tour restarts rather than layers; the read-me box is `[hidden]` until opened, enforced with
 `!important`, because an invisible-but-present box swallows every click and wheel beneath it.
 

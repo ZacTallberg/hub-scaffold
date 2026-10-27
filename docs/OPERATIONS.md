@@ -150,12 +150,16 @@ or use one disposable probe and retain only its receipt.
 
 ## Measuring what the board costs and delivers
 
-Two measurements run on real data, never on cases written for them:
+These measurements run on real data, never on cases written for them:
 
 - **Retrieval, on the board's own answered asks.** `python manage.py retrieval_eval [--post]`
   scores search configurations and the DELIVERED per-prompt block against every answered ask
-  (`patterns/knowledge-retrieval.md` §2). `--post` keeps the run on the trend
-  (`/hub/eval.json`, `client evals`), so a ranking or delivery change shows as a step.
+  (`patterns/knowledge-retrieval.md` §2), including `@cut`, the point the client's own cut
+  actually delivers. `--post` keeps the run on the trend (`/hub/eval.json`, `client evals`), so
+  a ranking or delivery change shows as a step.
+- **Use and re-learning.** `python tools/knowledge_use.py --post` (suite `knowledge-use`) and
+  `python -m hub_core.client consolidate --post` (suite `knowledge-loop`) put the two halves of
+  the knowledge loop on the same trend: use should rise while re-learning falls.
 - **Context, per prompt.** `python tools/context_budget.py [--hours 24] [--json]` reads the
   agent-session transcripts on a workstation and reports, per turn kind (person, peer message,
   notification, session start), how many characters each hook injected and how many the harness

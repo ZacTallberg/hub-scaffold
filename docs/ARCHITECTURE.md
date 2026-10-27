@@ -95,8 +95,20 @@ General HTTP writes pass through one gate:
 3. refresh the caller's observed presence from the optional `X-Hub-*` headers (fail-soft);
 4. merge an update with the current aggregate;
 5. require `expected_version` for updates;
-6. validate the merged entity against its schema;
-7. append with aggregate-scoped idempotency and optimistic concurrency, then publish the
+6. validate what the event WRITES against its schema -- the existing record's written fields
+   (never the fold's own stamps, never fields the schema has since dropped) plus the payload --
+   and refuse only errors under fields this payload sent (an old record's drift is logged, not
+   charged to an unrelated update). The fold's OUTPUT is held to the schema by `manage.py
+   check` (`hub.E001` folds a real create + update and validates it), so an undeclared fold
+   stamp fails the pipeline instead of every write (the registry refuses to load a schema file
+   that declares one key twice in an object: JSON keeps the last silently, so two edits to one
+   property would otherwise decide the write contract by whichever landed second);
+7. append with aggregate-scoped idempotency and optimistic concurrency -- the event names WHO
+   wrote it: the subject and credential, plus the `machine` and `console` the client's `X-Hub-*`
+   headers name, `unattended` for a launcher-spawned run, and `parent_event_id` for the event that
+   caused it (a deploy record behind every receipt and close it drives, a passing verification
+   behind the close it triggers; the hub's own close is written as `hub`). The three attribution
+   fields are hashed into the chain only when present, so every older event still verifies -- then publish the
    identity-only wake signal to connected cockpits.
 
 Task completion has additional steps: a live lease, an acceptance note, evidence, strict-mode
@@ -106,6 +118,13 @@ fans out into a repository audit, and the Hub never executes the command.
 The final append rechecks the fencing token under the cross-process claim lock and uses the version
 whose command was verified, preventing an expired worker or concurrently changed task from landing
 an obsolete completion.
+Every step of an authenticated call is timed as a named phase (`hub_core/write_timing.py`):
+the split rides each response's `Server-Timing` header and `/hub/perf.json` `write_phases`,
+and `InFlightMiddleware` (outermost) measures what happens before the view -- the requests in
+flight at arrival and the interpreter's wake-up lag -- so a slow write is attributed to its
+handler, a lock, or the queue in front of it, never guessed. Only what the claims lock guards
+runs under it (the knowledge a task start carries is looked up after the release), and a deploy
+record answers once it is durable: its task close runs after, one at a time.
 See [HUB-API.md](../adapters/django/HUB-API.md) for the exact contract.
 
 ### Runtime sidecars beyond claims
@@ -116,6 +135,19 @@ into `presence/_retired/` — archive over delete), the bounded redacted operati
 claims/: they change with no ledger event, so the snapshot memo carries their change stamps and
 mutations to them publish realtime wake signals — a board keyed on the ledger head alone would
 freeze its fleet strip and error card between appends.
+
+Those side files hold the LATEST state only, so their HISTORY is written to the ledger beside
+them (`hub/outcome_events.py`): every lease claim, takeover and release, every problem claim,
+release, escalation, resolve and recurrence, and every responder run's start and finish is one
+event on a log-only aggregate (`<project>:outcome:<kind>.<subject>`) that the fold skips, so it
+never bumps a task's version. A busy ledger spools a live transition under its idempotency key for
+the background tick to write; nothing describing a claim can fail the claim. `GET
+/hub/outcomes.json` reads the history.
+
+Measurements are sidecars too, never ledger facts: the cross-machine run ledger
+(`run-ledger/YYYYMMDD.jsonl`, `hub_core/run_ledger.py`), the shared evidence store and the eval
+trend. Pinned hosted components need no sidecar at all: a release is read out of the hub's own
+git history (`hub_core/component_releases.py`), and only shipped commits are servable.
 
 ## Enforcement matrix
 

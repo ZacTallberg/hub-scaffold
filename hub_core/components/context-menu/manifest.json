@@ -1,8 +1,8 @@
 {
   "name": "context-menu",
   "title": "Context menu",
-  "version": "1.0.1",
-  "what": "One right-click menu any app links. The APP declares what can be right-clicked on its pages (kinds: a card, a row, an order) and what can be done to each (items) in one JSON catalog island; the component does everything a menu does -- pointer, Shift+F10 and the Menu key, touch long-press, arrow keys and type-ahead, tabs, submenus, a check on the current value, press-twice confirmation for anything destructive, the writes through the app's own endpoints and their toasts, each person's recently-used row, and a facts line showing the values behind the state. SMART (optional): with data-smart-url the hub's configured model organises the declared items for this app, page, kind and role -- pins the likeliest at the top, splits a long menu into tabs, drops optional items that make no sense here, and offers up to three questions for the page's agent. It can only name ids the app declared; it can never add or change an action, and a model that is down leaves the catalog's own order.",
+  "version": "1.1.0",
+  "what": "One right-click menu any app links. The APP declares what can be right-clicked on its pages (kinds: a card, a row, an order) and what can be done to each (items) in one JSON catalog island; the component does everything a menu does -- pointer, Shift+F10 and the Menu key, touch long-press, arrow keys and type-ahead, tabs, submenus, a check on the current value, press-twice confirmation for anything destructive, the writes through the app's own endpoints and their toasts, each person's recently-used row, and a facts line showing the values behind the state. SMART (optional): with data-smart-url the hub's configured model organises the declared items for this app, page, kind and role -- pins the likeliest at the top, splits a long menu into tabs, drops optional items that make no sense here, and offers up to three questions for the page's agent. It can only name ids the app declared; it can never add or change an action, and a model that is down leaves the catalog's own order. ASK ABOUT THIS (1.1.0): where the page has an agent component, the menu also answers on things no catalog declared -- selected words (Copy first), a link, a table row and its cell, a section heading, a card -- and a declared kind with no ask of its own gains one; every question comes from one composer (HubMenu.questionAbout) that says what the thing is and where it sits.",
   "link": [
     "<link rel=\"stylesheet\" href=\"{hub}/components/context-menu/context-menu.css\">",
     "<script src=\"{hub}/components/context-menu/context-menu.js\"></script>"
@@ -52,7 +52,7 @@
     "hub-menu:done": "on document: {kind, id, item, status, body} after a post or htmx action landed",
     "hub:agent-ask": "dispatched on document for an `ask` action, cancelable, detail {question}; the agent component cancels it once it has taken the question",
     "hub:component-props": "window event, detail {app, props}; props['context-menu'] overrides the fetched values without a reload",
-    "window.HubMenu": "{version, open(target, x, y), close(), register(kind, def), kinds(), smart()} -- smart() reports each kind's model state and error, for debugging from the console"
+    "window.HubMenu": "{version, open(target, x, y), close(), register(kind, def), kinds(), smart(), questionAbout(thing)} -- smart() reports each kind's model state and error, for debugging from the console; questionAbout({kind, intent: next|explain|link|search|table|page, text, facts, where: {column, row, record, section}}) is the shared composer other components call"
   },
   "rules": [
     "THE HUB SERVES THE COMPONENT AND NEVER AN APP'S DATA. Every URL in a catalog is a path on the app's own origin behind its own sign-in; the component can only run what the catalog declared.",
@@ -60,6 +60,11 @@
     "NOTHING DESTRUCTIVE FIRES ON ONE PRESS. An item with `confirm` arms on the first press and runs on the second, on the same open; anything else disarms it. `danger` marks it. The model may never pin one.",
     "A MODEL FAILURE DOES NOTHING. No model, a timeout or a bad reply leaves the catalog's own order and no star; the model can never add an item, remove a core item, or change an action.",
     "SUCCESS IS WHAT THE APP SAID. A refusal toasts the server's words; a 204 or an HX-Trigger response is the app speaking for itself; only a 2xx with content earns the item's own toast.",
+    "SELECTED WORDS ARE NEVER MADE UNCOPYABLE (1.1.0). A right-click ON the person's own selection (or Shift+F10 / the Menu key while words are selected) never opens a declared kind's menu over it: with an agent on the page it opens the selected-text menu with Copy FIRST, then Ask the agent about this and Explain this in plain words; without an agent, or with the `selection` property set to `browser`, the browser's own menu. A right-click elsewhere still opens the app's menu.",
+    "SHIFT + RIGHT-CLICK IS ALWAYS THE BROWSER'S MENU (1.1.0): one gesture that never gets ours, because the menu now also answers on links, rows and headings. Built-in menus say so in their foot.",
+    "BUILT-IN KINDS EXIST ONLY TO ASK THE PAGE'S AGENT (1.1.0). With an agent component ([data-hub-agent]) on the page and no declared kind under the pointer, the thing is named by what it is: @link (open, new tab, copy link, ask about this link), @row (copy the cell / the row, ask about this row, ask about this <column>), @heading (copy link to the section, copy the heading, ask), @card (.card, .chart-card, .panel, [data-card] with a title: ask about it, explain what it shows, copy its title; a link that IS a card is a card first, its Open items on top). Declared kinds win, then these, then the app's page kind, then a card. With no agent on the page none of them exist and the browser keeps its menu.",
+    "A DECLARED KIND WITH NO ASK GAINS ONE (1.1.0). With an agent on the page and neither a catalog `ask` item nor model asks, the menu adds 'Ask the agent' > 'About this <kind>' (its facts and where it sits), and 'About this <column> (<value>)' when the press landed in a table cell.",
+    "ONE COMPOSER (1.1.0). Every question the menu puts to the agent -- and the table's and the search bar's when the menu is on the page -- comes from questionAbout(thing): the app, the page by its banner nav NAME (never the h1, which often states a finding; else the tab title), and where the thing sits (column and row, table caption, the declared record, the section sub-heading). Text read off the page drops the controls inside it (buttons, role=button, aria-hidden, svg, script, style), so a heading's info button never becomes part of its name. Text read off the page is never a template: a '{' in a cell is asked about as written.",
     "TEXT FIELDS KEEP THE BROWSER'S MENU. A right-click inside input, textarea, select or contenteditable, or anything under [data-hcm-native], is left alone.",
     "SCROLL CLOSES IT ONLY WHEN THE TARGET MOVED, and the menu takes focus back once if the page's own handler took it on the same gesture.",
     "AN ERROR IN THE COMPONENT IS RETHROWN off the stack so the app's error visibility forwards it; the gesture falls back to the browser's own menu.",
@@ -88,7 +93,10 @@
      "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]},
     {"key": "facts", "label": "Facts line", "type": "choice", "default": "on",
      "hint": "The values the app says matter (owner, due, status) under the header.",
-     "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]}
+     "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]},
+    {"key": "selection", "label": "Right-click on selected words", "type": "choice", "default": "menu",
+     "hint": "Menu: with an agent on the page, selected words get Copy first, then ask the agent about them. Browser: the browser's own menu. Shift + right-click is always the browser's menu.",
+     "options": [{"value": "menu", "label": "Copy, then ask the agent"}, {"value": "browser", "label": "The browser's menu"}]}
   ],
   "publishes": {
     "html_attributes": ["data-hcm-ready", "data-hcm-version", "data-hcm-smart"],

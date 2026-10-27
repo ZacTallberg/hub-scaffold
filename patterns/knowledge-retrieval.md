@@ -54,7 +54,8 @@ served, both ranked. **Consolidation** (§1a) is the half that acts on it.
 `python tools/knowledge_use.py [--hours 24]` measures whether delivered knowledge is USED: of
 the records a `<hub-knowledge>` block delivered in a session, how many the agent later named in
 its own replies or tool calls (a floor, stated as one), and how many prompts carried rows, an
-empty block, or none.
+empty block, or none. `--post` records the reading on the standing-eval trend (suite
+`knowledge-use`) so the rate is watched over time, not read once.
 
 A STATE claim ("the export host serves port 8443", a measurement) decays from the day it is
 written. Record it with `--verify "<the command or URL that answers it now>"` and
@@ -139,10 +140,14 @@ console is not for.
    unjudged and counted — never coerced.
 3. **Plan** — duplicates fold (union-find, clusters over five are reported, not folded) into ONE
    canonical lesson, the most foundational then the oldest, which gains `reinforced_by` (who else
-   learned it, when, their story); a folded lesson becomes `superseded` with `superseded_by`, a
-   folded finding keeps standing and is tagged `folded-into:<id>`. A correction supersedes the
-   rule it corrects. A contradiction is written onto the lesson's `related` as a settled verdict,
-   where `recall` prints it for a person.
+   learned it, when, their story); every folded member, lesson or finding, becomes `superseded`
+   with `superseded_by` and is tagged `folded-into:<id>` — a finding left standing was found,
+   proposed and re-tagged again by every later run. A correction supersedes the rule it corrects.
+   A contradiction is written onto the lesson's `related` as a settled verdict, where `recall`
+   prints it for a person. The printed plan holds only what an apply would write (`ACTION`);
+   what needs a person's eyes and no write — a correction across kinds, an oversized cluster, a
+   contradiction with no room left on the lesson — prints as `REPORT`, and a contradiction
+   already recorded is not proposed again, so the proposal count drains as applies land.
 4. **`applies_when`** — for every live lesson, the literal strings whose appearance means the rule
    applies NOW: `errors` (text as the tool prints it), `commands`, `paths`, `systems`. This is what
    a tool-time hook matches; similarity over a failed command's output rarely returns the record
@@ -160,7 +165,10 @@ console is not for.
    these at tool time is adopter wiring; the field is the contract.
 5. **Re-learn count** — per ISO week, lessons filed and how many restated an older record
    (`relearned`: another author or more than a day later; `double_filed`: same author within a
-   day). The scaffold has no served trend store: the run prints it (`RELEARN`) and returns it.
+   day). The run prints it (`RELEARN`) and returns it; `--post` records it as one run of the
+   standing-eval trend (suite `knowledge-loop`, `/hub/eval.json`, one path per week) and prints
+   what the hub stored. `tools/knowledge_use.py --post` records the other half (suite
+   `knowledge-use`): the loop is working when use rises while re-learning falls.
 
 **The review-first apply contract.**
 
@@ -169,6 +177,13 @@ console is not for.
 - **An apply writes only what an earlier dry run judged.** `--apply` judges nothing new and derives
   no new triggers; it replays the cached plan, so an apply must use the dry run's `--state-dir`.
   Otherwise pairs judged in the same run as the apply would be written unread.
+- **Triggers alone.** `--apply-triggers` (trigger line `apply triggers [limit=N] [except <ids>]`)
+  writes ONLY the non-empty `applies_when` the dry run derived, through the same logged,
+  revertible path; folds, supersedes and contradictions stay for a person. What makes a rule fire
+  at the moment it applies is low-risk; retiring a record is not. An empty derivation is never
+  written (it would erase a working trigger and gain nothing). The board raises one critical
+  `knowledge_triggers_dark` attention item while it holds 50 or more live lessons and not one
+  carries a trigger -- every tool-time hook then fires nothing while every surface reads green.
 - **Hold-backs.** `--except <id>,<id>` drops every action touching a held record (and its
   `applies_when`), each printed `HELD BY REVIEWER`. `--apply-limit` caps writes per run.
 - **Nothing is deleted; everything is revertible.** Before each write the record's full prior
@@ -178,8 +193,8 @@ console is not for.
   form; a lesson's status defaults to `standing`) — re-sending a payload without an added key
   leaves the key standing. Each revert carries its own idempotency key, so a corrective second
   revert writes instead of replaying the first.
-- **Parse or refuse.** `--from-trigger FILE` reads the last non-comment line: `apply [limit=N]
-  [except <ids>]`, `revert <run> [only <ids>]`, anything else a dry run. Every token must be
+- **Parse or refuse.** `--from-trigger FILE` reads the last non-comment line: `apply [triggers]
+  [limit=N] [except <ids>]`, `revert <run> [only <ids>]`, anything else a dry run. Every token must be
   understood; an unreadable limit or a hold-back with no ids exits 4 before any write, and the
   run prints `PARSED mode=… apply_limit=… exclude=… only=…` with the file and git HEAD of the
   code that parsed it. On the source instance an ignored hold-back was written through and the
@@ -232,7 +247,12 @@ five splits, and ranks ties pessimistically. Move `CONVEX_ALPHA` only to a value
 reported. It needs at least ten answered asks.
 
 The same run scores the **delivered** path — the answer's rank in the per-prompt memory index
-(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25. Its query is the ask's
+(`guidance.json`) when the ask is the console's focus, at @1/@5/@10/@25, and at **@cut**: whether
+the answer is among the rows the client's own relevance or word cut keeps
+(`prompt_context.delivered_cut`, the one function the prompt hook renders from), with the mean
+number of rows that cut delivered. A top-k the client never renders is not in front of the model;
+on a small board the @5 figure can read 90% while the cut delivers almost nothing, and only @cut
+says so. Its query is the ask's
 CONTEXT with the question removed: every answer restates its question verbatim, and a question
 scored against its own echo reads far better than any real prompt will. Sentences sharing 60% of
 the question's words go too, asks left with fewer than 60 characters are excluded and counted,
@@ -259,8 +279,11 @@ It asks `guidance.json` for the index ranked by the console's focus (by meaning 
 the first 400 characters of the prompt), prints the rows the session does not already hold
 (a per-session receipt in `HUB_CLIENT_STATE_DIR`, reset on session start), names the relevant
 rows it already holds in one line, and keeps the whole output under 9,500 characters — rows that
-did not fit are written to a pack file whose path is printed, and only rows that rendered become
-receipt keys. When the ranking is by MEANING, each row carries its cosine (`score`) and only
+did not fit are NOT delivered (one line counts them and names `search`; an overflow pack file was
+retired after packs holding thousands of rows were read zero times), and only rows that rendered
+become receipt keys. When the board could not rank for the prompt at all, no rows are delivered
+and one line says why, with the search verb: unranked is not relevant, and a prompt that got
+nothing must not look like one where nothing applied. When the ranking is by MEANING, each row carries its cosine (`score`) and only
 rows at or above `HUB_PROMPT_RELEVANCE_CUT` (0.48) are delivered, at most
 `HUB_PROMPT_RELEVANCE_MAX` (6), never padded: a budget filled with whatever ranked next is read
 by nobody. A prompt whose focus is the one the session's last memory block was ranked for gets
@@ -303,7 +326,12 @@ it with `python -m hub_core.client knowledge-sync --out <file>`, which pages
 its ETag on every carrier (`If-None-Match`, `X-Hub-ETag`, `?etag=`) and gets a 304; a narrowed
 reader is never sent a revoke for a record it could not see (a revoke carries an id, and ids are
 often slugs of titles). The feed serves record text redacted (a mirror is a second copy on
-somebody's disk). How a local memory engine consumes that mirror — what it indexes, how it
+somebody's disk). A `put`'s `author` is the record's FIRST writer (`last_writer` beside it): the
+last writer is often a maintenance pass -- a re-check, an attestation, a consolidation -- and
+naming it credited the machinery with every rule it touched. The cursor carries the `put` shape
+it was built with (`.P<n>`); a cursor from an older shape (or a bare integer) re-pages the ledger
+once, so records a mirror already holds arrive again in the current shape instead of only when
+they next change. How a local memory engine consumes that mirror — what it indexes, how it
 renders, and the tool-time lesson triggers that fire on a command, a path or an error — is
 `patterns/agent-memory.md`.
 

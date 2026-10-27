@@ -632,13 +632,17 @@ def fold(rows: list, *, hub_dir=None, acked=None, claims=None, resolved=None,
 
 
 _READ_CACHE: dict = {}
+#: ``row -> {projects}``: which CI projects' deploys restart the app a row came from. The adapter
+#: sets it from its declared apps (their `project` / `hosted_in`); the default is the row's app.
+SERVING_PROJECTS = None
 
 
 def _folded(hub_dir, state, now: float, limit: int) -> tuple:
     """(rows, meta, problems) cached per hub on the stamps of every input sidecar — this
     rides every board payload and the inbox long-poll."""
+    from . import deploy_windows
     key = (errorlog.stamp(hub_dir), presence.stamp(hub_dir), int(limit),
-           _escalation_signature(hub_dir, state))
+           _escalation_signature(hub_dir, state), deploy_windows.stamp(hub_dir))
     hit = _READ_CACHE.get(str(hub_dir))
     if hit and hit["key"] == key and (now - hit["at"]) < READ_TTL_S:
         rows, meta, probs = hit["value"]
@@ -646,7 +650,8 @@ def _folded(hub_dir, state, now: float, limit: int) -> tuple:
     rows, meta = errorlog.read(hub_dir, limit=limit)
     roster = Roster(hub_dir, now)
     probs = fold(rows, hub_dir=hub_dir, now=now, roster=roster,
-                 escalations=read_escalations(hub_dir, state))
+                 escalations=read_escalations(hub_dir, state),
+                 bar=deploy_windows.bar(hub_dir, errorlog.passes_bar, SERVING_PROJECTS))
     _READ_CACHE[str(hub_dir)] = {"key": key, "at": now, "value": (rows, meta, probs)}
     return rows, dict(meta), copy.deepcopy(probs)
 

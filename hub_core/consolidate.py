@@ -23,6 +23,9 @@ served, both ranked, and the stack grows. It also sets lesson-vs-finding pairs a
      when, and their story, so no evidence is lost and the count becomes the rule's weight. A
      correction supersedes the rule it corrects. A contradiction is recorded on the lesson's
      `related` as a settled verdict, where `recall` prints it for a person. Nothing else.
+     The plan lists only what an apply would write (ACTION); what is for a person to look at
+     -- a correction across kinds, a cluster too large -- is printed apart (REPORT), and a
+     contradiction already on the lesson is not proposed again.
   4. `applies_when` for every live lesson: the literal error text, the DEFECTIVE FORM of a
      command, the paths and the systems whose appearance means THIS rule is relevant now.
      Nearest-neighbour search over a failed command's error text rarely returns the record that
@@ -33,7 +36,8 @@ served, both ranked, and the stack grows. It also sets lesson-vs-finding pairs a
 
 WHAT IT REFUSES TO DO.
   * It never guesses: an unparseable verdict leaves the pair unjudged and counted.
-  * It never deletes: a folded lesson is `superseded` with a pointer; the record's full prior
+  * It never deletes: every folded member, finding or lesson, is `superseded` with a pointer
+    to the canonical lesson (a member left live is re-proposed every run); the record's full prior
     state is written to the run log BEFORE each write, and `revert(<run>)` restores every
     record the run touched -- or `only` the ids named, because one wrong action in a run of
     sixty must be undoable without undoing the fifty-nine a reviewer approved.
@@ -486,6 +490,33 @@ def hold_back(actions, held, out=print):
     return keep
 
 
+def actionable(actions, records):
+    """`(proposals, reports)`: the plan a reviewer reads lists only what an apply would WRITE.
+
+    A `report` (a correction across kinds, a cluster too large to trust) is something for a
+    person to look at, never a write; a contradiction already recorded on the lesson's
+    `related`, or one with no room left there, is something the apply would skip. Counted
+    as proposals, they stand in every dry run's plan forever -- a review queue that never
+    drains because half of it is not actionable reads as a backlog nobody is working. So they
+    are printed apart (REPORT) or dropped, and the proposal count is what an apply acts on."""
+    proposals, reports = [], []
+    for act in actions:
+        if act["op"] == "report":
+            reports.append(act)
+            continue
+        if act["op"] == "contradiction":
+            related = [r for r in ((records.get(act["lesson"]) or {}).get("related") or [])
+                       if isinstance(r, dict)]
+            if any(r.get("id") == act["other"] for r in related):
+                continue                       # already recorded: the contradiction pass owns it
+            if len(related) >= RELATED_MAX:
+                reports.append(dict(act, op="report", why="contradiction, but %s's related is full"
+                                    % act["lesson"]))
+                continue
+        proposals.append(act)
+    return proposals, reports
+
+
 def _parse_ts(ts):
     try:
         return _dt.datetime.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S")
@@ -532,6 +563,28 @@ def relearn_stats(records, judged) -> dict:
         else:
             bucket["relearned"] += 1
     return dict(sorted(weeks.items()))
+
+
+def trend_run(t, *, weeks=8):
+    """The re-learn count as one run of the standing-eval trend (suite `knowledge-loop`), or
+    None when no week has a lesson. One path per ISO week -- lessons filed, how many re-learned
+    an older record, how many were double-filed -- so the trend shows the rate falling (the loop
+    working) or not. Beside the knowledge-use reading (`tools/knowledge_use.py --post`) it is
+    the other half of "is the board's knowledge used, and is it learning"."""
+    rows = list((t.get("relearn") or {}).items())[-weeks:]
+    paths = {}
+    for week, v in rows:
+        n = v.get("lessons") or 0
+        cell = {"n": n, "relearned": v.get("relearned", 0), "double_filed": v.get("double_filed", 0)}
+        if n:
+            cell["relearn_pct"] = round(100.0 * v.get("relearned", 0) / n, 1)
+        paths[week] = cell
+    if not paths:
+        return None
+    return {"suite": "knowledge-loop", "pairs": t.get("pairs", 0), "paths": paths,
+            "notes": json.dumps({k: t.get(k) for k in ("run", "mode", "basis", "verdicts", "actions",
+                                                       "reports", "judged_now", "triggers_now")},
+                                sort_keys=True)[:600]}
 
 
 # --------------------------------------------------------------------------- #
@@ -590,14 +643,17 @@ def apply(actions, records, triggers, run_id, *, write, log_dir, model="", out=p
                 for m in act["members"]:
                     ent = records[m]
                     mark = "folded-into:%s" % act["canonical"]
-                    if mark in (ent.get("tags") or []):
+                    if mark in (ent.get("tags") or []) and ent.get("status") in _k.DEAD_STATUS:
                         t["unchanged"] += 1
                         continue
                     tags = [x for x in (ent.get("tags") or []) if not str(x).startswith("folded-into:")]
-                    fields = {"tags": tags + [mark, "consolidate:%s" % run_id]}
-                    if kind_of(ent) == "lesson":
-                        fields["status"] = "superseded"
-                        fields["superseded_by"] = act["canonical"]
+                    # EVERY folded member is RETIRED, a finding as much as a lesson. A finding
+                    # that was only tagged stayed live, so every later run found the same pair,
+                    # proposed the same fold and re-tagged it (on the source instance one finding
+                    # carried a consolidate:<run> tag per nightly run). Its text and author live
+                    # on in the canonical lesson's reinforced_by; `revert` restores it.
+                    fields = {"tags": tags + [mark, "consolidate:%s" % run_id],
+                              "status": "superseded", "superseded_by": act["canonical"]}
                     do(ent, fields, "fold into %s" % act["canonical"])
             elif act["op"] == "supersede":
                 ent = records[act["old"]]
@@ -708,13 +764,15 @@ class TriggerRefused(ValueError):
 
 
 def parse_trigger_line(line: str) -> dict:
-    """`apply [limit=N] [except <id>,<id>]` | `revert <run> [only <id>,<id>]` | anything else
-    (a dry run). Every token after `apply`/`revert` must be understood: an ignored hold-back or
+    """`apply [triggers] [limit=N] [except <id>,<id>]` | `revert <run> [only <id>,<id>]` |
+    anything else (a dry run). `apply triggers` writes ONLY the derived applies_when (folds,
+    supersedes and contradictions stay for a person). Every token after `apply`/`revert` must be understood: an ignored hold-back or
     cap must stop the run, never be written through (on the source instance a reviewer's
     hold-back was silently dropped and the held record was superseded)."""
     words = str(line or "").split()
     verb = words[0].lower() if words else ""
-    spec = {"mode": "dry-run", "apply_limit": None, "exclude": [], "only": [], "run": ""}
+    spec = {"mode": "dry-run", "apply_limit": None, "exclude": [], "only": [], "run": "",
+            "triggers_only": False}
     if verb not in ("apply", "revert"):
         return spec
     rest = words[1:]
@@ -725,6 +783,9 @@ def parse_trigger_line(line: str) -> dict:
         rest = rest[1:]
     else:
         spec["mode"] = "apply"
+        if rest and rest[0].lower() == "triggers":
+            spec["triggers_only"] = True
+            rest = rest[1:]
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -751,7 +812,7 @@ def parse_trigger_line(line: str) -> dict:
 # --------------------------------------------------------------------------- #
 def run(records, vectors, conn, *, write, log_dir, apply_writes=False, judge_limit=MAX_JUDGE,
         trigger_limit=MAX_TRIGGERS, apply_limit=MAX_APPLY, exclude=(), cfg=None, out=print,
-        pairs=None) -> dict:
+        pairs=None, triggers_only=False) -> dict:
     """One pass over `records` ({id: note}, from `live`) with `vectors` ({id: unit vector}), or
     with `pairs` already found by `candidates_from_hub` (then `vectors` is unused).
 
@@ -827,11 +888,13 @@ def run(records, vectors, conn, *, write, log_dir, apply_writes=False, judge_lim
     for _a, _b, j in judged:
         t["verdicts"][j["verdict"]] = t["verdicts"].get(j["verdict"], 0) + 1
 
-    actions = hold_back(plan(records, judged), exclude, out=out)
-    t["actions"] = {}
+    actions, reports = actionable(hold_back(plan(records, judged), exclude, out=out), records)
+    t["actions"], t["reports"] = {}, len(reports)
     for act in actions:
         t["actions"][act["op"]] = t["actions"].get(act["op"], 0) + 1
         out("ACTION " + json.dumps(act))
+    for act in reports:
+        out("REPORT " + json.dumps(act))
 
     triggers, t["triggers_now"], t["triggers_cached"], t["triggers_unparsed"] = {}, 0, 0, 0
     t["triggers_underived"] = 0
@@ -885,6 +948,15 @@ def run(records, vectors, conn, *, write, log_dir, apply_writes=False, judge_lim
     t["relearn"] = relearn_stats(records, judged)
     out("RELEARN " + json.dumps(t["relearn"]))
     if apply_writes:
+        if triggers_only:
+            # TRIGGERS ONLY: what makes a rule fire at the moment it applies is low-risk and
+            # revertable; folding and superseding records is a person's call. So this apply
+            # writes nothing but NON-EMPTY applies_when (an empty derivation would erase a
+            # working trigger and gain nothing), through the same logged, revertable path.
+            actions = []
+            triggers = {eid: v for eid, v in triggers.items()
+                        if any(v[1].get(k) for k in TRIGGER_KEYS)}
+            t["mode"] = "apply-triggers"
         t["apply"] = apply(actions, records, triggers, run_id, write=write, log_dir=log_dir,
                            model=model, out=out, limit=apply_limit)
     return t

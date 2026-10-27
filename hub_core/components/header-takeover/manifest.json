@@ -3,7 +3,7 @@
   "title": "Header takeover",
   "what": "A companion to the shared banner: hides (never removes) the header an app names in data-replaces and names the reachable controls that went dark, warns when the banner sits on top of a header nobody declared, hides app copies of controls the banner is really drawing (data-ab-superseded, or automatically in the slot, with data-ab-keep as the written escape hatch), and lets an operator take an app's own control off the band (hide_custom).",
   "link": [
-    "<script src=\"{hub}/components/header-takeover/header-takeover.js\" defer></script>"
+    "<script src=\"{hub}/components/header-takeover/header-takeover.js\"></script>  (right after the #app-banner mount, NOT deferred: a declared data-replaces header is then hidden as it is parsed instead of painting once first)"
   ],
   "requires": ["banner"],
   "mount": {
@@ -19,6 +19,7 @@
   },
   "rules": [
     "Hidden, never removed: apps bind their own controls by id at startup.",
+    "The declared header never paints first: run during parsing, the component adds a stylesheet rule naming exactly the data-replaces selectors (never html, body, or anything holding the banner), and removes it once the real nodes are marked -- or at DOMContentLoaded when the banner never drew, so a failed banner leaves the app's own header on screen.",
     "The detector only warns; its failure mode is doing nothing.",
     "A duplicate is hidden only while the banner is drawing its counterpart, checked per control and asked twice.",
     "An app's own search box is kept when the standard search bar is not mounted.",

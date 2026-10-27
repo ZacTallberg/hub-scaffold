@@ -7,6 +7,8 @@
      + data-suggest-url          a panel that suggests as you type
      + data-chose-url            the app learns from what people actually OPENED
      + smart:true in the answer  a second, re-ranked pass the APP computes (smart=1)
+     + an agent component        "Ask the agent" when nothing matched, and as the last row of a
+                                 question (three words or more)
 
      <div id="app-search" data-app="budget-app" data-app-name="Budget"
           data-action="/budget/search/" data-sources="budgets, cost centres, owners"
@@ -25,7 +27,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.3.0";
+  var VERSION = "1.4.0";
   var doc = document, win = window;
   var mount = doc.getElementById("app-search") || doc.querySelector("[data-app-search]");
   if (!mount || mount.getAttribute("data-sb-ready") === "1") return;
@@ -261,6 +263,7 @@
     if (body) wrap.appendChild(el("div", "sb-state-body", body));
     list.appendChild(wrap);
     openPanel();
+    return wrap;
   }
 
   function addOption(row, groupKey, rank, extraCls) {
@@ -283,6 +286,47 @@
     });
     options.push(entry);
     list.appendChild(a);
+    return entry;
+  }
+
+  /* ASK THE AGENT ABOUT THIS (1.4.0). When the index finds nothing, or the person typed a real
+     question, the agent on this page is one press away -- the question written by the context
+     menu's shared composer (HubMenu.questionAbout, which knows the page's name) when it is on the
+     page, else plainly here. Offered only where the page has an agent component to take it:
+     hub:agent-ask is cancelable, and the agent cancels it once it has the question. */
+  function agentHere() { return !!doc.querySelector("[data-hub-agent]"); }
+  function askAbout(q) {
+    var thing = { kind: "search", intent: "search", text: q };
+    var question = "";
+    try {
+      if (win.HubMenu && typeof win.HubMenu.questionAbout === "function") question = win.HubMenu.questionAbout(thing) || "";
+    } catch (e) { setTimeout(function () { throw e; }, 0); }
+    if (!question) {
+      var page = String(doc.title || "").split(/ [·|—–-] /)[0];
+      question = "In " + (APP_NAME || "this app") + (page && page !== APP_NAME ? ", on the " + page + " page" : "") +
+                 ": I searched for “" + q + "”. Can you answer it, or find what I am looking for?";
+    }
+    var ev;
+    try { ev = new CustomEvent("hub:agent-ask", { cancelable: true, detail: { question: question, about: thing } }); }
+    catch (e) { return false; }
+    doc.dispatchEvent(ev);
+    if (ev.defaultPrevented) { closePanel(); try { input.blur(); } catch (e) {} }
+    return ev.defaultPrevented;
+  }
+  function askButton(q) {
+    var b = el("button", "sb-ask", "Ask the agent: “" + q + "”");
+    b.type = "button";
+    b.addEventListener("click", function (e) { e.preventDefault(); askAbout(q); });
+    return b;
+  }
+  // The agent row is NOT a result: it carries rank -1 (so choose() reports nothing) and its press
+  // asks instead of navigating.
+  function addAskOption(q) {
+    var entry = addOption({ title: "Ask the agent: “" + q + "”",
+                            meta: "The agent on this page answers it from this app", url: "#" },
+                          "ask", -1, "sb-opt--ask");
+    entry.ask = function () { askAbout(q); };
+    entry.node.addEventListener("click", function (e) { e.preventDefault(); e.stopImmediatePropagation(); askAbout(q); }, true);
     return entry;
   }
 
@@ -412,7 +456,10 @@
     groups.forEach(function (g) { total += ((g && g.rows) || []).length; });
     var hasTop = !!(data.top && data.top.title);
     if (!total && !hasTop) {
-      drawState("Nothing matched “" + q + "”", "Try fewer words, or part of a name or a key.", "quiet");
+      var none = drawState("Nothing matched “" + q + "”",
+                           agentHere() ? "Try fewer words, or part of a name or a key -- or ask the agent."
+                                       : "Try fewer words, or part of a name or a key.", "quiet");
+      if (agentHere()) none.appendChild(askButton(q));
       return;
     }
     // The learned top match, only when the app sent one -- and lifted OUT of its group rather
@@ -431,6 +478,8 @@
       rows.forEach(function (row, i) { addOption(row, g.key || "", i); });
     });
     if (data.smart_error) list.appendChild(el("div", "sb-note", String(data.smart_error)));
+    // A real QUESTION (three words or more) gets the agent as the last row, after the matches.
+    if (agentHere() && q.split(/\s+/).filter(Boolean).length >= SMART_WORDS) addAskOption(q);
     if (typeof data.total === "number" && data.total > total) {
       var more = el("a", "sb-more", "See all " + data.total + " results");
       more.href = ACTION + (ACTION.indexOf("?") === -1 ? "?" : "&") + PARAM + "=" + encodeURIComponent(q);
@@ -502,6 +551,7 @@
       // runs the search (not a choice, reports nothing).
       e.preventDefault();
       var entry = options[active];
+      if (entry.ask) { entry.ask(); return; }   // the agent row asks; it is not a result to open
       choose(entry);
       win.location.href = entry.node.href;
     }

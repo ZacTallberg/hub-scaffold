@@ -260,6 +260,7 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     from urllib.parse import urlencode
     from . import prompt_context as pc
     _utf8_stdout()
+    _c.no_restart_ride()           # a per-prompt hook answers now; it never waits on a deploy
     sid = arguments.session or os.environ.get("HUB_SESSION_ID", "")
     event, prompt = arguments.event or "", ""
     if arguments.hook:
@@ -284,7 +285,12 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
     # block still rides) and print one line that says which side is serving. Any doubt keeps
     # the hub block: the decision fails closed.
     from . import knowledge_mirror
-    local = knowledge_mirror.local_owner()
+    # PER SESSION, not only per machine: a session started without the local recall hook (an
+    # unattended run's lean settings set HUB_SESSION_LOCAL_RECALL=0) is served by nobody if this
+    # hook stands down for the machine's engine -- on the origin system none of six lean
+    # unattended runs received any knowledge while the machine's bit said "local serves".
+    local = (os.environ.get("HUB_SESSION_LOCAL_RECALL", "").strip() != "0"
+             and knowledge_mirror.local_owner())
     query: dict[str, Any] = {"agent": _agent(arguments),
                              "memory_cap": 1 if local else arguments.memory_cap,
                              "memory_full": 0 if local else arguments.memory_full}
@@ -323,16 +329,11 @@ def _run_prompt_context(base: str, arguments: argparse.Namespace) -> None:
         return None
     phases["render_ms"] = round((_time.perf_counter() - t1) * 1000)
     parts = [out["live"], out["memory"]]
-    if out["spill"]:
-        t2 = _time.perf_counter()
-        path = pc.write_spill(sid, out["spill"])
-        phases["pack_ms"] = round((_time.perf_counter() - t2) * 1000)
-        parts.append("(%d more ranked records are in %s)" % (len(out["spill"]), path or
-                     "no file — the overflow could not be written; use `search`"))
     text = pc.fit_output(parts)
     if text:
         print(text)
     phases.update(total_ms=round((_time.perf_counter() - t0) * 1000), delivered=len(out["keys"]),
+                  withheld=len(out["spill"]),
                   held=len(delivered), chars=len(text or ""), outcome="delivered" if text else "silent",
                   rank=(payload.get("memory_rank") or {}).get("by") or
                   ("ranked" if (payload.get("memory_rank") or {}).get("ranked") else "standing"))
@@ -731,7 +732,9 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
                                                             (": " + err[:200]) if err else "")}
         print("CODE_UNDER_TEST %s HEAD %s contains %s" % (code_dir, head, arguments.require_commit))
 
-    apply_writes, revert_run = bool(arguments.apply), (arguments.revert or "").strip()
+    triggers_only = bool(getattr(arguments, "apply_triggers", False))
+    apply_writes = bool(arguments.apply) or triggers_only
+    revert_run = (arguments.revert or "").strip()
     exclude = [x for x in (arguments.except_ids or "").split(",") if x]
     only = [x for x in (arguments.only or "").split(",") if x]
     apply_limit = arguments.apply_limit
@@ -752,6 +755,7 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
             return {"_exit": 4, "refused": "CONSOLIDATE_REFUSED the trigger line was not fully "
                     "understood (%s); nothing run" % error}
         apply_writes = spec["mode"] == "apply"
+        triggers_only = bool(spec.get("triggers_only"))
         revert_run = spec["run"]
         exclude, only = spec["exclude"], spec["only"]
         if spec["apply_limit"] is not None:
@@ -759,7 +763,8 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
     # A VERIFIER NAMES ITS SUBJECT: what was parsed, and which code parsed it.
     _hrc, head, _e = _git(code_dir, "rev-parse", "--short", "HEAD")
     print("PARSED mode=%s apply_limit=%s exclude=%s only=%s | code %s at %s"
-          % ("revert" if revert_run else ("apply" if apply_writes else "dry-run"), apply_limit,
+          % ("revert" if revert_run else (("apply-triggers" if triggers_only else "apply")
+                                          if apply_writes else "dry-run"), apply_limit,
              exclude, only, cons.__file__, head or "?"))
 
     def write(eid, fields, version, idem):
@@ -813,11 +818,12 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
         try:
             t = cons.run(records, {}, conn, write=write, log_dir=log_dir, apply_writes=apply_writes,
                          judge_limit=arguments.judge_limit, trigger_limit=arguments.trigger_limit,
-                         apply_limit=apply_limit, exclude=exclude, pairs=pairs)
+                         apply_limit=apply_limit, exclude=exclude, pairs=pairs,
+                         triggers_only=triggers_only)
         finally:
             conn.close()
         t.update(lookups=lookups, lookups_blind=blind)
-        return _consolidate_exit(t, state)
+        return _consolidate_exit(t, state, base, arguments)
     label = "%s|%s" % (semantic.embed_url(), os.environ.get("HUB_EMBED_MODEL", "").strip())
     conn = cons.open_cache(state / "cache.sqlite3")
     try:
@@ -838,23 +844,37 @@ def _run_consolidate(base: str, arguments: argparse.Namespace) -> dict[str, Any]
         vectors = {eid: have[s] for eid, s in shas.items() if s in have}
         t = cons.run(records, vectors, conn, write=write, log_dir=log_dir, apply_writes=apply_writes,
                      judge_limit=arguments.judge_limit, trigger_limit=arguments.trigger_limit,
-                     apply_limit=apply_limit, exclude=exclude)
+                     apply_limit=apply_limit, exclude=exclude, triggers_only=triggers_only)
     finally:
         conn.close()
-    return _consolidate_exit(t, state)
+    return _consolidate_exit(t, state, base, arguments)
 
 
-def _consolidate_exit(t: dict, state) -> dict:
-    # The re-learn count has no served scoreboard in this scaffold: it is printed (RELEARN) and
-    # returned here, for an adopter to post wherever their trend store lives.
+def _consolidate_exit(t: dict, state, base=None, arguments=None) -> dict:
+    # The re-learn count is printed (RELEARN) and returned; with --post it is also one run of the
+    # board's standing-eval trend (suite knowledge-loop, /hub/eval.json), and what the hub
+    # STORED is printed, so a post that did not land never reads as recorded.
     t["state_dir"] = str(state)
+    if arguments is not None and getattr(arguments, "post", False):
+        from . import consolidate as cons
+        run = cons.trend_run(t)
+        if run is None:
+            t["trend"] = {"skipped": "no week has a lesson: nothing to post"}
+        else:
+            try:
+                stored = _c._post(base, "eval", run).get("data")
+                t["trend"] = {"posted": stored}
+                print("TREND POSTED " + json.dumps(stored, sort_keys=True)[:600])
+            except (RuntimeError, ValueError) as error:
+                t["trend"] = {"refused": str(error)[:300]}
+                print("TREND REFUSED " + str(error)[:300])
     if t.get("mode") == "dry-run":
         t["next"] = ("DRY RUN: nothing was written. Read the proposals above, then run again with "
                      "--apply and the same --state-dir (undo a run with --revert %s)" % t.get("run"))
     if t.get("needs_model"):
         t["_exit"] = 2
         t["msg"] = "judging or trigger derivation left undone: no judge model (HUB_JUDGE_URL/_MODEL)"
-    elif (t.get("apply") or {}).get("refused"):
+    elif (t.get("apply") or {}).get("refused") or (t.get("trend") or {}).get("refused"):
         t["_exit"] = 3
     return t
 
@@ -1053,13 +1073,16 @@ def register(commands) -> None:
                               "derive applies_when (dry run unless --apply; judge + embedder on THIS machine)")
     con.add_argument("--apply", action="store_true",
                      help="write the plan an EARLIER dry run judged (an apply judges nothing new)")
+    con.add_argument("--apply-triggers", action="store_true", dest="apply_triggers",
+                     help="write ONLY the non-empty applies_when an earlier dry run derived "
+                          "(folds and supersedes stay for a person); logged and revertable")
     con.add_argument("--apply-limit", type=int, default=60, dest="apply_limit", help="max hub writes this run")
     con.add_argument("--except", dest="except_ids", default="",
                      help="comma-separated ids a reviewer held back: every action touching one is dropped")
     con.add_argument("--revert", default="", help="restore every record run <RUN> wrote")
     con.add_argument("--only", default="", help="with --revert: restore only these comma-separated ids")
     con.add_argument("--from-trigger", default="", dest="from_trigger",
-                     help="read the LAST non-comment line of FILE: 'apply [limit=N] [except <ids>]', "
+                     help="read the LAST non-comment line of FILE: 'apply [triggers] [limit=N] [except <ids>]', "
                           "'revert <run> [only <ids>]', anything else a dry run; a line the parse "
                           "does not fully understand refuses (exit 4)")
     con.add_argument("--scheduled", action="store_true",
@@ -1078,5 +1101,8 @@ def register(commands) -> None:
     con.add_argument("--state-dir", default="", dest="state_dir",
                      help="verdict/trigger/vector cache and run logs (default <client state>/consolidate); "
                           "an apply or revert must use the dry run's state dir")
+    con.add_argument("--post", action="store_true",
+                     help="record the re-learn count on the standing-eval trend (suite knowledge-loop; "
+                          "needs eval:write); a refused post exits 3")
     con.add_argument("--agent")
     con.set_defaults(runner=_run_consolidate)

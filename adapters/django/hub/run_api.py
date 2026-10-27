@@ -176,3 +176,42 @@ def update_run(request, b):
         response["data"].update({"run": current, "operation": operation,
                                  "recovery": runs.recovery_envelope(current)})
     return JsonResponse(response, status=status)
+
+
+# ── the cross-machine run ledger (hub_core.run_ledger) ─────────────────────────────────────────
+
+RUN_LEDGER_MAX_BODY = 32 * 1024
+
+
+@writer(scope="run:report")
+def run_ledger_post(request, b):
+    """POST /hub/api/run-ledger -- one ended unattended run from any machine: ``item`` (required),
+    ``item_kind``, ``outcome``, ``run_id``, ``duration_s``, ``tokens``, ``turns``, ``rc``,
+    ``started``, ``suspended_s``, ``runtime``, ``lane``, ``repo``, ``session``, optional
+    ``phases``. Attributed to the authenticated writer and the ``X-Hub-Machine`` it sent."""
+    from hub_core import run_ledger
+    if len(request.body or b"") > RUN_LEDGER_MAX_BODY:
+        return _error("too_large", "a run row is at most %d bytes" % RUN_LEDGER_MAX_BODY, 413)
+    agent = str(b.get("agent") or getattr(request.hub_auth, "subject", "") or "")
+    try:
+        row = run_ledger.record(hub_app.HUB_DIR, agent,
+                                request.headers.get("X-Hub-Machine") or "", b)
+    except OSError as exc:
+        return _error("not_recorded", "the run ledger could not be written: %s"
+                      % type(exc).__name__, 503)
+    if not row:
+        return _error("need_item", "name the item the run was for", 422)
+    return JsonResponse({"data": row}, status=201)
+
+
+def run_ledger_json(request):
+    """GET /hub/run-ledger.json?days=7&machine=&item= -- the ledger across machines (rolling
+    window, one row per run id, per-machine summaries, the row cap said out loud)."""
+    from hub_core import run_ledger
+    try:
+        days = int(request.GET.get("days") or 7)
+    except ValueError:
+        days = 7
+    return JsonResponse({"data": run_ledger.runs(hub_app.HUB_DIR, days,
+                                                 request.GET.get("machine") or "",
+                                                 request.GET.get("item") or "")})

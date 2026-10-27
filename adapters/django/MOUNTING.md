@@ -47,11 +47,26 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # FIRST of all: counts the requests in flight at each arrival and stamps when each entered,
+    # so /hub/perf.json `write_phases` / `process_pressure` and every write's Server-Timing
+    # header can say how long a write waited BEFORE its view ran (set HUB_SERVER_THREADS to
+    # the server's thread pool so the at-capacity share is computed).
+    "hub.middleware.InFlightMiddleware",
+    # FIRST, before sessions and sign-in: a hosted component FILE (public chrome every app links
+    # render-blocking) is answered without a session read or a viewer lookup and without
+    # `Vary: Cookie`, so a slow session store never becomes every app's slow page.
+    "hub.app_services.ComponentFastPathMiddleware",
     # ... your middleware ...
     # Early, before any read gate: a busy ledger answers 503 + Retry-After on every hub path,
     # reads included, and records a WARNING row instead of a 5xx defect.
     "hub.middleware.RouteTimingMiddleware",   # per-route latency for /hub/perf.json + the rail
     "hub.middleware.LedgerBusyMiddleware",
+    # While a process started from wsgi/asgi (prewarm.start()) warms, a heavy GET /hub/* read
+    # SLEEPS until it is warm and is then served -- never a cold fold per thread, which queued
+    # the liveness probe behind every request and rolled a deploy back. Every hold ends at one
+    # deadline (HUB_WARMUP_HOLD_S, 20 s after start); past it or past HUB_WARMUP_HOLD_MAX holds
+    # the read is shed 503 + Retry-After. Counts on /hub/perf.json `warmup`.
+    "hub.middleware.WarmupHoldMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",   # optional: no-store on dynamic HTML after deploys
     # The visibility veil (after your auth middleware, so request.user is known). A no-op until
     # PROJECT/facets.json declares hidden facets; see HUB-API.md "Visibility".
@@ -132,8 +147,12 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # this channel either way):
 # LOGGING = {..., "handlers": {"hub_errors": {
 #     "()": "hub_core.errorlog.HubErrorHandler", "hub_dir": str(BASE_DIR / "PROJECT" / ".hub"),
-#     "level": "ERROR"}},
-#     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"}}}
+#     "level": "WARNING"}},
+#     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR"},
+#                 "hub": {"handlers": ["hub_errors"], "level": "WARNING"}}}
+# The handler keeps every ERROR and a WARNING that carries a traceback (a background loop that
+# caught a failure to keep going); a plain warning stays out. The hub app also arms thread and
+# process excepthooks at start, so a thread that dies of an exception is a `hub.thread` row.
 
 # Optional: CI results as board rows (POST /hub/api/ci-event). The secret is what a CI webhook
 # or pipeline step presents; with it unset the ingest refuses everything. From the environment.
@@ -150,7 +169,8 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 # Optional: the one interpreter line seats must run ("major.minor"). Unset = not graded.
 # HUB_REQUIRED_PYTHON = "3.13"
 # Artifacts released by moving a PIN instead of publishing bytes, {name: version}. A seat reports
-# name=@<running>, name.pin=@<pin received>, name.inst=@<install result> via HUB_ARTIFACTS.
+# name=@<running>, name.pin=@<pin received>, name.inst=@<install result> and, for a tree off the
+# pin, name.rel=@ahead|behind|dirty|diverged|pin-unknown via HUB_ARTIFACTS.
 # HUB_DISTRIBUTION_PINS = {"companion-tool": "1a2b3c4d5e6f"}
 # Knowledge attached to an EVENT (task start, problem claim, doctor, CI problem items) is only
 # a record scored at least this close to the event's subject; nothing clears it, nothing attached.
@@ -177,6 +197,10 @@ HUB_SHARED_TOKEN_COMPAT = os.environ.get("HUB_SHARED_TOKEN_COMPAT", "true").lowe
 #                                               # takes its liveness from its tenants' probes
 #     "old-tool": {"status": "retired"},       # withheld from the observed table (not "partial"
 #                                               # forever); its errors still fold into problems
+#     "nightly-proof": {"kind": "probe"},      # a probe filing findings under its own name: not
+#                                               # a service row; its problems still fold
+#     "budget-sync": {"part_of": "budget-app"},  # a lane that ships inside budget-app and files
+#                                               # under its own name: counted on budget-app's row
 # }
 # `owners` routes a problem to who hears first; it is never a permission — anyone may fix any
 # service.

@@ -73,8 +73,8 @@ There is ONE publisher implementation (`hub_core/unattended/publisher.py`) and t
 * **Scheduled (the loop).** Every armed unattended launcher runs the publisher on its scan tick
   (`python -m hub_core.unattended scan`; `publish` runs one pass by hand). It acts only when the
   machine names hosts it may push to (`HUB_PUBLISH_HOSTS`) and has PROVED it can push there -- a
-  `git push --dry-run` of a throwaway ref over SSH keys only, never a password, cached six hours
-  either way -- and then publishes at most one hand-off per tick as its own bounded process whose
+  `git push --dry-run` of a throwaway ref over SSH keys only, never a password, an answer cached six
+  hours and no answer (network, certificate) an hour -- and then publishes at most one hand-off per tick as its own bounded process whose
   tree is reaped. So a waiting hand-off is taken on the next tick of any machine that can push;
   nobody has to call a verb.
 * **By hand.** `publish-handoff --machine <m>` runs the same `publish_one` once. With

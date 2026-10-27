@@ -87,6 +87,20 @@ These are recorded, and demoted or kept local — keyed on status and path, neve
 
 The hub's own mounted app applies the first two through `errorlog.HubErrorHandler`.
 
+Three failures never reach an ERROR handler on their own, and each was invisible until a person
+read a service's stderr on its host:
+
+- a **thread that dies** of an exception (a background clock, a sweep, a close running off the
+  request): `errorlog.install_excepthooks(hub_dir)` arms `threading.excepthook` and
+  `sys.excepthook` to record a `hub.thread` / `hub.process` row with the traceback (the previous
+  hook still runs; a re-entrancy guard keeps a failing recorder from looping);
+- a loop that **catches and keeps going** -- `log.warning(..., exc_info=True)`: the handler keeps
+  a WARNING that carries a traceback, at severity `warning` (counted, visible, not queued); a
+  plain warning without one stays out;
+- a browser **resource that never loaded** and a **Content-Security-Policy refusal**: an
+  element's load error does not bubble and a CSP block fires its own event, so the page listens
+  for both in the capture phase and reports them through the same client-error channel.
+
 ## 3. The forwarder proves its own chain
 
 "No rows" from a satellite cannot tell *nothing failed* from *the forwarder is unconfigured*. So:
@@ -174,11 +188,13 @@ LOGGING = {
         "hub_errors": {
             "()": "hub_core.errorlog.HubErrorHandler",
             "hub_dir": str(BASE_DIR / "PROJECT" / ".hub"),
-            "level": "ERROR",
+            "level": "WARNING",   # every ERROR, plus a WARNING that carries a traceback
         },
     },
     "loggers": {
         "django.request": {"handlers": ["hub_errors"], "level": "ERROR", "propagate": True},
+        # a loop that catches a failure to keep going logs warning(..., exc_info=True)
+        "myapp": {"handlers": ["hub_errors"], "level": "WARNING", "propagate": True},
     },
 }
 ```

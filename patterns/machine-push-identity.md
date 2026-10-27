@@ -53,6 +53,19 @@ decoration.
   a transport helper still holds is not a bound (a stalled HTTPS probe hung past three minutes).
 - Cache by verdict: an auth answer (yes or no) is re-proved every few hours and never retried
   sooner — retrying a "no" is exactly the lockout loop; only a network `unknown` re-asks hourly.
+- Classify from git's words, not its trailer. ssh ends EVERY failure with "fatal: Could not read
+  from remote repository" -- an unresolvable host off the network included -- so that line is never
+  a refusal; only "could not read Username/Password", "permission denied", "not allowed to push" or a
+  401/403 is. Read the network words first (could not resolve, timed out, refused, no route,
+  connection closed/reset): that is `unknown`. A certificate the machine does not trust ("SSL
+  certificate problem", "self-signed certificate in certificate chain", schannel's
+  `SEC_E_UNTRUSTED_ROOT`) is not "off the network" either -- the host ANSWERED; the fix is the
+  machine's trust store, and a machine told to "re-run on the network" was already on it.
+- Strip advisory lines before classifying or quoting: OpenSSH 10 prints a three-line `** WARNING:
+  ... post-quantum key exchange` block on every connection to a host without it, and kept in the
+  report it filled the whole detail field and hid the real error.
+- Probe from a NEUTRAL directory. Run from inside a checkout, that repository's own `.git/config`
+  (a certificate backend, an `insteadOf`) answers for the whole machine and hides its failure.
 - Report it: export the verdict as `HUB_PUSH_STATE=yes|no|unknown` for the client, which sends it as
   `X-Hub-Push`; the distribution view shows it per seat, and a seat that cannot push hands its
   commits to one that can (`patterns/publish-handoff.md`).

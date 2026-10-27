@@ -1,8 +1,11 @@
 """Two tiny adopting apps for the example site, so the shared banner can be SEEN working.
 
 ``/demo/budget-app/`` and ``/demo/reporting/`` are what an adopting app's page looks like: it
-links ``/hub/components/banner/*``, declares its pages once, and marks a few key things with
-``data-ab-info``. ``/demo/reporting/`` also shows an app that HAD a header when it adopted the
+links ``/hub/components/banner/*``, declares its pages once (each at its own address,
+``/demo/<slug>/<page>/``, so a person's pinned pages, order and home page can be seen across real
+pages), and marks a few key things with ``data-ab-info``. ``/demo/budget-app/`` also links the
+hub-hosted agent through the demo app's bridge, so an info bubble's "Ask about this" has an agent
+to hand its question to. ``/demo/reporting/`` also shows an app that HAD a header when it adopted the
 banner: it links the hub-hosted ``header-takeover`` (the old header named in ``data-replaces``,
 duplicate controls and drawer rows folded, ``hide_custom`` read from the hub's component
 properties) and ``search-bar`` (answered by ``/demo/<slug>/suggest.json``, the app's own
@@ -107,28 +110,43 @@ def _label(role: str) -> str:
     return next((r["label"] for r in ROLES if r["value"] == role), role)
 
 
+#: The demo apps' pages, each at its own address under the app's root, so a person's pinned
+#: pages, order and home page (the banner's arrangement) can be seen working across real pages.
+PAGES = {"forecasts": "Forecasts", "monthly": "Monthly pack", "variance": "Variance",
+         "exports": "Exports", "settings": "Settings"}
+
+
 @ensure_csrf_cookie
-def page(request, slug="budget-app"):
+def page(request, slug="budget-app", sub=""):
     _debug_only()
     app = APPS.get(slug)
-    if not app:
+    if not app or (sub and sub not in PAGES):
         raise Http404("no such demo app")
     person = viewers.person(request)
     role = _role_of(_load(), person) if person else ""
     nav_style = "sidebar" if request.GET.get("nav") == "sidebar" else "strip"
+    root = "/demo/%s/" % slug
     here = request.path
+
+    def at(key):
+        return root + key + "/"
     nav = [
-        {"label": "Overview", "href": here, "icon": "home", "current": True,
+        {"label": "Overview", "href": root, "icon": "home", "current": not sub,
          "hint": "Where the month stands: spend against forecast, and what changed since last week."},
-        {"label": "Forecasts", "href": here + "#forecasts", "icon": "chart", "count": 3, "countId": "fc-count",
-         "hint": "Every open forecast, the ones waiting on you first."},
+        {"label": "Forecasts", "href": at("forecasts"), "icon": "chart", "count": 3, "countId": "fc-count",
+         "current": sub == "forecasts", "hint": "Every open forecast, the ones waiting on you first."},
         {"label": "Reports", "icon": "file", "hint": "The packs this app produces.", "children": [
-            {"label": "Monthly pack", "href": here + "#monthly", "hint": "The pack that goes to the leadership review."},
-            {"label": "Variance", "href": here + "#variance", "hint": "Where actuals left the forecast, and by how much."},
-            {"label": "Exports", "href": here + "#exports"}]},
-        {"label": "Settings", "href": here + "#settings", "icon": "settings", "sep": True,
+            {"label": "Monthly pack", "href": at("monthly"), "current": sub == "monthly",
+             "hint": "The pack that goes to the leadership review."},
+            {"label": "Variance", "href": at("variance"), "current": sub == "variance",
+             "hint": "Where actuals left the forecast, and by how much."},
+            {"label": "Exports", "href": at("exports"), "current": sub == "exports"}]},
+        {"label": "Settings", "href": at("settings"), "icon": "settings", "sep": True, "current": sub == "settings",
          "hint": "This app's own settings: cost centres, fiscal calendar, thresholds."},
     ]
+    if nav_style == "sidebar":
+        for item in [nav[0], nav[1], nav[3]] + nav[2]["children"]:
+            item["href"] += "?nav=sidebar"
     admin = [{"label": "Cost centres", "href": here + "#cost-centres", "icon": "list",
               "info": "The cost centres this app knows, and who owns each."}]
     profile = [{"label": "My forecasts", "href": here + "#mine", "icon": "user", "sub": "3 open"}]
@@ -142,7 +160,7 @@ def page(request, slug="budget-app"):
                      {"label": "Read me", "href": here + "#readme"}]
     attrs = {
         "data-app": slug, "data-app-name": app["name"], "data-app-sub": app["sub"],
-        "data-version": app["version"], "data-home": here, "data-hub": "/hub",
+        "data-version": app["version"], "data-home": root, "data-hub": "/hub",
         "data-actor": next((d["display"] for d in DIRECTORY if d["username"] == person), person) if person else "",
         "data-actor-sub": person, "data-role": _label(role), "data-nav-style": nav_style,
         "data-access-url": "/demo/access.json" if slug == "budget-app" else "",
@@ -178,17 +196,28 @@ def page(request, slug="budget-app"):
                        '<button class="app-btn" type="button">Refresh packs</button>'
                        '<a href="/demo/signout/">Sign out</a></header>')
         search_css = '<link rel="stylesheet" href="/hub/components/search-bar/search-bar.css">'
-        takeover_js = '<script src="/hub/components/header-takeover/header-takeover.js" defer></script>'
+        # Right after the mount and NOT deferred: the old header is then hidden as it is parsed.
+        takeover_js = '<script src="/hub/components/header-takeover/header-takeover.js"></script>'
+        agent_css = agent = ""
     else:
         slot = ('<button class="app-btn" type="button" data-ab-info="Start a new forecast for next '
                 'month from this month&#39;s actuals." data-ab-info-title="New forecast">New forecast</button>')
         legacy_head = search_css = takeover_js = ""
+        # The agent on this page, through the demo app's own bridge (demo_app.py): an info
+        # bubble's "Ask about this" hands it the thing the bubble explains.
+        agent_css = '<link rel="stylesheet" href="/hub/components/agent/agent.css">'
+        agent = ('<div data-hub-agent data-app="budget-app" data-title="Budget assistant" '
+                 'data-ask="/demo-app/agent/ask" data-history="/demo-app/agent/history" '
+                 'data-conversation="/demo-app/agent/conversation" data-profile="/demo-app/profile.json" '
+                 'data-props="/hub/components/props/budget-app.json"></div>'
+                 '<script src="/hub/components/agent/agent.js" defer></script>')
+    heading = html.escape(PAGES[sub]) if sub else "Spend is 4% under forecast this month"
 
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(app['name'])} - example</title>
 <link rel="stylesheet" href="/hub/components/banner/banner.css">
-{search_css}
+{search_css}{agent_css}
 <style>
   body {{ margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #f6f7f9; color: #1d2230; }}
   html[data-theme="dark"] body {{ background: #111521; color: #e3e7ef; }}
@@ -204,9 +233,10 @@ def page(request, slug="budget-app"):
   {island("nav", nav)}{island("admin", admin)}{island("profile", profile)}{help_island}
   <div data-ab-slot>{slot}</div>
 </header>
+{takeover_js}
 {legacy_head}
 <main>
-  <h1 style="margin:0">Spend is 4% under forecast this month</h1>
+  <h1 style="margin:0">{heading}</h1>
   <p style="margin:4px 0 0;opacity:.75">An example page for the shared banner. Signed in as <b>{html.escape(person or 'nobody')}</b>.</p>
   <div class="cards">
     <div class="card" data-ab-info="Actual spend so far this month, against the forecast for the same days." data-ab-info-title="Spend to date"><b>41,200 of 43,000</b>spend to date</div>
@@ -215,7 +245,7 @@ def page(request, slug="budget-app"):
   </div>
 </main>
 <script src="/hub/components/banner/banner.js" defer></script>
-{takeover_js}
+{agent}
 </body></html>"""
     return HttpResponse(body)
 

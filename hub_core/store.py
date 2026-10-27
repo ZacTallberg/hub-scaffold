@@ -256,6 +256,35 @@ _HASH_FIELDS = (
     "repo_build", "git_sha", "idem_key", "prev_hash",
 )
 
+# WHO wrote an event, beyond the credential: the MACHINE and the CONSOLE (session) it came from,
+# and whether an UNATTENDED run wrote it. A person, a console, an unattended responder and the
+# hub's own close otherwise read as one subject. Hashed ONLY WHEN PRESENT: they arrived after
+# events were written without them, so hashing them unconditionally would fail every older
+# event's verification; present -> hashed (removing one from a new event is detected); absent ->
+# the old hash, unchanged.
+_OPTIONAL_HASH_FIELDS = ("machine", "console", "unattended")
+
+
+def hash_body(ev) -> dict:
+    """The dict an event's hash is computed over (append, heal, batch and verify share it)."""
+    body = {k: ev.get(k) for k in _HASH_FIELDS}
+    for k in _OPTIONAL_HASH_FIELDS:
+        if k in ev:
+            body[k] = ev[k]
+    return body
+
+
+def _who(machine=None, console=None, unattended=None) -> dict:
+    """The optional attribution fields an event carries -- only the ones that are set."""
+    out = {}
+    if machine:
+        out["machine"] = str(machine).strip().lower()[:120]
+    if console:
+        out["console"] = str(console).strip()[:64]
+    if unattended:
+        out["unattended"] = True
+    return out
+
 
 class EventStore:
     def __init__(self, root, lock_timeout=None):
@@ -286,9 +315,18 @@ class EventStore:
         # path: an earlier attempt to remove the drop entirely (rebuild into side tables and swap by
         # DDL) lost an acked event, and serializing the window is worth far more than a cleverer
         # rebuild that cannot be trusted with the ledger.
+        # Where an open spent its time (lock wait, schema, reconcile), read by a caller that
+        # times its writes (hub_core.write_timing); never consulted by the store itself.
+        t0 = time.perf_counter()
         with LedgerLock(self.root, timeout=self._lock_timeout):
+            t1 = time.perf_counter()
             self._init_db()
+            t2 = time.perf_counter()
             self._reconcile()
+            t3 = time.perf_counter()
+        self.open_ms = {"lock": (t1 - t0) * 1000.0, "init": (t2 - t1) * 1000.0,
+                        "reconcile": (t3 - t2) * 1000.0}
+        self.last_append_ms = {}
 
     def close(self):
         self._db.close()
@@ -548,7 +586,7 @@ class EventStore:
             if not dirty and ev.get("seq") == want_seq and ev.get("prev_hash") == prev:
                 healed.append(ev)
             else:
-                claimed = {k: ev.get(k) for k in _HASH_FIELDS}
+                claimed = hash_body(ev)
                 if sha256_hex(ev.get("prev_hash", "") + canonical(claimed)) != ev.get("hash"):
                     raise ValueError(
                         "corrupt event log: line %d does not verify against its own fields; "
@@ -573,7 +611,7 @@ class EventStore:
                 ev = dict(ev)
                 ev["seq"] = want_seq
                 ev["prev_hash"] = prev
-                ev["hash"] = sha256_hex(prev + canonical({k: ev.get(k) for k in _HASH_FIELDS}))
+                ev["hash"] = sha256_hex(prev + canonical(hash_body(ev)))
                 healed.append(ev)
                 dirty = True
             prev = healed[-1]["hash"]
@@ -689,7 +727,7 @@ class EventStore:
     def append(self, *, aggregate, type, payload, expected_version=None, agent_id=None,
                session_id=None, parent_event_id=None, actor_kind="agent", model_version=None,
                repo_build=None, git_sha=None, idem_key=None, idem_scope=None,
-               allocate=None) -> dict:
+               allocate=None, machine=None, console=None, unattended=None) -> dict:
         """Append one event with OCC + idempotency + hash-chain. Returns the stored event.
 
         Raises ConflictError if expected_version != current head for the aggregate.
@@ -715,14 +753,21 @@ class EventStore:
         replace clobbers the acked line an appender just fsynced, and seq/prev_hash get
         allocated against a SQLite head the file has already moved past.
         """
-        import json
+        t0 = time.perf_counter()
         with LedgerLock(self.root, timeout=self._lock_timeout):
-            return self._append_locked(
-                aggregate=aggregate, type=type, payload=payload,
-                expected_version=expected_version, agent_id=agent_id, session_id=session_id,
-                parent_event_id=parent_event_id, actor_kind=actor_kind,
-                model_version=model_version, repo_build=repo_build, git_sha=git_sha,
-                idem_key=idem_key, idem_scope=idem_scope, allocate=allocate)
+            t1 = time.perf_counter()
+            try:
+                return self._append_locked(
+                    aggregate=aggregate, type=type, payload=payload,
+                    expected_version=expected_version, agent_id=agent_id, session_id=session_id,
+                    parent_event_id=parent_event_id, actor_kind=actor_kind,
+                    model_version=model_version, repo_build=repo_build, git_sha=git_sha,
+                    idem_key=idem_key, idem_scope=idem_scope, allocate=allocate,
+                    machine=machine, console=console, unattended=unattended)
+            finally:
+                # The lock wait and the locked write (index + line + commit) of THIS append.
+                self.last_append_ms = {"lock": (t1 - t0) * 1000.0,
+                                       "locked": (time.perf_counter() - t1) * 1000.0}
 
     def append_batch(self, operations) -> list[dict]:
         """Commit multiple aggregate events at one canonical-file boundary.
@@ -803,8 +848,8 @@ class EventStore:
                         "idem_key": idem,
                         "prev_hash": prev_hash,
                     }
-                    ev["hash"] = sha256_hex(prev_hash + canonical(
-                        {key: ev[key] for key in _HASH_FIELDS}))
+                    ev.update(_who(op.get("machine"), op.get("console"), op.get("unattended")))
+                    ev["hash"] = sha256_hex(prev_hash + canonical(hash_body(ev)))
                     events.append(ev)
                     heads[aggregate] = head + 1
                     prev_hash = ev["hash"]
@@ -844,7 +889,8 @@ class EventStore:
 
     def _append_locked(self, *, aggregate, type, payload, expected_version, agent_id,
                        session_id, parent_event_id, actor_kind, model_version, repo_build,
-                       git_sha, idem_key, idem_scope=None, allocate=None):
+                       git_sha, idem_key, idem_scope=None, allocate=None, machine=None,
+                       console=None, unattended=None):
         import json
         # Tail-consistency guard: a crashed sync/heal can leave the FILE ahead of this handle's
         # SQLite view (the lock died with the crasher). Re-heal before allocating seq/prev_hash
@@ -902,7 +948,8 @@ class EventStore:
                 "idem_key": idem_key,
                 "prev_hash": prev_hash,
             }
-            ev["hash"] = sha256_hex(prev_hash + canonical({k: ev[k] for k in _HASH_FIELDS}))
+            ev.update(_who(machine, console, unattended))
+            ev["hash"] = sha256_hex(prev_hash + canonical(hash_body(ev)))
             # INDEX FIRST, then durably append the canonical line, then COMMIT.
             #
             # An fsync cannot be rolled back, and the next seq is read from the INDEX. When the
@@ -954,6 +1001,18 @@ class EventStore:
             rows = self._db.execute("SELECT raw FROM events WHERE aggregate=? ORDER BY seq", (aggregate,)).fetchall()
         else:
             rows = self._db.execute("SELECT raw FROM events ORDER BY seq").fetchall()
+        return [json.loads(r["raw"]) for r in rows]
+
+    def events_prefixed(self, prefix: str, since_seq: int = 0, limit: int = 500):
+        """Events whose aggregate starts with ``prefix`` (a log-only family such as the lifecycle
+        history), after ``since_seq``, oldest first, at most ``limit``: a seek on the aggregate
+        index, never a scan of the whole ledger."""
+        import json
+        rows = self._db.execute(
+            "SELECT raw FROM events WHERE aggregate >= ? AND aggregate < ? AND seq > ? "
+            "ORDER BY seq LIMIT ?",
+            (prefix, prefix + "\U0010ffff", max(0, int(since_seq or 0)),
+             max(1, min(int(limit), 5000)))).fetchall()
         return [json.loads(r["raw"]) for r in rows]
 
     def events_after(self, seq: int, limit: int = 100):
@@ -1032,7 +1091,7 @@ class EventStore:
             expect_seq = (ev.get("seq") if isinstance(ev.get("seq"), int) else expect_seq) + 1
             if ev.get("prev_hash", "") != prev:
                 errs.append(f"line {i} seq {ev.get('seq')}: prev_hash mismatch")
-            recomputed = sha256_hex(prev + canonical({k: ev.get(k) for k in _HASH_FIELDS}))
+            recomputed = sha256_hex(prev + canonical(hash_body(ev)))
             if recomputed != ev.get("hash"):
                 errs.append(f"line {i} seq {ev.get('seq')}: hash mismatch (tampered)")
             prev = ev.get("hash", "")

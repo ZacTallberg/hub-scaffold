@@ -14,6 +14,10 @@ The buckets (for ``in_progress`` tasks; every other status passes through unchan
                           in order has done == total after every single step, and advertising
                           that as "finished and forgotten" invited a peer to close live work.
 * ``complete_unclosed`` — every declared checkpoint done and nothing has moved since.
+* ``waiting``           — not moving because its NEXT open checkpoint carries a ``due_at`` still
+                          ahead (``step --due``): a scheduled wait, neither stalled nor paged.
+                          Fails closed -- a passed, unparseable or over-cap time reads as no
+                          wait, and once the time passes the task is stalled at its true age.
 * ``stalled``           — checkpoints outstanding and nothing moved.
 * ``orphaned``          — no checkpoints at all and nothing moved.
 
@@ -128,6 +132,17 @@ def is_unattended(task) -> bool:
     return (task or {}).get("unattended") in (True, 1, "1", "true")
 
 
+#: What an unattended responder may take: P0-P2 (P3 is a wish list).
+UNATTENDED_PRIORITIES = ("P0", "P1", "P2")
+
+
+def unattended_eligible(task) -> bool:
+    """Marked unattended, P0-P2, and never a person's decision -- the one rule the unattended
+    lane of next.json and the task wake (hub_core.inbox.task_wake) both apply."""
+    return (isinstance(task, dict) and is_unattended(task) and not is_decision(task)
+            and str(task.get("priority") or "").strip().upper() in UNATTENDED_PRIORITIES)
+
+
 def owner_of(task) -> str:
     """The task's explicit owner, else whoever CREATED it -- never its last writer (a deploy
     actor stamping a deployed step is not the task's owner)."""
@@ -167,6 +182,13 @@ def classify(task, activity=None, now: float | None = None) -> dict:
                 "reason": "all %d checkpoints recorded, still in progress" % total,
                 "says_unfinished": unfinished,
                 "closeable": has_dereferencing_evidence(task) and not unfinished}
+    due = next_due(task, now) if total else ""
+    if due:
+        # Not moving because its next checkpoint is not due yet: neither stalled nor paged. Once
+        # `due` passes this falls through to stalled with its true age, so the owner is told at
+        # once that the scheduled checkpoint is now owed.
+        return {"state": "waiting", "age_s": age, "done": done, "total": total, "due_at": due,
+                "reason": "%d/%d checkpoints recorded, next checkpoint due %s" % (done, total, due)}
     if total:
         return {"state": "stalled", "age_s": age, "done": done, "total": total,
                 "reason": "%d/%d checkpoints recorded, nothing moved in %s" % (done, total, phrase(age))}
@@ -174,9 +196,26 @@ def classify(task, activity=None, now: float | None = None) -> dict:
             "reason": "in progress with no checkpoints, untouched %s" % phrase(age)}
 
 
+def next_due(task, now: float | None = None) -> str:
+    """The ``due_at`` of the task's NEXT open work checkpoint while it is still ahead, else ''.
+
+    Only the FIRST open checkpoint counts: a later one cannot excuse an earlier one that is owed.
+    A time already passed, unparseable, or more than ``checkpoints.MAX_DUE_AHEAD_S`` out reads as
+    no wait, so the task is judged exactly as it would be without one."""
+    now = time.time() if now is None else now
+    for s in checkpoints.work_steps(task):
+        if s.get("done"):
+            continue
+        due = checkpoints.due_epoch(s.get("due_at"))
+        if due is not None and now < due <= now + checkpoints.MAX_DUE_AHEAD_S:
+            return str(s.get("due_at"))
+        return ""
+    return ""
+
+
 def summarize(tasks, activity=None, now: float | None = None) -> dict:
     """The Workstream card's buckets: every in-progress task in exactly one, with its reason."""
-    buckets = {"moving": [], "complete_unclosed": [], "stalled": [], "orphaned": []}
+    buckets = {"moving": [], "complete_unclosed": [], "waiting": [], "stalled": [], "orphaned": []}
     for t in tasks or []:
         c = classify(t, activity, now)
         if c["state"] in buckets:

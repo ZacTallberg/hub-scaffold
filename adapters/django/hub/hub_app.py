@@ -926,8 +926,36 @@ def roster():
     return liveness.resolve(HUB_DIR)
 
 
+def _outcome(etype, task_id, payload, *, agent="", idem=""):
+    """The lease transition as a ledger event (hub.outcome_events). Never fails the caller."""
+    try:
+        from . import outcome_events
+        outcome_events.emit(etype, "task", task_id, dict(payload, task=task_id), agent=agent,
+                            idem=idem)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
           actor_kind=None, session="", machine=""):
+    """Grant or renew the fenced lease on one task (``_claim``), then record a NEW holder as a
+    lifecycle event -- ``lease.claimed``, or ``lease.taken_over`` naming whom it took over from.
+    A renewal by the same holder is not a transition and writes nothing."""
+    res = _claim(task_id, agent, ttl_s, auth_subject=auth_subject, credential_id=credential_id,
+                 actor_kind=actor_kind, session=session, machine=machine)
+    if res.get("ok") and (res.get("created") or res.get("took_over")) and agent != "hub":
+        took = res.get("took_over_from") if res.get("took_over") else None
+        _outcome("lease.taken_over" if took else "lease.claimed", task_id,
+                 {"agent": agent, "machine": res.get("machine") or "",
+                  "session": str(res.get("session") or "")[:64], "ttl_s": int(ttl_s),
+                  "from": ({k: (took or {}).get(k) for k in ("agent", "session", "machine")}
+                           if took else None)},
+                 agent=agent, idem="lease:%s:%s" % (task_id, res.get("token")))
+    return res
+
+
+def _claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
+           actor_kind=None, session="", machine=""):
     """Grant or renew the fenced lease on one task.
 
     The result carries ``created``: whether THIS call brought the lease into existence. A caller
@@ -1020,10 +1048,14 @@ def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
                 # the takeover is on record, and the fencing token ROTATES, so the old console
                 # can never complete over this one (it used to keep the old holder's name and
                 # hand this caller the same token).
+                # `console` marks a takeover between consoles of ONE agent, and `stale_s` is how
+                # long the old console had not renewed -- the notice states that real reason
+                # (without it the text read "silent for 0 minutes").
                 cur["took_over_from"] = {"session": holder, "agent": cur.get("agent"),
                                          "machine": cur.get("machine") or None,
                                          "claimed": cur.get("claimed"), "state": state,
-                                         "ended": ended, "at": now}
+                                         "ended": ended, "at": now, "console": True,
+                                         "stale_s": int(max(0.0, now - touched))}
                 cur["token"] = _uuid.uuid4().hex
                 cur["session"] = session
                 if not session:
@@ -1203,6 +1235,9 @@ def void_lease(task_id, token, why="") -> bool:
         cur["voided_why"] = str(why or "")[:300]
         _write_lease(task_id, cur)
     _publish_realtime("lease.voided", task=task_id, agent=cur.get("agent"))
+    _outcome("lease.released", task_id, {"agent": cur.get("agent"), "reason": "voided",
+                                         "why": str(why or "")[:200]},
+             agent="hub", idem="lease-void:%s:%s" % (task_id, token))
     return True
 
 
@@ -1231,7 +1266,10 @@ def release_lease(task_id, token) -> bool:
             realtime.cancel_scheduled(HUB_DIR, "lease-expiry:" + task_id)
         except Exception:
             pass
-        return True
+    if str(cur.get("agent") or "") != "hub":
+        _outcome("lease.released", task_id, {"agent": cur.get("agent"), "reason": "released"},
+                 agent=str(cur.get("agent") or ""), idem="lease-release:%s:%s" % (task_id, token))
+    return True
 
 
 # ---- observed presence: who is on this board, per (agent, machine, console) ----
@@ -1367,8 +1405,8 @@ def distribution_files():
 def distribution_pins():
     """{artifact: pinned version} for artifacts released by moving a pin rather than by
     publishing bytes (HUB_DISTRIBUTION_PINS, {name: sha-or-version}). A seat reports
-    ``<name>=<running version>``, ``<name>.pin=<pin it received>`` and ``<name>.inst=<install
-    result>`` through HUB_ARTIFACTS."""
+    ``<name>=<running version>``, ``<name>.pin=<pin it received>``, ``<name>.inst=<install
+    result>`` and ``<name>.rel=<ancestry of a tree off the pin>`` through HUB_ARTIFACTS."""
     pins = _dj_setting("HUB_DISTRIBUTION_PINS") or os.environ.get("HUB_DISTRIBUTION_PINS") or {}
     if isinstance(pins, str):
         try:
@@ -1378,11 +1416,26 @@ def distribution_pins():
     return {str(k).lower(): str(v) for k, v in pins.items() if v} if isinstance(pins, dict) else {}
 
 
+def _client_modules_published() -> dict:
+    """``client-modules``: the digest over every module the served client runs
+    (hub_core.client._CLIENT_FILES), published as of the newest of those files. Never raises."""
+    try:
+        import hub_core.client as _client_module
+        root = Path(_client_module.__file__).parent
+        newest = max([(root / name).stat().st_mtime for name in _client_module._CLIENT_FILES
+                      if (root / name).exists()] or [0.0])
+        return {"client-modules": _distribution.published_digest(
+            _client_module.client_digest(root), newest)}
+    except Exception:                                        # noqa: BLE001
+        return {}
+
+
 def distribution_report(now=None):
     """(report, published) — the grade of every seat, fail-soft: a broken read is an empty
     report that SAYS it could not grade, never a 500 on the board."""
     try:
         pub = _distribution.published(distribution_files())
+        pub.update(_client_modules_published())
         report = _distribution.assess(read_presence_rows(), pub, now=now,
                                       is_kit=_presence.is_kit_machine,
                                       is_service=_presence.is_service_identity,
@@ -1525,7 +1578,9 @@ def apps_config():
     """The services this project runs, as the adopter declares them: settings.HUB_APPS (a
     dict) or the HUB_APPS_JSON environment variable. Per service, all optional:
     {"url", "health_url", "project" (its CI project when it differs), "hosted_in",
-     "owners": [agent, ...], "status": "planned"}. A service that has never been declared but
+     "owners": [agent, ...], "status": "planned" | "retired", "kind": "probe" (a reporter, not a
+     service), "part_of": "<slug>" (a lane that ships inside another service)}. A service that
+     has never been declared but
     has forwarded an error still appears — reporting is evidence enough to exist."""
     raw = _dj_setting("HUB_APPS", None)
     if raw is None:

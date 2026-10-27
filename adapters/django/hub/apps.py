@@ -16,3 +16,13 @@ class HubConfig(AppConfig):
 
     def ready(self):
         connection_created.connect(_sqlite_pragmas)
+        from . import checks  # noqa: F401  (the fold/schema contract, run by `manage.py check`)
+        # A thread (or the process) that dies of an exception lands in the hub's own error
+        # stream, not only in the service's stderr. Fail-soft: arming must never stop a start.
+        try:
+            from hub_core import errorlog
+
+            from . import hub_app
+            errorlog.install_excepthooks(hub_app.HUB_DIR)
+        except Exception:                                    # noqa: BLE001
+            pass

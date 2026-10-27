@@ -146,31 +146,60 @@ def telling_line(text: str, rc) -> str:
     """The line of git's output that names the failure. git ends every SSH failure with the same
     "Please make sure you have the correct access rights / and the repository exists." trailer,
     which reads as an answer and names nothing."""
-    lines = [ln.strip() for ln in str(text or "").strip().splitlines() if ln.strip()]
+    from .runtime import without_advisories
+    lines = [ln.strip() for ln in without_advisories(text).strip().splitlines() if ln.strip()]
     for ln in lines:
         low = ln.lower()
         if low.startswith(("ssh:", "permission denied", "host key", "fatal: unable", "timed out",
-                           "error:")) or "could not resolve" in low:
+                           "error:")) or "could not resolve" in low or tls_refusal(low):
             return ln[:200]
     generic = ("please make sure", "and the repository exists", "fatal: could not read")
     rest = [ln for ln in lines if not ln.lower().startswith(generic)]
     return (rest or lines or ["rc %s" % rc])[0][:200]
 
 
+#: git's words for "the code host ANSWERED and this machine does not trust its certificate". Not
+#: a network failure: on the origin system a machine ON the network was told to "re-run on the
+#: network" because a certificate refusal was read as unreachable. The fix is the machine's
+#: certificate store (or git's TLS backend), never the route.
+_TLS_REFUSAL = ("ssl certificate", "certificate problem", "self-signed certificate",
+                "self signed certificate", "unable to get local issuer",
+                "certificate verify failed", "openssl verify result",
+                # the Windows certificate store's own words (schannel)
+                "sec_e_untrusted_root", "certificate chain was issued by an authority",
+                "cert_e_untrustedroot", "sec_e_cert_expired", "sec_e_wrong_principal")
+
+#: ssh's and git's words for "never reached the code host". ssh follows every one of them with
+#: "fatal: Could not read from remote repository", so THAT line alone is never a refusal.
+NETWORK_FAILURE = ("could not resolve hostname", "could not resolve host", "connection timed out",
+                   "connection refused", "network is unreachable", "no route to host",
+                   "operation timed out", "timed out", "kex_exchange_identification",
+                   "connection closed by", "connection reset by", "connection closed")
+
+
+def tls_refusal(low: str) -> bool:
+    return any(t in str(low or "").lower() for t in _TLS_REFUSAL)
+
+
 def clone_failure(text: str, rc) -> tuple[str, str]:
     """(kind, what a person should do) for a failed clone. The kinds have OPPOSITE fixes -- a
     refused key is a setting on the code host, an unreachable port is the network, a prompt is
-    one interactive connection -- so the report names which one it was instead of guessing."""
-    low = str(text or "").lower()
+    one interactive connection, an untrusted certificate is the machine's trust store -- so the
+    report names which one it was instead of guessing."""
+    from .runtime import without_advisories
+    low = without_advisories(text).lower()
+    if tls_refusal(low):
+        return "tls", ("the code host answered but this machine's git does not trust its "
+                       "certificate: install the issuing CA in the store git verifies against "
+                       "(the OS store under http.sslBackend=schannel on Windows) -- not a network "
+                       "or key problem")
     if "permission denied" in low or "publickey" in low or "authentication failed" in low:
         return "auth", "the code host refused this machine's credential: register its key"
     if ("host key verification failed" in low or "passphrase" in low or "batchmode" in low
             or "terminal prompts disabled" in low or "could not read username" in low):
         return "prompt", ("git needed an interactive answer (a host key, a key passphrase or a "
                           "username): connect once from a terminal on this machine")
-    if (rc == 124 or "timed out" in low or "could not resolve" in low
-            or "connection refused" in low or "no route to host" in low
-            or "network is unreachable" in low or "connection closed" in low):
+    if rc == 124 or any(s in low for s in NETWORK_FAILURE):
         return "network", "the code host is not reachable from this machine: not a key problem"
     return "other", "see the git output"
 

@@ -77,12 +77,83 @@ def _files(directory: Path) -> list[Path]:
                   if f.is_file() and f.suffix.lower() in ALLOWED_SUFFIXES)
 
 
+# CACHING, AND WHY A BUSY HUB MUST NEVER BE ON AN APP'S PAGE-LOAD PATH. Every adopting app links
+# these files from its own pages, so whenever a browser has to ASK the hub for one, the app's page
+# waits on the hub; on the instance this was lifted from a loaded hub took seconds per file and an
+# app's first paint waited for it. So:
+#
+# * a plain URL is fresh for CACHE_SECONDS (so "update the master and every app changes" stays
+#   true in minutes), then `stale-while-revalidate` for a day -- the browser answers from its own
+#   copy AT ONCE and asks in the background -- and `stale-if-error` for a week, so the copy keeps
+#   working while the hub is down;
+# * a FINGERPRINTED URL (`?v=<the component's measured version>`, learned from
+#   `components/versions.json`) is immutable for a year; a `v` that is not current gets the
+#   current bytes for a minute, so a stale fingerprint can never pin old bytes;
+# * bytes, ETag and version are remembered against each file's mtime and size, so serving a file
+#   is a lookup, not a disk read plus a hash of the whole directory.
+STALE_WHILE_REVALIDATE = 86400
+STALE_IF_ERROR = 604800
+PLAIN_CACHE = "public, max-age=%d, stale-while-revalidate=%d, stale-if-error=%d" % (
+    CACHE_SECONDS, STALE_WHILE_REVALIDATE, STALE_IF_ERROR)
+IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+MISMATCH_CACHE = "public, max-age=60"
+_FILE_MEMO: dict = {}       # path -> (mtime_ns, size, body, etag)
+_VERSION_MEMO: dict = {}    # directory -> (stamp, version)
+_MEMO_LOCK = threading.Lock()
+
+
+def cache_control(asked_version: str, version_now: str) -> str:
+    """The Cache-Control a component file is served with, by the fingerprint the URL asked for."""
+    asked = str(asked_version or "")
+    if not asked:
+        return PLAIN_CACHE
+    return IMMUTABLE_CACHE if asked == version_now else MISMATCH_CACHE
+
+
 def version(directory: Path) -> str:
+    """A hash of the files actually served (a declared version someone forgets to bump would tell
+    every adopter it is current when it is not), remembered against every file's name, mtime and
+    size so the same bytes are hashed once, not on every request."""
+    files = _files(directory)
+    stamp = tuple((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in files)
+    hit = _VERSION_MEMO.get(directory)
+    if hit and hit[0] == stamp:
+        return hit[1]
     digest = hashlib.sha256()
-    for f in _files(directory):
+    for f in files:
         digest.update(f.name.encode("utf-8"))
         digest.update(f.read_bytes())
-    return digest.hexdigest()[:12]
+    value = digest.hexdigest()[:12]
+    with _MEMO_LOCK:
+        _VERSION_MEMO[directory] = (stamp, value)
+    return value
+
+
+def versions() -> dict:
+    """``{name: measured version}`` for every hosted component -- the cheap answer an app
+    fingerprints its links from."""
+    out = {}
+    if COMPONENTS.is_dir():
+        for directory in sorted(p for p in COMPONENTS.iterdir() if p.is_dir()):
+            try:
+                if _files(directory):
+                    out[directory.name] = version(directory)
+            except OSError:
+                continue
+    return out
+
+
+def _file_bytes(path: Path) -> tuple:
+    """(body, etag) for one served file, re-read only when its mtime or size moves."""
+    st = path.stat()
+    hit = _FILE_MEMO.get(path)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2], hit[3]
+    body = path.read_bytes()
+    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:16]
+    with _MEMO_LOCK:
+        _FILE_MEMO[path] = (st.st_mtime_ns, st.st_size, body, etag)
+    return body, etag
 
 
 def manifest(name: str) -> dict:
@@ -107,10 +178,9 @@ def read_file(name: str, filename: str):
     path = directory / filename
     if not path.is_file() or path.suffix.lower() not in ALLOWED_SUFFIXES:
         return None
-    body = path.read_bytes()
+    body, etag = _file_bytes(path)
     content_type = (CONTENT_TYPES.get(path.suffix.lower())
                     or mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:16]
     return body, content_type, etag, version(directory)
 
 

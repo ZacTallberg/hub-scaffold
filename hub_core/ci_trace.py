@@ -23,6 +23,10 @@ Verdicts:
 ``rollback``      the deploy restored the previous release — the most serious thing a log says
 ``real``          the job ran and its own checks failed; ``detail`` names the first one
 ``not_deployed``  it stopped at the deployed-commit assertion; no phase of the job ran
+``verified_then_killed``
+                  it posted its release record ``result=ok`` and the runner THEN killed it at its
+                  job ceiling: the deploy verified, the defect is the job's timeout;
+                  ``record_sha`` names the commit the record named
 ``unclear``       it failed for a reason this cannot name (still a failure, never "fine");
                   ``detail`` is the first failure-shaped line, minus the runner's own epitaph
 ``unreadable``    there was no log text to read
@@ -45,8 +49,21 @@ NOT_DEPLOYED = re.compile(
     r"deployed[ -]commit mismatch|DEPLOYED_COMMIT_MISMATCH|"
     r"is not (?:contained )?in what the host (?:serves|runs)|host is not on this commit", re.I)
 # A real failure inside the job's own work: a phase table row, or a SCREAMING_FAILED marker.
-PHASE_FAIL = re.compile(r"^\s*\[FAIL\]\s*(\S.*)$", re.M)
+# Runners prefix every line with a timestamp and a stream tag ("2026-01-01T00:00:00.1Z 01O "),
+# and a line may carry ANSI colour: anchored at the bare line start, the marker never matched a
+# real trace -- only unprefixed samples -- so a real [FAIL] read as "unclear".
+PHASE_FAIL = re.compile(r"^(?:\d{4}-\d\d-\d\dT[\d:.]+Z?\s+\S{0,4}\s*)?(?:\x1b\[[0-9;]*m)*"
+                        r"\s*\[FAIL\]\s*(\S.*)$", re.M)
 HARD_FAIL = re.compile(r"\b([A-Z][A-Z_]{4,})_FAILED\b")
+# A JOB THAT VERIFIED AND WAS THEN KILLED BY ITS OWN CEILING. A CI job clock counts source
+# fetches, interpreter cold starts and artifact upload, not just the checks, so on a loaded
+# runner a verify job can pass every check, post its release record (`python -m hub_core.client
+# deploy` prints DEPLOY_RECORD_POSTED ... result=ok) and still be killed at its timeout. Filed as
+# a CRITICAL, its "cause" was whatever error-shaped noise the log printed earlier. Both halves are
+# required: the record alone is not enough (a job can post ok and then fail a real later step),
+# and the ceiling alone is not enough (a job killed mid-check proved nothing).
+RECORD_OK = re.compile(r"DEPLOY_RECORD_POSTED\b(?P<rest>[^\r\n]*)")
+CEILING = re.compile(r"execution took longer than\s+(\S+)", re.I)
 # The first failure-shaped line of a log nothing above could classify. A SCREAMING_MISMATCH
 # marker counts too: the word may follow an underscore, which a plain \b does not see.
 FIRST_SIGNAL = re.compile(
@@ -60,7 +77,7 @@ _STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z?\s*\S{0,4}\s*")
 #: The severity each verdict earns on the operational stream. A rollback is critical whatever
 #: the pipeline's own status said; a not_deployed stop says nothing about the app.
 SEVERITY = {"rollback": "critical", "real": "error", "unclear": "error",
-            "unreadable": "error", "not_deployed": "warning"}
+            "unreadable": "error", "not_deployed": "warning", "verified_then_killed": "warning"}
 
 
 def first_signal(text: str) -> str:
@@ -85,10 +102,38 @@ def classify_text(trace: str) -> dict:
     if fails or hard:
         first = fails[0].strip() if fails else hard.group(0)
         return {"verdict": "real", "detail": _ANSI.sub("", first)[:160]}
+    killed = verified_then_killed(text)
+    if killed:
+        return killed
     if NOT_DEPLOYED.search(text):
         return {"verdict": "not_deployed",
                 "detail": "stopped at the deployed-commit assertion before any phase ran"}
     return {"verdict": "unclear", "detail": first_signal(text)}
+
+
+def verified_then_killed(text: str) -> dict:
+    """The verdict for a log whose LAST release record said ``result=ok`` and whose runner then
+    killed the job at its ceiling, AFTER that record; {} for anything else."""
+    text = str(text or "")
+    records = list(RECORD_OK.finditer(text))
+    if not records:
+        return {}
+    last = records[-1]
+    rest = _ANSI.sub("", last.group("rest"))
+    if not re.search(r"\bresult=ok\b", rest, re.I):
+        return {}
+    ceiling = None
+    for m in CEILING.finditer(text):
+        if m.start() > last.end():
+            ceiling = m
+    if ceiling is None:
+        return {}
+    sha = re.search(r"\bsha=([0-9a-f]{7,64})\b", rest, re.I)
+    limit = ceiling.group(1).rstrip(".,;")
+    return {"verdict": "verified_then_killed", "ceiling": limit,
+            "record_sha": sha.group(1).lower() if sha else "",
+            "detail": "release record posted result=ok, then the runner killed the job at its %s "
+                      "job ceiling" % limit}
 
 
 def note(verdict: dict, source: str = "", deployless: bool = False) -> str:
@@ -106,6 +151,10 @@ def note(verdict: dict, source: str = "", deployless: bool = False) -> str:
             return ("%s-triggered: it stopped at the deployed-commit assertion before any phase "
                     "ran, so this run says nothing about the app" % source)
         return "it stopped at the deployed-commit assertion before any phase ran"
+    if v == "verified_then_killed":
+        return ("the deploy VERIFIED (its release record posted result=ok) and the runner then "
+                "killed the job at its %s ceiling: the defect is the job's timeout, not the "
+                "deploy" % ((verdict or {}).get("ceiling") or "job"))
     if v == "unclear":
         return ("first failure in the log: %s" % detail) if detail \
             else "failed for a reason the log does not name"

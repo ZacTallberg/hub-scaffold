@@ -58,16 +58,20 @@ from .. import client
 from ..process_lock import _pid_alive
 from . import board, home, log, machine, read_json, write_json
 from .runtime import NO_WINDOW, git, reap, worker_env
-from .worktree import no_userinfo, redact
+from .worktree import NETWORK_FAILURE, no_userinfo, redact, tls_refusal
 
 PUBLISH_MAX_RUN_S = 600          # the whole publish pass, hard (process tree killed)
 PUBLISH_LEASE_S = 900            # > PUBLISH_MAX_RUN_S: the lease outlives the pass
 PUSH_VERDICT_OK_S = 6 * 3600     # re-prove push rights every six hours
 PUSH_VERDICT_NO_S = 6 * 3600     # an auth refusal is never retried sooner (account lockout)
+PUSH_VERDICT_UNKNOWN_S = 3600    # never reached the host (network, TLS): ask again in an hour
+#: The code host REFUSED this machine. Not "could not read from remote repository": ssh prints
+#: that after EVERY failure, an unresolvable host off the network included, and matching it read
+#: a machine that was merely off the network as refused -- cached for six hours as "cannot push".
 AUTH_REFUSAL = re.compile(r"(?i)permission denied|publickey|authentication failed|"
-                          r"could not read username|terminal prompts disabled|"
-                          r"not allowed to push|http (?:basic: )?access denied|"
-                          r"\b40[13]\b|could not read from remote repository")
+                          r"could not read username|could not read password|"
+                          r"terminal prompts disabled|not allowed to push|"
+                          r"http (?:basic: )?access denied|\b40[13]\b")
 MOVED = re.compile(r"(?i)non-fast-forward|fetch first|rejected.*\(stale|failed to update ref")
 _SCP = re.compile(r"^(?P<user>[^@/\s]+)@(?P<host>[^:/\s]+):(?P<path>.+?)(?:\.git)?/?$")
 _SCHEME = re.compile(r"^(?P<scheme>[a-z][a-z0-9+.\-]*)://(?:[^@/\s]*@)?(?P<host>[^/:\s]+)"
@@ -124,22 +128,30 @@ def _verdicts() -> dict:
     return read_json(_state_path(), {}).get("hosts") or {}
 
 
-def _save_verdict(host: str, ok: bool, why: str) -> None:
+def _save_verdict(host: str, ok, why: str) -> None:
+    """``ok`` is True (pushed), False (the host REFUSED this machine) or None (never got an answer:
+    the network, the certificate) -- three verdicts with three lifetimes, because only a refusal
+    is a fact about the credential."""
     state = read_json(_state_path(), {})
-    state.setdefault("hosts", {})[host] = {"ok": bool(ok), "at": time.time(), "why": redact(why)[:300]}
+    state.setdefault("hosts", {})[host] = {"ok": ok if ok is None else bool(ok), "at": time.time(),
+                                           "why": redact(why)[:300]}
     write_json(_state_path(), state)
 
 
 def cached_verdict(host: str):
-    """True/False while the cached verdict is fresh, None when it must be proved again."""
+    """True/False while the cached verdict is fresh, None when it must be proved again. An auth
+    answer (yes or no) lives six hours and is never asked sooner -- a refused credential asked
+    again counts toward a lockout -- while "no answer" is asked again after an hour."""
     row = _verdicts().get(host) or {}
     if not row:
         return None
     age = time.time() - float(row.get("at") or 0)
-    if row.get("ok") and age < PUSH_VERDICT_OK_S:
+    if row.get("ok") is True and age < PUSH_VERDICT_OK_S:
         return True
-    if not row.get("ok") and age < PUSH_VERDICT_NO_S:
+    if row.get("ok") is False and age < PUSH_VERDICT_NO_S:
         return False
+    if row.get("ok") is None and age < PUSH_VERDICT_UNKNOWN_S:
+        return False                       # not proven yet; the hour bounds the next probe
     return None
 
 
@@ -150,7 +162,18 @@ def push_state() -> str:
     if not rows:
         return "unknown"
     row = max(rows, key=lambda r: float(r.get("at") or 0))
-    return "ok" if row.get("ok") else "no"
+    return {True: "ok", False: "no"}.get(row.get("ok"), "unknown")
+
+
+def push_outcome(rc: int, text: str):
+    """What a failed push (or dry run) says about this machine: False = the host REFUSED it (an
+    auth fact), None = it never got an answer (the network, an untrusted certificate, a timeout).
+    Anything unrecognised is "no answer" too: only a refusal is a fact about the credential, and
+    only a refusal earns the six-hour silence. Advisory lines are already gone (runtime.git)."""
+    low = str(text or "").lower()
+    if AUTH_REFUSAL.search(low) and not tls_refusal(low)             and not (rc == 124 or any(s in low for s in NETWORK_FAILURE)):
+        return False
+    return None
 
 
 def _rmtree_literal(path: Path) -> None:
@@ -173,9 +196,11 @@ def _rmtree_literal(path: Path) -> None:
     shutil.rmtree(str(path), onerror=_onerror)
 
 
-def probe_push(url: str) -> tuple[bool, str]:
-    """Can this machine PUSH to ``url``'s host? Proved with a dry run, keys only, never a
-    password; an HTTPS transport is "not proven" and fails closed."""
+def probe_push(url: str) -> tuple:
+    """Can this machine PUSH to ``url``'s host? ``(True | False | None, why)``: proved with a dry
+    run, keys only, never a password; False is the host refusing this machine, None is no answer
+    (network, certificate) -- see ``push_outcome``. An HTTPS transport is "not proven" and fails
+    closed."""
     if not _is_ssh(url):
         return False, ("not proven: an HTTPS push probe would send a stored password, which a "
                        "probe never does; this machine needs an SSH key for the host")
@@ -193,11 +218,21 @@ def probe_push(url: str) -> tuple[bool, str]:
                   "-c", "core.sshCommand=ssh -o BatchMode=yes -o PasswordAuthentication=no "
                         "-o KbdInteractiveAuthentication=no -o ConnectTimeout=15",
                   "-C", str(probe), "push", "--dry-run", "--porcelain", url, "HEAD:" + ref])
-        for args in steps:
+        for index, args in enumerate(steps):
             result = git(args, timeout=90)
             if result.returncode != 0:
-                lines = ((result.stderr or "") + (result.stdout or "")).strip().splitlines()
-                return False, redact(lines[-1] if lines else "exit %s" % result.returncode)[:300]
+                text = (result.stderr or "") + (result.stdout or "")
+                lines = text.strip().splitlines()
+                from .worktree import telling_line
+                why = redact(telling_line(text, result.returncode) if lines
+                             else "exit %s" % result.returncode)[:300]
+                if index < len(steps) - 1:
+                    return None, "the local probe repository could not be made: " + why
+                outcome = push_outcome(result.returncode, text)
+                if outcome is None:
+                    why = ("no answer from the host (%s) -- not a refusal; asked again in an hour"
+                           % why)
+                return outcome, why
         return True, "push --dry-run authenticated"
     finally:
         _rmtree_literal(probe)
@@ -252,8 +287,9 @@ def can_push(project: str, workspace: str) -> tuple[bool, str, str]:
         return cached, url, "cached verdict for %s" % host
     ok, why = probe_push(url)
     _save_verdict(host, ok, why)
-    log("publisher: push probe to %s: %s (%s)" % (host, "CAN push" if ok else "cannot push", why))
-    return ok, url, why
+    log("publisher: push probe to %s: %s (%s)" % (
+        host, {True: "CAN push", False: "cannot push"}.get(ok, "no answer"), why))
+    return ok is True, url, why
 
 
 # ---------------------------------------------------------------- the hub's hand-off lane
@@ -405,10 +441,14 @@ def publish_one(rec: dict, url: str, deadline: float) -> str:
                 pushed = new_head
                 break
             text = (result.stderr or "") + (result.stdout or "")
-            if AUTH_REFUSAL.search(text):
-                _save_verdict(parse_remote(url)[1], False, tail(result))
-                _result(rec, "released", reason="this machine's push was refused for auth: "
-                        + tail(result))
+            outcome = push_outcome(result.returncode, text)
+            if outcome is None or AUTH_REFUSAL.search(text):
+                # Not this hand-off's fault either way: a refused credential (cached six hours)
+                # or a host this machine could not reach (asked again in an hour).
+                _save_verdict(parse_remote(url)[1], outcome, tail(result))
+                _result(rec, "released", reason="this machine's push %s: %s" % (
+                    "never reached the host" if outcome is None else "was refused for auth",
+                    tail(result)))
                 return "released"
             if MOVED.search(text) and attempt < 2:
                 g("fetch", "-q", "origin", "%s:refs/remotes/origin/%s" % (target, target))

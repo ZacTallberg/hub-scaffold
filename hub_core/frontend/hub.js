@@ -243,6 +243,7 @@
   function isWorkStep(s) {
     if (!s || typeof s !== "object") return false;
     if (s.lifecycle === true || LIFECYCLE_KINDS[s.kind]) return false;
+    if (s.kind === "verified" || s.kind === "rejected") return false;   // outcomes, not work
     if (!s.done && !String(s.note || "").trim() &&
         (s.auto === true || /^step \d+$/i.test(String(s.step || "").trim()))) return false;
     return true;
@@ -255,7 +256,8 @@
       var kind = s.kind || "checkpoint";
       var label = (i + 1) + ". " + (s.done ? "✓ " : "○ ") + (s.step || "");
       var meta = [];
-      if (!isWorkStep(s)) meta.push(s.auto ? "placeholder — not counted" : "scheduler row — not counted");
+      if (!isWorkStep(s)) meta.push(s.kind === "verified" || s.kind === "rejected" ? "outcome — not counted as work"
+                                     : s.auto ? "placeholder — not counted" : "scheduler row — not counted");
       if (kind !== "checkpoint") meta.push(kind + (s.times > 1 ? " ×" + s.times : ""));
       if (s.sha) meta.push("commit " + s.sha);
       if (s.pipeline_id) meta.push("pipeline " + s.pipeline_id);
@@ -268,6 +270,38 @@
                       text: "open pipeline" }) : null
       ].filter(Boolean)));
     }).filter(Boolean);
+  }
+  // What the MACHINE check said about the deployed build: every verified / rejected row, newest
+  // first, in full (note, the artifact it read, its facts), plus the app's own rate. Done is
+  // this check, never a person's confirmation.
+  function outcomeRows(task) {
+    var rows = ((task && task.plan) || []).filter(function (s) {
+      return s && (s.kind === "verified" || s.kind === "rejected");
+    }).slice().sort(function (a, b) { return String(b.note_at || "").localeCompare(String(a.note_at || "")); });
+    var out = rows.map(function (s) {
+      var verdict = s.kind === "rejected" ? "rejected by the requester" : (s.result === "pass" ? "verified — pass" : "verified — FAIL");
+      var meta = [verdict];
+      if (s.sha) meta.push("commit " + s.sha);
+      if (s.by) meta.push("by " + s.by);
+      if (s.note_at) meta.push(relativeTime(s.note_at));
+      var art = s.artifact ? (/^https?:\/\//.test(s.artifact)
+        ? el("a", { class: "cell-sub", href: s.artifact, rel: "noopener noreferrer", target: "_blank", text: s.artifact })
+        : el("div", { class: "cell-sub mono", text: s.artifact })) : null;
+      var facts = s.facts && typeof s.facts === "object" ? Object.keys(s.facts).map(function (k) {
+        return el("div", { class: "cell-sub mono", text: k + ": " + JSON.stringify(s.facts[k]) });
+      }) : [];
+      return row(s.kind === "rejected" ? "Rejected" : "Verified", el("div", null, [
+        el("div", { class: "cell-sub mono", text: meta.join(" · ") }),
+        s.note ? el("div", { class: "detail-prose", text: s.note }) : null,
+        art
+      ].concat(facts).filter(Boolean)));
+    });
+    var rates = (D.live && D.live.verified_live) || {};
+    var app = task && (task.project || (/^([a-z0-9][a-z0-9-]{1,60}):/.exec(String(task.title || "").toLowerCase()) || [])[1]);
+    var rate = app && rates[app];
+    if (rate) out.push(row("App outcome", app + ": " + rate.verified_live + " of " + rate.closed +
+                                          " closed requests verified live, " + rate.failed + " failed"));
+    return out;
   }
   function isLifecycleStep(step) {
     return !!(step && (step.lifecycle === true || LIFECYCLE_KINDS[step.kind]));
@@ -590,15 +624,28 @@
   function capsSignature() {
     return (D.caps || []).map(function (c) { return c.id + "@" + c.version; }).join(",");
   }
+  /* A FAILED READ BACKS OFF. Every live snapshot re-renders the tabs, and a failure clears the
+     signature so a later change retries -- so without a wait, a board whose components.json is
+     failing re-fetched it on every event, as fast as events arrived. After a failure the next
+     automatic read waits 60 s, doubling to 15 min, and nothing is read automatically while the
+     page is hidden; a success resets it, and the Retry button always reads at once. */
+  var CATALOG_RETRY_MS = 60000, CATALOG_RETRY_MAX_MS = 15 * 60000;
   function refreshCatalog(tab, force) {
     if (!tab._catalog) return;
     var sig = capsSignature();
     if (!force && sig === tab._catalogSig) return;
+    var fail = tab._catalogFail;
+    if (!force && fail) {
+      var wait = Math.min(CATALOG_RETRY_MS * Math.pow(2, fail.n - 1), CATALOG_RETRY_MAX_MS);
+      if (doc.hidden || Date.now() - fail.at < wait) return;
+    }
     tab._catalogSig = sig;
     getJSON("components.json").then(function (payload) {
+      tab._catalogFail = null;
       renderCatalog(tab._catalog, (payload && payload.data) || {});
     }, function (error) {
-      tab._catalogSig = null;                               // the next change retries
+      tab._catalogSig = null;                               // a later change retries, after the wait
+      tab._catalogFail = { n: ((tab._catalogFail && tab._catalogFail.n) || 0) + 1, at: Date.now() };
       var retry = el("button", { class: "text-action", type: "button", text: "Retry" });
       retry.addEventListener("click", function () { refreshCatalog(tab, true); });
       tab._catalog.textContent = "";
@@ -2203,6 +2250,15 @@
            : (r.closeable ? "all " + r.total + " checkpoints recorded · has a commit/URL/path to verify"
                           : "all " + r.total + " checkpoints recorded · nothing to verify against");
     });
+    // An open checkpoint whose due time is still ahead (client `step --due`): not moving, not
+    // stalled either -- listed apart, soonest first, so a scheduled wait never reads as abandoned.
+    group("Waiting on a scheduled checkpoint", (th.waiting || []).slice().sort(function (a, b) {
+      return String(a.due_at || "").localeCompare(String(b.due_at || ""));
+    }), "info", function (r) {
+      var at = Date.parse(r.due_at || ""), left = isNaN(at) ? null : Math.round((at - Date.now()) / 1000);
+      return r.done + "/" + r.total + " checkpoints recorded · next due " + String(r.due_at || "?") +
+        (left != null && left > 0 ? " (in " + fmtAge(left) + ")" : "");
+    });
     group("Stalled", th.stalled, "fail", function (r) { return r.reason; });
     group("Orphaned", th.orphaned, "fail", function (r) { return r.reason; });
     group("Unattended requests nobody started", th.unstarted, "warn", function (r) { return r.body; });
@@ -3045,6 +3101,8 @@
       if (liveRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Live", "pulse", liveRows)]));
       var cps = checkpointRows(r);
       if (cps.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Checkpoints", "checks", cps)]));
+      var outs = outcomeRows(r);
+      if (outs.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Outcomes", "target", outs)]));
       var lane = [
         r.unattended ? row("Queue", "unattended — offered to unattended workers (P0-P2)") : null,
         r.project ? rowMono("Project", r.project) : null,
@@ -4061,6 +4119,14 @@
       var reason = e.reason;
       if (reason && (reason.name === "AbortError" || reason.__hubReported)) return;
       post("promise", describe(reason), "promise");
+    });
+
+    // A Content-Security-Policy refusal is an element that silently never ran or loaded; the
+    // browser fires its own event for it, which no error listener sees.
+    doc.addEventListener("securitypolicyviolation", function (e) {
+      var url = String(e.blockedURI || "").split("?")[0];
+      post("csp", "blocked by the content security policy: " + (e.violatedDirective || "?") +
+           (url ? " " + url : ""), "csp");
     });
 
     return { post: post, describe: describe };

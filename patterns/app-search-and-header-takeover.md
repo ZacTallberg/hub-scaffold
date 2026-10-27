@@ -14,12 +14,15 @@ One search box for any app, degrading by configuration rather than by settings:
 | `+ data-suggest-url` | suggest-as-you-type from the app's own endpoint |
 | `+ data-chose-url` | the app learns from what people actually OPENED (never from what they typed) |
 | `smart: true` in the suggest answer | a second, re-ranked pass the APP computes (`smart=1`) |
+| an agent component on the page | "Ask the agent" on *Nothing matched*, and as the last row of a three-word-or-more question |
 
 The hub serves the file and never an app's data: every URL on the mount is on the app's origin,
 behind its sign-in. The component never calls a model and never writes a reason of its own —
 `top` and its `why` are the app's. Empty, unconfigured and failed are drawn as three different
 states, and a suggest endpoint that answers HTML (a sign-in or error page) is a failure, never
-"nothing matched". Inside the banner's `[data-ab-slot]` it inherits the band's tokens.
+"nothing matched". The agent row is not a result: pressing it dispatches `hub:agent-ask` and
+reports nothing to the chosen-result beacon, so asking can never teach the index a wrong top match.
+Inside the banner's `[data-ab-slot]` it inherits the band's tokens.
 
 ## Header takeover (`components/header-takeover/`)
 
@@ -27,6 +30,11 @@ A companion to the banner for apps that already had a header when they adopted i
 
 - `data-replaces="<selector>"` on `#app-banner` hides (never removes) the named header and names
   the reachable controls that went dark with it; `data-replaces=""` means nothing to replace.
+  Link `header-takeover.js` right after the mount and NOT deferred: it then adds a stylesheet rule
+  naming exactly the declared selectors while the page is still parsing, so the old header never
+  paints first (deferred, it paints once and is then hidden). The rule is removed once the real
+  nodes are marked, or at `DOMContentLoaded` if the banner never drew — a failed banner leaves the
+  app's own header on screen, never a page with no header.
 - With `data-replaces` absent, a visible header near the top holding controls is WARNED about;
   nothing is hidden. A detector's failure mode must be doing nothing.
 - `data-ab-superseded` on an app element hides it once the banner has really drawn.

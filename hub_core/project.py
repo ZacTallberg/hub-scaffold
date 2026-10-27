@@ -9,6 +9,7 @@ detection, and counts/phases/coverage. Everything the hub renders (state.json, .
 import datetime as _dt
 import re
 
+from . import checkpoints as _checkpoints
 from . import upcast as _upcast
 
 # Entity types that fold into the projected state (everything else, e.g. decision/claim, is a
@@ -104,6 +105,11 @@ def _advance(entities, events):
         first_by = first_by.get("created_by") if isinstance(first_by, dict) else None
         for k, v in payload.items():
             ent[k] = v
+        # A plan write never removes a system receipt (deployed, an outcome, a hand-off push):
+        # writers send the whole plan, and one landing on a receipt's slot used to erase it.
+        prior_plan = entities.get(agg, {}).get("plan")
+        if isinstance(payload.get("plan"), list) and isinstance(prior_plan, list):
+            ent["plan"] = _checkpoints.keep_receipts(prior_plan, payload["plan"])
         ent["version"] = ev.get("result_version", ent.get("version", 0))
         # COPY before stamping: a payload that carries its own provenance dict arrives ALIASED
         # into ent (the k/v merge is by reference), and stamping through the alias mutates the
@@ -140,6 +146,42 @@ def _advance(entities, events):
         ent.setdefault("type", _type_of(agg))
         entities[agg] = ent
     return entities
+
+
+#: Fields the FOLD stamps onto an entity; no writer sends them, so no write is validated on them.
+FOLD_STAMPED = ("provenance", "version")
+
+
+def write_candidate(existing: dict, payload: dict, eid: str, type_: str, known_fields) -> tuple:
+    """What a write is validated as, and which top-level fields it is answerable for.
+
+    Validating the FOLD'S OUTPUT (existing entity merged with the payload) under a closed schema
+    made every update of every entity of a type fail the day the fold started stamping a field the
+    schema did not list -- the write door then refused writes that had nothing to do with it. So
+    the candidate is the entity as WRITTEN after this event: the existing record's written fields
+    (fold-stamped ones dropped, and so are fields the schema no longer lists -- a tightened schema
+    must not poison every later write to an old record) merged with the payload, plus
+    id/type/version, which the schemas require. ``touched`` is the set of top-level fields this
+    payload sends: an error under a field the payload did not touch is old data, not this write's
+    fault. Returns ``(candidate, touched)``."""
+    known = set(known_fields or ())
+    base = {k: v for k, v in (existing or {}).items()
+            if k not in FOLD_STAMPED and (not known or k in known)}
+    candidate = {**base, **(payload or {}), "id": eid, "type": type_}
+    for k in FOLD_STAMPED:
+        candidate.pop(k, None)
+    candidate["version"] = (int((existing or {}).get("version") or 0) + 1) if existing else 1
+    touched = {k for k in (payload or {}) if k not in FOLD_STAMPED}
+    return candidate, touched
+
+
+def error_field(err: str) -> str:
+    """The top-level field a validator error is about ('' for the record as a whole). Reads both
+    validators' paths: jsonschema's ``plan.3.kind: ...`` and the subset's ``$.plan[3].kind: ...``."""
+    path = str(err).split(": ", 1)[0].strip()
+    if path.startswith("$"):
+        path = path[1:].lstrip(".")
+    return re.split(r"[.\[]", path, 1)[0] if path else ""
 
 
 def fold(events) -> dict:

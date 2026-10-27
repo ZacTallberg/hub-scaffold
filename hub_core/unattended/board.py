@@ -133,6 +133,10 @@ def is_unattended(data: dict) -> bool:
 HANDBACK_PUSH_WINDOW_S = 5400        # a push older than one task run is not this run's
 HANDBACK_NO_PIPELINE_WAIT_S = 600    # pushed, and no pipeline delivery has arrived for it yet
 HANDBACK_UNKNOWN_WAIT_S = 1500       # the hub's CI status could not be read
+#: A task LEFT IN PROGRESS (a refused hand-back, an expired lease, a run that ended) waits on its
+#: own push the same way, anchored on the push; a push older than this is not what a resume
+#: would be waiting on.
+LEFT_ACTIVE_PUSH_WINDOW_S = 6 * 3600
 
 
 def _iso_epoch(value) -> float:
@@ -144,18 +148,32 @@ def _iso_epoch(value) -> float:
 
 
 def pipeline_wait(data: dict, now: float | None = None) -> str:
-    """Non-empty (the reason) while a handed-back task's pushed commit still has a pipeline
-    running, so the resume waits until there is something new to read: green (the next run
-    verifies and finishes) or red (it fixes). '' when the run pushed nothing."""
+    """Non-empty (the reason) while a task's pushed commit still has a pipeline running, so the
+    next run waits until there is something new to read: green (it verifies and finishes) or red
+    (it fixes). '' when the run pushed nothing.
+
+    Anchored on the hand-back when there is one, else on the PUSH: a task left in progress -- its
+    hand-back refused, its lease expired, its run ended -- is offered again as a resume, and on
+    the origin system one was relaunched 26 s after its run stopped, with the pipeline of the
+    commit that run pushed still running. Every offer of a task is held the same way."""
     from hub_core import task_rows
     now = time.time() if now is None else now
     back = task_rows.handed_back(data) or {}
     back_at = _iso_epoch(back.get("at"))
     push = task_rows.pushed(data) or {}
     sha = str(push.get("sha") or "")
-    if not back_at or not sha or _iso_epoch(push.get("at")) < back_at - HANDBACK_PUSH_WINDOW_S:
+    push_at = _iso_epoch(push.get("at"))
+    if not sha or not push_at:
         return ""
-    age = now - back_at
+    if back_at and back_at >= push_at:
+        anchor = back_at
+        if push_at < back_at - HANDBACK_PUSH_WINDOW_S:
+            return ""                       # that push was not the handed-back run's
+    else:
+        anchor = push_at                    # left in progress: the push itself
+        if now - push_at > LEFT_ACTIVE_PUSH_WINDOW_S:
+            return ""
+    age = now - anchor
     try:
         seen = _read("ci-status.json?sha=%s" % quote(sha)).get("data") or {}
     except RuntimeError:
@@ -165,6 +183,18 @@ def pipeline_wait(data: dict, now: float | None = None) -> str:
                 if age < HANDBACK_NO_PIPELINE_WAIT_S else "")
     return ("the pipeline for %s is %s" % (sha[:12], seen.get("status"))
             if seen.get("active") else "")
+
+
+def shipped(task_id: str) -> dict:
+    """What CI says already shipped for this task (GET /hub/task/<n>/shipped.json): a commit on
+    the default branch whose subject names the task. ``{}`` when the hub cannot say (an older
+    hub, an unreadable store, nothing kept) -- never read as "nothing shipped" by a caller that
+    would act on it, only as "no reason to wait"."""
+    try:
+        data = _read("task/%s/shipped.json" % quote(task_id.rsplit(":", 1)[-1])).get("data") or {}
+    except (RuntimeError, ValueError):
+        return {}
+    return data if data.get("checked") else {}
 
 
 def resolve(item_id: str) -> dict | None:
@@ -203,8 +233,14 @@ def resolve(item_id: str) -> dict | None:
                 "resume": bool(readiness.get("stale_reclaim")) or abandoned,
                 "abandoned_by": str(holder.get("agent") or "") if abandoned else "",
                 "handed_back": charged, "handed_back_idle": idle,
-                # A hand-back whose pushed commit still has a pipeline running waits for it.
-                "pipeline_wait": pipeline_wait(data) if (charged or idle) else "",
+                # A hand-back -- or a task left in progress -- whose pushed commit still has a
+                # pipeline running waits for it.
+                "pipeline_wait": pipeline_wait(data) if (charged or idle or abandoned
+                                                         or readiness.get("stale_reclaim")) else "",
+                # A change for this task already on the default branch (a person pushed it by
+                # hand, or an earlier run's push landed): wait for its pipeline, then verify it
+                # rather than build the same change again.
+                "shipped": (shipped(item_id).get("commit") or {}),
                 "from": str((data.get("provenance") or {}).get("agent") or "")}
     if item_id.startswith(ATTENTION_PREFIX):
         return resolve_attention(item_id)
@@ -254,7 +290,9 @@ def scan() -> dict:
                 continue
             if item.get("pipeline_wait"):
                 out["waiting"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
-                                       "why": "handed back; " + item["pipeline_wait"]})
+                                       "why": ("handed back; " if item["handed_back"]
+                                               or item["handed_back_idle"] else "left in "
+                                               "progress; ") + item["pipeline_wait"]})
                 continue
             out["workable"].append({"id": row["id"], "kind": "task", "title": row.get("title"),
                                     "resume": item["resume"], "handed_back": item["handed_back"],
@@ -361,9 +399,12 @@ def attention_offered(it: dict) -> tuple[bool, str]:
                        else "the hub does not say an agent can clear it (no actor field)")
     if it.get("severity") == "info":
         return False, "informational: shown on the card, never worked"
+    # AN ITEM THAT NAMES ONE MACHINE IS ITS MACHINE'S, flagged on_its_machine or not: a queue
+    # only that machine drains, a login only that machine renews. Offered elsewhere it spends a
+    # session that can only conclude "not here".
     target = str(it.get("machine") or "").strip().lower()
-    if it.get("on_its_machine") and target and target != machine():
-        return False, "can only be cleared on %s" % target
+    if target and target != machine():
+        return False, "names %s: only that machine can clear it" % target
     return True, "needs attention, and an agent can clear it"
 
 
@@ -473,18 +514,45 @@ def release_left(leases_file: str, note: str, skip: str = "", uncharged: bool = 
 
 # ---------------------------------------------------------------- per-item claims (non-task)
 
-def item_claim(item_id: str, release: bool = False) -> str:
-    """``granted``, ``held:<machine>`` or ``unreachable`` for a NON-task item (a task has its
-    lease). A same-machine re-claim is granted idempotently, which is how a queued launcher
-    keeps its claim alive."""
-    payload = {"item": item_id, "agent": agent(), "machine": machine()}
+def item_class(item_id: str) -> str:
+    """The thing an item is about (hub_core.item_claims.aggregate_of): an attention condition
+    about a task is that task, and a recurring condition keeps one class across its ids."""
+    from hub_core.item_claims import aggregate_of
+    return aggregate_of(item_id)
+
+
+#: What the last claim's answer said earlier runs on the same class concluded.
+CLAIM_HISTORY: dict = {}
+
+#: item id -> (aggregate, epoch) of this launcher's newest grant, for the session it spawns.
+GRANTS: dict = {}
+
+
+def item_claim(item_id: str, release: bool = False, ending: dict | None = None) -> str:
+    """``granted``, ``held:<machine>`` or ``unreachable``. The claim is on the item's CLASS too:
+    another machine holding any key of the same class (the task itself, or an attention item
+    about it) refuses it. A grant leaves the class's history in ``CLAIM_HISTORY[item_id]`` and its
+    fencing epoch in ``GRANTS[item_id]``; a release with ``ending`` records this run's. A
+    same-machine re-claim is granted idempotently, which is how a queued launcher keeps its claim
+    alive."""
+    payload = {"item": item_id, "agent": agent(), "machine": machine(),
+               "class": item_class(item_id)}
     if release:
         payload["release"] = True
+        if ending:
+            payload.update({k: v for k, v in ending.items() if v is not None})
     status, body = _write("item-claim", payload)
+    data = (body.get("data") if isinstance(body, dict) else None) or {}
+    if isinstance(data.get("history"), list):
+        CLAIM_HISTORY[item_id] = data["history"]
     if status == 200:
+        data = (body.get("data") if isinstance(body, dict) else None) or {}
+        if not release and data.get("aggregate") and data.get("epoch"):
+            # The fencing epoch the run's session carries (HUB_CLAIM_AGGREGATE/_EPOCH): its
+            # writes on this item are refused once another holder has claimed it since.
+            GRANTS[item_id] = (str(data["aggregate"]), int(data["epoch"]))
         return "released" if release else "granted"
     if status == 409:
-        data = (body.get("data") if isinstance(body, dict) else None) or {}
         return "held:%s" % (data.get("holder") or "another machine")
     return "unreachable"
 
@@ -666,6 +734,29 @@ def record_run(run_id: str, **fields) -> dict:
         data = dict(sorted(data.items(), key=lambda kv: kv[1].get("created", 0))[-RUNS_KEEP:])
     write_json(_runs_path(), data)
     return row
+
+
+def post_run(row: dict) -> bool:
+    """Send one ENDED run to the hub's cross-machine run ledger (POST /hub/api/run-ledger), so a
+    run on this machine is measurable from every other one. Sent once, when the run ends; a
+    failed send is recorded on the local row (``ledger_post``) and never retried in a loop --
+    the local ledger still holds it. Never raises."""
+    if not isinstance(row, dict) or not row.get("item"):
+        return False
+    started = row.get("launched") or row.get("created")
+    try:
+        duration = (int(float(row.get("ended") or time.time()) - float(started or 0))
+                    if started else None)
+    except (TypeError, ValueError):
+        duration = None
+    payload = {"agent": agent(), "item": row.get("item"), "item_kind": row.get("kind"),
+               "outcome": row.get("outcome"), "run_id": row.get("id"), "rc": row.get("rc"),
+               "tokens": row.get("tokens"), "turns": row.get("turns"),
+               "suspended_s": row.get("suspended_s"), "runtime": row.get("runtime"),
+               "lane": row.get("lane"), "session": row.get("session"), "started": started,
+               "duration_s": duration}
+    status, body = _write("run-ledger", {k: v for k, v in payload.items() if v not in (None, "")})
+    return status in (200, 201)
 
 
 def drop_run(run_id: str) -> None:

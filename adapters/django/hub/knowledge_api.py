@@ -14,6 +14,7 @@ store is derived data beside it.
 import copy
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -195,6 +196,59 @@ def _semantic_half(q, state, key, candidate_ids, cat_items, cat_error):
         return [], {"semantic": False, "reason": "%s: %s" % (type(exc).__name__, exc)}
 
 
+#: How much of a question the search reads. It was 200 ("far more than any real question"),
+#: measured false on a few hundred real answered questions: most were longer, and the cut threw
+#: away the half of the question that named the answer (reading them whole moved hit@10 by
+#: about a third). 1000 is a CPU bound, not a measured optimum: BM25 walks only the postings of
+#: the query's terms, and one embedding call reads the whole string.
+SEARCH_QUERY_CHARS = 1000
+
+#: How long a search reuses the board state it folded. The ledger head moves every few seconds
+#: on a busy board, and every component keyed on it (corpus, index, dense coverage) was rebuilt
+#: on nearly every search -- the search path became the request pool's top consumer. A record
+#: written in the last half minute may be missing from one answer; none is ever served stale
+#: for longer.
+SEARCH_REUSE_S = float(os.environ.get("HUB_SEARCH_REUSE_S") or 30)
+_SEARCH_STATE = {"at": 0.0, "value": None}
+_SEARCH_STATE_LOCK = threading.Lock()
+
+
+def _search_state():
+    now = time.monotonic()
+    with _SEARCH_STATE_LOCK:
+        if _SEARCH_STATE["value"] is not None and now - _SEARCH_STATE["at"] < SEARCH_REUSE_S:
+            return _SEARCH_STATE["value"]
+    value = _state_and_key()
+    with _SEARCH_STATE_LOCK:
+        _SEARCH_STATE.update(at=now, value=value)
+    return value
+
+
+def _search_query(raw):
+    """``(q, terms)`` exactly as the endpoint scores them -- one function, so an offline
+    harness measures the query the served search actually ranks."""
+    q = str(raw or "").strip().lower()[:SEARCH_QUERY_CHARS]
+    terms = [t for t in re.split(r"[^a-z0-9._-]+", q) if t and t not in _SEARCH_STOP][:24]
+    return q, terms
+
+
+_NAMED_ID = re.compile(r"\b[a-z0-9][a-z0-9-]*:[a-z]+:[\w.\-]+")
+#: Fewer words than this besides the ids, and the search is treated as an id LOOKUP.
+NAMED_LOOKUP_WORDS = 8
+
+
+def _named_in_query(q, rows) -> set:
+    """Records the query names by full id, when the query says more than those ids. A question
+    that cites a record ("the diagnosis is on <id>") already holds it; ranking it first answers
+    the question with the asker's own citation -- measured on real questions, a noticeable share
+    of top-1s were exactly that, and the answer was never one of them."""
+    found = {m.rstrip("._-") for m in _NAMED_ID.findall(q or "")}
+    found = {m for m in found if m in rows}
+    if not found or len(bm25.tokens(_NAMED_ID.sub(" ", q))) < NAMED_LOOKUP_WORDS:
+        return set()
+    return found
+
+
 @require_GET
 def search_json(request):
     """Ranked search over the board's knowledge — the PULL half of "push pointers, pull content".
@@ -204,10 +258,10 @@ def search_json(request):
     halves ran (`fusion`), what the dense half could not see (`partial`, present ONLY when
     something is missing), and where the time went (`timing_ms`, per stage).
 
-    ?q= (<=200 chars) · ?limit= (1-50) · ?mode=fused|lexical|semantic (measurement) ·
+    ?q= (<= SEARCH_QUERY_CHARS) · ?limit= (1-50) · ?mode=fused|lexical|semantic (measurement) ·
     ?alpha=0..1 (measurement; the served default is the measured CONVEX_ALPHA)."""
     started = time.perf_counter()
-    q = (request.GET.get("q") or "").strip().lower()[:200]
+    q, terms = _search_query(request.GET.get("q") or "")
     try:
         limit = max(1, min(50, int(request.GET.get("limit") or 10)))
     except (TypeError, ValueError):
@@ -222,9 +276,8 @@ def search_json(request):
         alpha = semantic.CONVEX_ALPHA
     if not q:
         return JsonResponse({"data": [], "metadata": {"q": "", "msg": "pass ?q="}})
-    terms = [t for t in re.split(r"[^a-z0-9._-]+", q) if t and t not in _SEARCH_STOP][:24]
     timing = {}
-    state, key = _state_and_key()
+    state, key = _search_state()
     timing["state"] = time.perf_counter() - started
     mark = time.perf_counter()
     cat_items, cat_error = _catalog_for_index()
@@ -257,11 +310,16 @@ def search_json(request):
     # TIES BROKEN BY ID, never by which channel inserted first: rank 1 is then a fact about
     # the scores, reproducible across runs.
     ordered = sorted(fused, key=lambda eid: (-fused[eid], eid))
+    # WHAT THE ASKER ALREADY HOLDS GOES LAST: kept in the list, after everything not named, and
+    # only when the question says more than the ids (a search that is mostly an id is a lookup).
+    named = _named_in_query(q, rows)
+    if named:
+        ordered = [e for e in ordered if e not in named] + [e for e in ordered if e in named]
     # `matched` = records that share a WORD with the query; `scored` = every record either half
     # ranked (the denominator of what is shown). With a dense half they differ, and a count that
     # used `matched` as the denominator printed "20 shown of 2".
     metadata = {"q": q, "terms": terms, "matched": len(lexical_scores), "scored": len(fused),
-                "candidates": len(rows),
+                "candidates": len(rows), **({"named_last": sorted(named)} if named else {}),
                 "mode": mode, "fusion": fusion, "retrieval": retrieval}
     partial = semantic.partiality(retrieval) if mode != "lexical" else ""
     if partial:
@@ -609,9 +667,35 @@ def guidance_json(request):
     # ?peer=<a peer message's text> answers memory_rank.peer_similarity (cosine against focus).
     peer = (request.GET.get("peer") or "").strip()[:400]
     memory, total, rank = memory_index(state, key, cap=cap, focus=focus, full=full, peer=peer)
-    return JsonResponse({"memory": memory, "memory_total": total, "memory_rank": rank,
-                         "live": _live(state, key, agent),
-                         "metadata": {"agent": agent or None, "head": {"seq": key[1], "hash": key[2]}}})
+    body = {"memory": memory, "memory_total": total, "memory_rank": rank,
+            "live": _live(state, key, agent),
+            "metadata": {"agent": agent or None, "head": {"seq": key[1], "hash": key[2]}}}
+    # A CONDITIONAL READ that can actually match. A client that holds the payload and polls with
+    # If-None-Match (or X-Hub-ETag, which a proxy that drops If-None-Match passes) gets a 304 when
+    # nothing it reads moved. The tag leaves out what TICKS on every read -- ages and durations
+    # (`*_s`, `*_ms`) -- and carries a 5-minute bucket instead, so ages are never staler than
+    # that: tagged over the raw body, three reads seconds apart had three tags and a holding
+    # client never once got its 304.
+    tag = '"%s"' % content_hash({"body": _without_ticking(body),
+                                 "bucket": int(time.time() // 300)})[:24]
+    sent = request.headers.get("If-None-Match") or request.headers.get("X-Hub-ETag") or ""
+    if sent == tag:
+        resp = HttpResponse(status=304)
+    else:
+        resp = JsonResponse(body)
+    resp["ETag"] = tag
+    resp["X-Hub-ETag"] = tag
+    return resp
+
+
+def _without_ticking(obj):
+    """``obj`` without the fields that move on every read (``*_s``, ``*_ms``, ``timing*``)."""
+    if isinstance(obj, dict):
+        return {k: _without_ticking(v) for k, v in obj.items()
+                if not (str(k).endswith(("_s", "_ms")) or str(k).startswith("timing"))}
+    if isinstance(obj, list):
+        return [_without_ticking(v) for v in obj]
+    return obj
 
 
 # ── knowledge attached to an EVENT ──
@@ -709,7 +793,9 @@ def knowledge_since(request):
     caller gets an empty page and, with its ETag sent back (If-None-Match, X-Hub-ETag or
     ?etag=), a 304: the same three carriers every conditional route reads, because a proxy on
     the path can drop If-None-Match and then a caught-up mirror is re-sent a full 200 forever."""
-    cur = knowledge.parse_cursor(request.GET.get("cursor"))
+    asked = knowledge.parse_cursor(request.GET.get("cursor"))
+    # A cursor built with an older `put` shape re-pages the ledger once (knowledge.current_shape).
+    cur = knowledge.current_shape(asked)
     try:
         limit = max(1, min(int(request.GET.get("limit") or knowledge.FEED_MAX), knowledge.FEED_MAX))
     except ValueError:
@@ -717,7 +803,7 @@ def knowledge_since(request):
     state, key = _state_and_key()
     head_seq = key[1]
     cat_sha, cat_items = _catalog_sha()
-    tag = '"k-%s"' % knowledge.cursor_str(cur)
+    tag = '"k-%s"' % knowledge.cursor_str(asked)
     # A narrowed reader is sent no revoke for a record it could never see (knowledge.ledger_ops).
     from . import veil as _veil
     reader = _veil.veil_for(request)

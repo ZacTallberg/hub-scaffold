@@ -27,6 +27,15 @@ the files at `/hub/components/<name>/<file>` and lists them at `/hub/components/
 - **Presentation only.** No board record and no identity is ever served here, which is why these
   reads can sit outside any read-auth boundary you add. Only files on disk under the component,
   with an allowed suffix, are served — there is no caller-controlled path.
+- **An app can pin a release.** Linking the master means a bad release reaches every app at
+  once. `/hub/components/@<commit>/<name>/<file>` serves a component as it was at a SHIPPED
+  commit (an ancestor of what the hub runs), read straight out of the hub's git history -- no
+  second copy -- and cached as immutable. The index lists each component's shipped releases
+  (`versions`: commit, date, and the `VERSION` its main script declared). A component that loads
+  its own parts from its own base gets them from the same commit. An unknown or unshipped commit
+  is a 404, never the latest bytes (that would un-pin the app without telling it). It needs a
+  checkout with history where the hub runs; without one every pin is a 404 and `versions` is
+  empty.
 
 Shipped component: `agent` (below). Add one by creating its directory; nothing else changes.
 
@@ -102,7 +111,9 @@ Both follow one shape — **the hub authenticates the app, the app vouches for t
   placement, sidebar state, help switches, starred apps and mark (initials, or a small
   PNG/JPEG/WebP data URL; SVG refused). Closed sets; out-of-range values are dropped and
   reported. Any page key (and the agent placement) can also be set for ONE app under
-  `prefs.apps.<slug>`; `?app=<slug>` answers `resolved`, the values that app should draw. The
+  `prefs.apps.<slug>`; `?app=<slug>` answers `resolved`, the values that app should draw. How
+  the person arranged an app's pages — hidden from its sidebar (`nav_hidden`), pinned, reordered,
+  a home page (`nav_layout`) — are their own per-app maps beside `apps`, merged per slug. The
   GET lists the apps the person can reach (`HUB_APPS` joined with the adopter's `HUB_REACH`
   seam). Mutable per-person state lives in `HUB_DIR/profiles.json`, not the ledger. When the
   hub shares an origin with the site that signs people in, the same route also answers the
@@ -153,6 +164,45 @@ failed (with retry) and empty states. Any element with `data-hub-agent-open`, or
 `hub:agent-open` window event (`detail: {question}`), opens it. Agent text is rendered as text,
 never HTML.
 
+**It reads the page the person is on — on by default, one click off.** A chip above the
+question box says "Reading this page"; one click says "Not reading this page", and the choice
+is remembered for every app (`hub-agent:page`), because it is the reader's habit. "What it
+reads" shows the exact text a question would carry. It is read at the moment of asking and only
+what is on screen: title, address (secret-looking query values dropped), the nav's current
+section, selected text, open panels and dialogs first, then the visible text in reading order
+(a table row as `a | b | c`) and visible fields with values — never password or hidden fields,
+the shared banner, the panel itself, or anything marked `data-agent-skip`. At most 7,000
+characters, sent as ONE `thread` item `{"role": "page", "text": …}`: every bridge already
+forwards `thread` untouched, so adopters gain it with no change. `agent_broker.compose` lifts it
+out before counting turns (a page never pushes a real turn out of the window), caps it at
+`PAGE_MAX_CHARS` and states it first as what the person is looking at. An answer to a question
+that carried the page says "read this page" under it.
+
+**Other sidebars step aside.** Docked, the panel takes its width from `<body>`, but a FIXED
+layer ignores body margin — an app's own right-edge drawer was drawn over the panel or under
+it. While docked, every fixed layer reaching the right edge (probed every 48px: a sidebar, a
+sheet across the foot, a toast; never the shared banner, never the panel's own parts) is moved
+left by exactly the panel's width — right margin, or a translate for a layer placed by `left`; a
+window-wide layer that will not shrink is left alone — re-checked on page changes and every
+resize, and restored exactly on close. While the panel is open the floating button and the edge
+tab step away; the panel carries its own close.
+
+**An optional page guide.** An app may declare, per page, what each section is and who fills
+it in, as a JSON island anywhere on the page (inside the mount is tidiest):
+
+    <script type="application/json" data-agent-guide>{"title": "Overview", "summary": "...",
+      "sections": [{"name": "Ledger", "kind": "system|user|mixed", "text": "...", "who": "...",
+                    "target": "#ledger"}], "labels": {"system": "..."}, "more": {"label": "...", "href": "..."}}</script>
+
+It is drawn as a folding "About this page" block above the conversation, at most 45% of the
+panel and scrolling inside itself so the question box is never pushed off. Each kind is a WORD
+on a chip (Automatic / Entered by people / Both, relabelled by `labels`), never colour alone,
+and the legend lists only the kinds the page has. A section whose `target` is on the page gets a
+button that scrolls to it and outlines it. Folded or open is remembered for every app
+(`hub-agent:guide-open`). No island, or no sections, draws nothing. A page that changes what it
+shows without a reload dispatches `hub:agent-guide` on `document` (`detail: {guide}` draws that
+guide; no detail re-reads the island).
+
 ## 5. The context menu — the app declares, the hub organises
 
     <div id="hub-menu" hidden data-app="budget-app" data-page="ledger" data-role="member"
@@ -179,6 +229,24 @@ sent (unknown ids dropped and counted, only optional items hideable, nothing des
 pinned), so a model can make a menu less useful but never make it do something new. No model,
 or one that fails, leaves the catalog's own order with no "organised" star.
 
+**Ask about what you pointed at.** Where the page has an agent component, the menu also answers
+on things no catalog declared, by what they ARE -- a link, a table row and the cell pressed, a
+section heading, a card (`.card`, `.panel`, `[data-card]`; a link that IS a card is a card first)
+-- and a declared kind that carries no ask of its own gains "Ask the agent" (plus "About this
+<column>" when the press landed in a table cell). Every such question comes from ONE composer,
+`HubMenu.questionAbout(thing)`, which says what the thing is and where it sits: its column and
+row, the record it belongs to, the section sub-heading, and the page by its banner nav NAME, never
+the h1 (a page's h1 often states a finding, not the page). Text is read without the controls inside
+it, so a heading's info button is never part of its name. The table and the search bar call the
+same composer when the menu is on the page.
+
+**Selected words keep Copy.** A right-click ON the person's own selection never opens a declared
+kind's menu over it -- that took Copy away and made the words as good as unselectable. With an
+agent on the page it opens the selected-text menu, Copy first, then "Ask the agent about this" and
+"Explain this in plain words"; without one, the browser's menu. Shift + right-click is always the
+browser's menu, and the `selection` property (`menu` | `browser`) gives an app the browser's menu
+on selections back. With no agent on the page, none of the built-in kinds exist.
+
 ## 6. The table — interaction hosted, persistence the app's
 
     <section data-hub-table data-app="budget-app" data-table="#ledger">
@@ -196,5 +264,9 @@ cancelable `hub-table:*` event on the mount, so an app that saves layouts saves 
 without that, the viewer's layout is kept in their browser. Where the app declares its own lanes,
 a Suggest panel draws the app's model-shaped cuts of the table (the counts are the app's own
 measurement; a slow lane answers 202 and is polled) and a Request button files what the table
-cannot do as board work through the app's own credential. The contract is the component's
-`manifest.json`.
+cannot do as board work through the app's own credential. Double-clicking a column's resize handle
+(or Enter / F on it) fits the column to its content -- measured on an uncapped off-screen copy of
+its cells, so an app's own ellipsis caps do not stop it -- and is announced like a drag. With an
+agent component on the page, Suggest also offers "Ask the agent" (and a failed or unconfigured
+Suggest offers it instead), carrying the person's words, the table's columns and the cut it shows.
+The contract is the component's `manifest.json`.

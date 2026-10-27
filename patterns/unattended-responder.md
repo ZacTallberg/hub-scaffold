@@ -12,6 +12,7 @@ schedule it.
 ```
 python -m hub_core.unattended scan              # what could be taken here, and what may not, with why
 python -m hub_core.unattended scan --launch     # spawn one `respond` per workable item (--max N)
+python -m hub_core.unattended watch            # stay up: scan --launch the moment the task wake moves
 python -m hub_core.unattended respond <item-id> # one bounded session for exactly this item
 python -m hub_core.unattended publish           # push at most one waiting hand-off, then exit
 python -m hub_core.unattended sweep             # hand back leases left by a launcher that died
@@ -37,8 +38,9 @@ contains `unattended`. An unmarked task belongs to whoever made it. A **question
 this launcher's agent is the operator identity and the escalation rule below allows it.
 
 A **needs-attention condition** (`GET /hub/attention.json`) is workable when the hub marks it
-`actor: agent` and it is not informational; one the hub says only its own machine can clear
-(`on_its_machine`) is offered only there. A list without the `actor` field says nothing about who
+`actor: agent` and it is not informational; one that names a machine (`machine`, whether or not
+the hub flags it `on_its_machine`) is offered only on that machine -- a queue only that machine
+drains is never worked from another. A list without the `actor` field says nothing about who
 can clear a condition, so nothing is offered from it — a guess would put a session on something
 only a person can do. The id is `attention:<the hub item's id>`.
 
@@ -49,6 +51,13 @@ holder it can prove gone — so a refusal is a cheap stand-down, never a session
 
 `scan` and `respond` use the same predicates. A scan that counts items the responder will then
 refuse launches sessions that are killed at the ceiling with nothing to show.
+
+A task whose change is ALREADY on the default branch is not built twice. Before a task is
+launched the launcher asks `GET /hub/task/<n>/shipped.json` (from the hub's retained CI
+deliveries, so the machine needs no CI credential): while a commit whose SUBJECT names the task
+has its pipeline running, the run waits; once it has finished, the session is told the commit is
+there and to verify it against the acceptance instead of rebuilding it. A commit that only cites
+the task in its body is context, never the task's work.
 
 ## A refusal is a response; one run per item, one machine per item
 
@@ -117,6 +126,13 @@ it was waiting on), not starting over.
 
 ## Hand-back with proof, and ONE self-counting row
 
+Every run that ends is also posted to the hub's cross-machine run ledger
+(`POST /hub/api/run-ledger`, read on `GET /hub/run-ledger.json` and `client run-ledger`): item,
+outcome, duration, exit code, tokens, and -- when the launcher could measure it -- where the wall
+time went. The local `runs.json` is the launcher's own record; the hub's ledger is how a run on
+one machine is measurable from every other.
+
+
 The launcher claims the task itself and gives the session its fencing token (`HUB_LEASE_TOKEN`)
 plus a lease journal (`HUB_RUN_LEASES`); `python -m hub_core.client claim|start` appends every
 granted lease to that journal. At teardown every journalled lease whose task is still in progress
@@ -138,7 +154,10 @@ fleet's task tokens. It waits until the pipeline is terminal — green means the
 and finishes, red means it fixes — and never forever: 10 minutes when no pipeline has reported for
 the sha, 25 when the hub's CI status is unreadable. A run that pushed nothing waits for nothing.
 This needs CI deliveries reaching the hub (`patterns/ci-evidence.md`); without them every
-hand-back simply waits the no-pipeline window once.
+hand-back simply waits the no-pipeline window once. The same hold applies to a task LEFT in
+progress -- its hand-back refused, its lease expired, its holder gone -- anchored on the push
+itself (within 6 hours) instead of a hand-back: one such task was relaunched 26 seconds after its
+run stopped, against the still-running pipeline of the commit that run had pushed.
 
 A launcher killed so hard that it died too is swept by the next launcher (`sweep`, and at the start
 of every `respond`): its journal names the leases, its pid is gone, and the same proof applies.
@@ -297,7 +316,10 @@ through a model session, so it is mechanical and narrow — ships it from a mach
    throwaway commit to a ref that never exists. A probe never sends a password (a directory-backed
    git host counts an expired stored password toward lockout): ssh keys only (`BatchMode`, no
    password or keyboard-interactive auth, empty credential helper and askpass), and an HTTPS
-   transport is "not proven" — it fails closed. The verdict is cached six hours either way.
+   transport is "not proven" — it fails closed. A refusal or a success is cached six hours; NO ANSWER
+   (a network failure, an untrusted certificate, a timeout) is asked again after an hour and never
+   recorded as "cannot push" -- ssh ends every failure with "Could not read from remote
+   repository", so that line is never read as a refusal (`publisher.push_outcome`).
 2. The URL is built from the record's project PATH and a transport this machine already uses,
    only for a host in `HUB_PUBLISH_HOSTS` — never taken from the hand-off, so a record can never
    steer a publisher at another host. No allowed host: the publisher is off.
@@ -356,6 +378,11 @@ clock, outcome checks and fault classification.
 Any scheduler that runs a command every few minutes will do (cron, a systemd timer, Windows Task
 Scheduler: `adapters/windows/register-responder.ps1 -Launcher unattended -HomeDir <dir> -Workspace
 <dir>`, which gives the tick a twenty-minute limit because it may run one publish pass first). Run
-`scan --launch` from a directory that holds the checkouts the tasks name. For a long
+`scan --launch` from a directory that holds the checkouts the tasks name. A timer alone leaves
+a task filed just after a tick waiting out the rest of the interval: `watch` (one long-lived
+process instead of the timer) asks `GET /hub/task_wake.json` every `HUB_WAKE_POLL_S` (3 s) -- a
+hash of the responder-eligible todo tasks that holds no server thread -- and scans the moment it
+moves, plus at least every `--interval` seconds; against a hub without the route it falls back
+to the interval. An unreadable wake is a missed poll, never a scan. For a long
 unattended window on a laptop, `adapters/windows/keep_awake.py` holds a wake lock for the whole
 window; each run already holds one for its own length.

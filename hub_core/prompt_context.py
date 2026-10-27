@@ -19,8 +19,10 @@ FOUR RULES, each paid for on the instance this was lifted from:
   * WHAT FITS IS WHAT IS DELIVERED. Agent harnesses commonly show hook output inline only up to
     a ceiling and replace anything longer with a short preview — so a 30 KB block delivers its
     first few rows while the receipt marks hundreds as held. Output is fitted under
-    OUTPUT_MAX, rows that did not fit are written to a pack file the agent can read, and only
-    rows that actually rendered become receipt keys. A cut is never silent.
+    OUTPUT_MAX and only rows that actually rendered become receipt keys; rows that did not fit
+    are NOT delivered, and one line says how many and how to search for them. (An overflow pack
+    file was tried and retired: on the instance this was lifted from, packs held thousands of
+    rows over weeks and were read zero times.) A cut is never silent.
   * A STATE CLAIM CARRIES ITS DATE AND ITS CHECK. A rule that says "port 8001 serves X" decays
     from the day it is written; rows print the hub's one label for the record (STATE as of ...
     · verify before acting / UNVERIFIED / CHECK FAILED — NEEDS REVIEW, hub_core.staleness), or
@@ -30,7 +32,10 @@ FOUR RULES, each paid for on the instance this was lifted from:
     never padded to fill the room -- on the instance this was lifted from, a few thousand
     records delivered by budget were referred to a handful of times, and the rows past the
     first few added almost nothing to the answers people actually got. A row without a score
-    is unranked, not relevant.
+    is unranked, not relevant: when the board could not rank for this prompt at all (no focus,
+    an embedder and a word index both unavailable), NO rows are delivered and one line says so,
+    with the reason and the search verb -- a prompt that got nothing because nothing could be
+    ranked must not look like one where nothing applied.
   * THE SAME QUESTION GETS NO NEW ANSWERS. A prompt whose focus is the one the session's last
     memory block was ranked for re-ranks the SAME query, so all it could add sits BELOW rows
     the session already holds (most prompts that repeat a focus are notifications and relayed
@@ -51,7 +56,7 @@ from pathlib import Path
 OUTPUT_MAX = 9500
 #: The most the memory block may take of that.
 MEMORY_BUDGET = 8000
-SPILL_LINE_RESERVE = 260
+SPILL_LINE_RESERVE = 200
 #: After a session's first injection, only this head of the ranking is considered for new rows,
 #: and only the first DELTA_FULL of those carry their full RULE/WHY.
 DELTA_RANK_WINDOW = 60
@@ -71,8 +76,7 @@ def _env_float(name, default):
 RELEVANCE_CUT = _env_float("HUB_PROMPT_RELEVANCE_CUT", 0.48)
 RELEVANCE_MAX = int(_env_float("HUB_PROMPT_RELEVANCE_MAX", 6))
 SPILL_MARK = ("  (%d more records ranked for this prompt did not fit inline and were NOT delivered; "
-              "they are in full, in rank order, in the file named below — read it when the task "
-              "touches them)")
+              "find them with: %s search \"<symptom>\")")
 
 
 def state_dir() -> Path:
@@ -249,33 +253,30 @@ def relevance_filter(memory, rank, *, cut=None, most=None) -> tuple:
 
 
 #: When the hub could only rank by WORDS, each matching row carries `lexical_score`: the share
-#: of THIS query's own BM25 ceiling it answers (0..1). Read from real focuses, not a round
-#: number: the top row must reach LEXICAL_SCORE_MIN, a later row LEXICAL_FOLLOW_MIN AND
-#: LEXICAL_FOLLOW_FRAC of the top, at most LEXICAL_RELEVANT_MAX rows — fewer than a meaning-based
-#: ranking would get, because a shared word is weaker evidence of relevance than a close meaning.
-LEXICAL_SCORE_MIN = 0.25
-LEXICAL_FOLLOW_MIN = 0.24
-LEXICAL_FOLLOW_FRAC = 0.6
-LEXICAL_RELEVANT_MAX = 4
+#: of THIS query's own BM25 ceiling it answers (0..1). The cut on it is RANK, not score: every
+#: query term counts in the ceiling, so the score FALLS WITH QUERY LENGTH and a prompt-length
+#: query rarely clears any fixed floor. Measured on the origin system over 758 real answered asks
+#: (context-only queries): a floor of 0.25 with a 60%-of-top follow delivered the answering record
+#: for 2 and gave 754 prompts nothing (median top score 0.119); the first six matches delivered
+#: 309, 80% of what the meaning-based ranking delivered on the same asks.
+LEXICAL_RELEVANT_MAX = 6
 
 
 def lexical_cut(memory) -> tuple:
-    """(rows that clear the word-match cut, how many scored rows were considered)."""
-    scored = [m for m in memory if isinstance(m.get("lexical_score"), (int, float))]
+    """(the first LEXICAL_RELEVANT_MAX rows that match at all, how many scored rows there were)."""
+    scored = [m for m in memory if isinstance(m.get("lexical_score"), (int, float))
+              and float(m["lexical_score"]) > 0]
     scored.sort(key=lambda m: -float(m["lexical_score"]))
-    if not scored or float(scored[0]["lexical_score"]) < LEXICAL_SCORE_MIN:
-        return [], len(scored)
-    top = float(scored[0]["lexical_score"])
-    follow = max(LEXICAL_FOLLOW_MIN, LEXICAL_FOLLOW_FRAC * top)
-    kept = [scored[0]] + [m for m in scored[1:] if float(m["lexical_score"]) >= follow]
-    return kept[:LEXICAL_RELEVANT_MAX], len(scored)
+    return scored[:LEXICAL_RELEVANT_MAX], len(scored)
 
 
-def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
-    """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
-    the receipt keys of rows that actually rendered, and the rendered rows that did not fit."""
-    memory = list(payload.get("memory") or [])
-    rank = payload.get("memory_rank") or {}
+def delivered_cut(memory, rank) -> tuple:
+    """``(rows, word_cut, cut_applied)``: the rows of a ranked index this client would actually
+    DELIVER, before any per-session de-duplication. The one place the cut is decided, so a
+    measurement of "what reaches the model" (``manage.py retrieval_eval``'s delivered@cut) reads
+    the same rows a prompt gets, never an arbitrary top-k the client never renders."""
+    memory = list(memory or [])
+    rank = rank or {}
     word_cut = None
     if rank.get("ranked") and rank.get("by") == "wording" and any(
             isinstance(m.get("lexical_score"), (int, float)) for m in memory):
@@ -287,6 +288,15 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
     # MEANING-ranked rows are cut the same way, by their absolute score (a ranking by words is
     # left to the word cut above: relevance_filter returns it unchanged).
     memory, cut_applied = relevance_filter(memory, rank)
+    return memory, word_cut, cut_applied
+
+
+def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python -m hub_core.client"):
+    """`{"memory", "live", "keys", "spill"}` — the memory and live blocks (each "" when silent),
+    the receipt keys of rows that actually rendered, and the rows that did not fit (counted in
+    the block, never delivered and never receipted)."""
+    rank = payload.get("memory_rank") or {}
+    memory, word_cut, cut_applied = delivered_cut(payload.get("memory") or [], rank)
     already, fresh = [], []
     if delivered:
         memory = memory[:DELTA_RANK_WINDOW]
@@ -305,6 +315,14 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
     else:
         fresh = memory
     memory_block, kept_keys, spill = "", [], []
+    if word_cut is None and not rank.get("ranked") and memory:
+        # UNRANKED IS NOT RELEVANT. A standing-order list under a knowledge header is read as
+        # relevance it is not, and padding a prompt with it is the budget fill the cut replaced.
+        memory_block = ("<hub-knowledge>\nBOARD KNOWLEDGE was NOT delivered for this prompt: the "
+                        "board could not rank it (%s). Search it yourself: %s search \"<symptom>\"\n"
+                        "</hub-knowledge>" % (re.sub(r"[<>]", "", str(
+                            rank.get("reason") or "unranked"))[:160], client_hint))
+        fresh, already = [], []
     if word_cut is not None and not word_cut["kept"]:
         memory_block = ("<hub-knowledge>\nBOARD KNOWLEDGE was NOT delivered for this prompt: it could "
                         "only be ranked by WORDS (%s) and no record matched them strongly enough "
@@ -351,7 +369,7 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
             else:
                 spill.append(row)        # rank order holds: nothing lower jumps a row that did not fit
         if kept or already:
-            lines = head + kept + ([SPILL_MARK % len(spill)] if spill else []) + tail
+            lines = head + kept + ([SPILL_MARK % (len(spill), client_hint)] if spill else []) + tail
             memory_block = "\n".join(lines)
     live = payload.get("live") or {}
     live_lines = []
@@ -367,31 +385,6 @@ def render(payload, *, delivered=None, budget=MEMORY_BUDGET, client_hint="python
         live_lines.append("(the live block could not be read: %s)" % live["error"])
     live_block = "\n".join(["<hub-live>"] + live_lines + ["</hub-live>"]) if live_lines else ""
     return {"memory": memory_block, "live": live_block, "keys": kept_keys, "spill": spill}
-
-
-def write_spill(sid, rows) -> str:
-    """Rows that did not fit inline, written where the agent can read them; the path, or ""."""
-    if not rows:
-        return ""
-    try:
-        d = state_dir() / "packs"
-        d.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha1("\n".join(rows).encode("utf-8", "replace")).hexdigest()[:8]
-        path = d / ("%s-%s.md" % (_safe(sid), digest))
-        cutoff = time.time() - 86400
-        for old in d.glob("*.md"):
-            try:
-                if old.stat().st_mtime < cutoff:
-                    old.unlink()
-            except OSError:
-                pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text("# Board knowledge ranked for this prompt (%s); did not fit inline.\n\n%s\n"
-                       % (time.strftime("%Y-%m-%d %H:%M:%S"), "\n".join(rows)), encoding="utf-8")
-        os.replace(tmp, path)
-        return str(path).replace("\\", "/")
-    except OSError:
-        return ""
 
 
 def fit_output(parts, limit=OUTPUT_MAX) -> str:

@@ -1,8 +1,8 @@
 {
   "name": "table",
   "title": "Table",
-  "version": "1.3.0",
-  "what": "Table behaviours any app links: the heading is the drag handle (no grip glyphs), a pin appears on a column only while it is under the pointer, pinned columns stick as the table scrolls sideways, every column can be sized from its heading's right edge (drag, double-click to fit, arrow keys) without moving its neighbours and never narrower than its heading needs, a faint rule runs between every column with the seam where the subject changes a step more present, the toolbar stays one line and moves what does not fit into the '…' menu at its end, and -- only where the app declares its own lanes -- a Suggest panel turns what a person is trying to do into measured cuts of the table, and a Request button files what the table cannot do as work on the board.",
+  "version": "1.5.0",
+  "what": "Table behaviours any app links: the heading is the drag handle (no grip glyphs), a pin appears on a column only while it is under the pointer, pinned columns stick as the table scrolls sideways, every column can be sized from its heading's right edge (drag, double-click to fit the column to its content, arrow keys) without moving its neighbours and never narrower than its heading needs, a faint rule runs between every column with the seam where the subject changes a step more present, the toolbar stays one line and moves what does not fit into the '…' menu at its end, and -- only where the app declares its own lanes -- a Suggest panel turns what a person is trying to do into measured cuts of the table (and, with an agent component on the page, can put the same words to the agent instead), and a Request button files what the table cannot do as work on the board.",
   "link": [
     "<link rel=\"stylesheet\" href=\"{hub}/components/table/table.css\">",
     "<script src=\"{hub}/components/table/table.js\"></script>"
@@ -59,7 +59,9 @@
     "NOTHING IN THE BODY IS DRAGGABLE. The heading is the handle; draggable kills text selection, and the body is what people select to copy out. No grip glyphs: the heading's hover ground and title say it moves.",
     "THE PIN IS A GHOST UNTIL ITS COLUMN IS UNDER THE POINTER: hovering the heading OR any body cell in that column shows it (.ht-col-hot on the heading); it has no ground, border or shadow until it is pointed at itself. A pinned column is said by the rule and shadow down the pinned block's edge, one mark for the block.",
     "A PINNED COLUMN IS AT THE LEFT. Pinning moves it to the end of the pinned block; a column held in the middle would let the columns between it and the edge slide underneath it.",
-    "EVERY COLUMN CAN BE SIZED FROM ITS HEADING'S RIGHT EDGE: drag the handle, double-click it to fit the content, or focus it and use the arrow keys (Shift for bigger steps, Delete to reset). The width is the viewer's own, saved per column by FIELD (a moved column keeps its width), and a column never sized is sized by its content.",
+    "EVERY COLUMN CAN BE SIZED FROM ITS HEADING'S RIGHT EDGE: drag the handle, double-click it (or press Enter or F on it) to fit the column to its content, or focus it and use the arrow keys (Shift for bigger steps, Delete to reset). The width is the viewer's own, saved per column by FIELD (a moved column keeps its width), and a column never sized is sized by its content.",
+    "DOUBLE-CLICK FITS THE COLUMN TO ITS CONTENT, like a spreadsheet (1.4.0). It does not hand the column back to auto layout -- under an app's own caps (a cell clamped with an ellipsis) auto layout is not the width of the content, so a clipped column stayed clipped. Every body cell of the column is copied into an off-screen table that carries the real table's classes but no id and no caps (every max-width lifted, nothing wrapping); the widest cell, never under the heading's floor and never over 900px, becomes the viewer's width and is announced as hub-table:resize exactly like a drag. A row whose cells span columns is skipped.",
+    "ASK THE AGENT, ONLY WHERE THERE IS ONE (1.5.0). With an agent component ([data-hub-agent]) on the page, Suggest carries an 'Ask the agent' button, and a failed or unconfigured Suggest offers 'Ask the agent instead': the person's words, the table's columns and the cut it shows (the page's query) go to the agent as one question through hub:agent-ask. The question is written by the context menu's shared composer (HubMenu.questionAbout) when that component is on the page, else plainly here. No agent, no button.",
     "A RESIZE MOVES ONE THING. The first drag freezes every heading at its drawn width and fixes the table's layout, so each frame changes the dragged heading and the table's width only; neighbours never shift, and nothing else is restyled per frame. It never reloads the page, and the handle never starts a column move or a sort.",
     "A COLUMN IS NEVER NARROWER THAN ITS HEADING NEEDS: the floor is measured from the heading -- padding, the label as drawn, the sort arrow and room for the pin -- and a saved width below it is raised on load.",
     "TWO TIERS OF LINE, BOTH FAINT: a whisper between every column so the eye can follow one down, and the seam where the subject changes is the SAME line a step more present -- opacity, not a different mark. Tuned per app with --ht-col-rule / --ht-col-seam.",
@@ -76,10 +78,12 @@
     "HubTable.version": "the semantic version",
     "HubTable.claims(node, feature)": "true when the component owns drag|pin|resize|overflow for the mount containing node",
     "HubTable.showAnswer(node, answer)": "draw a shape answer in that mount's panel",
-    "HubTable.relayout(node)": "recompute pinned offsets (the component calls it itself after a resize; call it after the app changes a width)"
+    "HubTable.relayout(node)": "recompute pinned offsets (the component calls it itself after a resize; call it after the app changes a width)",
+    "HubTable.fit(node, field)": "size one column (by field) to its content, as a double-click on its handle does; returns the width in px",
+    "HubTable.fitAll(node)": "size every sizable column to its content (all measured first, then applied)"
   },
   "publishes": {
     "html_attributes": ["data-ht-ready"],
-    "events_dispatched": ["hub-table:reorder", "hub-table:pin", "hub-table:resize", "hub-table:layout"]
+    "events_dispatched": ["hub-table:reorder", "hub-table:pin", "hub-table:resize", "hub-table:layout", "hub:agent-ask"]
   }
 }

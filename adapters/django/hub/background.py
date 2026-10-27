@@ -43,8 +43,19 @@ def tick() -> dict:
         # the ingest and read paths, because a single-process hub runs no tick at all.
         from . import fix_tasks
         report["fix_tasks"] = fix_tasks.reconcile().get("written", 0)
+        # Lifecycle history: write what a busy ledger spooled, and record recurrences
+        # (hub/outcome_events.py). Self-throttled; kicked from the read path in a single process.
+        from . import outcome_events
+        report["outcomes"] = outcome_events.tick()
     except Exception as exc:                                  # noqa: BLE001 - keep ticking
         report["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+        # Kept ticking, never swallowed: a failure only the clock file knew about was invisible
+        # to everybody who reads the board.
+        import traceback
+        hub_app.record_error("hub.background", "background tick failed: %s" % type(exc).__name__,
+                             severity="error", code="background_tick_failed",
+                             details=traceback.format_exc(),
+                             context={"component": "hub-background"})
     report["took_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     roles.write_clock(hub_app.HUB_DIR, **report)
     return report

@@ -94,3 +94,53 @@ whose hooks it cannot list as `unknown` — never `ok` — with a non-zero exit.
 around: group-level hooks can exist, pass a manual test, and never fire on a tier that does not fan
 them out; and an API answers a list when it succeeds and an object when it refuses, so code that
 iterates the answer without checking its shape crashes exactly when it is needed.
+
+## 7. Every probe after a restart shares the cold-start window
+
+A restart step usually waits for health with patience — a window, retries. The verify step that
+runs next often does not: it fires its own probes (the public health URL, the sign-in page, the
+static assets) ONCE, at a fixed timeout, while the fresh process is still loading its state. On
+the origin system the restart step saw health answer in four seconds, then the verify step's
+single public probe timed out at thirty while the new process rebuilt its read model, and a
+completed, correct deploy went red; a minute later the same URL answered in under a second.
+Widening the restart step's window had not helped, because the same cold start had a second,
+single-shot probe downstream.
+
+- **One cold-start probe function for every post-restart check**, inside the same window the
+  restart step grants: a per-attempt timeout, retried only on NO ANSWER (timeout, refused, reset)
+  or a gateway 502/503/504. Any other status is the app speaking and fails at once.
+- **An app's own "warming up" answer is waited out, nothing else is.** If the app sheds load while
+  it builds state (a 503 with a recognisable body such as `{"code": "warming"}`), wait for that
+  answer specifically, printing each wait (`WARMING`), and fail at once on every other failure.
+- **Time every attempt and make slowness audible before it is red**: print a distinct marker for
+  an attempt over a threshold (`PROBE_SLOW`), so a cold start that grows deploy by deploy is seen
+  in the logs well before it crosses the timeout.
+
+## 8. The deploy's own bookkeeping survives the host it runs on
+
+- **Replacing a config file retries a transient lock.** A deploy that rewrites the environment
+  file (merging secrets) can meet it held open for a moment by a scanner, an indexer or the
+  service itself; one failed replace must not fail — or roll back — the deploy. Replace by
+  write-to-temp then rename, retried a bounded number of times with a short doubling backoff,
+  and fail loudly only when every attempt was refused.
+- **A restore restamps the deploy stamp.** When a failed deploy restores the previous commit,
+  it must also write the previous sha back into whatever names the deployed commit (a stamp
+  file, a variable). Otherwise the host serves old code under a new stamp, and every reader of
+  the stamp — liveness, the deploy record, "is my fix live?" — reports a release that is not
+  running. (Liveness should report the commit the PROCESS loaded, with the stamp beside it; see
+  `app-kit/kits/health`.)
+
+## 9. A destructive-migration guard fails closed
+
+A guard that refuses an undeclared destructive migration (a dropped table or column, a data
+delete) is only as strong as its failure modes. On the origin system it passed three things it
+should have refused: a migration file it could not parse, a scan that found zero migration files
+(a wrong root reads exactly like a clean tree), and a migration whose name merely appeared
+somewhere in the declarations document. Each must fail, naming the file or the root:
+
+- a migration that does not parse is a refusal, never a skip;
+- a scan that examined zero files is a refusal ("examined nothing" is not "found nothing");
+- a declaration is an exact `app_label/migration_name` list entry, never a substring of prose.
+
+Run it as the deploy job's first step (`deploy-runbook.md`), and print a distinct success marker
+with the count of files examined so a reader can tell a real pass from an empty one.

@@ -53,6 +53,12 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # OUTERMOST: requests in flight at arrival and each one's time before its view, for the
+    # write phases on /hub/perf.json and every write's Server-Timing header.
+    "hub.middleware.InFlightMiddleware",
+    # FIRST: a hosted component FILE is public chrome every app links; it is answered before any
+    # session or sign-in, so an app's page never waits on those.
+    "hub.app_services.ComponentFastPathMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -60,6 +66,9 @@ MIDDLEWARE = [
     # Per-route latency (worst process window, last hour) for /hub/perf.json and the rail.
     "hub.middleware.RouteTimingMiddleware",
     "hub.middleware.LedgerBusyMiddleware",
+    # While a freshly started process warms, a heavy hub read sleeps until it is warm (bounded)
+    # instead of computing a cold fold that queues the health probe behind it.
+    "hub.middleware.WarmupHoldMiddleware",
     "hub.middleware.NoStoreHTMLMiddleware",
     # The visibility veil: a no-op until PROJECT/facets.json declares hidden facets.
     "hub.veil.VeilMiddleware",
@@ -131,9 +140,12 @@ LOGGING = {
     "disable_existing_loggers": False,
     "handlers": {"hub_errors": {"()": "hub_core.errorlog.HubErrorHandler",
                                 "hub_dir": os.environ.get("HUB_DIR") or str(BASE_DIR / "PROJECT" / ".hub"),
-                                "level": "ERROR"}},
+                                "level": "WARNING"}},
+    # `hub`: the hub's own background loops log a caught failure as a WARNING with its
+    # traceback so they can keep going; the handler keeps exactly those (and every ERROR).
     "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR",
-                                   "propagate": True}},
+                                   "propagate": True},
+                "hub": {"handlers": ["hub_errors"], "level": "WARNING", "propagate": True}},
 }
 
 # Console chat histories are OFF by default: turn them on only after the people whose consoles
