@@ -1140,8 +1140,22 @@ def _hub_finish(tid, commit, deployed_sha, deploy_id):
     """Finish one unattended task as the hub: claim a short lease (refused when anyone else
     holds it — the hub never finishes work another agent holds), then the shared done path.
     Returns '' on success, else the reason."""
+    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
+            % (commit[:12], deployed_sha[:12], deploy_id))
+    payload = {"type": "task", "status": "done", "verified_by": [note],
+               "evidence_uri": [deploy_id, commit], "auto_close": {
+                   "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
+    return hub_grant_done(tid, payload, credential_id="hub-deploy-close",
+                          idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+
+
+def hub_grant_done(tid, payload, *, credential_id, idem):
+    """The HUB finishing a task through the one done path: claim a short lease (refused when
+    anyone else holds it -- the hub never finishes work another agent holds), then the shared
+    terminal write (``_commit_done``). For proof the hub already holds as its own record -- a
+    verified deploy, a resolved problem. Returns '' on success, else the reason."""
     from hub_core import agent_auth
-    auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id="hub-deploy-close",
+    auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id=credential_id,
                                   scopes=("task:complete",), actor_kind="hub",
                                   mode="hub-internal")
     res = hub_app.claim(tid, DEPLOY_ACTOR, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
@@ -1153,14 +1167,8 @@ def _hub_finish(tid, commit, deployed_sha, deploy_id):
         if res.get("created"):
             hub_app.release_lease(tid, res["token"])
         return "gone or already done"
-    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
-            % (commit[:12], deployed_sha[:12], deploy_id))
-    payload = {"type": "task", "status": "done", "verified_by": [note],
-               "evidence_uri": [deploy_id, commit], "auto_close": {
-                   "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
     resp, status = _commit_done(tid, res["token"], DEPLOY_ACTOR, payload,
-                                verified_version=ent.get("version"), auth=auth,
-                                idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+                                verified_version=ent.get("version"), auth=auth, idem=idem)
     if status != 200:
         if res.get("created"):
             hub_app.release_lease(tid, res["token"])
@@ -2608,6 +2616,10 @@ def app_error(request, b):
             "project": str(b.get("project") or "")[:120],
         },
     )
+    # A real app error is also a board task the app's banner shows being fixed
+    # (hub/fix_tasks.py). KICKED, never run here: this endpoint sits on the app's error path.
+    from . import fix_tasks as _fix_tasks
+    _fix_tasks.kick()
     return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
 
 
@@ -3060,8 +3072,16 @@ def problem_claim(request, b):
     if refusal:
         return JsonResponse({"errors": [refusal]}, status=409)
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "claim": entry, "title": found.get("title"),
-                                  "rows": len(found.get("rows") or [])}}, status=201)
+    data = {"problem": pid, "claim": entry, "title": found.get("title"),
+            "rows": len(found.get("rows") or [])}
+    # An app problem is also a board task its app's banner shows moving (hub/fix_tasks.py).
+    from . import fix_tasks as _fix_tasks
+    fix_task = _fix_tasks.sync_pid(pid)
+    if fix_task:
+        data["task"] = fix_task
+        data["task_hint"] = ("this problem is mirrored as %s; `step %s --note \"...\"` shows each "
+                             "checkpoint live in the app's Fixes panel" % (fix_task, fix_task))
+    return JsonResponse({"data": data}, status=201)
 
 
 @writer(scope="problem:resolve")
@@ -3083,7 +3103,9 @@ def problem_resolve(request, b):
                               note=note, evidence=str(b.get("evidence") or ""),
                               session=session, name=name)
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "resolved": entry}})
+    from . import fix_tasks as _fix_tasks
+    return JsonResponse({"data": {"problem": pid, "resolved": entry,
+                                  "task": _fix_tasks.sync_pid(pid)}})
 
 
 @writer(scope="problem:claim")
@@ -3101,6 +3123,8 @@ def problem_release(request, b):
         return JsonResponse({"errors": [{"code": "not_held",
             "msg": "no claim (or presumed reopen) by %s to release" % agent}]}, status=409)
     hub_app.errors_changed()
+    from . import fix_tasks as _fix_tasks
+    _fix_tasks.sync_pid(pid)
     return JsonResponse({"data": {"problem": pid, "released": True}})
 
 
@@ -3145,7 +3169,10 @@ def problem_escalate(request, b):
     except Exception:                                        # noqa: BLE001
         pass
     hub_app.errors_changed()
-    return JsonResponse({"data": {"problem": pid, "escalation": entry}}, status=201)
+    from . import fix_tasks as _fix_tasks
+    fix_task = _fix_tasks.sync_pid(pid)
+    return JsonResponse({"data": {"problem": pid, "escalation": entry, "task": fix_task}},
+                        status=201)
 
 
 @writer(scope="presence:write")

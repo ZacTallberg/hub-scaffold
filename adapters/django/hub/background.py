@@ -2,7 +2,7 @@
 
 Each tick folds the ledger at its current head, materializes the delivery projection for that
 exact key if no sidecar holds it yet, publishes a ``projection.delivery`` wake-up so every open
-stream re-reads it, re-arms the lease truth timers, and stamps the backgrounder's clock. A tick
+stream re-reads it, re-arms the lease truth timers, reconciles the problem-mirror tasks, and stamps the backgrounder's clock. A tick
 that fails still stamps the clock with the error, so a web process can tell "alive but failing"
 (visible in perf.json) from "dead" (stale clock -> the web process builds for itself).
 """
@@ -35,6 +35,11 @@ def tick() -> dict:
                 report["delivery"] = "current"
         for lease in hub_app.leases():
             hub_app._schedule_lease_truth(lease)
+        # Every app error on the board has its mirror task, matching its problem (a new error,
+        # an auto-resolve, a recurrence): hub/fix_tasks.py. Self-throttled; also kicked from
+        # the ingest and read paths, because a single-process hub runs no tick at all.
+        from . import fix_tasks
+        report["fix_tasks"] = fix_tasks.reconcile().get("written", 0)
     except Exception as exc:                                  # noqa: BLE001 - keep ticking
         report["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
     report["took_ms"] = round((time.perf_counter() - t0) * 1000, 1)
