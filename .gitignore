@@ -16,3 +16,6 @@ build_sha.txt
 staticfiles/
 .app-kit-staging/
 .app-kit-backup/
+
+# A literal `~` directory at the root is client state written through an unexpanded path.
+/~/

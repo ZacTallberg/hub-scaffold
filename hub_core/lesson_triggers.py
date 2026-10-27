@@ -97,7 +97,7 @@ PATH_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 def state_dir() -> Path:
     raw = os.environ.get("HUB_CLIENT_STATE_DIR", "").strip()
-    return Path(raw) if raw else Path(os.path.expanduser("~")) / ".hub-client"
+    return Path(os.path.expanduser(raw)) if raw else Path(os.path.expanduser("~")) / ".hub-client"
 
 
 def mirror_path() -> Path:

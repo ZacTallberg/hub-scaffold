@@ -233,7 +233,7 @@ def _maybe_converge() -> dict[str, Any] | None:
     want = _SEEN.get("hub_client") or ""
     if os.environ.get("HUB_CLIENT_SELF_UPDATE") != "1" or not want or want == client_version():
         return None
-    state_dir = Path(os.environ.get("HUB_CLIENT_STATE_DIR") or (Path.home() / ".hub-client"))
+    state_dir = Path(os.path.expanduser(os.environ.get("HUB_CLIENT_STATE_DIR") or "~/.hub-client"))
     stamp = state_dir / "converge.stamp"
     try:
         if _time.time() - float(stamp.read_text(encoding="utf-8")) < CONVERGE_EVERY_S:
@@ -309,10 +309,12 @@ def _budget_s() -> int:
 def _state_dir():
     """Per-seat client state (route health, the offline queue, the blind window). Resolved
     through the Python user profile, never a shell variable: on some workstations the shell's
-    home is a network share that is slow or unmapped."""
+    home is a network share that is slow or unmapped. A leading `~` in either variable is expanded
+    here: a .env loader passes it through literally, and the state then lands in a directory named
+    `~` under whatever the working directory happens to be."""
     from pathlib import Path
-    return Path(os.environ.get("HUB_CLIENT_HOME") or os.environ.get("HUB_CLIENT_STATE_DIR")
-                or os.path.expanduser("~/.hub-client"))
+    return Path(os.path.expanduser(os.environ.get("HUB_CLIENT_HOME") or os.environ.get("HUB_CLIENT_STATE_DIR")
+                                   or "~/.hub-client"))
 
 
 def _normalize_base(raw: str) -> str:

@@ -83,7 +83,7 @@ def state_dir() -> Path:
     """Where receipts and packs live: HUB_CLIENT_STATE_DIR, else ~/.hub-client (resolved by
     Python, never through a shell variable that may point at a network share)."""
     raw = os.environ.get("HUB_CLIENT_STATE_DIR", "").strip()
-    return Path(raw) if raw else Path(os.path.expanduser("~")) / ".hub-client"
+    return Path(os.path.expanduser(raw)) if raw else Path(os.path.expanduser("~")) / ".hub-client"
 
 
 def _safe(sid) -> str:
